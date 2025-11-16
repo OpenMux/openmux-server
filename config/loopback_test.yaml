@@ -1,0 +1,110 @@
+authentication:
+  api_keys:
+  - key: test-key-123
+    name: Test API Key
+    permissions: admin
+  pam:
+    allow_root: false
+    enabled: true
+    groups:
+      admin_group: staff
+    service_name: login
+  public_keys:
+  - allowed_uses:
+    - client
+    key_id: test_key
+    public_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQI6FeEv+E43SRpww5uTgv6sKTDdSe/EQvKGL8Vt81O
+    username: test_key
+  users:
+  - is_admin: true
+    password_hash: 8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
+    username: admin
+  - is_admin: false
+    password_hash: 04f8996da763b7a969b1028ee3007569eaf3a635486ddab211d512c85b9df8fb
+    username: user
+client_listener:
+  enabled: true
+command_ports:
+- command: cat
+  description: Echo Command Test Port
+  max_read_write_users: 2
+  name: echo_command
+  shell: false
+- command: bash -c 'while true; do date; sleep 2; done'
+  description: Date Command Test Port
+  max_read_write_users: 1
+  name: date_command
+  shell: true
+- always_buffer: true
+  command: zsh
+  description: Bash console.. yea.. not so secure...
+  interactive: true
+  max_read_write_users: 2
+  name: bash_console
+  shell: false
+logging:
+  console: true
+  file: /tmp/openmux_loopback.log
+  level: DEBUG
+loopback_ports:
+- buffer_size: 1024
+  description: Loopback Port 1 - Echo Test
+  echo_delay: 0
+  max_read_write_users: 5
+  name: loopback1
+- buffer_size: 1024
+  description: Loopback Port 2 - For Multi-Client Testing
+  echo_delay: 0
+  max_read_write_users: 5
+  name: loopback2
+muxcon:
+  auth_required: true
+  federated_cache_enabled: false
+  listeners:
+  - enabled: true
+    interface: en0
+    port: 7822
+    tls_autogen: true
+    tls_dir: ~/.openmux/muxcon/loopback
+  - enabled: true
+    interface: lo
+    port: 7823
+    tls_autogen: true
+    tls_dir: ~/.openmux/muxcon/loopback
+  mpath_neighbor_idle_drop_sec: 60
+  mpath_preemptive_promote: false
+  public_keys:
+  - key_id: remote_leaf_server_key
+    public_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQI6FeEv+E43SRpww5uTgv6sKTDdSe/EQvKGL8Vt81O
+server:
+  description: Loopback Test Server
+  id: loopback-test-server
+  # Local control interfaces
+  control_socket: logs/openmux.sock
+  pidfile: logs/openmux.pid
+web_console:
+  download_xterm_if_missing: false
+  enable_probes: true
+  enable_ui: true
+  host: 0.0.0.0
+  plugins:
+  - openmux.server.web_plugins.config_editor
+  - openmux.server.web_plugins.os_customizer
+  - openmux.server.web_plugins.federated_proxy
+  port: 80
+  probes_include_details: true
+  realm: OpenMux
+  respect_forwarded_prefix: false
+  ssl_port: 443
+  static_dir: static
+  template_dir: templates/web_console/
+  tls_autogen: true
+  use_tls: true
+web_status:
+  cors_enable: true
+  enable_fault_injection: true
+  enable_http_api: true
+  host: 127.0.0.1
+  port: 8081
+
+## Legacy runtime section removed; moved to server.*

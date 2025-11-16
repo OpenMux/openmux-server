@@ -1,0 +1,21 @@
+# OpenMux Client Configuration
+
+# Default server to connect to if not specified
+default_server: localhost
+
+# List of known servers
+servers:
+  - name: localhost
+    host: localhost
+    port: 8023
+    username: admin
+    
+  - name: remote
+    host: 192.168.1.10
+    port: 8023
+    username: user1
+    
+  - name: network_device
+    host: 192.168.1.20
+    port: 8023
+    api_key: 12345abcde

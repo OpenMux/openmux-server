@@ -1,0 +1,259 @@
+"$schema": "https://json-schema.org/draft/2020-12/schema"
+"$id": "https://openmux.org/schema/server-config"
+title: OpenMux Server Configuration Schema (Simplified)
+description: >
+  Validates core OpenMux configuration. This simplified schema covers common
+  sections and defaults and is compatible with loopback and web demos.
+type: object
+required: [server, authentication]
+additionalProperties: false
+properties:
+  server:
+    type: object
+    additionalProperties: false
+    properties:
+      id: { type: string }
+      description: { type: string }
+      control_socket: { type: string, default: logs/openmux.sock }
+      pidfile: { type: string, default: logs/openmux.pid }
+  authentication:
+    type: object
+    additionalProperties: false
+    properties:
+      users:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [username, password_hash]
+          properties:
+            username: { type: string }
+            password_hash: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+            is_admin: { type: boolean }
+            permissions: { type: string, enum: [admin, read-write, read-only] }
+      api_keys:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [key]
+          properties:
+            name: { type: string }
+            key: { type: string }
+            permissions: { type: string, enum: [admin, read-write, read-only] }
+      public_keys:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [key_id, public_key]
+          properties:
+            username: { type: string }
+            key_id: { type: string }
+            public_key: { type: string }
+            allowed_uses:
+              type: array
+              items: { type: string, enum: [client, muxcon] }
+              uniqueItems: true
+      pam:
+        type: object
+        additionalProperties: false
+        properties:
+          enabled: { type: boolean, default: false }
+          service_name: { type: string, default: login }
+          allow_root: { type: boolean, default: false }
+          allowed_users:
+            type: array
+            items: { type: string }
+            uniqueItems: true
+          groups:
+            type: object
+            additionalProperties: false
+            properties:
+              admin_group: { type: string, default: openmux_admin }
+              write_group: { type: string, default: openmux_write }
+              read_group: { type: string, default: openmux_read }
+    anyOf:
+      - required: [users]
+      - required: [api_keys]
+      - required: [public_keys]
+      - required: [pam]
+  logging:
+    type: object
+    additionalProperties: false
+    properties:
+      level: { type: string }
+      console: { type: boolean }
+      file: { type: string }
+      log_dir: { type: string }
+      max_log_size: { type: integer, minimum: 0 }
+      log_backup_count: { type: integer, minimum: 0 }
+  client_listener:
+    type: object
+    additionalProperties: false
+    properties:
+      enabled: { type: boolean, default: true }
+      host: { type: string, default: 127.0.0.1 }
+      port: { type: integer, minimum: 1, maximum: 65535, default: 8023 }
+      max_connections: { type: integer, minimum: 1, default: 100 }
+      connection_timeout: { type: integer, minimum: 1, default: 30 }
+  serial_ports:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [name, device]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        device: { type: string }
+        baudrate: { type: integer, minimum: 1, default: 9600 }
+        bytesize: { type: integer, enum: [5,6,7,8], default: 8 }
+        parity: { type: string, enum: [N,E,O,M,S], default: N }
+        stopbits: { oneOf: [ { type: integer, enum: [1,2] }, { type: number, enum: [1.5] } ], default: 1 }
+        timeout: { type: number, minimum: 0, default: 1.0 }
+        flow_control: { type: string, enum: [none, rtscts, dsrdtr, xonxoff], default: none }
+        dtr: { type: boolean, default: true }
+        rts: { type: boolean, default: true }
+        read_write_users: { type: integer, minimum: 1, default: 1 }
+  loopback_ports:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        buffer_size: { type: integer, minimum: 1, default: 1024 }
+        echo_delay: { type: number, minimum: 0, default: 0.0 }
+        max_read_write_users: { type: integer, minimum: 1, default: 5 }
+        read_write_users: { type: integer, minimum: 1, default: 1 }
+  command_ports:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [name, command]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        command: { type: string }
+        shell: { type: boolean, default: false }
+        cwd: { type: string }
+        env: { type: object, additionalProperties: { type: string } }
+        max_read_write_users: { type: integer, minimum: 1, default: 1 }
+        interactive: { type: boolean }
+        always_buffer: { type: boolean }
+  muxcon:
+    type: object
+    additionalProperties: false
+    properties:
+      auth_required: { type: boolean }
+      federated_cache_enabled: { type: boolean }
+      federated_cache_ttl_sec: { type: number, minimum: 0 }
+      federated_cache_path: { type: string }
+      heartbeat_interval: { type: number, minimum: 0 }
+      shutdown_grace_timeout_sec: { type: number, minimum: 0 }
+      context_idle_timeout_sec: { type: number, minimum: 0 }
+      shutdown_ack_flush_ms: { type: integer, minimum: 0 }
+      mpath_primary_stale_sec: { type: number, minimum: 0 }
+      mpath_failover_check_sec: { type: number, minimum: 0 }
+      mpath_strategy: { type: string, enum: [best_pref] }
+      mpath_preemptive_promote: { type: boolean }
+      mpath_neighbor_idle_drop_sec: { type: number, minimum: 0 }
+      listeners:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          properties:
+            enabled: { type: boolean }
+            interface: { type: string }
+            host: { type: string }
+            port: { type: integer, minimum: 1, maximum: 65535 }
+            use_tls: { type: boolean }
+            tls_autogen: { type: boolean }
+            tls_dir: { type: string }
+            ssl_cert: { type: string }
+            ssl_key: { type: string }
+            ssl_ca_cert: { type: string }
+            require_client_cert: { type: boolean }
+            tls_known_peers_path: { type: string }
+            path_pref: { type: integer }
+            path_group: { type: string }
+            tags: { type: object, additionalProperties: true }
+            # Tags are now constrained (no arbitrary keys) for strictness.
+            tags: { type: object, additionalProperties: false }
+            fwmark: { type: integer }
+          required: [enabled, port]
+        uniqueItems: true
+      public_keys:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [key_id, public_key]
+          properties:
+            key_id: { type: string }
+            public_key: { type: string }
+      advertise_filters:
+        type: object
+        additionalProperties: false
+        properties:
+          include: { type: array, items: { type: string } }
+          exclude: { type: array, items: { type: string } }
+          adapter_include: { type: array, items: { type: string } }
+          adapter_exclude: { type: array, items: { type: string } }
+          server_include: { type: array, items: { type: string } }
+          server_exclude: { type: array, items: { type: string } }
+      accept_filters:
+        type: object
+        additionalProperties: false
+        properties:
+          include: { type: array, items: { type: string } }
+          exclude: { type: array, items: { type: string } }
+          adapter_include: { type: array, items: { type: string } }
+          adapter_exclude: { type: array, items: { type: string } }
+          server_include: { type: array, items: { type: string } }
+          server_exclude: { type: array, items: { type: string } }
+  web_console:
+    type: object
+    additionalProperties: false
+    required: [host, port]
+    properties:
+      host: { type: string }
+      port: { type: integer, minimum: 1, maximum: 65535 }
+      ssl_port: { type: integer, minimum: 1, maximum: 65535 }
+      enable_ui: { type: boolean, default: true }
+      realm: { type: string, default: OpenMux }
+      download_xterm_if_missing: { type: boolean, default: true }
+      enable_probes: { type: boolean, default: true }
+      probes_include_details: { type: boolean, default: false }
+      use_tls: { type: boolean, default: false }
+      tls_autogen: { type: boolean, default: true }
+      respect_forwarded_prefix: { type: boolean }
+      static_dir: { type: string }
+      template_dir: { type: string }
+      plugins:
+        type: array
+        items: { type: string }
+  web_status:
+    type: object
+    additionalProperties: false
+    required: [host, port]
+    properties:
+      host: { type: string }
+      port: { type: integer, minimum: 1, maximum: 65535 }
+      enable_http_api: { type: boolean }
+      cors_enable: { type: boolean }
+      enable_fault_injection: { type: boolean }
+
+anyOf:
+  - required: [client_listener]
+  - required: [serial_ports]
+  - required: [loopback_ports]
+  - required: [command_ports]
+  - required: [muxcon]
+  - required: [web_console]
+  - required: [web_status]

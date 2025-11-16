@@ -1,0 +1,93 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.atom/
+.vs/
+
+# Logs and runtime data
+logs/
+*.log
+log/
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Documentation
+docs/_build/
+site/
+
+# Local configuration files
+*.local.yaml
+*.local.yml
+*.local.json
+*.local.conf
+*.local.ini
+local_settings.py
+
+# SSL/TLS certificates
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+
+# Temporary files
+.tmp/
+tmp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# Mac OS specific files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows specific files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Temporary files
+old/
+backup/
+device-configs/
+static/xterm*/

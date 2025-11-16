@@ -1,0 +1,122 @@
+# OpenMux Server Configuration (loopback_test style)
+
+server:
+  id: "primary-server"
+  description: "Primary OpenMux Server"
+
+
+authentication:
+  users:
+    - username: "admin"
+      password_hash: 5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8  # password
+      is_admin: true
+    - username: "user1"
+      password_hash: a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e  # user1
+      is_admin: false
+    - username: "viewer"
+      password_hash: 628a7476ada25574e51158f5e9cec7a6b0a3356c93466ec78a768be9b6a394e1  # viewer
+      is_admin: false
+  api_keys:
+    - key: "automation-key"
+      name: "Automation"
+      permissions: "read-write"
+    - key: "monitoring-key"
+      name: "Monitoring"
+      permissions: "read-only"
+  # Optional: UNIX PAM authentication (disabled by default)
+  # Enable to allow system users to authenticate via PAM. Group membership maps to roles.
+  # Note: Requires python-pam to be installed and system PAM configured.
+  pam:
+    enabled: false
+    # PAM service to use (e.g., "login", "sshd", or a custom service name)
+    service_name: "login"
+    # Group-to-role mapping. Users in these groups receive corresponding permissions.
+    groups:
+      admin_group: "openmux_admin"
+      write_group: "openmux_write"
+      read_group: "openmux_read"
+    # Security policy
+    allow_root: false             # Allow root login via PAM (default false)
+    # allowed_users: ["alice", "bob"]  # Optional allowlist; if set, only these users may log in via PAM
+
+# Per-subtype top-level configuration
+
+loopback_ports:
+  - name: "loopback"
+    description: "Loopback Test Console"
+    echo_delay: 0.0
+    buffer_size: 1024
+    max_read_write_users: 5
+    # Optional per-port data log file; defaults to logs/ports/<name>.log if omitted
+    # log_file: "logs/ports/loopback.jsonl"
+    # To log only outbound data uncomment:
+    # log_direction: out
+
+serial_ports:
+  - name: "console1"
+    description: "Main Server Console"
+    device: "/dev/ttyS0"
+    baudrate: 9600
+    bytesize: 8
+    parity: "N"
+    stopbits: 1
+    read_write_users: 1
+    # log_file: "logs/ports/console1.jsonl"
+    # log_directions: [in, out]
+  - name: "console2"
+    description: "Secondary Server Console"
+    device: "/dev/ttyS1"
+    baudrate: 115200
+    bytesize: 8
+    parity: "N"
+    stopbits: 1
+    read_write_users: 1
+  # log_file: "logs/ports/console2.jsonl"
+  # log_direction: out
+
+command_ports:
+  - name: "ssh_server"
+    description: "SSH to remote server"
+    command: "ssh user@remote-server"
+    shell: false
+    max_read_write_users: 1
+    # log_file: "logs/ports/ssh_server.jsonl"
+    # log_direction: out
+  - name: "telnet_server"
+    description: "Telnet to network device"
+    command: "telnet 192.168.1.1"
+    shell: false
+    max_read_write_users: 1
+    # log_file: "logs/ports/telnet_server.jsonl"
+    # log_direction: out
+
+# Outbound raw TCP/TLS connectors
+tcp_initiator_ports:
+  - name: "network_device"
+    host: "192.168.1.20"
+    port: 23
+    use_tls: false
+    timeout: 10.0
+    auto_reconnect: true
+
+## Note: unified schema no longer supports `openmux_client_ports` top-level entries.
+
+logging:
+  level: "INFO"
+  file: "logs/openmux_server.log"
+  console: true
+
+# TCP console endpoint (required for clients to connect)
+client_listener:
+  host: "127.0.0.1"
+  port: 8023
+  max_connections: 200
+  connection_timeout: 30
+
+# MuxCon adapter (unified-only)
+muxcon:
+  # node_name deprecated; identity comes from server.id (fallback to hostname)
+  listeners:
+    - enabled: true
+      host: "127.0.0.1"
+      port: 7822

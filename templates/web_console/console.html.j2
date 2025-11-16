@@ -1,0 +1,584 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="omx-base-path" content="{{ base_path }}" />
+    <title>{{ title }}</title>
+  <link rel="stylesheet" href="{{ base_path }}/static/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="{{ base_path }}/static/web_console.css" />
+  </head>
+  <body class="console">
+    <header class="toolbar">
+      <div class="brand">
+        {% if logo_url %}
+          <img class="logo-img" src="{{ base_path }}{{ logo_url }}" alt="logo" />
+        {% else %}
+          <div class="logo">{{ (realm.split()[0][0] ~ (realm.split()[1][0] if realm.split()|length > 1 else '')) | upper }}</div>
+        {% endif %}
+        <div>
+          <div class="title">OpenMux</div>
+          <div class="subtitle">Web Console</div>
+        </div>
+      </div>
+  <div class="page">Console</div>
+      <div class="toolbar-controls">
+        <label for="portSelect">Port:</label>
+        <select id="portSelect" title="Select a port to connect"></select>
+  <button class="btn" id="connect">Connect</button>
+      </div>
+      <div class="actions">
+        <button class="btn" id="menuToggle" type="button" title="Open control menu">Menu</button>
+        <button class="btn" id="infoToggle" type="button" title="Show port info">Info</button>
+  <a class="btn" href="{{ base_path }}/">Summary</a>
+  <a class="btn" href="{{ base_path }}/status">Status</a>
+  <a class="btn" href="{{ base_path }}/logout" title="Sign out">Logout</a>
+      </div>
+    </header>
+  <div id="banner" class="banner error">WebSocket disconnected. Click Connect to retry.</div>
+    <div id="term-container"><div id="term"></div></div>
+    <!-- Control menu overlay (Ctrl+E) -->
+  <aside id="ctrlMenu" class="card" style="position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); min-width: 600px; width: 70vw; max-width: 1000px; display:none; z-index:20;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <div class="muted">OpenMux Control Menu</div>
+        <button id="ctrlClose" class="btn" type="button" title="Close">✕</button>
+      </div>
+      <div class="mini" style="margin-top:8px;">
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <button class="btn" id="ctrlReqRW" type="button">Request read-write access (r)</button>
+          <button class="btn" id="ctrlReconnect" type="button">Disconnect and reconnect (d)</button>
+          <button class="btn" id="ctrlDisconnect" type="button">Disconnect (q)</button>
+        </div>
+        <div class="muted" style="margin-top:10px">Tip: Use Ctrl+E to toggle this menu</div>
+        <hr style="margin:10px 0" />
+        <div style="font-weight:600; margin-bottom:6px">Slow Paste</div>
+        <div>
+          <label for="slowPasteText" class="muted" style="display:block; margin-bottom:4px">Paste text to send at a controlled speed</label>
+          <textarea id="slowPasteText" rows="6" style="width:100%; box-sizing:border-box; resize:vertical" placeholder="Paste or type here..."></textarea>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          <label for="slowPasteRate" class="muted">Speed</label>
+          <input id="slowPasteRate" type="number" min="1" max="2000" step="1" value="30" style="width:96px" />
+          <span class="muted">chars/sec</span>
+          <button id="slowPasteStart" class="btn" type="button" title="Start slow paste">Start</button>
+          <button id="slowPasteStop" class="btn" type="button" title="Stop" style="display:none">Stop</button>
+          <div style="display:flex; align-items:center; gap:8px; flex: 1 1 auto; min-width: 200px;">
+            <progress id="slowPasteProgress" value="0" max="100" style="width:100%"></progress>
+            <span id="slowPasteStatus" class="muted" style="min-width: 52px; text-align:right;">0%</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+    <!-- Lightweight Info overlay; styled via web_console.css card/tag classes -->
+  <aside id="infoOverlay" class="card" style="position:fixed; top:64px; right:16px; min-width: 300px; display:none; z-index:10;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <div class="muted">Port Info</div>
+        <button id="infoClose" class="btn" type="button" title="Close">✕</button>
+      </div>
+      <div id="infoBody" class="mini" style="margin-top:8px;">
+        <div class="muted">No port selected</div>
+      </div>
+    </aside>
+  <script src="{{ base_path }}/static/xterm/lib/xterm.js"></script>
+  <script src="{{ base_path }}/static/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+    <script>
+      const term = new Terminal({ convertEol: true, theme: { background: '#111111' } });
+      const fitAddon = (window.FitAddon) ? new window.FitAddon.FitAddon() : null;
+      if (fitAddon) term.loadAddon(fitAddon);
+      const termEl = document.getElementById('term');
+      term.open(termEl);
+      function fitTerminal() { try { fitAddon && fitAddon.fit(); } catch (_) {} }
+      window.addEventListener('load', () => { fitTerminal(); setTimeout(fitTerminal, 0); });
+      window.addEventListener('resize', () => { fitTerminal(); });
+      try { const ro = new ResizeObserver(() => fitTerminal()); ro.observe(document.getElementById('term-container')); } catch (_) {}
+
+    const qs = new URLSearchParams(window.location.search);
+  const bannerEl = document.getElementById('banner');
+  const selectEl = document.getElementById('portSelect');
+      const connectBtn = document.getElementById('connect');
+  let ws; let ports = []; let currentConnectedPort = null; let portIsUp = false;
+  // Debounce timer to delay showing WS-down banner during fast reconnects
+  let wsDownTimer = null;
+  // Debounce timer to delay showing Port-down (yellow) banner to avoid flicker during quick switches
+  let portDownTimer = null;
+
+      function portLabel(p) {
+        const name = p.name || 'unknown';
+        const desc = p.description ? ` — ${p.description}` : '';
+        const origin = p.origin_server_id ? ` — ${p.origin_server_id}` : '';
+        const adapter = p.adapter || p.adapter_type || '';
+        const adapterTxt = adapter ? ` [${adapter}]` : '';
+        return `${name}${desc}${origin}${adapterTxt}`;
+      }
+      function populatePorts(list) {
+        ports = Array.isArray(list) ? list : [];
+        selectEl.innerHTML = '';
+        for (const p of ports) {
+          const opt = document.createElement('option');
+          opt.value = p.name; opt.textContent = portLabel(p);
+          selectEl.appendChild(opt);
+        }
+        const qp = qs.get('console') || qs.get('port');
+        if (qp && ports.find(p => p.name === qp)) selectEl.value = qp;
+      }
+      async function loadPorts() {
+        try {
+          // Build an absolute URL from origin to avoid inheriting any userinfo (username:password) from the page URL
+          const url = new URL('{{ base_path }}/api/ports', window.location.origin);
+          const res = await fetch(url.toString(), { cache: 'no-store', credentials: 'same-origin' });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          populatePorts(data.ports || []);
+        } catch (e) {
+          console.warn('Failed to load ports list:', e);
+        }
+      }
+
+      // --- Info overlay helpers ---
+      const infoOverlay = document.getElementById('infoOverlay');
+      const infoBody = document.getElementById('infoBody');
+      const infoToggle = document.getElementById('infoToggle');
+      const infoClose = document.getElementById('infoClose');
+      let infoTimer = null;
+  // Minimal mode tracking per port (updated from server control frames)
+  let clientMode = 'read-only';
+  // Ctrl+E menu wiring
+  const ctrlMenu = document.getElementById('ctrlMenu');
+  const ctrlClose = document.getElementById('ctrlClose');
+  const ctrlReqRW = document.getElementById('ctrlReqRW');
+  const ctrlReconnect = document.getElementById('ctrlReconnect');
+  const ctrlDisconnect = document.getElementById('ctrlDisconnect');
+  const menuToggle = document.getElementById('menuToggle');
+  function showCtrlMenu() { ctrlMenu.style.display = 'block'; }
+  function hideCtrlMenu() { ctrlMenu.style.display = 'none'; }
+  ctrlClose.addEventListener('click', hideCtrlMenu);
+  ctrlReqRW.addEventListener('click', () => { try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'request_rw' })); } catch (_) {} });
+  ctrlReconnect.addEventListener('click', () => { try { abortSlowPaste('Reconnecting'); if (isConnected()) ws.close(1000, 'Client requested reconnect'); setTimeout(connectSelected, 50); } catch (_) {} });
+  ctrlDisconnect.addEventListener('click', () => { try { abortSlowPaste('Disconnecting'); if (isConnected()) ws.close(1000, 'Client requested disconnect'); } catch (_) {} hideCtrlMenu(); });
+  if (menuToggle) menuToggle.addEventListener('click', () => { if (ctrlMenu.style.display === 'none') showCtrlMenu(); else hideCtrlMenu(); });
+
+  // Slow paste UI elements and state
+  const slowPasteText = document.getElementById('slowPasteText');
+  const slowPasteRate = document.getElementById('slowPasteRate');
+  const slowPasteStart = document.getElementById('slowPasteStart');
+  const slowPasteStop = document.getElementById('slowPasteStop');
+  const slowPasteProgress = document.getElementById('slowPasteProgress');
+  const slowPasteStatus = document.getElementById('slowPasteStatus');
+  const slowPaste = {
+    active: false,
+    codepoints: [],
+    idx: 0,
+    tokens: 0,
+    lastTs: 0,
+    timerId: null,
+    rate: 30,
+    // Completion announce debounce: wait for idle RX window
+    waitMs: 1000,
+    lastRxTs: 0,
+    completeTimerId: null,
+    waitingIdle: false,
+  };
+  function clearSlowPasteCompletionTimer() {
+    try { if (slowPaste.completeTimerId) clearTimeout(slowPaste.completeTimerId); } catch (_) {}
+    slowPaste.completeTimerId = null;
+  }
+  function scheduleSlowPasteCompletionAnnounce() {
+    if (!slowPaste.waitingIdle) return;
+    clearSlowPasteCompletionTimer();
+    slowPaste.completeTimerId = setTimeout(() => {
+      // If still waiting and no new RX within window, announce complete
+      const now = performance.now();
+      if (!slowPaste.waitingIdle) return;
+      if (now - slowPaste.lastRxTs >= slowPaste.waitMs) {
+        slowPaste.waitingIdle = false;
+        clearSlowPasteCompletionTimer();
+        try { term.write(`\r\n[Slow paste complete]` + '\r\n'); } catch (_) {}
+      } else {
+        // Data arrived; reschedule
+        scheduleSlowPasteCompletionAnnounce();
+      }
+    }, slowPaste.waitMs);
+  }
+  function resetSlowPasteUI() {
+    slowPasteProgress.value = 0;
+    slowPasteProgress.max = 100;
+    slowPasteStatus.textContent = '0%';
+    slowPasteStart.disabled = false;
+    slowPasteStop.style.display = 'none';
+    slowPasteStart.style.display = '';
+    slowPasteText.disabled = false;
+    slowPasteRate.disabled = false;
+  }
+  function updateSlowPasteUI() {
+    const sent = slowPaste.idx;
+    const total = slowPaste.codepoints.length || 1;
+    slowPasteProgress.max = total;
+    slowPasteProgress.value = sent;
+    const pct = Math.floor((sent / total) * 100);
+    slowPasteStatus.textContent = `${pct}%`;
+  }
+  function abortSlowPaste(reason) {
+    if (!slowPaste.active) return;
+    try { if (slowPaste.timerId) clearInterval(slowPaste.timerId); } catch (_) {}
+    slowPaste.active = false;
+    slowPaste.timerId = null;
+    slowPaste.tokens = 0; slowPaste.idx = 0; slowPaste.codepoints = [];
+    slowPaste.waitingIdle = false; clearSlowPasteCompletionTimer();
+    resetSlowPasteUI();
+    if (reason) {
+      try { term.write(`\r\n[Slow paste aborted: ${reason}]\r\n`); } catch (_) {}
+    }
+  }
+  function finishSlowPaste() {
+    if (slowPaste.timerId) { try { clearInterval(slowPaste.timerId); } catch (_) {} }
+    slowPaste.active = false;
+    slowPaste.timerId = null;
+    updateSlowPasteUI();
+    slowPasteStart.disabled = false;
+    slowPasteStop.style.display = 'none';
+    slowPasteStart.style.display = '';
+    slowPasteText.disabled = false;
+    slowPasteRate.disabled = false;
+    // Defer completion message until RX has been idle for waitMs
+    slowPaste.waitingIdle = true;
+    slowPaste.lastRxTs = performance.now();
+    scheduleSlowPasteCompletionAnnounce();
+  }
+  function sendChunk(chars) {
+    if (!chars || chars.length === 0) return;
+    try { if (isConnected()) { ws.send(chars.join('')); } } catch (_) {}
+  }
+  function startSlowPaste() {
+    if (!isConnected()) { alert('Connect to a console before starting slow paste.'); return; }
+    // Cancel any pending completion from a previous session
+    slowPaste.waitingIdle = false; clearSlowPasteCompletionTimer();
+    const raw = slowPasteText.value || '';
+    if (!raw) { alert('Paste some text first.'); return; }
+    const rateVal = Math.max(1, Math.min(2000, Number(slowPasteRate.value || 30)));
+    slowPaste.rate = rateVal;
+    // Convert to array of Unicode code points to avoid splitting surrogate pairs
+    // Spread operator creates an array of code points for BMP and astral symbols
+    slowPaste.codepoints = Array.from(raw);
+    slowPaste.idx = 0;
+    slowPaste.tokens = 0;
+    slowPaste.lastTs = performance.now();
+    slowPaste.active = true;
+    updateSlowPasteUI();
+    slowPasteStart.disabled = true;
+    slowPasteStart.style.display = 'none';
+    slowPasteStop.style.display = '';
+    slowPasteText.disabled = true;
+    slowPasteRate.disabled = false; // allow adjusting during paste
+    try { term.write(`\r\n[Starting slow paste @ ${rateVal} chars/sec, ${slowPaste.codepoints.length} chars]` + '\r\n'); } catch (_) {}
+    // Pace using a 20ms interval and a token bucket to smooth out scheduling jitter
+    const TICK_MS = 20;
+    slowPaste.timerId = setInterval(() => {
+      if (!slowPaste.active) return;
+      if (!isConnected()) { abortSlowPaste('Disconnected'); return; }
+      // If user changed rate, pick it up
+      const currentRate = Math.max(1, Math.min(2000, Number(slowPasteRate.value || slowPaste.rate)));
+      slowPaste.rate = currentRate;
+      const now = performance.now();
+      const dt = Math.max(0, (now - slowPaste.lastTs) / 1000);
+      slowPaste.lastTs = now;
+      slowPaste.tokens += currentRate * dt;
+      // limit burst per tick to avoid huge sends
+      let budget = Math.min(512, Math.floor(slowPaste.tokens));
+      const remaining = slowPaste.codepoints.length - slowPaste.idx;
+      if (remaining <= 0) { finishSlowPaste(); return; }
+      if (budget <= 0) { return; }
+      const toSend = Math.min(budget, remaining);
+      const chunk = slowPaste.codepoints.slice(slowPaste.idx, slowPaste.idx + toSend);
+      sendChunk(chunk);
+      slowPaste.idx += toSend;
+      slowPaste.tokens -= toSend;
+      updateSlowPasteUI();
+      if (slowPaste.idx >= slowPaste.codepoints.length) { finishSlowPaste(); }
+    }, TICK_MS);
+  }
+  slowPasteStart.addEventListener('click', startSlowPaste);
+  slowPasteStop.addEventListener('click', () => abortSlowPaste('Stopped by user'));
+
+      function formatSerial(sc) {
+        if (!sc) return '';
+        const dev = sc.device ?? 'n/a';
+        const baud = sc.baudrate ?? 'n/a';
+        const bs = sc.bytesize ?? 'n/a';
+        const par = sc.parity ?? 'n/a';
+        const sb = sc.stopbits ?? 'n/a';
+        const fc = sc.flow_control ?? 'n/a';
+        return `device=${dev} baud=${baud} ${bs}${par}${sb} flow=${fc}`;
+      }
+      function formatLine(ls) {
+        if (!ls) return '';
+        function v(x) { return (x === true || x === false) ? (x ? '1' : '0') : (x ?? 'n/a'); }
+        const dcd = v(ls.DCD ?? ls.dcd);
+        const dsr = v(ls.DSR ?? ls.dsr);
+        const cts = v(ls.CTS ?? ls.cts);
+        const rts = v(ls.RTS ?? ls.rts);
+        const dtr = v(ls.DTR ?? ls.dtr);
+        return `DCD=${dcd} DSR=${dsr} CTS=${cts} RTS=${rts} DTR=${dtr}`;
+      }
+      function renderInfo(p) {
+        if (!p) { infoBody.innerHTML = '<div class="muted">No port selected</div>'; return; }
+        const adapter = (p.adapter || p.adapter_type || '');
+        const sc = p.serial_config || {};
+        const ls = p.line_status || {};
+  const connected = (('connected' in p) ? !!p.connected : !!p.is_running);
+        const yesNoTag = (v) => `<span class="tag ${v ? 'ok' : 'bad'}">${v ? '1' : '0'}</span>`;
+        const valueOrDash = (v) => (v === undefined || v === null || v === '' ? '<span class="muted">—</span>' : String(v));
+
+        const rows = [];
+        rows.push(`<tr><th>Name</th><td><strong>${p.name || ''}</strong></td></tr>`);
+        rows.push(`<tr><th>Adapter</th><td>${adapter ? `<span class=\"tag\">${adapter}</span>` : '<span class=\"muted\">—</span>'}</td></tr>`);
+        rows.push(`<tr><th>Description</th><td>${valueOrDash(p.description)}</td></tr>`);
+  rows.push(`<tr><th>Connected</th><td>${connected ? '<span class=\"tag ok\">yes</span>' : '<span class=\"tag bad\">no</span>'} &nbsp; <span class=\"tag\">${clientMode}</span></td></tr>`);
+        // Serial configuration rows
+        rows.push(`<tr><th>Device</th><td>${valueOrDash(sc.device)}</td></tr>`);
+        rows.push(`<tr><th>Baudrate</th><td>${valueOrDash(sc.baudrate)}</td></tr>`);
+        rows.push(`<tr><th>Bytesize</th><td>${valueOrDash(sc.bytesize)}</td></tr>`);
+        rows.push(`<tr><th>Parity</th><td>${valueOrDash(sc.parity)}</td></tr>`);
+        rows.push(`<tr><th>Stopbits</th><td>${valueOrDash(sc.stopbits)}</td></tr>`);
+        rows.push(`<tr><th>Flow control</th><td>${valueOrDash(sc.flow_control)}</td></tr>`);
+        // Line status rows
+        const dcd = (ls.DCD !== undefined) ? !!ls.DCD : (ls.dcd !== undefined ? !!ls.dcd : undefined);
+        const dsr = (ls.DSR !== undefined) ? !!ls.DSR : (ls.dsr !== undefined ? !!ls.dsr : undefined);
+        const cts = (ls.CTS !== undefined) ? !!ls.CTS : (ls.cts !== undefined ? !!ls.cts : undefined);
+        const rts = (ls.RTS !== undefined) ? !!ls.RTS : (ls.rts !== undefined ? !!ls.rts : undefined);
+        const dtr = (ls.DTR !== undefined) ? !!ls.DTR : (ls.dtr !== undefined ? !!ls.dtr : undefined);
+        rows.push(`<tr><th>DCD</th><td>${dcd === undefined ? '<span class=\"muted\">—</span>' : yesNoTag(dcd)}</td></tr>`);
+        rows.push(`<tr><th>DSR</th><td>${dsr === undefined ? '<span class=\"muted\">—</span>' : yesNoTag(dsr)}</td></tr>`);
+        rows.push(`<tr><th>CTS</th><td>${cts === undefined ? '<span class=\"muted\">—</span>' : yesNoTag(cts)}</td></tr>`);
+        rows.push(`<tr><th>RTS</th><td>${rts === undefined ? '<span class=\"muted\">—</span>' : yesNoTag(rts)}</td></tr>`);
+        rows.push(`<tr><th>DTR</th><td>${dtr === undefined ? '<span class=\"muted\">—</span>' : yesNoTag(dtr)}</td></tr>`);
+        if (Array.isArray(p.server_chain) && p.server_chain.length > 0) {
+          rows.push(`<tr><th>Chain</th><td class=\"muted\">${p.server_chain.join(' \u2192 ')}</td></tr>`);
+        }
+        if (!connected && p.last_seen) {
+          try {
+            const dt = new Date(Number(p.last_seen) * 1000);
+            const ts = isNaN(dt.getTime()) ? String(p.last_seen) : dt.toLocaleString();
+            rows.push(`<tr><th>Last seen</th><td>${ts}</td></tr>`);
+          } catch (_) {
+            rows.push(`<tr><th>Last seen</th><td>${String(p.last_seen)}</td></tr>`);
+          }
+        }
+        infoBody.innerHTML = `<table class=\"mini-table\"><tbody>${rows.join('')}</tbody></table>`;
+      }
+      function openInfo() {
+        infoOverlay.style.display = 'block';
+        renderInfo(ports.find(x => x.name === currentPort()) || null);
+        if (infoTimer) { clearInterval(infoTimer); infoTimer = null; }
+        // No polling fallback; metadata is pushed over WS (meta=1)
+      }
+      function closeInfo() { infoOverlay.style.display = 'none'; if (infoTimer) { clearInterval(infoTimer); infoTimer = null; } }
+      infoToggle.addEventListener('click', () => { const visible = infoOverlay.style.display !== 'none'; if (visible) closeInfo(); else openInfo(); });
+      infoClose.addEventListener('click', () => closeInfo());
+
+      term.onData((data) => { try { ws && ws.send(data); } catch (e) {} });
+      function isConnected() { return ws && ws.readyState === WebSocket.OPEN; }
+      function currentPort() { return (selectEl.value || '').trim(); }
+      function showBanner(msg, kind='error') {
+        if (!bannerEl) return;
+        bannerEl.textContent = msg;
+        bannerEl.classList.remove('error','warn');
+        bannerEl.classList.add(kind === 'warn' ? 'warn' : 'error');
+        bannerEl.style.display = 'block';
+        if (kind === 'warn') { document.body.classList.add('port-down'); document.body.classList.remove('ws-down'); }
+        else { document.body.classList.add('ws-down'); document.body.classList.remove('port-down'); }
+      }
+      function hideBanner() {
+        if (!bannerEl) return;
+        if (wsDownTimer) { clearTimeout(wsDownTimer); wsDownTimer = null; }
+        if (portDownTimer) { clearTimeout(portDownTimer); portDownTimer = null; }
+        bannerEl.style.display = 'none';
+        document.body.classList.remove('ws-down');
+        document.body.classList.remove('port-down');
+      }
+      function updateButton() { if (isConnected()) connectBtn.textContent = 'Disconnect'; else if (currentConnectedPort && currentPort() === currentConnectedPort) connectBtn.textContent = 'Reconnect'; else connectBtn.textContent = 'Connect'; }
+      function truthyParam(val) { if (!val) return false; const v = String(val).toLowerCase(); return v === '1' || v === 'true' || v === 'yes' || v === 'on'; }
+      let splashShown = false; function showSplash() { if (splashShown) return; splashShown = true; const art = [
+          '\x1b[36m',
+          '    ___                   __  __               ____                      _      ',
+          '   / _ \\ _ __   ___ _ __ |  \\/  |_   ___  __  / ___|___  _ __  ___  ___ | | ___ ',
+          '  | | | | \'_ \\ / _ \\ \'_ \\| |\\/| | | | \\ \\/ / | |   / _ \\| \'_ \\/ __|/ _ \\| |/ _ \\',
+          '  | |_| | |_) |  __/ | | | |  | | |_| |>  <  | |__| (_) | | | \\__ \\ (_) | |  __/',
+          '   \\___/| .__/ \\___|_| |_|_|  |_|\\__,_/_/\\_\\  \\____\\___/|_| |_|___/\\___/|_|\\___|',
+          '        |_|                   ',
+          '  \x1b[0m',
+          '',
+          ' Welcome to the OpenMux Web Console',
+          ' - Select a Console from the dropdown and click Connect',
+          ' - URL params: ?console=<name>&autoconnect=1',
+          ' - Disconnect/Reconnect using the button on the right',
+          '',]; for (const line of art) term.write(line + '\r\n'); fitTerminal(); }
+
+  selectEl.addEventListener('change', () => {
+    const prev = currentConnectedPort;
+    const next = currentPort();
+    updateButton();
+    if (infoOverlay.style.display !== 'none') renderInfo(ports.find(x => x.name === next) || null);
+    // If currently connected and user selects a different port, auto-switch
+    if (isConnected() && next && next !== prev) {
+      abortSlowPaste('Switching port');
+      connectSelected();
+    }
+  });
+      function connectSelected() {
+        const port = currentPort(); if (!port) { alert('Select a console'); return; }
+        if (isConnected()) { try { abortSlowPaste('Reconnecting'); ws.close(1000, 'Client requested reconnect'); } catch (_) {} }
+        const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+        const basePath = "{{ base_path }}";
+        const meta = (ports || []).find(p => p.name === port) || {};
+        const url = meta.origin_server_id
+          ? `${proto}://${location.host}${basePath}/ws/${encodeURIComponent(String(meta.origin_server_id))}/${encodeURIComponent(port)}?meta=1`
+          : `${proto}://${location.host}${basePath}/ws/${encodeURIComponent(port)}?meta=1`;
+        ws = new WebSocket(url); ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    const meta = (ports || []).find(p => p.name === port) || {};
+    const desc = meta.description ? ` - ${meta.description}` : '';
+    const origin = meta.origin_server_id ? String(meta.origin_server_id) : 'local';
+    const isFirstConnect = (currentConnectedPort === null);
+    // Do not clear the terminal when switching; continue on a new line instead
+    if (!isFirstConnect) {
+      try { term.write('\r\n'); } catch (_) {}
+    }
+  term.write(`[Connected to console: ${origin}::${port}${desc}]\r\n`);
+  try { term.write('Use Ctrl+E to access control menu\r\n'); } catch (_) {}
+  currentConnectedPort = port;
+    // Clear any pending banners when WS opens
+    if (wsDownTimer) { clearTimeout(wsDownTimer); wsDownTimer = null; }
+    if (portDownTimer) { clearTimeout(portDownTimer); portDownTimer = null; }
+    hideBanner();
+    updateButton();
+    fitTerminal();
+    term.focus();
+    if (infoOverlay.style.display !== 'none') renderInfo(meta);
+  };
+        ws.onclose = (ev) => {
+          // Ensure any ongoing slow paste is stopped
+          try { abortSlowPaste('Disconnected'); } catch (_) {}
+          const meta = (ports || []).find(p => p.name === currentConnectedPort) || {};
+          const desc = meta.description ? ` - ${meta.description}` : '';
+          const origin = meta.origin_server_id ? String(meta.origin_server_id) : 'local';
+          const reason = ev && ev.reason ? ` (reason: ${ev.reason})` : (ev && ev.code ? ` (code: ${ev.code})` : '');
+          const nameForMsg = currentConnectedPort || port;
+          term.write(`[Disconnected from ${origin}::${nameForMsg}${desc}]${reason}\r\n`);
+          // Delay showing WS-down banner to avoid flicker during quick reconnects
+          if (wsDownTimer) { clearTimeout(wsDownTimer); wsDownTimer = null; }
+          if (portDownTimer) { clearTimeout(portDownTimer); portDownTimer = null; }
+          wsDownTimer = setTimeout(() => {
+            showBanner('WebSocket disconnected. Click Connect to retry.');
+            wsDownTimer = null;
+          }, 1000);
+          fitTerminal();
+          updateButton();
+        };
+  ws.onerror = (e) => {
+    // Also debounce error banner to avoid transient flicker on quick reconnect
+    if (wsDownTimer) { clearTimeout(wsDownTimer); wsDownTimer = null; }
+    if (portDownTimer) { clearTimeout(portDownTimer); portDownTimer = null; }
+    wsDownTimer = setTimeout(() => {
+      showBanner('WebSocket error. See console and retry.');
+      wsDownTimer = null;
+    }, 1000);
+    console.error(e);
+  };
+        ws.onmessage = (ev) => {
+          // Control path: metadata frames prefixed with 'OMXCTRL '
+          if (typeof ev.data === 'string' && ev.data.startsWith('OMXCTRL ')) {
+            try {
+              const payload = ev.data.slice('OMXCTRL '.length);
+              const msg = JSON.parse(payload);
+              if (msg && msg.type === 'client_mode') {
+                clientMode = (msg.mode === 'read-write') ? 'read-write' : 'read-only';
+                if (infoOverlay.style.display !== 'none') {
+                  renderInfo(ports.find(x => x.name === currentPort()) || null);
+                }
+                return;
+              }
+              if (msg && msg.type === 'meta' && msg.name) {
+                const idx = ports.findIndex(p => p.name === msg.name);
+                const prev = (idx >= 0 ? ports[idx] : {});
+                // Start from previous snapshot and apply only defined fields from msg
+                const merged = Object.assign({}, prev, { name: msg.name });
+                const applyIf = (key) => { if (Object.prototype.hasOwnProperty.call(msg, key) && msg[key] !== undefined && msg[key] !== null) { merged[key] = msg[key]; } };
+                applyIf('description');
+                applyIf('adapter');
+                applyIf('connected');
+                applyIf('serial_config');
+                applyIf('line_status');
+                applyIf('server_chain');
+                applyIf('last_seen');
+                if (idx >= 0) {
+                  ports[idx] = merged;
+                } else {
+                  ports.push(merged);
+                }
+                // Track port-up/down for selected port
+                if (currentPort() === msg.name) {
+                  portIsUp = !!merged.connected;
+                  // Debounce yellow port-down banner to avoid flicker on quick state transitions
+                  if (isConnected()) {
+                    if (!portIsUp) {
+                      if (portDownTimer) { clearTimeout(portDownTimer); }
+                      portDownTimer = setTimeout(() => {
+                        // Re-check conditions before showing
+                        if (isConnected() && currentPort() === msg.name && !portIsUp) {
+                          showBanner('Port is disconnected on server. Data will resume when it becomes available.', 'warn');
+                        }
+                        portDownTimer = null;
+                      }, 1000);
+                    } else {
+                      if (portDownTimer) { clearTimeout(portDownTimer); portDownTimer = null; }
+                      hideBanner();
+                    }
+                  }
+                }
+                if (infoOverlay.style.display !== 'none' && currentPort() === msg.name) {
+                  renderInfo(merged);
+                }
+              }
+            } catch (_) {
+              // ignore malformed control frames
+            }
+            return; // don't send control frames to terminal
+          }
+          // Track last RX for slow paste completion debounce
+          slowPaste.lastRxTs = performance.now();
+          if (slowPaste.waitingIdle) { scheduleSlowPasteCompletionAnnounce(); }
+          if (ev.data instanceof ArrayBuffer) {
+            const dec = new TextDecoder('utf-8');
+            term.write(dec.decode(new Uint8Array(ev.data)));
+          } else {
+            term.write(String(ev.data));
+          }
+        };
+      }
+  connectBtn.addEventListener('click', () => { if (isConnected()) { try { abortSlowPaste('Disconnecting'); ws.close(1000, 'Client requested disconnect'); } catch (_) {} } else { connectSelected(); } updateButton(); });
+  loadPorts().then(() => { const qpName = qs.get('console') || qs.get('port'); const qpAuto = truthyParam(qs.get('autoconnect')); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; const legacyAuto = !!qs.get('port') && !qs.has('autoconnect'); if (qpAuto || legacyAuto) { connectSelected(); } } updateButton(); const didAuto = (qpName && (qpAuto || (!!qs.get('port') && !qs.has('autoconnect')))); if (!didAuto) showSplash(); });
+
+      // Keyboard shortcut: Ctrl+] then 'r' to request read-write directly from Web UI
+      window.addEventListener('keydown', (e) => {
+        // Toggle control menu: Ctrl+E
+        if (e.key.toLowerCase() === 'e' && e.ctrlKey) { if (ctrlMenu.style.display === 'none') showCtrlMenu(); else hideCtrlMenu(); e.preventDefault(); return false; }
+        // If ']' is pressed with Control
+        if (e.key === ']' && e.ctrlKey) {
+          const onKey = (ev) => {
+            if (ev.key.toLowerCase() === 'r') {
+              try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'request_rw' })); } catch (_) {}
+              window.removeEventListener('keydown', onKey, true);
+              ev.preventDefault();
+              return false;
+            }
+            // any other key dismisses
+            window.removeEventListener('keydown', onKey, true);
+          };
+          window.addEventListener('keydown', onKey, true);
+          e.preventDefault();
+          return false;
+        }
+      }, true);
+    </script>
+  </body>
+  </html>

@@ -1,0 +1,379 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="omx-base-path" content="{{ base_path }}" />
+    <title>{{ title }}</title>
+  <link rel="stylesheet" href="{{ base_path }}/static/web_console.css" />
+  </head>
+  <body>
+    <header class="site">
+      <div class="brand">
+        {% if logo_url %}
+          <img class="logo-img" src="{{ base_path }}{{ logo_url }}" alt="logo" />
+        {% else %}
+          <div class="logo">{{ (realm.split()[0][0] ~ (realm.split()[1][0] if realm.split()|length > 1 else '')) | upper }}</div>
+        {% endif %}
+        <div>
+          <div class="title">OpenMux</div>
+          <div class="subtitle">Web Console</div>
+        </div>
+      </div>
+  <div class="page">Status</div>
+      <div class="extras">
+        <button class="btn" id="autoRefreshToggle" type="button" title="Toggle auto-refresh">Auto Refresh: Off</button>
+      </div>
+      <div class="actions">
+  <a class="btn" href="{{ base_path }}/">Summary</a>
+  <a class="btn" href="{{ base_path }}/console">Console</a>
+        {% if plugin_nav and plugin_nav|length > 0 %}
+          {% for item in plugin_nav %}
+            <a class="btn" href="{{ base_path }}{{ item.path }}">{{ item.title }}</a>
+          {% endfor %}
+        {% endif %}
+  <a class="btn" href="{{ base_path }}/logout" title="Sign out">Logout</a>
+      </div>
+    </header>
+    <main>
+  {% macro info_table(p) %}
+        {% set adapter = (p.adapter or p.adapter_type) %}
+        {% set sc = p.serial_config or {} %}
+  {% set ls = p.line_status or {} %}
+  {% set conn = (p.connected if ('connected' in p) else (p.is_running or false)) %}
+  {% set lseen = (p.last_seen if ('last_seen' in p) else ((ports_by_name[p.name].last_seen) if (ports_by_name and (p.name in ports_by_name) and ('last_seen' in ports_by_name[p.name])) else None)) %}
+        {% set parity = (sc.parity|string).upper() if sc and sc.parity is defined else '' %}
+        {% if parity in ['NONE', ''] %}{% set parity = 'N' %}{% else %}{% set parity = parity[0] %}{% endif %}
+        {% set fmt = ((sc.bytesize|string) ~ (parity) ~ (sc.stopbits|string)) if sc else '' %}
+        {% set dcd = (ls.DCD if ls and ('DCD' in ls) else (ls.dcd if ls and ('dcd' in ls) else None)) %}
+        {% set dsr = (ls.DSR if ls and ('DSR' in ls) else (ls.dsr if ls and ('dsr' in ls) else None)) %}
+        {% set cts = (ls.CTS if ls and ('CTS' in ls) else (ls.cts if ls and ('cts' in ls) else None)) %}
+        {% set rts = (ls.RTS if ls and ('RTS' in ls) else (ls.rts if ls and ('rts' in ls) else None)) %}
+        {% set dtr = (ls.DTR if ls and ('DTR' in ls) else (ls.dtr if ls and ('dtr' in ls) else None)) %}
+        <table class="mini-table">
+          <tbody>
+            <tr>
+              <th>Adapter</th>
+              <td>
+                {% if adapter %}<span class="tag tiny">{{ adapter }}</span>{% else %}<span class="muted">—</span>{% endif %}
+              </td>
+            </tr>
+            <tr>
+              <th>Serial</th>
+              <td>
+                {% if sc and sc.device %}<span class="muted">{{ sc.device }}</span>{% else %}<span class="muted">—</span>{% endif %}
+                {% if sc and sc.baudrate %}<span class="tag tiny">{{ sc.baudrate }}</span>{% endif %}
+                {% if sc and fmt %}<span class="tag tiny">{{ fmt }}</span>{% endif %}
+                {% if sc and sc.flow_control %}<span class="tag tiny">flow: {{ sc.flow_control }}</span>{% endif %}
+              </td>
+            </tr>
+            <tr>
+              <th>Lines</th>
+              <td>
+                {% if dcd is not none %}<span class="tag tiny {{ dcd and 'ok' or 'bad' }}">DCD</span>{% endif %}
+                {% if dsr is not none %}<span class="tag tiny {{ dsr and 'ok' or 'bad' }}">DSR</span>{% endif %}
+                {% if cts is not none %}<span class="tag tiny {{ cts and 'ok' or 'bad' }}">CTS</span>{% endif %}
+                {% if rts is not none %}<span class="tag tiny {{ rts and 'ok' or 'bad' }}">RTS</span>{% endif %}
+                {% if dtr is not none %}<span class="tag tiny {{ dtr and 'ok' or 'bad' }}">DTR</span>{% endif %}
+                {% if dcd is none and dsr is none and cts is none and rts is none and dtr is none %}<span class="muted">—</span>{% endif %}
+              </td>
+            </tr>
+            {% if p.server_chain and p.server_chain|length > 0 %}
+              <tr><th>Chain</th><td class="muted">{{ p.server_chain|join(' → ') }}</td></tr>
+            {% endif %}
+            {% if (not conn) and lseen %}
+              <tr><th>Last seen</th><td>{{ lseen | fmt_ts }}</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      {% endmacro %}
+      <div class="cards">
+        <div class="card">
+          <div class="muted">Total Ports</div>
+          <div class="metric">{{ total_ports }}</div>
+        </div>
+        <div class="card">
+          <div class="muted">Active/Connected</div>
+          <div class="metric">{{ connected_ports }}</div>
+        </div>
+        <div class="card">
+          <div class="muted">Federation Connections</div>
+          <div class="metric">{{ (federation.totals.connections_total if federation and federation.totals else 0) }}</div>
+        </div>
+        <div class="card">
+          <div class="muted">Multipath Groups</div>
+          <div class="metric">{{ (multipath.totals.groups if multipath and multipath.totals else 0) }}</div>
+        </div>
+      </div>
+
+      <h2>Ports</h2>
+      <table class="table-compact">
+        <thead>
+          <tr>
+            <th class="col-toggle"></th>
+            <th>Name</th>
+            <th>Description</th>
+            <th>Origin</th>
+            <th>Status</th>
+            <th>Clients</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in ports %}
+          <tr>
+            {% set pid = ('ports-' ~ (p.name | replace(' ', '_') | replace(':','_'))) %}
+            <td class="col-toggle"><button type="button" class="btn btn-icon toggleInfo" data-target="info-{{ pid }}">+</button></td>
+            <td>{{ p.name }}</td>
+            <td>{{ p.description or '' }}</td>
+            <td class="muted">
+              {% if p.origin_server_id %}
+                <code>{{ p.origin_server_id }}</code>
+              {% else %}
+                local
+              {% endif %}
+            </td>
+            <td>
+              {% set conn = (p.connected if ('connected' in p) else (p.is_running or false)) %}
+              <span class="tag {% if conn %}ok{% else %}bad{% endif %}">{{ conn and 'connected' or 'down' }}</span>
+            </td>
+            <td>
+              {% set cnt = p.clients_count or p.client_count %}
+              {{ cnt or 0 }}
+              {% if p.client_details %}
+                {# Show up to 5 entries with username (type@ip) #}
+                {% set preview = p.client_details[:5] %}
+                <span class="muted">—
+                  {% for cd in preview %}
+                    {{ cd.username }}{% if cd.type or cd.ip %} ({{ (cd.type or 'ws') }}{% if cd.ip %}@{{ cd.ip }}{% endif %}){% endif %}{% if not loop.last %}, {% endif %}
+                  {% endfor %}
+                  {% if (p.client_details|length) > 5 %}, …{% endif %}
+                </span>
+              {% elif p.clients %}
+                <span class="muted">— {{ p.clients[:5]|join(', ') }}{% if (p.clients|length) > 5 %}, …{% endif %}</span>
+              {% endif %}
+            </td>
+          </tr>
+          <tr id="info-{{ pid }}" style="display:none;">
+            <td colspan="6">
+              <div class="card">{{ info_table(p) }}</div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      {# Federation and Multipath tables removed in favor of hierarchical view below #}
+
+      <h2>Federation by Multipath Peer</h2>
+      <div class="muted">
+        {% if hb_interval %}Heartbeat interval: {{ hb_interval }}s{% endif %}
+        {% if peers_cfg and peers_cfg|length > 0 %}
+          · Peers configured: {{ peers_cfg|length }}
+        {% endif %}
+      </div>
+      {% set groups = multipath.groups if multipath and multipath.groups else [] %}
+      {% if not groups or groups|length == 0 %}
+        <p class="muted"><em>No federation connections</em></p>
+      {% else %}
+        {% for g in groups %}
+        <section class="peer-card card">
+          <div class="peer-header">
+            <div class="peer-title">Peer: <code>{{ g.peer_key }}</code></div>
+            <div class="peer-metrics">
+              <span class="tag">paths {{ g.connections|length }}</span>
+              <span class="tag{% if g.stale and g.stale|int > 0 %} warn{% endif %}">stale {{ g.stale }}</span>
+              {% if g.metrics %}
+                <span class="tag">sendbuf {{ g.metrics.sendbuf_size }}</span>
+                <span class="tag">rxbuf {{ g.metrics.rx_buffer_depth }}</span>
+                <span class="tag">retx {{ g.metrics.retransmissions }}</span>
+                <span class="tag">tx {{ g.metrics.tx_bytes }}</span>
+                <span class="tag">rx {{ g.metrics.rx_bytes }}</span>
+              {% endif %}
+            </div>
+          </div>
+
+          <table class="mini-table table-compact">
+            <thead>
+              <tr>
+                <th class="col-toggle"></th>
+                <th>ID</th>
+                <th>Role</th>
+                <th>Remote</th>
+                <th>Uptime</th>
+                <th>Streams</th>
+                <th>HB</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for c in g.connections %}
+                {% set cid = c.conn_id if c.conn_id is defined else (c.connection_id if c.connection_id is defined else c) %}
+                {% set meta = conn_index[cid] if conn_index and cid in conn_index else None %}
+                {% set hb = meta.heartbeat if meta else None %}
+                {% set hb_status = (hb.status if hb else 'n/a') %}
+                <tr>
+                  <td class="col-toggle"></td>
+                  <td>
+                    <code>{{ cid }}</code>
+                    {% if g.primary and cid == g.primary %}<span class="tag ok">primary</span>{% endif %}
+                  </td>
+                  <td><span class="tag">{{ (meta.role if meta else (c.role if c.role is defined else '')) }}</span></td>
+                  <td>
+                    {% if meta and meta.remote_peer %}
+                      {{ meta.remote_peer.host }}:{{ meta.remote_peer.port }}
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+                  <td>{{ (meta.uptime_seconds ~ 's') if meta and meta.uptime_seconds is defined else '' }}</td>
+                  <td>{{ (meta.counts.streams if meta and meta.counts else '') }}</td>
+                  <td>
+                    <span class="tag {% if hb_status == 'ok' %}ok{% elif hb_status == 'degraded' %}warn{% else %}muted{% endif %}">{{ hb_status }}</span>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+
+          {% set rp_list = (rport_map[g.peer_key] if rport_map and (g.peer_key in rport_map) else []) %}
+          {% if rp_list and (rp_list|length > 0) %}
+            <div class="remote-ports">
+              <div class="muted">Remote ports:</div>
+              <table class="mini-table table-compact">
+                <thead>
+                  <tr>
+                    <th class="col-toggle"></th>
+                    <th>Name</th>
+                    <th>Description</th>
+                    <th>Status</th>
+                    <th>Type</th>
+                    <th>maxRW</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for rp in rp_list %}
+                    {% set local = ports_by_name[rp.name] if ports_by_name and (rp.name in ports_by_name) else None %}
+                    <tr>
+                        {% set rid = ('rp-' ~ (g.peer_key | replace(' ','_') | replace(':','_') ) ~ '-' ~ (rp.name | replace(' ','_') | replace(':','_'))) %}
+                        <td class="col-toggle"><button type="button" class="btn btn-icon toggleInfo" data-target="info-{{ rid }}">+</button></td>
+                        <td>
+                          <a href="{{ base_path }}/console?port={{ rp.name }}" title="Open console">{{ rp.name }}</a>
+                        </td>
+                      <td class="muted">{{ (local.description if local else rp.description) or '' }}</td>
+                      <td>
+                        <span class="tag {% if rp.connected %}ok{% else %}bad{% endif %}">{{ rp.connected and 'connected' or 'down' }}</span>
+                      </td>
+                      <td>{{ rp.federation_type or '' }}</td>
+                      <td>{{ rp.max_rw_users or '' }}</td>
+                    </tr>
+                    <tr id="info-{{ rid }}" style="display:none;">
+                      <td colspan="6">
+                        <div class="card">{{ info_table(rp) }}</div>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              {% if rp_list[0] and rp_list[0].server_chain %}
+                <div class="muted mini">chain: {{ rp_list[0].server_chain|join(' → ') }}</div>
+              {% endif %}
+            </div>
+          {% else %}
+            <div class="remote-ports muted"><em>No remote ports mapped for this peer</em></div>
+          {% endif %}
+        </section>
+        {% endfor %}
+      {% endif %}
+
+  <h2>Connected Clients</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Client ID</th>
+            <th>User</th>
+            <th>IP</th>
+            <th>Type</th>
+            <th>Port</th>
+            <th>Created</th>
+            <th>Last seen</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if data.web_clients and data.web_clients|length > 0 %}
+            {% for cl in data.web_clients %}
+              <tr>
+                <td>{{ cl.client_id }}</td>
+                <td>{{ cl.username or '' }}</td>
+                <td>{{ cl.ip or '' }}</td>
+                <td>{{ cl.type or 'websocket' }}</td>
+                <td>{{ cl.port or '' }}</td>
+                <td>{% if cl.created %}{{ cl.created | fmt_ts }}{% endif %}</td>
+                <td>{% if cl.last_seen %}{{ cl.last_seen | fmt_ts }}{% endif %}</td>
+              </tr>
+            {% endfor %}
+          {% else %}
+            <tr><td colspan="7"><em>No connected clients</em></td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </main>
+  </body>
+  <script>
+    (function () {
+      const KEY = 'omx_status_autorefresh';
+      const INTERVAL_MS = 5000;
+      const btn = document.getElementById('autoRefreshToggle');
+      let timerId = null;
+
+      function updateButton(enabled) {
+        if (!btn) return;
+        btn.textContent = 'Auto Refresh: ' + (enabled ? 'On' : 'Off');
+      }
+
+      function start() {
+        if (timerId) return;
+        timerId = setInterval(() => { try { window.location.reload(); } catch (e) {} }, INTERVAL_MS);
+        updateButton(true);
+      }
+
+      function stop() {
+        if (timerId) { clearInterval(timerId); timerId = null; }
+        updateButton(false);
+      }
+
+      function toggle() {
+        const enabled = !!localStorage.getItem(KEY);
+        if (enabled) {
+          localStorage.removeItem(KEY);
+          stop();
+        } else {
+          localStorage.setItem(KEY, '1');
+          start();
+        }
+      }
+
+      if (btn) btn.addEventListener('click', toggle);
+      // Initialize from saved state
+      if (localStorage.getItem(KEY)) {
+        start();
+      } else {
+        updateButton(false);
+      }
+      // Wire Details toggles
+      try {
+        const toggles = document.querySelectorAll('.toggleInfo');
+        toggles.forEach(btn => {
+          // initialize all to '+' on load
+          btn.textContent = '+';
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-target');
+            const row = document.getElementById(id);
+            if (!row) return;
+            const show = row.style.display === 'none' || row.style.display === '';
+            row.style.display = show ? 'table-row' : 'none';
+            btn.textContent = show ? '-' : '+';
+          });
+        });
+      } catch (e) {}
+    })();
+  </script>
+</html>

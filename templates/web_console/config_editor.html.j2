@@ -1,0 +1,1116 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title or 'Config Editor' }}</title>
+  <meta name="omx-base-path" content="{{ base_path or '' }}" />
+  <link rel="stylesheet" href="{{ base_path }}/static/web_console.css" />
+    <style>
+      .row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
+      .row > * { margin: 0; }
+      .status { margin-top: 8px; min-height: 24px; }
+  .toolbar .status { margin-top: 0; min-height: 0; }
+      .status .ok { color: #2ecc71; }
+      .status .err { color: #e74c3c; white-space: pre-wrap; }
+      .hint { color: #999; font-size: 12px; }
+      .spacer { flex: 1; }
+      .section { border:1px solid #333; padding:12px; margin:12px 0; background:#0f0f0f; }
+      .section > .legend { display:flex; align-items:baseline; gap:8px; margin-bottom: 8px; }
+      .legend .title { font-weight:600; color:#ddd; font-size:16px; }
+      .legend .desc { color:#888; font-size:12px; }
+      .field { display:flex; gap:8px; align-items:center; margin:6px 0; }
+      .field label { width: 220px; color:#bbb; }
+  .field .help { color:#888; font-size:12px; margin-left: 8px; }
+  .field .default-hint { color:#777; font-size:12px; margin-left: 8px; }
+      .field input[type="text"], .field input[type="number"], .field select { flex:1; padding:6px; background:#0d0d0d; color:#e7e7e7; border:1px solid #333; }
+      .field input[type="checkbox"] { width: 18px; height: 18px; }
+      .tbl-wrap { margin: 8px 0; }
+      table.config { width:100%; border-collapse: collapse; }
+      table.config th, table.config td { border:1px solid #333; padding:6px; font-size: 13px; }
+      table.config th { background:#111; color:#ccc; text-align:left; }
+  table.config tr.editing td { background: #1a2330; }
+  table.config tr.editing td, table.config tr.editing th { border-color: #3a6ea5; }
+      table.config td .cell-muted { color:#777; }
+      .mini-btn { padding:2px 8px; font-size:12px; }
+      .toolbar { display:flex; gap:8px; align-items:center; }
+      .req { color:#d18; margin-left: 4px; font-size: 11px; }
+      .subtle { color:#aaa; font-size: 12px; }
+      details.collapsible > summary { cursor: pointer; color:#ccc; }
+      details.collapsible { margin: 6px 0; }
+      .advisory { margin-top: 6px; min-height: 20px; }
+      .advisory .warn { color: #f39c12; }
+    </style>
+  </head>
+  <body>
+    <header class="site">
+      <div class="brand">
+        {% if logo_url %}
+          <img class="logo-img" src="{{ logo_url }}" alt="logo" />
+        {% else %}
+          <div class="logo">{{ (realm.split()[0][0] ~ (realm.split()[1][0] if realm.split()|length > 1 else '')) | upper }}</div>
+        {% endif %}
+        <div>
+          <div class="title">OpenMux</div>
+          <div class="subtitle">Config Editor</div>
+        </div>
+      </div>
+      <div class="page">Config</div>
+      <div class="actions">
+        <a class="btn" href="{{ base_path }}/">Summary</a>
+        <a class="btn" href="{{ base_path }}/status">Status</a>
+        <a class="btn" href="{{ base_path }}/console">Console</a>
+        {% if plugin_nav and plugin_nav|length > 0 %}
+          {% for item in plugin_nav %}
+            <a class="btn" href="{{ base_path }}{{ item.path }}">{{ item.title }}</a>
+          {% endfor %}
+        {% endif %}
+  <a class="btn" href="{{ base_path }}/logout" title="Sign out">Logout</a>
+      </div>
+    </header>
+    <main>
+      <div class="row">
+        <div class="toolbar">
+          <button class="btn" id="loadBtn" title="Load current config">Load</button>
+          <button class="btn" id="validateBtn" title="Validate without saving">Validate</button>
+          <button class="btn" id="saveBtn" title="Save to server.yaml">Save</button>
+          <div class="status" id="status"></div>
+        </div>
+        <div class="spacer"></div>
+        <div class="subtle">Changes are saved to file; live reload is not automatic.</div>
+      </div>
+      <div class="advisory" id="advisory"></div>
+      <div class="subtle" style="margin-top:6px">Fields marked with <span class="req">*</span> are required.</div>
+
+      <div id="formRoot">
+        <details class="collapsible" open>
+          <summary><span class="title">Live reload</span> <span class="desc">Apply changes without full restart</span></summary>
+          <div class="section">
+            <div class="legend"><div class="title">Reload server config</div><div class="desc">Use these after Save to apply the active config file.</div></div>
+            <div class="field">
+              <label>Soft reload</label>
+              <button class="btn" id="softReloadBtn" type="button">Soft Reload</button>
+              <span class="help">Reloads YAML, updates authentication (users/API keys/PAM/public keys), and reconciles Serial/Loopback/Command/TCP-initiator ports without restarting listeners.</span>
+            </div>
+            <div class="field">
+              <label>Full reload</label>
+              <button class="btn" id="fullReloadBtn" type="button">Full Reload</button>
+              <span class="help">Stops and recreates adapters. Use when changing client listener, muxcon listeners/initiators, TLS, or other core settings. May briefly disconnect sessions.</span>
+            </div>
+            <details class="collapsible">
+              <summary><span class="title">When to use what</span> <span class="desc">Quick guidance</span></summary>
+              <div class="section">
+                <ul style="margin:0 0 0 18px; padding:0;">
+                  <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/PAM), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator port lists.</li>
+                  <li>Use <b>Full Reload</b> for: Client listener enable/host/port changes, muxcon listeners/initiators, TLS enable/certs/TOFU settings, and other adapter-wide options.</li>
+                  <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>
+                </ul>
+              </div>
+            </details>
+            <div class="status" id="reloadStatus"></div>
+          </div>
+        </details>
+        <details class="collapsible" open>
+          <summary><span class="title">Server</span> <span class="desc">Server identity and description</span></summary>
+          <div class="section">
+            <div class="field"><label for="server.id">Server ID</label><input id="server.id" type="text" /></div>
+            <div class="field"><label for="server.description">Description</label><input id="server.description" type="text" /></div>
+            <div class="field"><label for="server.control_socket">Control socket path</label><input id="server.control_socket" type="text" placeholder="logs/openmux.sock" /><span class="help">Unix domain socket for local CLI control (status/reload). Env override: OPENMUX_CTL_SOCK.</span></div>
+            <div class="field"><label for="server.pidfile">PID file path</label><input id="server.pidfile" type="text" placeholder="logs/openmux.pid" /><span class="help">PID file used for signal-based control (HUP soft reload, USR1 full reload). Env override: OPENMUX_PIDFILE.</span></div>
+          </div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and PAM</span></summary>
+          <div class="section" id="authSection">
+            <div class="legend"><div class="title">Users</div><div class="desc">Basic-auth accounts</div></div>
+            <div id="auth.users"></div>
+            <div class="legend" style="margin-top:10px"><div class="title">API Keys</div><div class="desc">Token auth</div></div>
+            <div id="auth.api_keys"></div>
+            <div class="legend" style="margin-top:10px"><div class="title">Public Keys</div><div class="desc">Ed25519 keys with allowed_uses</div></div>
+            <div id="auth.public_keys"></div>
+            <div class="legend" style="margin-top:10px"><div class="title">PAM (System Auth)</div><div class="desc">Use UNIX accounts and groups</div></div>
+            <div class="field"><label for="auth.pam.enabled">Enable PAM</label><input id="auth.pam.enabled" type="checkbox" /></div>
+            <div class="field"><label for="auth.pam.service_name">Service name</label><input id="auth.pam.service_name" type="text" placeholder="login" /><span class="help">PAM service to use (e.g., login, system-auth)</span></div>
+            <div class="field"><label for="auth.pam.allow_root">Allow root</label><input id="auth.pam.allow_root" type="checkbox" /><span class="help">If unchecked, root user cannot log in via PAM</span></div>
+            <div class="field"><label for="auth.pam.allowed_users">Allowed users</label><input id="auth.pam.allowed_users" type="text" placeholder="comma,separated,users" /><span class="help">Optional allowlist: only these users can authenticate via PAM</span></div>
+            <details class="collapsible">
+              <summary><span class="title">PAM Groups</span> <span class="desc">Map system groups to roles</span></summary>
+              <div class="section">
+                <div class="field"><label for="auth.pam.groups.admin_group">Admin group</label><input id="auth.pam.groups.admin_group" type="text" placeholder="openmux_admin" /></div>
+                <div class="field"><label for="auth.pam.groups.write_group">Write group</label><input id="auth.pam.groups.write_group" type="text" placeholder="openmux_write" /></div>
+                <div class="field"><label for="auth.pam.groups.read_group">Read group</label><input id="auth.pam.groups.read_group" type="text" placeholder="openmux_read" /></div>
+              </div>
+            </details>
+          </div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary><span class="title">Logging</span> <span class="desc">File and console logging</span></summary>
+          <div class="section">
+            <div class="field"><label for="logging.level">Level</label>
+              <select id="logging.level">
+                <option value=""></option>
+                <option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option>
+                <option>debug</option><option>info</option><option>warning</option><option>error</option><option>critical</option>
+              </select>
+            </div>
+            <div class="field"><label for="logging.console">Console</label><input id="logging.console" type="checkbox" /></div>
+            <div class="field"><label for="logging.file">File</label><input id="logging.file" type="text" /></div>
+            <div class="field"><label for="logging.log_dir">Log Dir</label><input id="logging.log_dir" type="text" /></div>
+            <div class="field"><label for="logging.max_log_size">Max size</label><input id="logging.max_log_size" type="number" min="0" /></div>
+            <div class="field"><label for="logging.log_backup_count">Backup count</label><input id="logging.log_backup_count" type="number" min="0" /></div>
+          </div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary><span class="title">Client listener</span> <span class="desc">TCP console endpoint</span></summary>
+          <div class="section">
+            <div class="field"><label for="client_listener.enabled">Enable listener</label><input id="client_listener.enabled" type="checkbox" /></div>
+            <div class="field"><label for="client_listener.host">Host</label><input id="client_listener.host" type="text" /></div>
+            <div class="field"><label for="client_listener.port">Port</label><input id="client_listener.port" type="number" min="1" max="65535" /></div>
+            <div class="field"><label for="client_listener.max_connections">Max connections</label><input id="client_listener.max_connections" type="number" min="1" /></div>
+            <div class="field"><label for="client_listener.connection_timeout">Timeout (s)</label><input id="client_listener.connection_timeout" type="number" min="1" /></div>
+          </div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary><span class="title">Serial ports</span> <span class="desc">Physical serial devices</span></summary>
+          <div class="section" id="serial_ports"></div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary><span class="title">Loopback ports</span> <span class="desc">Software loopbacks</span></summary>
+          <div class="section" id="loopback_ports"></div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary><span class="title">Command ports</span> <span class="desc">Process-backed ports</span></summary>
+          <div class="section" id="command_ports"></div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary><span class="title">Muxcon</span> <span class="desc">Federation and transport</span></summary>
+          <div class="section" id="muxcon">
+            <div class="field"><label for="muxcon.node_name">Node name (deprecated)</label><input id="muxcon.node_name" type="text" /></div>
+            <details class="collapsible">
+              <summary><span class="title">Advanced</span> <span class="desc">Timing, cache, filters, auth</span></summary>
+              <div class="section">
+                <div class="field"><label for="muxcon.heartbeat_interval">Heartbeat interval</label><input id="muxcon.heartbeat_interval" type="number" min="0" step="0.1" /></div>
+                <div class="field"><label for="muxcon.mpath_primary_stale_sec">MP stale sec</label><input id="muxcon.mpath_primary_stale_sec" type="number" min="0" step="0.1" /></div>
+                <div class="field"><label for="muxcon.mpath_failover_check_sec">MP check sec</label><input id="muxcon.mpath_failover_check_sec" type="number" min="0" step="0.1" /></div>
+                <div class="field"><label for="muxcon.mpath_strategy">MP strategy</label><select id="muxcon.mpath_strategy"><option value=""></option><option value="best_pref">best_pref</option></select></div>
+                <div class="field"><label for="muxcon.mpath_preemptive_promote">MP preemptive</label><input id="muxcon.mpath_preemptive_promote" type="checkbox" /></div>
+                <div class="field"><label for="muxcon.mpath_neighbor_idle_drop_sec">MP neighbor drop</label><input id="muxcon.mpath_neighbor_idle_drop_sec" type="number" min="0" step="0.1" /></div>
+                <div class="field"><label for="muxcon.federated_cache_enabled">Federated cache</label><input id="muxcon.federated_cache_enabled" type="checkbox" /></div>
+                <div class="field"><label for="muxcon.federated_cache_ttl_sec">Cache TTL (s)</label><input id="muxcon.federated_cache_ttl_sec" type="number" min="0" step="0.1" /></div>
+                <div class="field"><label for="muxcon.federated_cache_path">Cache path</label><input id="muxcon.federated_cache_path" type="text" /></div>
+                <div class="field"><label for="muxcon.auth_required">Auth required</label><input id="muxcon.auth_required" type="checkbox" /></div>
+                <div class="field"><label for="muxcon.auth_key_id">Auth key id</label><input id="muxcon.auth_key_id" type="text" /></div>
+                <div class="field"><label for="muxcon.auth_private_key">Private key</label><input id="muxcon.auth_private_key" type="text" /></div>
+              </div>
+            </details>
+            <div class="legend"><div class="title">Listeners</div><div class="desc">Incoming connections</div></div>
+            <div id="muxcon.listeners"></div>
+            <div class="legend" style="margin-top:10px"><div class="title">Initiators</div><div class="desc">Outgoing connections</div></div>
+            <div id="muxcon.initiators"></div>
+            <div class="legend" style="margin-top:10px"><div class="title">Public Keys</div><div class="desc">Ed25519 keys for muxcon federation</div></div>
+            <div id="muxcon.public_keys"></div>
+          </div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary><span class="title">Web status</span> <span class="desc">Read-only status server</span></summary>
+          <div class="section">
+            <div class="field"><label for="web_status.host">Host</label><input id="web_status.host" type="text" /></div>
+            <div class="field"><label for="web_status.port">Port</label><input id="web_status.port" type="number" min="1" max="65535" /></div>
+            <div class="field"><label for="web_status.enable_http_api">HTTP API</label><input id="web_status.enable_http_api" type="checkbox" /></div>
+            <div class="field"><label for="web_status.cors_enable">CORS</label><input id="web_status.cors_enable" type="checkbox" /></div>
+            <div class="field"><label for="web_status.enable_fault_injection">Fault injection</label><input id="web_status.enable_fault_injection" type="checkbox" /></div>
+          </div>
+        </details>
+
+        <details class="collapsible" open>
+          <summary><span class="title">Web console</span> <span class="desc">Admin UI and WS console</span></summary>
+          <div class="section">
+            <div class="field"><label for="web_console.host">Host</label><input id="web_console.host" type="text" /></div>
+            <div class="field"><label for="web_console.port">Port</label><input id="web_console.port" type="number" min="1" max="65535" /></div>
+            <div class="field"><label for="web_console.ssl_port">SSL Port</label><input id="web_console.ssl_port" type="number" min="1" max="65535" /></div>
+            <div class="field"><label for="web_console.base_path">Base path</label><input id="web_console.base_path" type="text" placeholder="/" /></div>
+            <div class="field"><label for="web_console.respect_forwarded_prefix">Respect X-Forwarded-Prefix</label><input id="web_console.respect_forwarded_prefix" type="checkbox" /></div>
+            <div class="field"><label for="web_console.enable_ui">Enable UI</label><input id="web_console.enable_ui" type="checkbox" /></div>
+            <div class="field"><label for="web_console.realm">Realm</label><input id="web_console.realm" type="text" /></div>
+            <div class="field"><label for="web_console.static_dir">Static dir</label><input id="web_console.static_dir" type="text" /></div>
+            <div class="field"><label for="web_console.template_dir">Template dir</label><input id="web_console.template_dir" type="text" /></div>
+            <div class="field"><label for="web_console.download_xterm_if_missing">Auto-download xterm</label><input id="web_console.download_xterm_if_missing" type="checkbox" /></div>
+            <div class="field"><label for="web_console.session_ttl_seconds">Session TTL (s)</label><input id="web_console.session_ttl_seconds" type="number" min="0" /></div>
+            <div class="legend"><div class="title">Probes</div><div class="desc">/healthz /livez /readyz</div></div>
+            <div class="field"><label for="web_console.enable_probes">Enable probes</label><input id="web_console.enable_probes" type="checkbox" /></div>
+            <div class="field"><label for="web_console.probes_include_details">Include details</label><input id="web_console.probes_include_details" type="checkbox" /></div>
+            <div class="legend"><div class="title">TLS</div><div class="desc">Optional HTTPS</div></div>
+            <div class="field"><label for="web_console.use_tls">Use TLS</label><input id="web_console.use_tls" type="checkbox" /></div>
+            <div class="field"><label for="web_console.ssl_cert">SSL cert</label><input id="web_console.ssl_cert" type="text" /></div>
+            <div class="field"><label for="web_console.ssl_key">SSL key</label><input id="web_console.ssl_key" type="text" /></div>
+            <div class="field"><label for="web_console.tls_autogen">Autogenerate cert</label><input id="web_console.tls_autogen" type="checkbox" /></div>
+            <div class="field"><label for="web_console.tls_dir">TLS dir</label><input id="web_console.tls_dir" type="text" /></div>
+            <div class="legend"><div class="title">Plugins</div><div class="desc">Web plugin modules to load</div></div>
+            <div id="web_console.plugins"></div>
+          </div>
+        </details>
+
+        
+      </div>
+
+      
+    </main>
+
+    <script>
+  (function(){
+        const status = document.getElementById('status');
+        const BTN = (id) => document.getElementById(id);
+  let csrf = null;
+  let current = {};
+  // Ensure a single open editor globally
+  let activeEditorEl = null;
+  let activeEditorCleanup = null;
+  let activeEditorValidate = null; // returns true if OK, false if missing required; also shows inline error
+  let activeEditorSave = null; // programmatically save current editor if valid
+
+        function setStatus(ok, msg){ status.innerHTML=''; const el=document.createElement('div'); el.className=ok?'ok':'err'; el.textContent=msg; status.appendChild(el); }
+
+        // Help text for simple fields (non-table inputs)
+        const FIELD_HELP = {
+          'server.id': 'Unique server identifier used in federation and status; if empty, hostname may be used.',
+          'server.description': 'Human-readable description shown in UIs and status.',
+          'server.control_socket': 'Unix domain socket path for openmuxctl and local control. Default logs/openmux.sock; env OPENMUX_CTL_SOCK overrides.',
+          'server.pidfile': 'PID file written on startup to enable kill -HUP/-USR1 control. Default logs/openmux.pid; env OPENMUX_PIDFILE overrides.',
+
+          'logging.level': 'Global log level for the server (DEBUG..CRITICAL).',
+          'logging.console': 'Send logs to console/stderr.',
+          'logging.file': 'Log file path; leave empty to disable file logging.',
+          'logging.log_dir': 'Optional directory to place rotated logs.',
+          'logging.max_log_size': 'Max size (bytes) before rotating the log file.',
+          'logging.log_backup_count': 'How many rotated files to keep.',
+
+          'client_listener.host': 'Bind address for the TCP console server.',
+          'client_listener.enabled': 'Enable or disable the TCP console listener. When disabled, the entire client_listener block is removed from the config.',
+          'client_listener.port': 'TCP port for console clients to connect to.',
+          'client_listener.max_connections': 'Maximum simultaneous client sessions allowed.',
+          'client_listener.connection_timeout': 'Idle connection timeout (seconds).',
+
+          'muxcon.node_name': 'Deprecated: use server.id for identity.',
+          'muxcon.heartbeat_interval': 'Seconds between federation keepalive heartbeats.',
+          'muxcon.mpath_primary_stale_sec': 'Mark the current primary path stale after this idle time (seconds).',
+          'muxcon.mpath_failover_check_sec': 'Interval to check if failover is needed (seconds).',
+          'muxcon.mpath_strategy': 'Multipath strategy to select the active path.',
+          'muxcon.mpath_preemptive_promote': 'Preemptively switch back to a preferred path when it recovers.',
+          'muxcon.mpath_neighbor_idle_drop_sec': 'Drop idle neighbor sessions after this many seconds.',
+          'muxcon.federated_cache_enabled': 'Cache remote port listings to speed up discovery.',
+          'muxcon.federated_cache_ttl_sec': 'How long to keep federated cache entries (seconds).',
+          'muxcon.federated_cache_path': 'Path to the cache file/directory for federated data.',
+          'muxcon.auth_required': 'Require cryptographic authentication for muxcon peers.',
+          'muxcon.auth_key_id': 'Key identifier to advertise for muxcon authentication.',
+          'muxcon.auth_private_key': 'Inline private key (not recommended); prefer a file path.',
+
+          'web_status.host': 'Bind address for the read-only status server.',
+          'web_status.port': 'TCP port for the status server.',
+          'web_status.enable_http_api': 'Enable JSON status API endpoints.',
+          'web_status.cors_enable': 'Allow cross-origin requests (adds permissive CORS headers).',
+          'web_status.enable_fault_injection': 'Enable fault injection endpoints for testing.',
+
+          'web_console.host': 'Bind address for the admin web console.',
+          'web_console.port': 'TCP port for the admin web console.',
+          'web_console.enable_ui': 'Serve the HTML UI (disable to expose only APIs).',
+          'web_console.realm': 'HTTP Basic-Auth realm displayed in login dialogs.',
+          'web_console.static_dir': 'Directory for static assets (xterm, css, js).',
+          'web_console.template_dir': 'Directory containing Jinja2 templates.',
+          'web_console.download_xterm_if_missing': 'Auto-download xterm assets if they are missing.',
+          'web_console.enable_probes': 'Expose /healthz /livez /readyz endpoints.',
+          'web_console.probes_include_details': 'Return extra JSON (version, uptime, clients) in probes.',
+          'web_console.use_tls': 'Serve the web console over HTTPS.',
+          'web_console.ssl_cert': 'Path to TLS certificate (PEM).',
+          'web_console.ssl_key': 'Path to TLS private key (PEM).',
+          'web_console.tls_autogen': 'Autogenerate a self-signed certificate if none is provided.',
+          'web_console.tls_dir': 'Directory to store autogen TLS artifacts.',
+          'web_console.base_path': 'Base URL path prefix for the web console (e.g., /openmux). Use "/" for root.',
+          'web_console.respect_forwarded_prefix': 'Honor X-Forwarded-Prefix header from reverse proxies to derive base path per request.',
+          // PAM help
+          'auth.pam.enabled': 'Enable UNIX PAM for username/password authentication.',
+          'auth.pam.service_name': 'PAM service name to use (login/system-auth/etc).',
+          'auth.pam.allow_root': 'Allow root to authenticate via PAM (default: off).',
+          'auth.pam.allowed_users': 'Optional allowlist: only listed users are accepted for PAM.',
+          'auth.pam.groups.admin_group': 'System group name granting admin role.',
+          'auth.pam.groups.write_group': 'System group name granting read-write role.',
+          'auth.pam.groups.read_group': 'System group name granting read-only role.',
+        };
+
+        // Merge defaults parsed from docs/DEFAULTS.md
+        const DEFAULTS_DOC = (function(){ try { return JSON.parse({{ defaults_doc_json|tojson|safe }}); } catch(_e){ return {dot:{}, sections:{}} } })();
+        const BASE_PATH = (function(){ const m=document.querySelector('meta[name="omx-base-path"]'); const v=m&&m.getAttribute('content')||''; return v||''; })();
+        function withBase(p){
+          const bp = BASE_PATH||'';
+          if(!bp) return p;
+          if(p.startsWith('http://')||p.startsWith('https://')) return p;
+          if(p.startsWith('/')) return bp + p;
+          return bp + '/' + p;
+        }
+        // Default value hints for simple fields (shown when empty)
+        const FIELD_DEFAULTS_BASE = {
+          // client listener
+          'client_listener.enabled': false,
+          'client_listener.host': '127.0.0.1',
+          'client_listener.port': 8023,
+          'client_listener.max_connections': 100,
+          'client_listener.connection_timeout': 30,
+          // web_status
+          'web_status.enable_http_api': true,
+          'web_status.cors_enable': true,
+          'web_status.enable_fault_injection': false,
+          // logging defaults are environment-dependent; omit placeholders
+          // web_status has no strong defaults for host/port
+          // web_console
+          'web_console.enable_ui': true,
+          'web_console.download_xterm_if_missing': true,
+          'web_console.enable_probes': true,
+          'web_console.probes_include_details': false,
+          'web_console.use_tls': false,
+          'web_console.tls_autogen': true,
+          // Paths below are relative to the server working directory by default
+          'web_console.static_dir': 'static',
+          'web_console.template_dir': 'templates/web_console',
+          // PAM UI default hints
+          'auth.pam.enabled': false,
+          'auth.pam.service_name': 'login',
+          'auth.pam.allow_root': false,
+          'auth.pam.groups.admin_group': 'openmux_admin',
+          'auth.pam.groups.write_group': 'openmux_write',
+          'auth.pam.groups.read_group': 'openmux_read',
+        };
+        // Overlay doc-derived defaults for simple fields
+        const FIELD_DEFAULTS = (function(){ const out = {...FIELD_DEFAULTS_BASE}; try { const m = DEFAULTS_DOC.dot||{}; Object.keys(m).forEach(k=>{ out[k]=m[k]; }); }catch(_e){} return out; })();
+
+        function injectHelps(){
+          Object.keys(FIELD_HELP).forEach(id=>{
+            const el = q(id);
+            if(!el) return;
+            const field = el.closest('.field');
+            if(!field) return;
+            if(field.querySelector('.help')) return; // avoid duplicates
+            const help = document.createElement('span');
+            help.className='help';
+            help.textContent = FIELD_HELP[id];
+            field.appendChild(help);
+          });
+        }
+        function injectDefaultHints(){
+          const ensureDefaultBadge = (el, defVal)=>{
+            const field = el && el.closest ? el.closest('.field') : null;
+            if(!field) return;
+            let badge = field.querySelector('.default-hint');
+            if(!badge){ badge = document.createElement('span'); badge.className='default-hint'; field.appendChild(badge); }
+            badge.textContent = `Default: ${defVal}`;
+            if(el && el.tagName==='SELECT'){
+              const toggle = ()=>{ badge.style.display = (el.value===''? 'inline' : 'none'); };
+              toggle();
+              el.addEventListener('change', toggle);
+            }
+          };
+          Object.entries(FIELD_DEFAULTS).forEach(([id, defVal])=>{
+            const el = q(id);
+            if(!el) return;
+            if(el.type==='text' || el.type==='number'){
+              if(!el.value){ el.placeholder = String(defVal); }
+            } else if(el.tagName==='SELECT'){
+              ensureDefaultBadge(el, defVal);
+            } else if(el.type==='checkbox'){
+              ensureDefaultBadge(el, defVal);
+            }
+          });
+
+          // Dynamic defaults for TLS cert/key under web_console: derive from tls_dir
+          try {
+            const tlsDirInput = q('web_console.tls_dir');
+            const certInput = q('web_console.ssl_cert');
+            const keyInput = q('web_console.ssl_key');
+            const getTlsDir = ()=>{
+              const v = getVal('web_console.tls_dir');
+              if(v && String(v).trim().length>0) return String(v).trim();
+              // fall back to defaults doc or hard default
+              const docDef = FIELD_DEFAULTS['web_console.tls_dir'] || '~/.openmux/web_console';
+              return String(docDef);
+            };
+            const joinPath = (dir, file)=>{
+              if(!dir) return file;
+              return dir.endsWith('/') ? (dir + file) : (dir + '/' + file);
+            };
+            const applyTlsHints = ()=>{
+              const tdir = getTlsDir();
+              if(certInput){
+                const defCert = joinPath(tdir, 'server.crt');
+                if(!certInput.value){ certInput.placeholder = defCert; }
+                const field = certInput.closest('.field');
+                if(field){
+                  let badge = field.querySelector('.default-hint');
+                  if(!badge){ badge = document.createElement('span'); badge.className='default-hint'; field.appendChild(badge); }
+                  badge.textContent = `Default: ${defCert}`;
+                }
+              }
+              if(keyInput){
+                const defKey = joinPath(tdir, 'server.key');
+                if(!keyInput.value){ keyInput.placeholder = defKey; }
+                const field = keyInput.closest('.field');
+                if(field){
+                  let badge = field.querySelector('.default-hint');
+                  if(!badge){ badge = document.createElement('span'); badge.className='default-hint'; field.appendChild(badge); }
+                  badge.textContent = `Default: ${defKey}`;
+                }
+              }
+            };
+            applyTlsHints();
+            if(tlsDirInput){ tlsDirInput.addEventListener('input', applyTlsHints); }
+          } catch(_e) {}
+        }
+  async function fetchCSRF(){ try{ const r=await fetch(withBase('/api/csrf')); if(!r.ok) return; const j=await r.json(); csrf=j.csrf; }catch(e){} }
+
+        // Generic helpers
+        function q(id){ return document.getElementById(id); }
+        function setVal(id, v){ const el=q(id); if(!el) return; if(el.type==='checkbox'){ el.checked=!!v; } else if(el.tagName==='SELECT'){ el.value = (v==null?'':String(v)); } else { el.value = (v==null?'':String(v)); } }
+        function getVal(id){ const el=q(id); if(!el) return undefined; if(el.type==='checkbox') return !!el.checked; if(el.type==='number') return el.value? Number(el.value) : undefined; const val = el.value; return val===''? undefined : val; }
+
+        function toDisplay(v){ if(v===undefined||v===null||v==='') return '—'; if(typeof v==='boolean') return v?'true':'false'; return String(v); }
+  function buildTable(rootId, columns, options){ options = options||{}; const root = q(rootId); root.innerHTML=''; const wrap=document.createElement('div'); wrap.className='tbl-wrap'; const table=document.createElement('table'); table.className='config'; const thead=document.createElement('thead'); const tbody=document.createElement('tbody'); table.appendChild(thead); table.appendChild(tbody); wrap.appendChild(table); const addHost=document.createElement('div'); wrap.appendChild(addHost); root.appendChild(wrap);
+    function renderHead(){ const tr=document.createElement('tr'); const visCols = columns.filter(c=>!c.hiddenList); visCols.forEach(c=>{const th=document.createElement('th'); const lbl=document.createElement('span'); lbl.textContent=c.label||c.key; th.appendChild(lbl); if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; th.appendChild(star); } tr.appendChild(th);}); const thA=document.createElement('th'); thA.textContent='Actions'; tr.appendChild(thA); thead.innerHTML=''; thead.appendChild(tr); }
+          renderHead();
+    let rows=[]; let editingIndex=null; function setRows(newRows){ rows = Array.isArray(newRows)? JSON.parse(JSON.stringify(newRows)) : []; if(editingIndex!=null && editingIndex>=rows.length) editingIndex=null; renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); }catch(_e){} }
+          function renderAddBar(){ addHost.innerHTML=''; if(editingIndex===null){ const addBar=document.createElement('div'); addBar.className='row'; const bA=document.createElement('button'); bA.className='btn'; bA.type='button'; bA.textContent='Add item'; bA.addEventListener('click',()=>{
+                // Open create editor without inserting a placeholder row; it will be added on save
+                editRow(rows.length);
+              }); addBar.appendChild(bA); addHost.appendChild(addBar); } }
+  function renderBody(){ tbody.innerHTML=''; rows.forEach((row,idx)=>{ const tr=document.createElement('tr'); if(editingIndex===idx) tr.classList.add('editing'); const visCols = columns.filter(c=>!c.hiddenList); visCols.forEach(c=>{ const td=document.createElement('td'); const hasVal = !(row[c.key]===undefined || row[c.key]===null || row[c.key]===''); const v = hasVal ? row[c.key] : (c.default!==undefined ? c.default : undefined); td.textContent = toDisplay(v); td.className = (!hasVal && (c.default===undefined))? 'cell-muted':''; tr.appendChild(td); }); const tdA=document.createElement('td'); const bE=document.createElement('button'); bE.className='mini-btn'; bE.type='button'; bE.textContent='Edit'; bE.addEventListener('click',()=>{ if(activeEditorEl && typeof activeEditorValidate==='function'){ if(!activeEditorValidate()){ return; } } editRow(idx); }); const bR=document.createElement('button'); bR.className='mini-btn'; bR.type='button'; bR.textContent='Remove'; bR.addEventListener('click',()=>{ try{ if(typeof options.onBeforeRemove==='function'){ const proceed = options.onBeforeRemove(rows[idx], idx); if(proceed===false){ return; } } }catch(_e){} if(editingIndex===idx && activeEditorEl){ if(activeEditorEl.parentNode) activeEditorEl.parentNode.removeChild(activeEditorEl); activeEditorEl=null; if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; } rows.splice(idx,1); if(editingIndex!=null){ if(idx<editingIndex) editingIndex -= 1; else if(idx===editingIndex) editingIndex=null; } renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); }catch(_e){} }); tdA.appendChild(bE); tdA.appendChild(bR); tr.appendChild(tdA); tbody.appendChild(tr); }); renderAddBar(); }
+          function editRow(idx){ const row = rows[idx] || {}; if(activeEditorEl && activeEditorEl.parentNode){ activeEditorEl.parentNode.removeChild(activeEditorEl); } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; activeEditorSave=null; editingIndex = idx; renderBody(); const editor=document.createElement('div'); editor.className='section'; const lg=document.createElement('div'); lg.className='legend'; const t=document.createElement('div'); t.className='title'; t.textContent = (idx===rows.length)? 'Add item' : 'Edit item'; lg.appendChild(t); const d=document.createElement('div'); d.className='desc'; d.textContent='Fields marked * are required'; lg.appendChild(d); editor.appendChild(lg); const getters=[]; const reqChecks=[]; const errBox=document.createElement('div'); editor.appendChild(errBox);
+            // Special inline row for serial 8-N-1 when editing serial_ports
+            const isSerial = rootId==='serial_ports';
+            columns.forEach(c=>{
+              // Inline group for serial settings
+              if(isSerial && (c.key==='baudrate' || c.key==='bytesize' || c.key==='parity' || c.key==='stopbits')){
+                // Defer handling to a single grouped row once (on baudrate)
+                if(c.key!=='baudrate') return;
+                const field=document.createElement('div'); field.className='field';
+                const lab=document.createElement('label'); lab.textContent='Serial settings'; const star=document.createElement('span'); star.className='req'; star.textContent=' *'; lab.appendChild(star); field.appendChild(lab);
+                // Baud (select with custom)
+                const baudLabel=document.createElement('span'); baudLabel.className='subtle'; baudLabel.textContent='Baud'; field.appendChild(baudLabel);
+                const baudChoices = ['', '9600','19200','38400','57600','115200','230400','460800','921600'];
+                const baudSel=document.createElement('select');
+                baudChoices.forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=(v===''? 'Custom' : v); baudSel.appendChild(o); });
+                const baudCustom=document.createElement('input'); baudCustom.type='number'; baudCustom.min='1'; baudCustom.placeholder='115200';
+                const existingBaud = row['baudrate'];
+                if(existingBaud!=null){
+                  const s = String(existingBaud);
+                  if(baudChoices.includes(s)) { baudSel.value = s; baudCustom.style.display='none'; }
+                  else { baudSel.value=''; baudCustom.value=s; baudCustom.style.display='inline-block'; }
+                } else {
+                  baudSel.value='115200'; baudCustom.style.display='none';
+                }
+                baudSel.addEventListener('change',()=>{
+                  if(baudSel.value==='') { baudCustom.style.display='inline-block'; baudCustom.focus(); }
+                  else { baudCustom.style.display='none'; }
+                });
+                field.appendChild(baudSel);
+                field.appendChild(baudCustom);
+                // Bytesize
+                const bytesLabel=document.createElement('span'); bytesLabel.className='subtle'; bytesLabel.textContent='Data bits'; field.appendChild(bytesLabel);
+                const bytes=document.createElement('select'); ['','5','6','7','8'].forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; if(String(row['bytesize']||'')===v) o.selected=true; bytes.appendChild(o); }); if(!row['bytesize']) bytes.value='8'; field.appendChild(bytes);
+                // Parity (full names)
+                const parityLabel=document.createElement('span'); parityLabel.className='subtle'; parityLabel.textContent='Parity'; field.appendChild(parityLabel);
+                const parity=document.createElement('select');
+                const parityChoices = [
+                  {v:'', t:''},
+                  {v:'N', t:'None (N)'},
+                  {v:'E', t:'Even (E)'},
+                  {v:'O', t:'Odd (O)'},
+                  {v:'M', t:'Mark (M)'},
+                  {v:'S', t:'Space (S)'}
+                ];
+                parityChoices.forEach(({v,t})=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; if(String(row['parity']||'')===v) o.selected=true; parity.appendChild(o); });
+                if(!row['parity']) parity.value='N';
+                field.appendChild(parity);
+                // Stopbits (friendly labels)
+                const stopLabel=document.createElement('span'); stopLabel.className='subtle'; stopLabel.textContent='Stop bits'; field.appendChild(stopLabel);
+                const stop=document.createElement('select'); const stopChoices=[{v:'',t:''},{v:'1',t:'1 stop bit'},{v:'2',t:'2 stop bits'}]; stopChoices.forEach(({v,t})=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; if(String(row['stopbits']||'')===v) o.selected=true; stop.appendChild(o); }); if(!row['stopbits']) stop.value='1'; field.appendChild(stop);
+                // Group help
+                const ghelp=document.createElement('span'); ghelp.className='help'; ghelp.textContent='Baud/Data bits/Parity/Stop bits. Defaults to 115200 8-N-1. Use "Custom" to enter a non-listed baud.'; field.appendChild(ghelp);
+                editor.appendChild(field);
+                // Collectors and required checks for the grouped fields
+                getters.push(()=>['baudrate', (baudSel.value!==''? Number(baudSel.value): (baudCustom.value!==''? Number(baudCustom.value):undefined))]);
+                getters.push(()=>['bytesize', bytes.value!==''? Number(bytes.value):undefined]);
+                getters.push(()=>['parity', parity.value||undefined]);
+                getters.push(()=>['stopbits', stop.value!==''? Number(stop.value):undefined]);
+                reqChecks.push(()=>({key:'baudrate', ok: (baudSel.value!=='' || baudCustom.value!=='')}));
+                reqChecks.push(()=>({key:'bytesize', ok: bytes.value!==''}));
+                reqChecks.push(()=>({key:'parity', ok: parity.value!==''}));
+                reqChecks.push(()=>({key:'stopbits', ok: stop.value!==''}));
+                return; // Skip default handling for grouped fields
+              }
+              // Default field rendering
+              const lab=document.createElement('label'); lab.textContent=c.label||c.key; if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; lab.appendChild(star); } const field=document.createElement('div'); field.className='field'; field.appendChild(lab); let input; if(c.type==='boolean'){ input=document.createElement('input'); input.type='checkbox'; if(row[c.key]!==undefined && row[c.key]!==null){ input.checked=!!row[c.key]; } else if(c.default!==undefined){ input.checked=!!c.default; } else { input.checked=false; } } else if(c.type==='enum'){ input=document.createElement('select'); const blank=document.createElement('option'); blank.value=''; blank.textContent=''; input.appendChild(blank); (c.enum||[]).forEach(v=>{ const o=document.createElement('option'); o.value=String(v); o.textContent=String(v); if(String(row[c.key])===String(v)) o.selected=true; input.appendChild(o); }); } else if(c.type==='number'||c.type==='integer'){ input=document.createElement('input'); input.type='number'; if(c.min!==undefined) input.min=String(c.min); if(c.max!==undefined) input.max=String(c.max); if(c.step!==undefined) input.step=String(c.step); if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } } else if(c.type==='array-string'){ input=document.createElement('input'); input.type='text'; input.placeholder='comma,separated,values'; if(Array.isArray(row[c.key])) input.value=row[c.key].join(','); } else { input=document.createElement('input'); input.type='text'; if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } }
+              if(c.placeholder){ input.placeholder=c.placeholder; }
+              field.appendChild(input); if(c.help){ const help=document.createElement('span'); help.className='help'; help.textContent=c.help; field.appendChild(help);} if(c.default!==undefined){ const def=document.createElement('span'); def.className='default-hint'; const dval = (typeof c.default==='boolean') ? (c.default? 'true':'false') : String(c.default); def.textContent = `Default: ${dval}`; field.appendChild(def); } editor.appendChild(field); getters.push(()=>{ let v; if(c.type==='boolean') v=!!input.checked; else if(c.type==='number'||c.type==='integer') v=input.value!==''? Number(input.value):undefined; else if(c.type==='enum') v=input.value||undefined; else if(c.type==='array-string') v=input.value? input.value.split(',').map(s=>s.trim()).filter(s=>s.length>0):[]; else v=input.value||undefined; return [c.key, v]; }); if(c.required){ reqChecks.push(()=>{ const val = (c.type==='boolean')? !!input.checked : (c.type==='number'||c.type==='integer')? (input.value!=='' ? true : false) : (Array.isArray(input.value)? input.value.length>0 : (input.value && input.value.trim().length>0)); return {key:c.key, ok: !!val}; }); }
+            });
+            const bar=document.createElement('div'); bar.className='row'; const bS=document.createElement('button'); bS.className='btn'; bS.textContent='Save item'; const bC=document.createElement('button'); bC.className='btn'; bC.textContent='Cancel'; bar.appendChild(bS); bar.appendChild(bC); editor.appendChild(bar); root.appendChild(editor); activeEditorEl = editor; activeEditorCleanup = ()=>{ editingIndex=null; renderBody(); }; activeEditorValidate = ()=>{ const missing = reqChecks.map(f=>f()).filter(r=>!r.ok).map(r=>r.key); if(missing.length>0){ errBox.className='err'; errBox.textContent = 'Missing required: ' + missing.join(', '); try{ editor.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){} return false; } errBox.textContent=''; return true; }; activeEditorSave = ()=>{ if(!activeEditorValidate || activeEditorValidate()){ const obj={}; getters.forEach(g=>{ const [k,v]=g(); if(v!==undefined) obj[k]=v; }); rows[idx]=obj; if(editor.parentNode) editor.parentNode.removeChild(editor); if(activeEditorEl===editor){ activeEditorEl=null; } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; activeEditorSave=null; renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); }catch(_e){} return true; } return false; };
+            bS.addEventListener('click',()=>{ activeEditorSave && activeEditorSave(); }); bC.addEventListener('click',()=>{ if(editor.parentNode) editor.parentNode.removeChild(editor); if(activeEditorEl===editor){ activeEditorEl=null; } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } else { // Ensure editingIndex resets if cleanup not set
+                editingIndex=null; renderBody();
+              } activeEditorValidate=null; activeEditorSave=null; }); }
+          renderAddBar();
+          wrap._get = ()=> rows;
+          wrap._set = setRows;
+          return wrap;
+        }
+
+        // Build static UI behavior
+        const tables = {};
+        // Help text for table columns (used in edit dialogs)
+        const COLUMN_HELP = {
+          'auth.users': {
+            username: 'Login username for HTTP basic-auth.',
+            password_hash: 'SHA-256 hex password hash of the password.',
+            is_admin: 'Grant full admin access to the UI and APIs.',
+            permissions: 'Role for future fine-grained access control.'
+          },
+          'auth.api_keys': {
+            name: 'Human-friendly name for this API key.',
+            key: 'The API key string presented by clients.',
+            permissions: 'Access level for this API key.'
+          },
+          'auth.public_keys': {
+            key_id: 'Identifier for this public key (referenced by peers).',
+            public_key: 'OpenSSH-format ed25519 public key.',
+            username: 'Associate this key with a username (optional).',
+            allowed_uses: 'Restrict usage of this key to client and/or muxcon.'
+          },
+          'serial_ports': {
+            name: 'Logical port name used by clients.',
+            description: 'Optional description shown in UIs.',
+            device: 'Serial device path, e.g., /dev/ttyUSB0.',
+            baudrate: 'Bits per second. Use Custom for non-standard rates.',
+            bytesize: 'Number of data bits per character.',
+            parity: 'Parity mode: None/Even/Odd/Mark/Space.',
+            stopbits: 'Number of stop bits.',
+            timeout: 'Read timeout in seconds (0 for non-blocking).',
+            flow_control: 'Hardware/software flow control (none/rtscts/dsrdtr/xonxoff).',
+            dtr: 'Initial DTR line state.',
+            rts: 'Initial RTS line state.',
+            read_write_users: 'Max concurrent read/write users for this port.'
+          },
+          'loopback_ports': {
+            name: 'Logical name for the software loopback port.',
+            description: 'Optional description for the loopback.',
+            buffer_size: 'Size of the internal buffer (bytes).',
+            echo_delay: 'Artificial echo delay in seconds.',
+            sanitize_control: 'Replace non-printable control characters with visible placeholders (e.g., show ^C instead of raw control bytes); helps prevent terminal glitches when testing.',
+            max_read_write_users: 'Max concurrent users for this loopback.',
+            read_write_users: 'Legacy concurrency field (backward-compat).'
+          },
+          'command_ports': {
+            name: 'Logical name for this command-backed port.',
+            description: 'Optional description for the command port.',
+            command: 'Command or executable to run for the session.',
+            shell: 'Run via shell (true) or exec directly (false).',
+            cwd: 'Working directory for the command.',
+            max_read_write_users: 'Max concurrent users.',
+            interactive: 'Allocate interactive TTY-like behavior.',
+            always_buffer: 'Buffer early output until first client connects.'
+          },
+          'muxcon.listeners': {
+            enabled: 'Enable or disable this listener entry.',
+            host: 'Bind address for incoming muxcon connections.',
+            port: 'TCP port to listen on.',
+            use_tls: 'Enable TLS for this listener (HTTPS-like).',
+            ssl_cert: 'Path to server certificate (PEM).',
+            ssl_key: 'Path to private key (PEM).',
+            ssl_ca_cert: 'CA certificate for client verification.',
+            require_client_cert: 'Require client certificates (mTLS).',
+            tls_autogen: 'Autogenerate self-signed certs if missing.',
+            tls_dir: 'Directory for generated or stored TLS files.',
+            tls_known_peers_path: 'Known-peers file for TOFU/pinning.',
+            interface: 'Bind to a specific network interface name.',
+            fwmark: 'Linux fwmark for policy routing (advanced).',
+            path_pref: 'Preference value for path selection (higher is preferred).',
+            path_group: 'Group name to allow multi-path within a group.'
+          },
+          'muxcon.initiators': {
+            host: 'Remote muxcon peer address to connect to.',
+            port: 'Remote muxcon peer TCP port.',
+            share_ports: 'Ports to share with the remote peer (advertise).',
+            accept_ports: 'Ports you will accept from the remote peer.',
+            request_ports: 'Ports to request from the remote peer.',
+            'options.use_tls': 'Use TLS for the outbound connection.',
+            'options.ssl_verify': 'Verify the server certificate.',
+            'options.ssl_ca_cert': 'CA certificate to trust when verifying.',
+            'options.ssl_cert': 'Client certificate for mTLS.',
+            'options.ssl_key': 'Client private key for mTLS.',
+            'options.server_hostname': 'Override SNI/server hostname for TLS.',
+            'options.tls_pin_fingerprint': 'Pin to a certificate fingerprint.',
+            'options.tls_tofu': 'Trust-On-First-Use: remember initial cert.',
+            'options.bind_host': 'Local address to bind the socket.',
+            'options.bind_port': 'Local port to bind (0 for automatic).',
+            'options.source_ip': 'Source IP for the connection (advanced).',
+            'options.interface': 'Bind to a specific network interface.',
+            'options.fwmark': 'Linux fwmark for policy routing (advanced).',
+            'options.retry_backoff_initial': 'Initial reconnect backoff (seconds).',
+            'options.retry_backoff_max': 'Maximum reconnect backoff (seconds).',
+            'options.retry_short_session_sec': 'Treat sessions shorter than this as failures.'
+          }
+          ,
+          'web_console.plugins': {
+            module: 'Python import path of a web plugin module to load, e.g., openmux.server.web_plugins.config_editor.'
+          }
+          ,
+          'muxcon.public_keys': {
+            key_id: 'Key identifier for this muxcon public key.',
+            public_key: 'Ed25519 public key (OpenSSH format or base64:...).',
+            advertise_filters: 'Default advertise filters for peers authenticated with this key.',
+            accept_filters: 'Default accept filters for peers authenticated with this key.'
+          }
+        };
+
+        function annotateColumnsWithHelp(rootId, cols){
+          const map = COLUMN_HELP[rootId] || {};
+          return cols.map(c=>{ if(!c.help && map[c.key]){ c = {...c, help: map[c.key]}; } return c; });
+        }
+        // Default value hints for table columns per section
+        const COLUMN_DEFAULTS_BASE = {
+          'serial_ports': { baudrate: 115200, bytesize: 8, parity: 'N', stopbits: 1 },
+          'loopback_ports': { max_read_write_users: 5, echo_delay: 0.0, buffer_size: 1024, sanitize_control: true },
+          'command_ports': { max_read_write_users: 1, shell: false },
+          // Default-safe: TLS on by default for muxcon listeners
+          'muxcon.listeners': { use_tls: true, require_client_cert: false, tls_autogen: true },
+          'muxcon.initiators': {
+            // Default-safe: TLS on by default for initiators
+            'options.use_tls': true,
+            'options.ssl_verify': true,
+            'options.retry_backoff_initial': 2.0,
+            'options.retry_backoff_max': 30.0,
+            'options.retry_short_session_sec': 5.0,
+          }
+        };
+        // Overlay doc-derived section defaults
+        const COLUMN_DEFAULTS = (function(){ const out = JSON.parse(JSON.stringify(COLUMN_DEFAULTS_BASE)); try { const sect = DEFAULTS_DOC.sections||{}; Object.keys(sect).forEach(sec=>{ out[sec] = {...(out[sec]||{}), ...(sect[sec]||{})}; }); }catch(_e){} return out; })();
+        function annotateColumnsWithDefaults(rootId, cols){
+          const map = COLUMN_DEFAULTS[rootId] || {};
+          return cols.map(c=>{
+            if(map.hasOwnProperty(c.key) && c.default===undefined){
+              c = {...c, default: map[c.key]};
+            }
+            return c;
+          });
+        }
+        function initStatic(){
+          const CONFIG_EDITOR_MODULE = 'openmux.server.web_plugins.config_editor';
+          const advisory = document.getElementById('advisory');
+          function setAdvisory(msg){
+            if(!advisory) return;
+            advisory.innerHTML = '';
+            if(msg){ const el=document.createElement('div'); el.className='warn'; el.textContent=msg; advisory.appendChild(el); }
+          }
+          // Client listener enable/disable wiring
+          function updateClientListenerUI(){
+            const enabled = !!getVal('client_listener.enabled');
+            const ids = ['client_listener.host','client_listener.port','client_listener.max_connections','client_listener.connection_timeout'];
+            ids.forEach(id=>{ const el = q(id); if(el){ el.disabled = !enabled; if(!enabled){ /* keep placeholders visible while disabled */ } } });
+          }
+          const clEnable = q('client_listener.enabled');
+          if(clEnable){
+            clEnable.addEventListener('change', ()=>{
+              if(!clEnable.checked){
+                const ok = confirm('Disabling the client listener will remove the entire client_listener block from the config and clear its options. Continue?');
+                if(!ok){ clEnable.checked = true; updateClientListenerUI(); return; }
+                // Clear values when disabling
+                ['client_listener.host','client_listener.port','client_listener.max_connections','client_listener.connection_timeout'].forEach(id=>{ const el=q(id); if(el){ if(el.type==='checkbox'){ el.checked=false; } else { el.value=''; } } });
+              }
+              updateClientListenerUI();
+            });
+            // Initialize state on load
+            updateClientListenerUI();
+          }
+          function updateAdvisory(){
+            const uiEnabled = !!getVal('web_console.enable_ui');
+            const pluginsTable = tables['web_console.plugins'];
+            const rows = pluginsTable && pluginsTable._get ? pluginsTable._get() : [];
+            const hasEditor = Array.isArray(rows) && rows.some(r=>r && String(r.module||'')===CONFIG_EDITOR_MODULE);
+            if(!uiEnabled){
+              setAdvisory('Web console UI is disabled; the Config Editor will not be accessible.');
+            } else if(!hasEditor){
+              setAdvisory('Config Editor plugin is not configured; the Config page will not be available.');
+            } else {
+              setAdvisory('');
+            }
+          }
+          tables['auth.users'] = buildTable('auth.users', annotateColumnsWithDefaults('auth.users', annotateColumnsWithHelp('auth.users', [
+            {key:'username', label:'Username', type:'string', required:true},
+            {key:'password_hash', label:'Password hash', type:'string', required:true, hiddenList:true},
+            {key:'is_admin', label:'Is admin', type:'boolean'},
+            {key:'permissions', label:'Permissions', type:'enum', enum:['admin','read-write','read-only']}
+          ])));
+          tables['auth.api_keys'] = buildTable('auth.api_keys', annotateColumnsWithDefaults('auth.api_keys', annotateColumnsWithHelp('auth.api_keys', [
+            {key:'name', label:'Name', type:'string'},
+            {key:'key', label:'Key', type:'string', required:true, hiddenList:true},
+            {key:'permissions', label:'Permissions', type:'enum', enum:['admin','read-write','read-only']}
+          ])));
+          tables['auth.public_keys'] = buildTable('auth.public_keys', annotateColumnsWithDefaults('auth.public_keys', annotateColumnsWithHelp('auth.public_keys', [
+            {key:'key_id', label:'Key ID', type:'string', required:true},
+            {key:'public_key', label:'Public key', type:'string', required:true},
+            {key:'username', label:'Username (optional)', type:'string'},
+            {key:'allowed_uses', label:'Allowed uses', type:'array-string'}
+          ])));
+
+          tables['serial_ports'] = buildTable('serial_ports', annotateColumnsWithDefaults('serial_ports', annotateColumnsWithHelp('serial_ports', [
+            {key:'name', label:'Name', type:'string', required:true},
+            {key:'description', label:'Description', type:'string'},
+            {key:'device', label:'Device', type:'string', required:true},
+            {key:'baudrate', label:'Baud', type:'integer', min:1, required:true},
+            {key:'bytesize', label:'Data bits', type:'enum', enum:[5,6,7,8], required:true},
+            {key:'parity', label:'Parity', type:'enum', enum:['N','E','O','M','S'], required:true},
+            {key:'stopbits', label:'Stop bits', type:'enum', enum:[1,2], required:true},
+            {key:'timeout', label:'Timeout', type:'number', min:0, step:0.1},
+            {key:'flow_control', label:'Flow', type:'enum', enum:['none','rtscts','dsrdtr','xonxoff']},
+            {key:'dtr', label:'DTR', type:'boolean'},
+            {key:'rts', label:'RTS', type:'boolean'},
+            {key:'read_write_users', label:'RW users', type:'integer', min:1}
+          ])));
+
+          tables['loopback_ports'] = buildTable('loopback_ports', annotateColumnsWithDefaults('loopback_ports', annotateColumnsWithHelp('loopback_ports', [
+            {key:'name', label:'Name', type:'string', required:true},
+            {key:'description', label:'Description', type:'string'},
+            {key:'buffer_size', label:'Buffer size', type:'integer', min:1},
+            {key:'echo_delay', label:'Echo delay', type:'number', min:0, step:0.1},
+            {key:'sanitize_control', label:'Sanitize control', type:'boolean'},
+            {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
+            {key:'read_write_users', label:'RW users (legacy)', type:'integer', min:1}
+          ])));
+
+          tables['command_ports'] = buildTable('command_ports', annotateColumnsWithDefaults('command_ports', annotateColumnsWithHelp('command_ports', [
+            {key:'name', label:'Name', type:'string', required:true},
+            {key:'description', label:'Description', type:'string'},
+            {key:'command', label:'Command', type:'string', required:true},
+            {key:'shell', label:'Shell', type:'boolean'},
+            {key:'cwd', label:'CWD', type:'string'},
+            {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
+            {key:'interactive', label:'Interactive', type:'boolean'},
+            {key:'always_buffer', label:'Always buffer', type:'boolean'}
+          ])));
+
+          tables['muxcon.listeners'] = buildTable('muxcon.listeners', annotateColumnsWithDefaults('muxcon.listeners', annotateColumnsWithHelp('muxcon.listeners', [
+            {key:'enabled', label:'Enabled', type:'boolean', required:true},
+            {key:'host', label:'Host', type:'string', required:true},
+            {key:'port', label:'Port', type:'integer', min:1, max:65535, required:true},
+            {key:'use_tls', label:'TLS', type:'boolean'},
+            {key:'ssl_cert', label:'SSL cert', type:'string'},
+            {key:'ssl_key', label:'SSL key', type:'string'},
+            {key:'ssl_ca_cert', label:'CA cert', type:'string'},
+            {key:'require_client_cert', label:'Mutual TLS', type:'boolean'},
+            {key:'tls_autogen', label:'Autogen', type:'boolean'},
+            {key:'tls_dir', label:'TLS dir', type:'string'},
+            {key:'tls_known_peers_path', label:'Known peers', type:'string'},
+            {key:'interface', label:'Interface', type:'string'},
+            {key:'fwmark', label:'fwmark', type:'integer'},
+            {key:'path_pref', label:'Path pref', type:'integer'},
+            {key:'path_group', label:'Path group', type:'string'}
+          ])));
+
+          tables['muxcon.initiators'] = buildTable('muxcon.initiators', annotateColumnsWithDefaults('muxcon.initiators', annotateColumnsWithHelp('muxcon.initiators', [
+            {key:'host', label:'Host', type:'string', required:true},
+            {key:'port', label:'Port', type:'integer', min:1, max:65535, required:true},
+            {key:'share_ports', label:'Share ports', type:'array-string'},
+            {key:'accept_ports', label:'Accept ports', type:'array-string'},
+            {key:'request_ports', label:'Request ports', type:'array-string'},
+            // Flattened options for easier editing
+            {key:'options.use_tls', label:'Opt: TLS', type:'boolean'},
+            {key:'options.ssl_verify', label:'Opt: Verify', type:'boolean'},
+            {key:'options.ssl_ca_cert', label:'Opt: CA cert', type:'string'},
+            {key:'options.ssl_cert', label:'Opt: SSL cert', type:'string'},
+            {key:'options.ssl_key', label:'Opt: SSL key', type:'string'},
+            {key:'options.server_hostname', label:'Opt: SNI', type:'string'},
+            {key:'options.tls_pin_fingerprint', label:'Opt: Pin', type:'string'},
+            {key:'options.tls_tofu', label:'Opt: TOFU', type:'boolean'},
+            {key:'options.bind_host', label:'Opt: Bind host', type:'string'},
+            {key:'options.bind_port', label:'Opt: Bind port', type:'integer', min:0, max:65535},
+            {key:'options.source_ip', label:'Opt: Source IP', type:'string'},
+            {key:'options.interface', label:'Opt: Interface', type:'string'},
+            {key:'options.fwmark', label:'Opt: fwmark', type:'integer'},
+            {key:'options.retry_backoff_initial', label:'Opt: Retry backoff initial', type:'number', min:0, step:0.1},
+            {key:'options.retry_backoff_max', label:'Opt: Retry backoff max', type:'number', min:0, step:0.1},
+            {key:'options.retry_short_session_sec', label:'Opt: Retry short session', type:'number', min:0, step:0.1}
+          ])));
+
+          // MuxCon public keys (new schema)
+          tables['muxcon.public_keys'] = buildTable('muxcon.public_keys', annotateColumnsWithHelp('muxcon.public_keys', [
+            {key:'key_id', label:'Key ID', type:'string', required:true},
+            {key:'public_key', label:'Public key', type:'string', required:true},
+            // Simple flat filters; advanced per-adapter options can be added later
+            {key:'advertise_filters', label:'Advertise filters (JSON)', type:'string', placeholder:'{"include":["remote_*"]}'},
+            {key:'accept_filters', label:'Accept filters (JSON)', type:'string', placeholder:'{"server_include":["core"]}'}
+          ]));
+
+          // Web console plugins (array of strings -> table of {module})
+          tables['web_console.plugins'] = buildTable('web_console.plugins', annotateColumnsWithHelp('web_console.plugins', [
+            {key:'module', label:'Module', type:'string', required:true}
+          ]), {
+            onBeforeRemove: (row)=>{
+              if(row && String(row.module||'')===CONFIG_EDITOR_MODULE){
+                return confirm('Removing the Config Editor plugin will make the Config page unavailable after save. Continue?');
+              }
+              return true;
+            },
+            onAfterChange: ()=>{
+              updateAdvisory();
+            }
+          });
+          // Hook UI toggle warning
+          const uiToggle = q('web_console.enable_ui');
+          if(uiToggle){
+            uiToggle.addEventListener('change', (e)=>{
+              if(!uiToggle.checked){
+                const ok = confirm('Disabling the web console also removes access to the Config Editor UI. Continue?');
+                if(!ok){ uiToggle.checked = true; }
+              }
+              updateAdvisory();
+            });
+          }
+        }
+
+        function deepGet(obj, path){ const parts=path.split('.'); let cur=obj; for(const p of parts){ if(cur==null) return undefined; if(p in cur) cur=cur[p]; else return undefined; } return cur; }
+        function deepSet(obj, path, value){ const parts=path.split('.'); let cur=obj; for(let i=0;i<parts.length-1;i++){ const p=parts[i]; if(!(p in cur) || typeof cur[p] !== 'object' || cur[p]==null){ cur[p]={}; } cur=cur[p]; } cur[parts[parts.length-1]] = value; }
+
+        function populate(data){ current = data || {}; // simple fields
+          setVal('server.id', deepGet(current, 'server.id'));
+          
+          setVal('server.description', deepGet(current, 'server.description'));
+          setVal('server.control_socket', deepGet(current, 'server.control_socket'));
+          setVal('server.pidfile', deepGet(current, 'server.pidfile'));
+
+          tables['auth.users']._set(deepGet(current, 'authentication.users')||[]);
+          tables['auth.api_keys']._set(deepGet(current, 'authentication.api_keys')||[]);
+          tables['auth.public_keys']._set(deepGet(current, 'authentication.public_keys')||[]);
+          // PAM populate
+          setVal('auth.pam.enabled', deepGet(current, 'authentication.pam.enabled'));
+          setVal('auth.pam.service_name', deepGet(current, 'authentication.pam.service_name'));
+          setVal('auth.pam.allow_root', deepGet(current, 'authentication.pam.allow_root'));
+          try { const au = deepGet(current, 'authentication.pam.allowed_users'); if(Array.isArray(au)) setVal('auth.pam.allowed_users', au.join(',')); }catch(_e){}
+          setVal('auth.pam.groups.admin_group', deepGet(current, 'authentication.pam.groups.admin_group'));
+          setVal('auth.pam.groups.write_group', deepGet(current, 'authentication.pam.groups.write_group'));
+          setVal('auth.pam.groups.read_group', deepGet(current, 'authentication.pam.groups.read_group'));
+
+          setVal('logging.level', deepGet(current, 'logging.level'));
+          setVal('logging.console', deepGet(current, 'logging.console'));
+          setVal('logging.file', deepGet(current, 'logging.file'));
+          setVal('logging.log_dir', deepGet(current, 'logging.log_dir'));
+          setVal('logging.max_log_size', deepGet(current, 'logging.max_log_size'));
+          setVal('logging.log_backup_count', deepGet(current, 'logging.log_backup_count'));
+
+          // client_listener enable from flag if present; else infer from presence
+          try { const cl = deepGet(current, 'client_listener'); const en = (cl && typeof cl==='object' && 'enabled' in cl)? !!cl.enabled : !!cl; setVal('client_listener.enabled', en); } catch(_e){}
+          setVal('client_listener.host', deepGet(current, 'client_listener.host'));
+          setVal('client_listener.port', deepGet(current, 'client_listener.port'));
+          setVal('client_listener.max_connections', deepGet(current, 'client_listener.max_connections'));
+          setVal('client_listener.connection_timeout', deepGet(current, 'client_listener.connection_timeout'));
+          try { const fn = (typeof updateClientListenerUI==='function')? updateClientListenerUI : null; if(fn) fn(); } catch(_e){}
+
+          tables['serial_ports']._set(deepGet(current, 'serial_ports')||[]);
+          tables['loopback_ports']._set(deepGet(current, 'loopback_ports')||[]);
+          tables['command_ports']._set(deepGet(current, 'command_ports')||[]);
+
+          setVal('muxcon.node_name', deepGet(current, 'muxcon.node_name'));
+          setVal('muxcon.heartbeat_interval', deepGet(current, 'muxcon.heartbeat_interval'));
+          setVal('muxcon.mpath_primary_stale_sec', deepGet(current, 'muxcon.mpath_primary_stale_sec'));
+          setVal('muxcon.mpath_failover_check_sec', deepGet(current, 'muxcon.mpath_failover_check_sec'));
+          setVal('muxcon.mpath_strategy', deepGet(current, 'muxcon.mpath_strategy'));
+          setVal('muxcon.mpath_preemptive_promote', deepGet(current, 'muxcon.mpath_preemptive_promote'));
+          setVal('muxcon.mpath_neighbor_idle_drop_sec', deepGet(current, 'muxcon.mpath_neighbor_idle_drop_sec'));
+          setVal('muxcon.federated_cache_enabled', deepGet(current, 'muxcon.federated_cache_enabled'));
+          setVal('muxcon.federated_cache_ttl_sec', deepGet(current, 'muxcon.federated_cache_ttl_sec'));
+          setVal('muxcon.federated_cache_path', deepGet(current, 'muxcon.federated_cache_path'));
+          setVal('muxcon.auth_required', deepGet(current, 'muxcon.auth_required'));
+          setVal('muxcon.auth_key_id', deepGet(current, 'muxcon.auth_key_id'));
+          setVal('muxcon.auth_private_key', deepGet(current, 'muxcon.auth_private_key'));
+          tables['muxcon.listeners']._set(deepGet(current, 'muxcon.listeners')||[]);
+          // For initiators, map flattened keys
+          const inits = (deepGet(current, 'muxcon.initiators')||[]).map(it=>{
+            const flat = {...it};
+            if(it && typeof it.options==='object' && it.options){ Object.keys(it.options).forEach(k=>{ flat['options.'+k]=it.options[k]; }); }
+            return flat;
+          });
+          tables['muxcon.initiators']._set(inits);
+          // MuxCon public keys
+          try {
+            const mpx = deepGet(current, 'muxcon.public_keys') || [];
+            tables['muxcon.public_keys']._set(Array.isArray(mpx)? mpx: []);
+          } catch(_e){}
+
+          setVal('web_status.host', deepGet(current, 'web_status.host'));
+          setVal('web_status.port', deepGet(current, 'web_status.port'));
+          setVal('web_status.enable_http_api', deepGet(current, 'web_status.enable_http_api'));
+          setVal('web_status.cors_enable', deepGet(current, 'web_status.cors_enable'));
+          setVal('web_status.enable_fault_injection', deepGet(current, 'web_status.enable_fault_injection'));
+
+          setVal('web_console.host', deepGet(current, 'web_console.host'));
+          setVal('web_console.port', deepGet(current, 'web_console.port'));
+          setVal('web_console.ssl_port', deepGet(current, 'web_console.ssl_port'));
+          setVal('web_console.base_path', deepGet(current, 'web_console.base_path'));
+          setVal('web_console.respect_forwarded_prefix', deepGet(current, 'web_console.respect_forwarded_prefix'));
+          setVal('web_console.enable_ui', deepGet(current, 'web_console.enable_ui'));
+          setVal('web_console.realm', deepGet(current, 'web_console.realm'));
+          setVal('web_console.static_dir', deepGet(current, 'web_console.static_dir'));
+          setVal('web_console.template_dir', deepGet(current, 'web_console.template_dir'));
+          setVal('web_console.download_xterm_if_missing', deepGet(current, 'web_console.download_xterm_if_missing'));
+          setVal('web_console.enable_probes', deepGet(current, 'web_console.enable_probes'));
+          setVal('web_console.probes_include_details', deepGet(current, 'web_console.probes_include_details'));
+          setVal('web_console.use_tls', deepGet(current, 'web_console.use_tls'));
+          setVal('web_console.ssl_cert', deepGet(current, 'web_console.ssl_cert'));
+          setVal('web_console.ssl_key', deepGet(current, 'web_console.ssl_key'));
+          setVal('web_console.tls_autogen', deepGet(current, 'web_console.tls_autogen'));
+          setVal('web_console.tls_dir', deepGet(current, 'web_console.tls_dir'));
+          // optional session TTL (if supported in schema/runtime)
+          try{ if(document.getElementById('web_console.session_ttl_seconds')){ setVal('web_console.session_ttl_seconds', deepGet(current, 'web_console.session_ttl_seconds')); } }catch(_e){}
+
+          // web_console.plugins: map ["pkg.mod", ...] -> [{module: "pkg.mod"}, ...]
+          const wcPlugins = deepGet(current, 'web_console.plugins') || [];
+          if (tables['web_console.plugins']) {
+            tables['web_console.plugins']._set((Array.isArray(wcPlugins)? wcPlugins: []).map(m=>({module: m})));
+          }
+          try{ // Update advisory after populate
+            const fn = (typeof updateAdvisory==='function')? updateAdvisory : null; if(fn) fn();
+          }catch(_e){}
+          try{ injectDefaultHints(); }catch(_e){}
+          // Ensure TLS cert/key default hints reflect current tls_dir after populate
+          try{ injectDefaultHints(); }catch(_e){}
+          
+        }
+
+        function buildConfig(){ const out = {}; function maybeSet(path, id){ const v=getVal(id); if(v!==undefined) deepSet(out, path, v); }
+          // server
+          maybeSet('server.id', 'server.id'); maybeSet('server.description', 'server.description'); maybeSet('server.control_socket', 'server.control_socket'); maybeSet('server.pidfile', 'server.pidfile');
+          // auth
+          const users = tables['auth.users']._get(); const api_keys = tables['auth.api_keys']._get(); const pub_keys = tables['auth.public_keys']._get(); if(users && users.length>0) deepSet(out, 'authentication.users', users); if(api_keys && api_keys.length>0) deepSet(out, 'authentication.api_keys', api_keys); if(pub_keys && pub_keys.length>0) deepSet(out, 'authentication.public_keys', pub_keys);
+          // PAM save: include pam block only if enabled toggle is true
+          const pamEnabled = getVal('auth.pam.enabled');
+          if(pamEnabled===true){
+            const pam = { enabled: true };
+            const svc = getVal('auth.pam.service_name'); if(svc!==undefined) pam.service_name = svc;
+            const allowRoot = getVal('auth.pam.allow_root'); if(allowRoot!==undefined) pam.allow_root = allowRoot;
+            const au = getVal('auth.pam.allowed_users'); if(typeof au==='string' && au.trim().length>0){ pam.allowed_users = au.split(',').map(s=>s.trim()).filter(s=>s.length>0); }
+            const groups = {};
+            const gAdmin = getVal('auth.pam.groups.admin_group'); if(gAdmin!==undefined) groups.admin_group = gAdmin;
+            const gWrite = getVal('auth.pam.groups.write_group'); if(gWrite!==undefined) groups.write_group = gWrite;
+            const gRead = getVal('auth.pam.groups.read_group'); if(gRead!==undefined) groups.read_group = gRead;
+            if(Object.keys(groups).length>0) pam.groups = groups;
+            deepSet(out, 'authentication.pam', pam);
+          }
+          // logging
+          maybeSet('logging.level','logging.level'); maybeSet('logging.console','logging.console'); maybeSet('logging.file','logging.file'); maybeSet('logging.log_dir','logging.log_dir'); maybeSet('logging.max_log_size','logging.max_log_size'); maybeSet('logging.log_backup_count','logging.log_backup_count');
+          // client_listener: explicit enabled flag
+          const clEnabled = getVal('client_listener.enabled');
+          if(clEnabled===true){
+            deepSet(out,'client_listener',{enabled:true});
+            maybeSet('client_listener.host','client_listener.host');
+            maybeSet('client_listener.port','client_listener.port');
+            maybeSet('client_listener.max_connections','client_listener.max_connections');
+            maybeSet('client_listener.connection_timeout','client_listener.connection_timeout');
+          } else if (clEnabled===false) {
+            // Explicitly disabled: write the block with enabled:false to satisfy schema and make intent clear
+            deepSet(out,'client_listener',{enabled:false});
+          } else if (clEnabled===undefined) {
+            // Back-compat: include block when host/port provided
+            if(getVal('client_listener.host')!==undefined || getVal('client_listener.port')!==undefined){
+              deepSet(out,'client_listener',{enabled:true});
+              maybeSet('client_listener.host','client_listener.host');
+              maybeSet('client_listener.port','client_listener.port');
+              maybeSet('client_listener.max_connections','client_listener.max_connections');
+              maybeSet('client_listener.connection_timeout','client_listener.connection_timeout');
+            }
+          }
+          // arrays
+          const sps = tables['serial_ports']._get(); if(sps && sps.length>0) deepSet(out,'serial_ports', sps);
+          const lps = tables['loopback_ports']._get(); if(lps && lps.length>0) deepSet(out,'loopback_ports', lps);
+          const cps = tables['command_ports']._get(); if(cps && cps.length>0) deepSet(out,'command_ports', cps);
+          // muxcon
+          const listeners = tables['muxcon.listeners']._get(); const initsFlat = tables['muxcon.initiators']._get(); const inits = (initsFlat||[]).map(it=>{ const {host,port,share_ports,accept_ports,request_ports, ...rest}=it; const opts={}; Object.keys(rest||{}).forEach(k=>{ if(k.startsWith('options.')){ const kk = k.substring('options.'.length); opts[kk] = rest[k]; } }); const obj={}; if(host!==undefined) obj.host=host; if(port!==undefined) obj.port=port; if(Array.isArray(share_ports)) obj.share_ports=share_ports; if(Array.isArray(accept_ports)) obj.accept_ports=accept_ports; if(Array.isArray(request_ports)) obj.request_ports=request_ports; if(Object.keys(opts).length>0) obj.options=opts; return obj; }); const muxcon={}; if(getVal('muxcon.node_name')!==undefined) muxcon.node_name = getVal('muxcon.node_name'); ['heartbeat_interval','mpath_primary_stale_sec','mpath_failover_check_sec','mpath_strategy','mpath_preemptive_promote','mpath_neighbor_idle_drop_sec','federated_cache_enabled','federated_cache_ttl_sec','federated_cache_path','auth_required','auth_key_id','auth_private_key'].forEach(k=>{ const v=getVal('muxcon.'+k); if(v!==undefined) muxcon[k]=v; }); if(listeners && listeners.length>0) muxcon.listeners = listeners; if(inits && inits.length>0) muxcon.initiators = inits; const pkRows = tables['muxcon.public_keys']._get(); if(pkRows && pkRows.length>0) muxcon.public_keys = pkRows.map(r=>{ const m={key_id:r.key_id, public_key:r.public_key}; try{ if(r.advertise_filters){ m.advertise_filters = JSON.parse(r.advertise_filters); } }catch(_e){} try{ if(r.accept_filters){ m.accept_filters = JSON.parse(r.accept_filters); } }catch(_e){} return m; }); if(Object.keys(muxcon).length>0) deepSet(out,'muxcon', muxcon);
+          // web_status
+          if(getVal('web_status.host')!==undefined || getVal('web_status.port')!==undefined){ deepSet(out,'web_status',{}); maybeSet('web_status.host','web_status.host'); maybeSet('web_status.port','web_status.port'); maybeSet('web_status.enable_http_api','web_status.enable_http_api'); maybeSet('web_status.cors_enable','web_status.cors_enable'); maybeSet('web_status.enable_fault_injection','web_status.enable_fault_injection'); }
+          // web_console
+          if(getVal('web_console.host')!==undefined || getVal('web_console.port')!==undefined){ deepSet(out,'web_console',{}); ['host','port','ssl_port','base_path','respect_forwarded_prefix','enable_ui','realm','static_dir','template_dir','download_xterm_if_missing','enable_probes','probes_include_details','use_tls','ssl_cert','ssl_key','tls_autogen','tls_dir','session_ttl_seconds'].forEach(k=>{ maybeSet('web_console.'+k,'web_console.'+k); }); }
+          // web_console.plugins from table -> array of strings
+          const wcpl = tables['web_console.plugins'] && tables['web_console.plugins']._get ? tables['web_console.plugins']._get() : [];
+          if (wcpl && wcpl.length>0) {
+            const arr = wcpl.map(r=>r && r.module).filter(m=>m && String(m).trim().length>0);
+            if (arr.length>0) deepSet(out, 'web_console.plugins', arr);
+          }
+          // management removed
+          return out;
+        }
+
+  async function loadCurrent(){ try{ const r=await fetch(withBase('/plugins/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } }
+  async function validateOnly(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Validation failed'); return; } try{ const r=await fetch(withBase('/plugins/config-editor/validate'),{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Validation OK'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Validation failed'); } }catch(e){ setStatus(false,String(e)); } }
+  async function saveConfig(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Save failed'); return; } try{ const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf; const r=await fetch(withBase('/plugins/config-editor/apply'),{method:'POST', headers, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Saved'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Save failed'); } }catch(e){ setStatus(false,String(e)); } }
+
+        BTN('loadBtn').addEventListener('click', loadCurrent);
+        BTN('validateBtn').addEventListener('click', validateOnly);
+        BTN('saveBtn').addEventListener('click', saveConfig);
+
+  // Reload handlers
+  const reloadStatus = document.getElementById('reloadStatus');
+  function setReloadStatus(ok, msgOrObj){
+    if(!reloadStatus) return;
+    reloadStatus.innerHTML='';
+    const el=document.createElement('div');
+    el.className=ok?'ok':'err';
+    if(typeof msgOrObj==='string'){
+      el.textContent=msgOrObj;
+    } else {
+      // Pretty print a small summary
+      try{
+        const pre=document.createElement('pre');
+        pre.style.whiteSpace='pre-wrap';
+        pre.textContent = JSON.stringify(msgOrObj, null, 2);
+        el.appendChild(pre);
+      }catch(_e){ el.textContent = String(msgOrObj); }
+    }
+    reloadStatus.appendChild(el);
+  }
+  async function doReload(kind){
+    try{
+      const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf;
+      const url = kind==='soft' ? '/plugins/config-editor/reload/soft' : '/plugins/config-editor/reload/full';
+      const r = await fetch(withBase(url), { method:'POST', headers, credentials: 'same-origin' });
+      // Detect auth redirect to login or non-JSON responses
+      const ct = (r.headers && r.headers.get('content-type')) || '';
+      if (r.redirected || (r.url && r.url.indexOf('/login') !== -1) || (ct && ct.indexOf('application/json') === -1)){
+        setReloadStatus(false, 'Not authorized or session expired. Please sign in again and retry.');
+        return;
+      }
+      const j = await r.json().catch(()=>({}));
+      if(r.ok && (j.ok===undefined || j.ok===true)){
+        const payload = j.summary || j.message || (kind==='soft'? 'Soft reload completed' : 'Full reload completed');
+        setReloadStatus(true, payload);
+      } else {
+        const err = (j&&(j.message||j.error)) || `Reload ${kind} failed`;
+        setReloadStatus(false, err);
+      }
+    }catch(e){ setReloadStatus(false, String(e)); }
+  }
+  const softBtn = document.getElementById('softReloadBtn');
+  if(softBtn){ softBtn.addEventListener('click', ()=> doReload('soft')); }
+  const fullBtn = document.getElementById('fullReloadBtn');
+  if(fullBtn){ fullBtn.addEventListener('click', ()=>{
+    const ok = confirm('Full reload will stop and recreate adapters, briefly interrupting connections. Continue?');
+    if(!ok) return; doReload('full');
+  }); }
+
+  fetchCSRF();
+  initStatic();
+  injectHelps();
+  injectDefaultHints();
+  loadCurrent();
+      })();
+    </script>
+  </body>
+</html>

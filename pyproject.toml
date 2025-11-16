@@ -1,0 +1,125 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openmux"
+version = "1.0.0"
+description = "Serial port multiplexing server and client"
+keywords = ["serial", "console", "server", "client"]
+authors = [
+    {name = "OpenMux Team", email = "info@openmux.org"}
+]
+license = {file = "LICENSE"}
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators", 
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Networking",
+    "Topic :: Terminals :: Serial",
+]
+dependencies = [
+    "pyserial>=3.5",
+    "pyserial-asyncio>=0.6",
+    "PyYAML>=6.0",
+    "cryptography>=38.0.0",
+    "aiohttp>=3.9.0",
+    "Jinja2>=3.1.0",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.68.0", "uvicorn>=0.15.0"]
+dev = [
+    "pytest>=6.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=3.0.0",
+    "pytest-mock>=3.8.0",
+    "black>=22.0.0",
+    "isort>=5.10.0",
+    "flake8>=4.0.0",
+]
+pam = [
+    "python-pam>=2.0.2",
+    "six>=1.16.0",
+]
+
+[project.scripts]
+openmux-server = "openmux.server.main:main"
+openmux-client = "openmux.client.main:main"
+openmuxctl = "openmux.cli.openmuxctl:main"
+
+
+[tool.setuptools.packages.find]
+# This tells setuptools to automatically find all packages
+include = ["openmux*"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["openmux"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__pycache__/*",
+    "*/.*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.black]
+line-length = 127
+target-version = ['py39']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 127
+
+[tool.flake8]
+max-line-length = 127
+extend-ignore = ["E203", "W503"]

@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="omx-base-path" content="{{ base_path }}" />
+    <title>{{ realm }} Login</title>
+  <link rel="stylesheet" href="{{ base_path }}/static/web_console.css" />
+  </head>
+  <body class="login">
+  <form class="card" method="POST" action="{{ base_path }}/login">
+      <div class="brand">
+        {% if logo_url %}
+          <img class="logo-img" src="{{ base_path }}{{ logo_url }}" alt="logo" />
+        {% else %}
+          <div class="logo">{{ (realm.split()[0][0] ~ (realm.split()[1][0] if realm.split()|length > 1 else '')) | upper }}</div>
+        {% endif %}
+        <div>
+          <div class="title">{{ realm }}</div>
+          <div class="subtitle">Web Console</div>
+        </div>
+      </div>
+      {% if error %}<p style="color:#f66">Invalid username or password</p>{% endif %}
+      <h1>Sign in to {{ realm }}</h1>
+      <input type="hidden" name="next" value="{{ next or '/' }}" />
+      <input type="text" name="username" placeholder="Username" autocomplete="username" required />
+      <input type="password" name="password" placeholder="Password" autocomplete="current-password" required />
+      <button class="btn" type="submit">Sign in</button>
+      <div class="hint">After login you'll be redirected back.</div>
+    </form>
+  </body>
+</html>
