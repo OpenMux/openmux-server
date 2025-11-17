@@ -91,3 +91,6 @@ old/
 backup/
 device-configs/
 static/xterm*/
+
+# Truls Custom config
+config/testconfigt.yaml
