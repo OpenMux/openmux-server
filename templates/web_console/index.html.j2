@@ -22,14 +22,13 @@
       </div>
   <div class="page">Summary</div>
       <div class="actions">
+        <a class="btn" style="font-weight: bold;" href="{{ base_path }}/">Summary</a>
         <a class="btn" href="{{ base_path }}/status">Status</a>
         <a class="btn" href="{{ base_path }}/console">Console</a>
-        {% if plugin_nav and plugin_nav|length > 0 %}
-          {% for item in plugin_nav %}
-            <a class="btn" href="{{ base_path }}{{ item.path }}">{{ item.title }}</a>
-          {% endfor %}
-        {% endif %}
-          <a class="btn" href="{{ base_path }}/logout" title="Sign out">Logout</a>
+        <a class="btn" href="{{ base_path }}/plugins/config-editor">Config</a>
+        <a class="btn" href="{{ base_path }}/plugins/os-customizer">OS</a>
+        <a class="btn" href="{{ base_path }}/plugins/federated-proxy/connections">Federation</a>
+        <a class="btn" href="{{ base_path }}/logout" title="Sign out">Logout</a>
       </div>
     </header>
     <main>
