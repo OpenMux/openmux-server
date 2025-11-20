@@ -1,71 +1,41 @@
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="omx-base-path" content="{{ base_path }}" />
-    <title>{{ title }}</title>
-      <link rel="stylesheet" href="{{ base_path }}/static/web_console.css" />
-  </head>
-  <body>
-    <header class="site">
-      <div class="brand">
-        {% if logo_url %}
-          <img class="logo-img" src="{{ base_path }}{{ logo_url }}" alt="logo" />
-        {% else %}
-          <div class="logo">{{ (realm.split()[0][0] ~ (realm.split()[1][0] if realm.split()|length > 1 else '')) | upper }}</div>
-        {% endif %}
-        <div>
-          <div class="title">OpenMux</div>
-          <div class="subtitle">Web Console</div>
-        </div>
-      </div>
-  <div class="page">Summary</div>
-      <div class="actions">
-        <a class="btn" href="{{ base_path }}/status">Status</a>
-        <a class="btn" href="{{ base_path }}/console">Console</a>
-        {% if plugin_nav and plugin_nav|length > 0 %}
-          {% for item in plugin_nav %}
-            <a class="btn" href="{{ base_path }}{{ item.path }}">{{ item.title }}</a>
-          {% endfor %}
-        {% endif %}
-          <a class="btn" href="{{ base_path }}/logout" title="Sign out">Logout</a>
-      </div>
-    </header>
-    <main>
-      <h2>Ports</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Description</th>
-            <th>Adapter</th>
-            <th>Connected</th>
-            <th>Clients</th>
-            <th class="actions">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for p in ports %}
-          <tr>
-            <td>{{ p.name }}</td>
-            <td>{{ p.description or '' }}</td>
-            <td>{{ p.adapter or p.adapter_type or '' }}</td>
-            <td>{{ (p.connected or p.is_running) and 'yes' or 'no' }}</td>
-            <td>
-              {% set cnt = p.clients_count or p.client_count %}
-              {{ cnt or 0 }}
-              {% if p.clients %}
-                <span class="meta">— {{ p.clients[:3]|join(', ') }}{% if (p.clients|length) > 3 %}, …{% endif %}</span>
-              {% endif %}
-            </td>
-            <td class="actions">
-                <a class="btn" href="{{ base_path }}/console?console={{ p.name | urlencode }}&autoconnect=1">Open Console</a>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </main>
-  </body>
-</html>
+{% extends "layout.html.j2" %}
+
+{% set active_page = 'summary' %}
+
+{% block page_title %}Summary{% endblock %}
+
+{% block content %}
+  <h2>Ports</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Description</th>
+        <th>Adapter</th>
+        <th>Connected</th>
+        <th>Clients</th>
+        <th class="actions">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in ports %}
+      <tr>
+        <td>{{ p.name }}</td>
+        <td>{{ p.description or '' }}</td>
+        <td>{{ p.adapter or p.adapter_type or '' }}</td>
+        <td>{{ (p.connected or p.is_running) and 'yes' or 'no' }}</td>
+        <td>
+          {% set cnt = p.clients_count or p.client_count %}
+          {{ cnt or 0 }}
+          {% if p.clients %}
+            <span class="meta">— {{ p.clients[:3]|join(', ') }}{% if (p.clients|length) > 3 %}, …{% endif %}</span>
+          {% endif %}
+        </td>
+        <td class="actions">
+            <a class="btn" href="{{ base_path }}/console?console={{ p.name | urlencode }}&autoconnect=1">Open Console</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

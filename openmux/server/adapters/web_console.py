@@ -327,8 +327,11 @@ async def handle_index(request: web.Request) -> web.Response:
             plugin_nav = adapter._get_allowed_plugin_nav(username)
         except Exception:
             plugin_nav = []
+        
+        current_port = request.query.get("port") or request.query.get("console")
+
         if hasattr(adapter, "_render_index"):
-            body = adapter._render_index(ports, plugin_nav=plugin_nav)  # type: ignore[attr-defined]
+            body = adapter._render_index(ports, plugin_nav=plugin_nav, current_port=current_port)  # type: ignore[attr-defined]
         else:
             # Older adapter without rendering helpers: silent fallback
             try:
@@ -349,8 +352,17 @@ async def handle_index(request: web.Request) -> web.Response:
 async def handle_console(request: web.Request) -> web.Response:
     adapter = request.app["adapter"]
     try:
+        username = request.get("username")
+        try:
+            plugin_nav = adapter._get_allowed_plugin_nav(username)
+        except Exception:
+            plugin_nav = []
+        
+        ports = adapter._get_ports_snapshot()
+        current_port = request.query.get("port") or request.query.get("console")
+
         if hasattr(adapter, "_render_console"):
-            body = adapter._render_console()  # type: ignore[attr-defined]
+            body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port)  # type: ignore[attr-defined]
         else:
             try:
                 bp = adapter._effective_base_path(request)
@@ -400,8 +412,10 @@ async def handle_status(request: web.Request) -> web.Response:
         except Exception:
             plugin_nav = []
 
+        current_port = request.query.get("port") or request.query.get("console")
+
         if hasattr(adapter, "_render_status"):
-            body = adapter._render_status(data, plugin_nav=plugin_nav)  # type: ignore[attr-defined]
+            body = adapter._render_status(data, plugin_nav=plugin_nav, current_port=current_port)  # type: ignore[attr-defined]
         else:
             body = b"<html><body><h1>Status</h1><p>OK</p></body></html>"
     except Exception as re:
@@ -1514,7 +1528,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             except Exception:
                 pass
 
-    def _render_index(self, ports: list[dict[str, Any]], plugin_nav: Optional[list[Dict[str, Any]]] = None) -> bytes:
+    def _render_index(self, ports: list[dict[str, Any]], plugin_nav: Optional[list[Dict[str, Any]]] = None, current_port: str = None) -> bytes:
         """Render the landing page.
 
         Tries Jinja2 template 'index.html.j2' when available; otherwise emits a
@@ -1527,7 +1541,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if self._jinja_env:
                 tmpl = self._jinja_env.get_template("index.html.j2")
                 base_path = self._effective_base_path(None)
-                html_text = tmpl.render(ports=ports, realm=self.realm, logo_url=self._get_logo_url(), title="OpenMux", adapter=self, plugin_nav=plugin_nav or [], base_path=base_path)
+                html_text = tmpl.render(ports=ports, realm=self.realm, logo_url=self._get_logo_url(), title="OpenMux", adapter=self, plugin_nav=plugin_nav or [], base_path=base_path, current_port=current_port)
                 return html_text.encode("utf-8")
         except Exception as e:
             # Fall back to inline below
@@ -1588,7 +1602,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
 """
         return body.encode("utf-8")
 
-    def _render_console(self) -> bytes:
+    def _render_console(self, plugin_nav: Optional[list[Dict[str, Any]]] = None, ports: list = None, current_port: str = None) -> bytes:
         """Render the xterm-based console page.
 
         Tries Jinja2 'console.html.j2'; otherwise uses the built-in fallback
@@ -1598,7 +1612,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if self._jinja_env:
                 tmpl = self._jinja_env.get_template("console.html.j2")
                 base_path = self._effective_base_path(None)
-                html_text = tmpl.render(realm=self.realm, logo_url=self._get_logo_url(), title="OpenMux Console", base_path=base_path)
+                html_text = tmpl.render(realm=self.realm, logo_url=self._get_logo_url(), title="OpenMux Console", base_path=base_path, plugin_nav=plugin_nav, ports=ports or [], current_port=current_port)
                 return html_text.encode("utf-8")
         except Exception as e:
             self.logger.debug(f"console template render failed: {e}")
@@ -1614,7 +1628,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             bp = ""
         return _fallback_with_base(_HTML_FALLBACK, bp)
 
-    def _render_status(self, data: Dict[str, Any], plugin_nav: Optional[list[Dict[str, Any]]] = None) -> bytes:
+    def _render_status(self, data: Dict[str, Any], plugin_nav: Optional[list[Dict[str, Any]]] = None, current_port: str = None) -> bytes:
         """Render a comprehensive status page (server-side aggregated).
 
         Expects an aggregated mapping with keys similar to the WebStatus API:
@@ -1700,6 +1714,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     adapter=self,
                     plugin_nav=plugin_nav or [],
                     base_path=base_path,
+                    current_port=current_port,
                 )
                 return html_text.encode("utf-8")
         except Exception as e:

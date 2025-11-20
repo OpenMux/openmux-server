@@ -65,6 +65,10 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
         if env:
             tmpl = env.get_template("config_editor.html.j2")
             plugin_nav = adapter._get_allowed_plugin_nav(username) if hasattr(adapter, "_get_allowed_plugin_nav") else []
+            
+            ports = adapter._get_ports_snapshot() if hasattr(adapter, "_get_ports_snapshot") else []
+            current_port = request.query.get("port") or request.query.get("console")
+
             # Attempt to load defaults from docs/DEFAULTS.md for UI hinting
             import json as _json
             defaults_doc = _read_defaults_doc()
@@ -80,6 +84,8 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
                 plugin_nav=plugin_nav,
                 defaults_doc_json=_json.dumps(defaults_doc),
                 base_path=base_path,
+                ports=ports,
+                current_port=current_port,
             )
             return web.Response(body=html_text.encode("utf-8"), content_type="text/html")
     except Exception:
@@ -547,7 +553,7 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     app.router.add_post(base + "/reload/full", _handle_reload_full)
     return {
         "nav": [
-            {"title": "Config", "path": base, "require": "admin"},
+            {"title": "Config Editor", "path": base, "require": "admin"},
         ]
     }
 

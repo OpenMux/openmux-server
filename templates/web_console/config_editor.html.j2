@@ -1,280 +1,255 @@
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{{ title or 'Config Editor' }}</title>
-  <meta name="omx-base-path" content="{{ base_path or '' }}" />
-  <link rel="stylesheet" href="{{ base_path }}/static/web_console.css" />
-    <style>
-      .row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
-      .row > * { margin: 0; }
-      .status { margin-top: 8px; min-height: 24px; }
+{% extends "layout.html.j2" %}
+
+{% set active_page = '/plugins/config-editor' %}
+
+{% block title %}{{ title or 'Config Editor' }}{% endblock %}
+
+{% block page_title %}Config Editor{% endblock %}
+
+{% block main_class %}content-scroll{% endblock %}
+
+{% block head_extras %}
+<style>
+  .row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
+  .row > * { margin: 0; }
+  .status { margin-top: 8px; min-height: 24px; }
   .toolbar .status { margin-top: 0; min-height: 0; }
-      .status .ok { color: #2ecc71; }
-      .status .err { color: #e74c3c; white-space: pre-wrap; }
-      .hint { color: #999; font-size: 12px; }
-      .spacer { flex: 1; }
-      .section { border:1px solid #333; padding:12px; margin:12px 0; background:#0f0f0f; }
-      .section > .legend { display:flex; align-items:baseline; gap:8px; margin-bottom: 8px; }
-      .legend .title { font-weight:600; color:#ddd; font-size:16px; }
-      .legend .desc { color:#888; font-size:12px; }
-      .field { display:flex; gap:8px; align-items:center; margin:6px 0; }
-      .field label { width: 220px; color:#bbb; }
+  .status .ok { color: #2ecc71; }
+  .status .err { color: #e74c3c; white-space: pre-wrap; }
+  .hint { color: #999; font-size: 12px; }
+  .spacer { flex: 1; }
+  .section { border:1px solid #333; padding:8px; margin:8px 0; background:#0f0f0f; }
+  .section > .legend { display:flex; align-items:baseline; gap:8px; margin-bottom: 4px; }
+  .legend .title { font-weight:600; color:#ddd; font-size:16px; }
+  .legend .desc { color:#888; font-size:12px; }
+  .field { display:flex; gap:8px; align-items:center; margin:4px 0; }
+  .field label { width: 220px; color:#bbb; }
   .field .help { color:#888; font-size:12px; margin-left: 8px; }
   .field .default-hint { color:#777; font-size:12px; margin-left: 8px; }
-      .field input[type="text"], .field input[type="number"], .field select { flex:1; padding:6px; background:#0d0d0d; color:#e7e7e7; border:1px solid #333; }
-      .field input[type="checkbox"] { width: 18px; height: 18px; }
-      .tbl-wrap { margin: 8px 0; }
-      table.config { width:100%; border-collapse: collapse; }
-      table.config th, table.config td { border:1px solid #333; padding:6px; font-size: 13px; }
-      table.config th { background:#111; color:#ccc; text-align:left; }
+  .field input[type="text"], .field input[type="number"], .field select { flex:1; padding:4px; background:#0d0d0d; color:#e7e7e7; border:1px solid #333; }
+  .field input[type="checkbox"] { width: 16px; height: 16px; }
+  .tbl-wrap { margin: 6px 0; }
+  table.config { width:100%; border-collapse: collapse; }
+  table.config th, table.config td { border:1px solid #333; padding:4px; font-size: 13px; }
+  table.config th { background:#111; color:#ccc; text-align:left; }
   table.config tr.editing td { background: #1a2330; }
   table.config tr.editing td, table.config tr.editing th { border-color: #3a6ea5; }
-      table.config td .cell-muted { color:#777; }
-      .mini-btn { padding:2px 8px; font-size:12px; }
-      .toolbar { display:flex; gap:8px; align-items:center; }
-      .req { color:#d18; margin-left: 4px; font-size: 11px; }
-      .subtle { color:#aaa; font-size: 12px; }
-      details.collapsible > summary { cursor: pointer; color:#ccc; }
-      details.collapsible { margin: 6px 0; }
-      .advisory { margin-top: 6px; min-height: 20px; }
-      .advisory .warn { color: #f39c12; }
-    </style>
-  </head>
-  <body>
-    <header class="site">
-      <div class="brand">
-        {% if logo_url %}
-          <img class="logo-img" src="{{ logo_url }}" alt="logo" />
-        {% else %}
-          <div class="logo">{{ (realm.split()[0][0] ~ (realm.split()[1][0] if realm.split()|length > 1 else '')) | upper }}</div>
-        {% endif %}
-        <div>
-          <div class="title">OpenMux</div>
-          <div class="subtitle">Config Editor</div>
+  table.config td .cell-muted { color:#777; }
+  .mini-btn { padding:2px 8px; font-size:12px; }
+  .toolbar { display:flex; gap:8px; align-items:center; }
+  .req { color:#d18; margin-left: 4px; font-size: 11px; }
+  .subtle { color:#aaa; font-size: 12px; }
+  details.collapsible > summary { cursor: pointer; color:#ccc; }
+  details.collapsible { margin: 6px 0; }
+  .advisory { margin-top: 6px; min-height: 20px; }
+  .advisory .warn { color: #f39c12; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="toolbar">
+    <button class="btn" id="loadBtn" title="Load current config">Load</button>
+    <button class="btn" id="validateBtn" title="Validate without saving">Validate</button>
+    <button class="btn" id="saveBtn" title="Save to server.yaml">Save</button>
+    <div class="status" id="status"></div>
+  </div>
+  <div class="spacer"></div>
+  <div class="subtle">Changes are saved to file; live reload is not automatic.</div>
+</div>
+<div class="advisory" id="advisory"></div>
+<div class="subtle" style="margin-top:6px">Fields marked with <span class="req">*</span> are required.</div>
+
+<div id="formRoot">
+  <details class="collapsible" open>
+    <summary><span class="title">Live reload</span> <span class="desc">Apply changes without full restart</span></summary>
+    <div class="section">
+      <div class="legend"><div class="title">Reload server config</div><div class="desc">Use these after Save to apply the active config file.</div></div>
+      <div class="field">
+        <label>Soft reload</label>
+        <button class="btn" id="softReloadBtn" type="button">Soft Reload</button>
+        <span class="help">Reloads YAML, updates authentication (users/API keys/PAM/public keys), and reconciles Serial/Loopback/Command/TCP-initiator ports without restarting listeners.</span>
+      </div>
+      <div class="field">
+        <label>Full reload</label>
+        <button class="btn" id="fullReloadBtn" type="button">Full Reload</button>
+        <span class="help">Stops and recreates adapters. Use when changing client listener, muxcon listeners/initiators, TLS, or other core settings. May briefly disconnect sessions.</span>
+      </div>
+      <details class="collapsible">
+        <summary><span class="title">When to use what</span> <span class="desc">Quick guidance</span></summary>
+        <div class="section">
+          <ul style="margin:0 0 0 18px; padding:0;">
+            <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/PAM), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator ports.</li>
+            <li>Use <b>Full Reload</b> for: Client listener enable/host/port changes, muxcon listeners/initiators, TLS enable/certs/TOFU settings, and other adapter-wide options.</li>
+            <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>
+          </ul>
         </div>
-      </div>
-      <div class="page">Config</div>
-      <div class="actions">
-        <a class="btn" href="{{ base_path }}/">Summary</a>
-        <a class="btn" href="{{ base_path }}/status">Status</a>
-        <a class="btn" href="{{ base_path }}/console">Console</a>
-        {% if plugin_nav and plugin_nav|length > 0 %}
-          {% for item in plugin_nav %}
-            <a class="btn" href="{{ base_path }}{{ item.path }}">{{ item.title }}</a>
-          {% endfor %}
-        {% endif %}
-  <a class="btn" href="{{ base_path }}/logout" title="Sign out">Logout</a>
-      </div>
-    </header>
-    <main>
-      <div class="row">
-        <div class="toolbar">
-          <button class="btn" id="loadBtn" title="Load current config">Load</button>
-          <button class="btn" id="validateBtn" title="Validate without saving">Validate</button>
-          <button class="btn" id="saveBtn" title="Save to server.yaml">Save</button>
-          <div class="status" id="status"></div>
+      </details>
+      <div class="status" id="reloadStatus"></div>
+    </div>
+  </details>
+  <details class="collapsible" open>
+    <summary><span class="title">Server</span> <span class="desc">Server identity and description</span></summary>
+    <div class="section">
+      <div class="field"><label for="server.id">Server ID</label><input id="server.id" type="text" /></div>
+      <div class="field"><label for="server.description">Description</label><input id="server.description" type="text" /></div>
+      <div class="field"><label for="server.control_socket">Control socket path</label><input id="server.control_socket" type="text" placeholder="logs/openmux.sock" /><span class="help">Unix domain socket for local CLI control (status/reload). Env override: OPENMUX_CTL_SOCK.</span></div>
+      <div class="field"><label for="server.pidfile">PID file path</label><input id="server.pidfile" type="text" placeholder="logs/openmux.pid" /><span class="help">PID file used for signal-based control (HUP soft reload, USR1 full reload). Env override: OPENMUX_PIDFILE.</span></div>
+    </div>
+  </details>
+
+  <details class="collapsible" open>
+    <summary><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and PAM</span></summary>
+    <div class="section" id="authSection">
+      <div class="legend"><div class="title">Users</div><div class="desc">Basic-auth accounts</div></div>
+      <div id="auth.users"></div>
+      <div class="legend" style="margin-top:10px"><div class="title">API Keys</div><div class="desc">Token auth</div></div>
+      <div id="auth.api_keys"></div>
+      <div class="legend" style="margin-top:10px"><div class="title">Public Keys</div><div class="desc">Ed25519 keys with allowed_uses</div></div>
+      <div id="auth.public_keys"></div>
+      <div class="legend" style="margin-top:10px"><div class="title">PAM (System Auth)</div><div class="desc">Use UNIX accounts and groups</div></div>
+      <div class="field"><label for="auth.pam.enabled">Enable PAM</label><input id="auth.pam.enabled" type="checkbox" /></div>
+      <div class="field"><label for="auth.pam.service_name">Service name</label><input id="auth.pam.service_name" type="text" placeholder="login" /><span class="help">PAM service to use (e.g., login, system-auth)</span></div>
+      <div class="field"><label for="auth.pam.allow_root">Allow root</label><input id="auth.pam.allow_root" type="checkbox" /><span class="help">If unchecked, root user cannot log in via PAM</span></div>
+      <div class="field"><label for="auth.pam.allowed_users">Allowed users</label><input id="auth.pam.allowed_users" type="text" placeholder="comma,separated,users" /><span class="help">Optional allowlist: only these users can authenticate via PAM</span></div>
+      <details class="collapsible">
+        <summary><span class="title">PAM Groups</span> <span class="desc">Map system groups to roles</span></summary>
+        <div class="section">
+          <div class="field"><label for="auth.pam.groups.admin_group">Admin group</label><input id="auth.pam.groups.admin_group" type="text" placeholder="openmux_admin" /></div>
+          <div class="field"><label for="auth.pam.groups.write_group">Write group</label><input id="auth.pam.groups.write_group" type="text" placeholder="openmux_write" /></div>
+          <div class="field"><label for="auth.pam.groups.read_group">Read group</label><input id="auth.pam.groups.read_group" type="text" placeholder="openmux_read" /></div>
         </div>
-        <div class="spacer"></div>
-        <div class="subtle">Changes are saved to file; live reload is not automatic.</div>
+      </details>
+    </div>
+  </details>
+
+  <details class="collapsible" open>
+    <summary><span class="title">Logging</span> <span class="desc">File and console logging</span></summary>
+    <div class="section">
+      <div class="field"><label for="logging.level">Level</label>
+        <select id="logging.level">
+          <option value=""></option>
+          <option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option>
+          <option>debug</option><option>info</option><option>warning</option><option>error</option><option>critical</option>
+        </select>
       </div>
-      <div class="advisory" id="advisory"></div>
-      <div class="subtle" style="margin-top:6px">Fields marked with <span class="req">*</span> are required.</div>
+      <div class="field"><label for="logging.console">Console</label><input id="logging.console" type="checkbox" /></div>
+      <div class="field"><label for="logging.file">File</label><input id="logging.file" type="text" /></div>
+      <div class="field"><label for="logging.log_dir">Log Dir</label><input id="logging.log_dir" type="text" /></div>
+      <div class="field"><label for="logging.max_log_size">Max size</label><input id="logging.max_log_size" type="number" min="0" /></div>
+      <div class="field"><label for="logging.log_backup_count">Backup count</label><input id="logging.log_backup_count" type="number" min="0" /></div>
+    </div>
+  </details>
 
-      <div id="formRoot">
-        <details class="collapsible" open>
-          <summary><span class="title">Live reload</span> <span class="desc">Apply changes without full restart</span></summary>
-          <div class="section">
-            <div class="legend"><div class="title">Reload server config</div><div class="desc">Use these after Save to apply the active config file.</div></div>
-            <div class="field">
-              <label>Soft reload</label>
-              <button class="btn" id="softReloadBtn" type="button">Soft Reload</button>
-              <span class="help">Reloads YAML, updates authentication (users/API keys/PAM/public keys), and reconciles Serial/Loopback/Command/TCP-initiator ports without restarting listeners.</span>
-            </div>
-            <div class="field">
-              <label>Full reload</label>
-              <button class="btn" id="fullReloadBtn" type="button">Full Reload</button>
-              <span class="help">Stops and recreates adapters. Use when changing client listener, muxcon listeners/initiators, TLS, or other core settings. May briefly disconnect sessions.</span>
-            </div>
-            <details class="collapsible">
-              <summary><span class="title">When to use what</span> <span class="desc">Quick guidance</span></summary>
-              <div class="section">
-                <ul style="margin:0 0 0 18px; padding:0;">
-                  <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/PAM), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator port lists.</li>
-                  <li>Use <b>Full Reload</b> for: Client listener enable/host/port changes, muxcon listeners/initiators, TLS enable/certs/TOFU settings, and other adapter-wide options.</li>
-                  <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>
-                </ul>
-              </div>
-            </details>
-            <div class="status" id="reloadStatus"></div>
-          </div>
-        </details>
-        <details class="collapsible" open>
-          <summary><span class="title">Server</span> <span class="desc">Server identity and description</span></summary>
-          <div class="section">
-            <div class="field"><label for="server.id">Server ID</label><input id="server.id" type="text" /></div>
-            <div class="field"><label for="server.description">Description</label><input id="server.description" type="text" /></div>
-            <div class="field"><label for="server.control_socket">Control socket path</label><input id="server.control_socket" type="text" placeholder="logs/openmux.sock" /><span class="help">Unix domain socket for local CLI control (status/reload). Env override: OPENMUX_CTL_SOCK.</span></div>
-            <div class="field"><label for="server.pidfile">PID file path</label><input id="server.pidfile" type="text" placeholder="logs/openmux.pid" /><span class="help">PID file used for signal-based control (HUP soft reload, USR1 full reload). Env override: OPENMUX_PIDFILE.</span></div>
-          </div>
-        </details>
+  <details class="collapsible" open>
+    <summary><span class="title">Client listener</span> <span class="desc">TCP console endpoint</span></summary>
+    <div class="section">
+      <div class="field"><label for="client_listener.enabled">Enable listener</label><input id="client_listener.enabled" type="checkbox" /></div>
+      <div class="field"><label for="client_listener.host">Host</label><input id="client_listener.host" type="text" /></div>
+      <div class="field"><label for="client_listener.port">Port</label><input id="client_listener.port" type="number" min="1" max="65535" /></div>
+      <div class="field"><label for="client_listener.max_connections">Max connections</label><input id="client_listener.max_connections" type="number" min="1" /></div>
+      <div class="field"><label for="client_listener.connection_timeout">Timeout (s)</label><input id="client_listener.connection_timeout" type="number" min="1" /></div>
+    </div>
+  </details>
 
-        <details class="collapsible" open>
-          <summary><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and PAM</span></summary>
-          <div class="section" id="authSection">
-            <div class="legend"><div class="title">Users</div><div class="desc">Basic-auth accounts</div></div>
-            <div id="auth.users"></div>
-            <div class="legend" style="margin-top:10px"><div class="title">API Keys</div><div class="desc">Token auth</div></div>
-            <div id="auth.api_keys"></div>
-            <div class="legend" style="margin-top:10px"><div class="title">Public Keys</div><div class="desc">Ed25519 keys with allowed_uses</div></div>
-            <div id="auth.public_keys"></div>
-            <div class="legend" style="margin-top:10px"><div class="title">PAM (System Auth)</div><div class="desc">Use UNIX accounts and groups</div></div>
-            <div class="field"><label for="auth.pam.enabled">Enable PAM</label><input id="auth.pam.enabled" type="checkbox" /></div>
-            <div class="field"><label for="auth.pam.service_name">Service name</label><input id="auth.pam.service_name" type="text" placeholder="login" /><span class="help">PAM service to use (e.g., login, system-auth)</span></div>
-            <div class="field"><label for="auth.pam.allow_root">Allow root</label><input id="auth.pam.allow_root" type="checkbox" /><span class="help">If unchecked, root user cannot log in via PAM</span></div>
-            <div class="field"><label for="auth.pam.allowed_users">Allowed users</label><input id="auth.pam.allowed_users" type="text" placeholder="comma,separated,users" /><span class="help">Optional allowlist: only these users can authenticate via PAM</span></div>
-            <details class="collapsible">
-              <summary><span class="title">PAM Groups</span> <span class="desc">Map system groups to roles</span></summary>
-              <div class="section">
-                <div class="field"><label for="auth.pam.groups.admin_group">Admin group</label><input id="auth.pam.groups.admin_group" type="text" placeholder="openmux_admin" /></div>
-                <div class="field"><label for="auth.pam.groups.write_group">Write group</label><input id="auth.pam.groups.write_group" type="text" placeholder="openmux_write" /></div>
-                <div class="field"><label for="auth.pam.groups.read_group">Read group</label><input id="auth.pam.groups.read_group" type="text" placeholder="openmux_read" /></div>
-              </div>
-            </details>
-          </div>
-        </details>
+  <details class="collapsible" open>
+    <summary><span class="title">Serial ports</span> <span class="desc">Physical serial devices</span></summary>
+    <div class="section" id="serial_ports"></div>
+  </details>
 
-        <details class="collapsible" open>
-          <summary><span class="title">Logging</span> <span class="desc">File and console logging</span></summary>
-          <div class="section">
-            <div class="field"><label for="logging.level">Level</label>
-              <select id="logging.level">
-                <option value=""></option>
-                <option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option>
-                <option>debug</option><option>info</option><option>warning</option><option>error</option><option>critical</option>
-              </select>
-            </div>
-            <div class="field"><label for="logging.console">Console</label><input id="logging.console" type="checkbox" /></div>
-            <div class="field"><label for="logging.file">File</label><input id="logging.file" type="text" /></div>
-            <div class="field"><label for="logging.log_dir">Log Dir</label><input id="logging.log_dir" type="text" /></div>
-            <div class="field"><label for="logging.max_log_size">Max size</label><input id="logging.max_log_size" type="number" min="0" /></div>
-            <div class="field"><label for="logging.log_backup_count">Backup count</label><input id="logging.log_backup_count" type="number" min="0" /></div>
-          </div>
-        </details>
+  <details class="collapsible" open>
+    <summary><span class="title">Loopback ports</span> <span class="desc">Software loopbacks</span></summary>
+    <div class="section" id="loopback_ports"></div>
+  </details>
 
-        <details class="collapsible" open>
-          <summary><span class="title">Client listener</span> <span class="desc">TCP console endpoint</span></summary>
-          <div class="section">
-            <div class="field"><label for="client_listener.enabled">Enable listener</label><input id="client_listener.enabled" type="checkbox" /></div>
-            <div class="field"><label for="client_listener.host">Host</label><input id="client_listener.host" type="text" /></div>
-            <div class="field"><label for="client_listener.port">Port</label><input id="client_listener.port" type="number" min="1" max="65535" /></div>
-            <div class="field"><label for="client_listener.max_connections">Max connections</label><input id="client_listener.max_connections" type="number" min="1" /></div>
-            <div class="field"><label for="client_listener.connection_timeout">Timeout (s)</label><input id="client_listener.connection_timeout" type="number" min="1" /></div>
-          </div>
-        </details>
+  <details class="collapsible" open>
+    <summary><span class="title">Command ports</span> <span class="desc">Process-backed ports</span></summary>
+    <div class="section" id="command_ports"></div>
+  </details>
 
-        <details class="collapsible" open>
-          <summary><span class="title">Serial ports</span> <span class="desc">Physical serial devices</span></summary>
-          <div class="section" id="serial_ports"></div>
-        </details>
+  <details class="collapsible" open>
+    <summary><span class="title">Muxcon</span> <span class="desc">Federation and transport</span></summary>
+    <div class="section" id="muxcon">
+      <div class="field"><label for="muxcon.node_name">Node name (deprecated)</label><input id="muxcon.node_name" type="text" /></div>
+      <details class="collapsible">
+        <summary><span class="title">Advanced</span> <span class="desc">Timing, cache, filters, auth</span></summary>
+        <div class="section">
+          <div class="field"><label for="muxcon.heartbeat_interval">Heartbeat interval</label><input id="muxcon.heartbeat_interval" type="number" min="0" step="0.1" /></div>
+          <div class="field"><label for="muxcon.mpath_primary_stale_sec">MP stale sec</label><input id="muxcon.mpath_primary_stale_sec" type="number" min="0" step="0.1" /></div>
+          <div class="field"><label for="muxcon.mpath_failover_check_sec">MP check sec</label><input id="muxcon.mpath_failover_check_sec" type="number" min="0" step="0.1" /></div>
+          <div class="field"><label for="muxcon.mpath_strategy">MP strategy</label><select id="muxcon.mpath_strategy"><option value=""></option><option value="best_pref">best_pref</option></select></div>
+          <div class="field"><label for="muxcon.mpath_preemptive_promote">MP preemptive</label><input id="muxcon.mpath_preemptive_promote" type="checkbox" /></div>
+          <div class="field"><label for="muxcon.mpath_neighbor_idle_drop_sec">MP neighbor drop</label><input id="muxcon.mpath_neighbor_idle_drop_sec" type="number" min="0" step="0.1" /></div>
+          <div class="field"><label for="muxcon.federated_cache_enabled">Federated cache</label><input id="muxcon.federated_cache_enabled" type="checkbox" /></div>
+          <div class="field"><label for="muxcon.federated_cache_ttl_sec">Cache TTL (s)</label><input id="muxcon.federated_cache_ttl_sec" type="number" min="0" step="0.1" /></div>
+          <div class="field"><label for="muxcon.federated_cache_path">Cache path</label><input id="muxcon.federated_cache_path" type="text" /></div>
+          <div class="field"><label for="muxcon.auth_required">Auth required</label><input id="muxcon.auth_required" type="checkbox" /></div>
+          <div class="field"><label for="muxcon.auth_key_id">Auth key id</label><input id="muxcon.auth_key_id" type="text" /></div>
+          <div class="field"><label for="muxcon.auth_private_key">Private key</label><input id="muxcon.auth_private_key" type="text" /></div>
+        </div>
+      </details>
+      <div class="legend"><div class="title">Listeners</div><div class="desc">Incoming connections</div></div>
+      <div id="muxcon.listeners"></div>
+      <div class="legend" style="margin-top:10px"><div class="title">Initiators</div><div class="desc">Outgoing connections</div></div>
+      <div id="muxcon.initiators"></div>
+      <div class="legend" style="margin-top:10px"><div class="title">Public Keys</div><div class="desc">Ed25519 keys for muxcon federation</div></div>
+      <div id="muxcon.public_keys"></div>
+    </div>
+  </details>
 
-        <details class="collapsible" open>
-          <summary><span class="title">Loopback ports</span> <span class="desc">Software loopbacks</span></summary>
-          <div class="section" id="loopback_ports"></div>
-        </details>
+  <details class="collapsible" open>
+    <summary><span class="title">Web status</span> <span class="desc">Read-only status server</span></summary>
+    <div class="section">
+      <div class="field"><label for="web_status.host">Host</label><input id="web_status.host" type="text" /></div>
+      <div class="field"><label for="web_status.port">Port</label><input id="web_status.port" type="number" min="1" max="65535" /></div>
+      <div class="field"><label for="web_status.enable_http_api">HTTP API</label><input id="web_status.enable_http_api" type="checkbox" /></div>
+      <div class="field"><label for="web_status.cors_enable">CORS</label><input id="web_status.cors_enable" type="checkbox" /></div>
+      <div class="field"><label for="web_status.enable_fault_injection">Fault injection</label><input id="web_status.enable_fault_injection" type="checkbox" /></div>
+    </div>
+  </details>
 
-        <details class="collapsible" open>
-          <summary><span class="title">Command ports</span> <span class="desc">Process-backed ports</span></summary>
-          <div class="section" id="command_ports"></div>
-        </details>
+  <details class="collapsible" open>
+    <summary><span class="title">Web console</span> <span class="desc">Admin UI and WS console</span></summary>
+    <div class="section">
+      <div class="field"><label for="web_console.host">Host</label><input id="web_console.host" type="text" /></div>
+      <div class="field"><label for="web_console.port">Port</label><input id="web_console.port" type="number" min="1" max="65535" /></div>
+      <div class="field"><label for="web_console.ssl_port">SSL Port</label><input id="web_console.ssl_port" type="number" min="1" max="65535" /></div>
+      <div class="field"><label for="web_console.base_path">Base path</label><input id="web_console.base_path" type="text" placeholder="/" /></div>
+      <div class="field"><label for="web_console.respect_forwarded_prefix">Respect X-Forwarded-Prefix</label><input id="web_console.respect_forwarded_prefix" type="checkbox" /></div>
+      <div class="field"><label for="web_console.enable_ui">Enable UI</label><input id="web_console.enable_ui" type="checkbox" /></div>
+      <div class="field"><label for="web_console.realm">Realm</label><input id="web_console.realm" type="text" /></div>
+      <div class="field"><label for="web_console.static_dir">Static dir</label><input id="web_console.static_dir" type="text" /></div>
+      <div class="field"><label for="web_console.template_dir">Template dir</label><input id="web_console.template_dir" type="text" /></div>
+      <div class="field"><label for="web_console.download_xterm_if_missing">Auto-download xterm</label><input id="web_console.download_xterm_if_missing" type="checkbox" /></div>
+      <div class="field"><label for="web_console.session_ttl_seconds">Session TTL (s)</label><input id="web_console.session_ttl_seconds" type="number" min="0" /></div>
+      <div class="legend"><div class="title">Probes</div><div class="desc">/healthz /livez /readyz</div></div>
+      <div class="field"><label for="web_console.enable_probes">Enable probes</label><input id="web_console.enable_probes" type="checkbox" /></div>
+      <div class="field"><label for="web_console.probes_include_details">Include details</label><input id="web_console.probes_include_details" type="checkbox" /></div>
+      <div class="legend"><div class="title">TLS</div><div class="desc">Optional HTTPS</div></div>
+      <div class="field"><label for="web_console.use_tls">Use TLS</label><input id="web_console.use_tls" type="checkbox" /></div>
+      <div class="field"><label for="web_console.ssl_cert">SSL cert</label><input id="web_console.ssl_cert" type="text" /></div>
+      <div class="field"><label for="web_console.ssl_key">SSL key</label><input id="web_console.ssl_key" type="text" /></div>
+      <div class="field"><label for="web_console.tls_autogen">Autogenerate cert</label><input id="web_console.tls_autogen" type="checkbox" /></div>
+      <div class="field"><label for="web_console.tls_dir">TLS dir</label><input id="web_console.tls_dir" type="text" /></div>
+      <div class="legend"><div class="title">Plugins</div><div class="desc">Web plugin modules to load</div></div>
+      <div id="web_console.plugins"></div>
+    </div>
+  </details>
+</div>
+{% endblock %}
 
-        <details class="collapsible" open>
-          <summary><span class="title">Muxcon</span> <span class="desc">Federation and transport</span></summary>
-          <div class="section" id="muxcon">
-            <div class="field"><label for="muxcon.node_name">Node name (deprecated)</label><input id="muxcon.node_name" type="text" /></div>
-            <details class="collapsible">
-              <summary><span class="title">Advanced</span> <span class="desc">Timing, cache, filters, auth</span></summary>
-              <div class="section">
-                <div class="field"><label for="muxcon.heartbeat_interval">Heartbeat interval</label><input id="muxcon.heartbeat_interval" type="number" min="0" step="0.1" /></div>
-                <div class="field"><label for="muxcon.mpath_primary_stale_sec">MP stale sec</label><input id="muxcon.mpath_primary_stale_sec" type="number" min="0" step="0.1" /></div>
-                <div class="field"><label for="muxcon.mpath_failover_check_sec">MP check sec</label><input id="muxcon.mpath_failover_check_sec" type="number" min="0" step="0.1" /></div>
-                <div class="field"><label for="muxcon.mpath_strategy">MP strategy</label><select id="muxcon.mpath_strategy"><option value=""></option><option value="best_pref">best_pref</option></select></div>
-                <div class="field"><label for="muxcon.mpath_preemptive_promote">MP preemptive</label><input id="muxcon.mpath_preemptive_promote" type="checkbox" /></div>
-                <div class="field"><label for="muxcon.mpath_neighbor_idle_drop_sec">MP neighbor drop</label><input id="muxcon.mpath_neighbor_idle_drop_sec" type="number" min="0" step="0.1" /></div>
-                <div class="field"><label for="muxcon.federated_cache_enabled">Federated cache</label><input id="muxcon.federated_cache_enabled" type="checkbox" /></div>
-                <div class="field"><label for="muxcon.federated_cache_ttl_sec">Cache TTL (s)</label><input id="muxcon.federated_cache_ttl_sec" type="number" min="0" step="0.1" /></div>
-                <div class="field"><label for="muxcon.federated_cache_path">Cache path</label><input id="muxcon.federated_cache_path" type="text" /></div>
-                <div class="field"><label for="muxcon.auth_required">Auth required</label><input id="muxcon.auth_required" type="checkbox" /></div>
-                <div class="field"><label for="muxcon.auth_key_id">Auth key id</label><input id="muxcon.auth_key_id" type="text" /></div>
-                <div class="field"><label for="muxcon.auth_private_key">Private key</label><input id="muxcon.auth_private_key" type="text" /></div>
-              </div>
-            </details>
-            <div class="legend"><div class="title">Listeners</div><div class="desc">Incoming connections</div></div>
-            <div id="muxcon.listeners"></div>
-            <div class="legend" style="margin-top:10px"><div class="title">Initiators</div><div class="desc">Outgoing connections</div></div>
-            <div id="muxcon.initiators"></div>
-            <div class="legend" style="margin-top:10px"><div class="title">Public Keys</div><div class="desc">Ed25519 keys for muxcon federation</div></div>
-            <div id="muxcon.public_keys"></div>
-          </div>
-        </details>
-
-        <details class="collapsible" open>
-          <summary><span class="title">Web status</span> <span class="desc">Read-only status server</span></summary>
-          <div class="section">
-            <div class="field"><label for="web_status.host">Host</label><input id="web_status.host" type="text" /></div>
-            <div class="field"><label for="web_status.port">Port</label><input id="web_status.port" type="number" min="1" max="65535" /></div>
-            <div class="field"><label for="web_status.enable_http_api">HTTP API</label><input id="web_status.enable_http_api" type="checkbox" /></div>
-            <div class="field"><label for="web_status.cors_enable">CORS</label><input id="web_status.cors_enable" type="checkbox" /></div>
-            <div class="field"><label for="web_status.enable_fault_injection">Fault injection</label><input id="web_status.enable_fault_injection" type="checkbox" /></div>
-          </div>
-        </details>
-
-        <details class="collapsible" open>
-          <summary><span class="title">Web console</span> <span class="desc">Admin UI and WS console</span></summary>
-          <div class="section">
-            <div class="field"><label for="web_console.host">Host</label><input id="web_console.host" type="text" /></div>
-            <div class="field"><label for="web_console.port">Port</label><input id="web_console.port" type="number" min="1" max="65535" /></div>
-            <div class="field"><label for="web_console.ssl_port">SSL Port</label><input id="web_console.ssl_port" type="number" min="1" max="65535" /></div>
-            <div class="field"><label for="web_console.base_path">Base path</label><input id="web_console.base_path" type="text" placeholder="/" /></div>
-            <div class="field"><label for="web_console.respect_forwarded_prefix">Respect X-Forwarded-Prefix</label><input id="web_console.respect_forwarded_prefix" type="checkbox" /></div>
-            <div class="field"><label for="web_console.enable_ui">Enable UI</label><input id="web_console.enable_ui" type="checkbox" /></div>
-            <div class="field"><label for="web_console.realm">Realm</label><input id="web_console.realm" type="text" /></div>
-            <div class="field"><label for="web_console.static_dir">Static dir</label><input id="web_console.static_dir" type="text" /></div>
-            <div class="field"><label for="web_console.template_dir">Template dir</label><input id="web_console.template_dir" type="text" /></div>
-            <div class="field"><label for="web_console.download_xterm_if_missing">Auto-download xterm</label><input id="web_console.download_xterm_if_missing" type="checkbox" /></div>
-            <div class="field"><label for="web_console.session_ttl_seconds">Session TTL (s)</label><input id="web_console.session_ttl_seconds" type="number" min="0" /></div>
-            <div class="legend"><div class="title">Probes</div><div class="desc">/healthz /livez /readyz</div></div>
-            <div class="field"><label for="web_console.enable_probes">Enable probes</label><input id="web_console.enable_probes" type="checkbox" /></div>
-            <div class="field"><label for="web_console.probes_include_details">Include details</label><input id="web_console.probes_include_details" type="checkbox" /></div>
-            <div class="legend"><div class="title">TLS</div><div class="desc">Optional HTTPS</div></div>
-            <div class="field"><label for="web_console.use_tls">Use TLS</label><input id="web_console.use_tls" type="checkbox" /></div>
-            <div class="field"><label for="web_console.ssl_cert">SSL cert</label><input id="web_console.ssl_cert" type="text" /></div>
-            <div class="field"><label for="web_console.ssl_key">SSL key</label><input id="web_console.ssl_key" type="text" /></div>
-            <div class="field"><label for="web_console.tls_autogen">Autogenerate cert</label><input id="web_console.tls_autogen" type="checkbox" /></div>
-            <div class="field"><label for="web_console.tls_dir">TLS dir</label><input id="web_console.tls_dir" type="text" /></div>
-            <div class="legend"><div class="title">Plugins</div><div class="desc">Web plugin modules to load</div></div>
-            <div id="web_console.plugins"></div>
-          </div>
-        </details>
-
-        
-      </div>
-
-      
-    </main>
-
-    <script>
+{% block scripts %}
+<script>
   (function(){
         const status = document.getElementById('status');
         const BTN = (id) => document.getElementById(id);
-  let csrf = null;
-  let current = {};
-  // Ensure a single open editor globally
-  let activeEditorEl = null;
-  let activeEditorCleanup = null;
-  let activeEditorValidate = null; // returns true if OK, false if missing required; also shows inline error
-  let activeEditorSave = null; // programmatically save current editor if valid
+        let csrf = null;
+        let current = {};
+        // Ensure a single open editor globally
+        let activeEditorEl = null;
+        let activeEditorCleanup = null;
+        let activeEditorValidate = null; // returns true if OK, false if missing required; also shows inline error
+        let activeEditorSave = null; // programmatically save current editor if valid
 
         function setStatus(ok, msg){ status.innerHTML=''; const el=document.createElement('div'); el.className=ok?'ok':'err'; el.textContent=msg; status.appendChild(el); }
 
@@ -1089,7 +1064,7 @@
       }
       const j = await r.json().catch(()=>({}));
       if(r.ok && (j.ok===undefined || j.ok===true)){
-        const payload = j.summary || j.message || (kind==='soft'? 'Soft reload completed' : 'Full reload completed');
+        const payload = j.summary || j.message || (kind==='soft' ? 'Soft reload completed' : 'Full reload completed');
         setReloadStatus(true, payload);
       } else {
         const err = (j&&(j.message||j.error)) || `Reload ${kind} failed`;
@@ -1111,6 +1086,5 @@
   injectDefaultHints();
   loadCurrent();
       })();
-    </script>
-  </body>
-</html>
+</script>
+{% endblock %}
