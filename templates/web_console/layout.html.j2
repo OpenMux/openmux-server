@@ -29,7 +29,7 @@
           </a>
           <div class="nav-group">
             <div class="nav-item-row">
-              <a class="nav-item {% if active_page == 'console' and not current_port %}active{% endif %}" href="{{ base_path }}/console">
+              <a class="nav-item {% if active_page == 'console' %}active{% endif %}" href="{{ base_path }}/console">
                 <span class="icon">💻</span> Console
               </a>
               <button class="nav-expand" id="console-expand-btn" onclick="toggleConsolePorts(event)" title="Show ports">+</button>

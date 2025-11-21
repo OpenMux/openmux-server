@@ -2,8 +2,14 @@
 :root { color-scheme: dark; }
 html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px/1.5 -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
 
+/* Layout Wrapper */
+.app-layout { display: flex; height: 100vh; overflow: hidden; }
+.sidebar { width: 240px; background: #1b1b1b; border-right: 1px solid #333; display: flex; flex-direction: column; transition: width 0.2s ease, opacity 0.2s ease; flex-shrink: 0; white-space: nowrap; }
+.sidebar.collapsed { width: 0; border-right: none; opacity: 0; overflow: hidden; }
+.main-content { flex: 1; display: flex; flex-direction: column; overflow: auto; min-width: 0; position: relative; }
+
 /* Header */
-header.toolbar, header.site { display: flex; gap: 8px; align-items: center; padding: 12px 16px; background: #1b1b1b; border-bottom: 1px solid #333; color: #ddd; position: sticky; top: 0; z-index: 10; }
+header.site { display: flex; gap: 8px; align-items: center; padding: 0 16px; background: #1b1b1b; border-bottom: 1px solid #333; color: #ddd; position: sticky; top: 0; z-index: 10; min-height: 40px; box-sizing: border-box; }
 header .title { font-weight: 600; margin-right: 8px; color: #fff; font-size: 18px; }
 header .page { font-weight: 600; color: #eee; font-size: 18px; margin-left: 8px; }
 header .meta { color: #aaa; font-size: 12px; }
@@ -11,10 +17,10 @@ header .actions { margin-left: auto; display: flex; gap: 8px; align-items: cente
 header.site .actions { margin-left: auto; }
 header .extras { display: flex; gap: 8px; align-items: center; }
 /* Console toolbar specific layout */
-header.toolbar .toolbar-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-header.toolbar .toolbar-controls label { color: #ccc; font-size: 12px; }
-header.toolbar .toolbar-controls select#portSelect { min-width: 220px; max-width: 420px; }
-header.toolbar .toolbar-controls #connect.btn { padding: 6px 12px; }
+header.site .toolbar-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+header.site .toolbar-controls label { color: #ccc; font-size: 12px; }
+header.site .toolbar-controls select#portSelect { min-width: 220px; max-width: 420px; }
+header.site .toolbar-controls #connect.btn { padding: 6px 12px; }
 /* Header brand (logo + title) */
 header .brand { display: flex; align-items: center; gap: 8px; margin-right: 8px; }
 header .brand .logo-img { width: 20px; height: 20px; border-radius: 4px; object-fit: contain; background: #2a2a2a; }
@@ -31,13 +37,13 @@ button.btn.btn-icon { width: 24px; height: 24px; padding: 0; display: inline-fle
 header select, header input { background: #0f0f0f; color: #ddd; border: 1px solid #333; border-radius: 4px; padding: 6px 8px; }
 
 /* Layout helpers */
-main { padding: 16px; }
+main { padding: 8px; }
 .muted { color: #aaa; font-size: 12px; }
 .meta { color: #aaa; font-size: 12px; }
 
 /* Cards */
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
-.card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 12px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-bottom: 8px; }
+.card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 8px; }
 .metric { font-size: 24px; font-weight: 600; }
 
 /* Centered Login */
@@ -56,9 +62,9 @@ body.login .card button.btn { width: 100%; margin-top: 8px; padding: 10px 12px; 
 
 /* Tables */
 table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-th, td { text-align: left; padding: 8px; border-bottom: 1px solid #2a2a2a; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #2a2a2a; }
 /* Compact table variant */
-table.table-compact th, table.table-compact td { padding: 4px 6px; }
+table.table-compact th, table.table-compact td { padding: 2px 6px; }
 /* Narrow first column for +/- */
 th.col-toggle, td.col-toggle { width: 28px; padding-left: 4px; padding-right: 4px; }
 tr:hover { background: #191919; }
@@ -69,19 +75,19 @@ body.console { display: flex; flex-direction: column; min-height: 100vh; }
 #term { flex: 1 1 auto; width: 100%; height: 100%; }
 
 /* Connection banner for prominent WS disconnect/alerts */
-.banner { position: fixed; top: 56px; left: 0; right: 0; padding: 10px 16px; display: none; z-index: 20; text-align: center; }
+.banner { position: absolute; top: 40px; left: 0; right: 0; padding: 10px 16px; display: none; z-index: 20; text-align: center; }
 .banner.error { background: #4d1f1f; color: #f0b6b6; border-bottom: 1px solid #6b2f2f; }
 .banner.warn { background: #4d3a1f; color: #f0e0b6; border-bottom: 1px solid #6b5a2f; }
 
 /* Page-level disconnected state */
-body.ws-down header.toolbar { background: #2a1515; border-bottom-color: #6b2f2f; }
+body.ws-down header.site { background: #2a1515; border-bottom-color: #6b2f2f; }
 /* status tag removed from header */
-body.port-down header.toolbar { background: #2a2015; border-bottom-color: #6b5a2f; }
+body.port-down header.site { background: #2a2015; border-bottom-color: #6b5a2f; }
 /* status tag removed from header */
 
 /* --- Federation/Multipath hierarchical view --- */
-.peer-card { margin: 16px 0; }
-.peer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.peer-card { margin: 8px 0; }
+.peer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
 .peer-title code { font-size: 0.95em; }
 .peer-metrics { display: flex; gap: 6px; flex-wrap: wrap; }
 
@@ -100,3 +106,45 @@ body.port-down header.toolbar { background: #2a2015; border-bottom-color: #6b5a2
 .mini-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
 .mini-table th, .mini-table td { border-bottom: 1px solid #303030; padding: 4px 6px; }
 .mini-table th { text-align: left; color: #aaa; font-weight: 600; }
+
+/* Sidebar Components */
+.sidebar-header { padding: 0 16px; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 10px; height: 40px; box-sizing: border-box; flex-shrink: 0; }
+.sidebar-nav { flex: 1; padding: 8px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.sidebar-footer { padding: 8px; border-top: 1px solid #333; }
+
+/* Nav Items */
+.nav-item { display: flex; align-items: center; padding: 6px 10px; color: #ccc; text-decoration: none; border-radius: 6px; transition: background 0.1s; }
+.nav-item:hover { background: #2a2a2a; color: #fff; }
+.nav-item.active { background: #333; color: #fff; font-weight: 500; }
+.nav-item .icon { margin-right: 10px; width: 20px; text-align: center; opacity: 0.7; }
+.nav-item:hover .icon, .nav-item.active .icon { opacity: 1; }
+
+/* Sidebar Toggle Button */
+.sidebar-toggle { background: transparent; border: none; color: #aaa; cursor: pointer; padding: 8px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; }
+
+/* Adjust Header for Sidebar Layout */
+header.site, header.site { border-bottom: 1px solid #333; background: #111; }
+/* When sidebar is present, header doesn't need to be sticky if main-content scrolls, but let's keep it sticky within main-content */
+.main-content header.site, .main-content header.site { position: sticky; top: 0; z-index: 10; }
+
+/* Hide brand in header if shown in sidebar, or adjust */
+.sidebar-header .brand { display: flex; align-items: center; gap: 10px; }
+.sidebar-header .brand .logo { width: 24px; height: 24px; font-size: 14px; }
+.sidebar-header .brand .logo-img { width: 24px; height: 24px; }
+.sidebar-header .brand-text { display: flex; align-items: baseline; gap: 6px; }
+.sidebar-header .brand-text .title { font-weight: 600; color: #fff; font-size: 16px; }
+.sidebar-header .brand-text .subtitle { color: #aaa; font-size: 12px; }
+
+/* Sidebar Sub-navigation */
+.nav-group { display: flex; flex-direction: column; }
+.nav-item-row { display: flex; align-items: center; width: 100%; }
+.nav-item-row .nav-item { flex-grow: 1; }
+.nav-expand { background: none; border: none; color: #aaa; cursor: pointer; font-size: 16px; padding: 0; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 4px; }
+.nav-expand:hover { color: #fff; background: #2a2a2a; }
+.nav-sub { padding-left: 0; background: rgba(0,0,0,0.2); display: none; }
+.nav-sub-item { display: block; padding: 4px 16px 4px 42px; color: #aaa; text-decoration: none; font-size: 13px; border-left: 3px solid transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-sub-item:hover { color: #fff; background: rgba(255,255,255,0.05); }
+.nav-sub-item.active { color: #fff; background: rgba(255,255,255,0.08); border-left-color: #4d88ff; }
+.nav-sub-empty { display: block; padding: 8px 16px 8px 42px; color: #666; font-style: italic; font-size: 12px; }
+.nav-more { background: none; border: none; color: #888; cursor: pointer; width: 100%; text-align: left; padding: 4px 16px 4px 42px; font-size: 12px; }
+.nav-more:hover { color: #ccc; }

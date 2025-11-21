@@ -568,7 +568,7 @@
       };
     }
     connectBtn.addEventListener('click', () => { if (isConnected()) { try { abortSlowPaste('Disconnecting'); ws.close(1000, 'Client requested disconnect'); } catch (_) {} } else { connectSelected(); } updateButton(); });
-    loadPorts().then(() => { const qpName = qs.get('console') || qs.get('port'); const qpAuto = truthyParam(qs.get('autoconnect')); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; const legacyAuto = !!qs.get('port') && !qs.has('autoconnect'); if (qpAuto || legacyAuto) { connectSelected(); } } updateButton(); updateSidebarHighlight(selectEl.value); const didAuto = (qpName && (qpAuto || (!!qs.get('port') && !qs.has('autoconnect')))); if (!didAuto) showSplash(); });
+    loadPorts().then(() => { const qpName = qs.get('console') || qs.get('port'); const qpAuto = truthyParam(qs.get('autoconnect')); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; const legacyAuto = !!qs.get('port') && !qs.has('autoconnect'); if (qpAuto || legacyAuto) { connectSelected(); } } updateButton(); if (qpName) updateSidebarHighlight(qpName); const didAuto = (qpName && (qpAuto || (!!qs.get('port') && !qs.has('autoconnect')))); if (!didAuto) showSplash(); });
 
     // Keyboard shortcut: Ctrl+] then 'r' to request read-write directly from Web UI
     window.addEventListener('keydown', (e) => {
