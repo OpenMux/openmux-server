@@ -57,9 +57,26 @@
           </a>
           {% if plugin_nav and plugin_nav|length > 0 %}
             {% for item in plugin_nav %}
-              <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="{{ base_path }}{{ item.path }}">
-                <span class="icon">🔌</span> {{ item.title }}
-              </a>
+              {% if item.path == '/plugins/config-editor' %}
+                 <div class="nav-group">
+                    <div class="nav-item-row">
+                        <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="#" onclick="toggleConfigMenu(event)" id="nav-config-parent">
+                            <span class="icon">⚙️</span> {{ item.title }}
+                        </a>
+                        <button class="nav-expand" id="config-expand-btn" onclick="toggleConfigMenu(event)">+</button>
+                    </div>
+                    <div class="nav-sub" id="config-menu" style="display:none">
+                        <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=ports" id="nav-config-ports">Ports</a>
+                        <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=muxcon" id="nav-config-muxcon">Muxcon</a>
+                        <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=setup" id="nav-config-setup">Setup</a>
+                        <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=reload" id="nav-config-reload">Reload</a>
+                    </div>
+                 </div>
+              {% else %}
+                <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="{{ base_path }}{{ item.path }}">
+                  <span class="icon">🔌</span> {{ item.title }}
+                </a>
+              {% endif %}
             {% endfor %}
           {% endif %}
         </nav>
@@ -130,6 +147,22 @@
                 localStorage.removeItem('omx_console_expanded');
             }
         };
+
+        window.toggleConfigMenu = function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const el = document.getElementById('config-menu');
+            const btn = document.getElementById('config-expand-btn');
+            if (el.style.display === 'none') {
+                el.style.display = 'block';
+                btn.textContent = '-';
+                localStorage.setItem('omx_config_expanded', '1');
+            } else {
+                el.style.display = 'none';
+                btn.textContent = '+';
+                localStorage.removeItem('omx_config_expanded');
+            }
+        };
         
         window.toggleMorePorts = function(e) {
             e.preventDefault();
@@ -144,6 +177,26 @@
         if (localStorage.getItem('omx_console_expanded')) {
              const el = document.getElementById('console-ports');
              const btn = document.getElementById('console-expand-btn');
+             if (el && btn) {
+                 el.style.display = 'block';
+                 btn.textContent = '-';
+             }
+        }
+        // Restore config menu state
+        if (localStorage.getItem('omx_config_expanded')) {
+             const el = document.getElementById('config-menu');
+             const btn = document.getElementById('config-expand-btn');
+             if (el && btn) {
+                 el.style.display = 'block';
+                 btn.textContent = '-';
+             }
+        }
+
+        // Auto-expand config menu if active
+        const configParent = document.getElementById('nav-config-parent');
+        if (configParent && configParent.classList.contains('active')) {
+             const el = document.getElementById('config-menu');
+             const btn = document.getElementById('config-expand-btn');
              if (el && btn) {
                  el.style.display = 'block';
                  btn.textContent = '-';

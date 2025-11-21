@@ -19,7 +19,7 @@
   .hint { color: #999; font-size: 12px; }
   .spacer { flex: 1; }
   .section { border:1px solid #333; padding:8px; margin:8px 0; background:#0f0f0f; }
-  .section > .legend { display:flex; align-items:baseline; gap:8px; margin-bottom: 4px; }
+  .section > .legend, .config-section > .legend { display:flex; align-items:baseline; gap:8px; margin-bottom: 4px; }
   .legend .title { font-weight:600; color:#ddd; font-size:16px; }
   .legend .desc { color:#888; font-size:12px; }
   .field { display:flex; gap:8px; align-items:center; margin:4px 0; }
@@ -28,19 +28,30 @@
   .field .default-hint { color:#777; font-size:12px; margin-left: 8px; }
   .field input[type="text"], .field input[type="number"], .field select { flex:1; padding:4px; background:#0d0d0d; color:#e7e7e7; border:1px solid #333; }
   .field input[type="checkbox"] { width: 16px; height: 16px; }
-  .tbl-wrap { margin: 6px 0; }
-  table.config { width:100%; border-collapse: collapse; }
-  table.config th, table.config td { border:1px solid #333; padding:4px; font-size: 13px; }
-  table.config th { background:#111; color:#ccc; text-align:left; }
-  table.config tr.editing td { background: #1a2330; }
-  table.config tr.editing td, table.config tr.editing th { border-color: #3a6ea5; }
-  table.config td .cell-muted { color:#777; }
-  .mini-btn { padding:2px 8px; font-size:12px; }
+  .tbl-wrap { margin: 12px 0; border: 1px solid #333; border-radius: 4px; overflow: hidden; background: #111; }
+  table.config { width:100%; border-collapse: collapse; border-spacing: 0; }
+  table.config th, table.config td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #333; font-size: 13px; }
+  table.config th { background: #1a1a1a; color: #e0e0e0; font-weight: 600; border-bottom: 1px solid #444; white-space: nowrap; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+  table.config td { color: #ccc; }
+  table.config tr:last-child td { border-bottom: none; }
+  table.config tr:hover td { background: #1f1f1f; }
+  table.config tr.editing td { background: #1a2330; color: #fff; }
+  table.config tr.editing td:first-child { border-left: 3px solid #3a6ea5; padding-left: 9px; }
+  table.config td .cell-muted { color: #666; font-style: italic; }
+  .tbl-wrap > div:last-child:not(:empty) { padding: 8px 12px; background: #161616; border-top: 1px solid #333; }
+  .mini-btn { padding: 4px 10px; font-size: 11px; border: 1px solid #444; background: #252525; color: #ccc; border-radius: 3px; cursor: pointer; margin-right: 6px; transition: all 0.2s; }
+  .mini-btn:hover { background: #333; color: #fff; border-color: #666; }
   .toolbar { display:flex; gap:8px; align-items:center; }
   .req { color:#d18; margin-left: 4px; font-size: 11px; }
   .subtle { color:#aaa; font-size: 12px; }
-  details.collapsible > summary { cursor: pointer; color:#ccc; }
-  details.collapsible { margin: 6px 0; }
+  
+  /* Section headers */
+  .config-section { margin-bottom: 24px; }
+  .section-header { display: flex; align-items: baseline; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid #333; margin-bottom: 12px; }
+  .section-header .title { font-size: 18px; font-weight: 600; color: #eee; }
+  .section-header .desc { font-size: 13px; color: #888; }
+
+
   .advisory { margin-top: 6px; min-height: 20px; }
   .advisory .warn { color: #f39c12; }
 </style>
@@ -61,46 +72,21 @@
 <div class="subtle" style="margin-top:6px">Fields marked with <span class="req">*</span> are required.</div>
 
 <div id="formRoot">
-  <details class="collapsible" open>
-    <summary><span class="title">Live reload</span> <span class="desc">Apply changes without full restart</span></summary>
-    <div class="section">
-      <div class="legend"><div class="title">Reload server config</div><div class="desc">Use these after Save to apply the active config file.</div></div>
-      <div class="field">
-        <label>Soft reload</label>
-        <button class="btn" id="softReloadBtn" type="button">Soft Reload</button>
-        <span class="help">Reloads YAML, updates authentication (users/API keys/PAM/public keys), and reconciles Serial/Loopback/Command/TCP-initiator ports without restarting listeners.</span>
-      </div>
-      <div class="field">
-        <label>Full reload</label>
-        <button class="btn" id="fullReloadBtn" type="button">Full Reload</button>
-        <span class="help">Stops and recreates adapters. Use when changing client listener, muxcon listeners/initiators, TLS, or other core settings. May briefly disconnect sessions.</span>
-      </div>
-      <details class="collapsible">
-        <summary><span class="title">When to use what</span> <span class="desc">Quick guidance</span></summary>
-        <div class="section">
-          <ul style="margin:0 0 0 18px; padding:0;">
-            <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/PAM), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator ports.</li>
-            <li>Use <b>Full Reload</b> for: Client listener enable/host/port changes, muxcon listeners/initiators, TLS enable/certs/TOFU settings, and other adapter-wide options.</li>
-            <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>
-          </ul>
-        </div>
-      </details>
-      <div class="status" id="reloadStatus"></div>
-    </div>
-  </details>
-  <details class="collapsible" open>
-    <summary><span class="title">Server</span> <span class="desc">Server identity and description</span></summary>
+  <div id="view-setup" class="config-view">
+
+  <div class="config-section">
+    <div class="section-header"><span class="title">Server</span> <span class="desc">Server identity and description</span></div>
     <div class="section">
       <div class="field"><label for="server.id">Server ID</label><input id="server.id" type="text" /></div>
       <div class="field"><label for="server.description">Description</label><input id="server.description" type="text" /></div>
       <div class="field"><label for="server.control_socket">Control socket path</label><input id="server.control_socket" type="text" placeholder="logs/openmux.sock" /><span class="help">Unix domain socket for local CLI control (status/reload). Env override: OPENMUX_CTL_SOCK.</span></div>
       <div class="field"><label for="server.pidfile">PID file path</label><input id="server.pidfile" type="text" placeholder="logs/openmux.pid" /><span class="help">PID file used for signal-based control (HUP soft reload, USR1 full reload). Env override: OPENMUX_PIDFILE.</span></div>
     </div>
-  </details>
+  </div>
 
-  <details class="collapsible" open>
-    <summary><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and PAM</span></summary>
-    <div class="section" id="authSection">
+  <div class="config-section">
+    <div class="section-header"><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and PAM</span></div>
+    <div id="authSection">
       <div class="legend"><div class="title">Users</div><div class="desc">Basic-auth accounts</div></div>
       <div id="auth.users"></div>
       <div class="legend" style="margin-top:10px"><div class="title">API Keys</div><div class="desc">Token auth</div></div>
@@ -108,23 +94,23 @@
       <div class="legend" style="margin-top:10px"><div class="title">Public Keys</div><div class="desc">Ed25519 keys with allowed_uses</div></div>
       <div id="auth.public_keys"></div>
       <div class="legend" style="margin-top:10px"><div class="title">PAM (System Auth)</div><div class="desc">Use UNIX accounts and groups</div></div>
+      <div class="section">
       <div class="field"><label for="auth.pam.enabled">Enable PAM</label><input id="auth.pam.enabled" type="checkbox" /></div>
       <div class="field"><label for="auth.pam.service_name">Service name</label><input id="auth.pam.service_name" type="text" placeholder="login" /><span class="help">PAM service to use (e.g., login, system-auth)</span></div>
       <div class="field"><label for="auth.pam.allow_root">Allow root</label><input id="auth.pam.allow_root" type="checkbox" /><span class="help">If unchecked, root user cannot log in via PAM</span></div>
       <div class="field"><label for="auth.pam.allowed_users">Allowed users</label><input id="auth.pam.allowed_users" type="text" placeholder="comma,separated,users" /><span class="help">Optional allowlist: only these users can authenticate via PAM</span></div>
-      <details class="collapsible">
-        <summary><span class="title">PAM Groups</span> <span class="desc">Map system groups to roles</span></summary>
-        <div class="section">
+      <div class="legend" style="margin-top:10px"><div class="title">PAM Groups</div><div class="desc">Map system groups to roles</div></div>
+      <div class="section">
           <div class="field"><label for="auth.pam.groups.admin_group">Admin group</label><input id="auth.pam.groups.admin_group" type="text" placeholder="openmux_admin" /></div>
           <div class="field"><label for="auth.pam.groups.write_group">Write group</label><input id="auth.pam.groups.write_group" type="text" placeholder="openmux_write" /></div>
           <div class="field"><label for="auth.pam.groups.read_group">Read group</label><input id="auth.pam.groups.read_group" type="text" placeholder="openmux_read" /></div>
-        </div>
-      </details>
+      </div>
+      </div>
     </div>
-  </details>
+  </div>
 
-  <details class="collapsible" open>
-    <summary><span class="title">Logging</span> <span class="desc">File and console logging</span></summary>
+  <div class="config-section">
+    <div class="section-header"><span class="title">Logging</span> <span class="desc">File and console logging</span></div>
     <div class="section">
       <div class="field"><label for="logging.level">Level</label>
         <select id="logging.level">
@@ -139,10 +125,52 @@
       <div class="field"><label for="logging.max_log_size">Max size</label><input id="logging.max_log_size" type="number" min="0" /></div>
       <div class="field"><label for="logging.log_backup_count">Backup count</label><input id="logging.log_backup_count" type="number" min="0" /></div>
     </div>
-  </details>
+  </div>
+  </div>
 
-  <details class="collapsible" open>
-    <summary><span class="title">Client listener</span> <span class="desc">TCP console endpoint</span></summary>
+  <div id="view-reload" class="config-view" style="display:none">
+  <div class="config-section">
+    <div class="section-header"><span class="title">Reload Actions</span> <span class="desc">Apply changes to the running server</span></div>
+    <div class="section">
+      <div class="field">
+        <label>Soft reload</label>
+        <button class="btn" id="softReloadBtn" type="button">Soft Reload</button>
+        <span class="help">Reloads YAML, updates authentication (users/API keys/PAM/public keys), and reconciles Serial/Loopback/Command/TCP-initiator ports without restarting listeners.</span>
+      </div>
+      <div class="field">
+        <label>Full reload</label>
+        <button class="btn" id="fullReloadBtn" type="button">Full Reload</button>
+        <span class="help">Stops and recreates adapters. Use when changing client listener, muxcon listeners/initiators, TLS, or other core settings. May briefly disconnect sessions.</span>
+      </div>
+      <div class="status" id="reloadStatus"></div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header"><span class="title">Guidance</span> <span class="desc">When to use what</span></div>
+    <div class="section">
+      <ul style="margin:0 0 0 18px; padding:0;">
+        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/PAM), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator ports.</li>
+        <li>Use <b>Full Reload</b> for: Client listener enable/host/port changes, muxcon listeners/initiators, TLS enable/certs/TOFU settings, and other adapter-wide options.</li>
+        <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>
+      </ul>
+    </div>
+  </div>
+  </div>
+
+  <div id="view-ports" class="config-view" style="display:none">
+  <div class="config-section">
+    <div class="section-header"><span class="title">Serial ports</span> <span class="desc">Physical serial devices</span></div>
+    <div id="serial_ports"></div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header"><span class="title">Command ports</span> <span class="desc">Process-backed ports</span></div>
+    <div id="command_ports"></div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header"><span class="title">Client listener</span> <span class="desc">TCP console endpoint</span></div>
     <div class="section">
       <div class="field"><label for="client_listener.enabled">Enable listener</label><input id="client_listener.enabled" type="checkbox" /></div>
       <div class="field"><label for="client_listener.host">Host</label><input id="client_listener.host" type="text" /></div>
@@ -150,55 +178,59 @@
       <div class="field"><label for="client_listener.max_connections">Max connections</label><input id="client_listener.max_connections" type="number" min="1" /></div>
       <div class="field"><label for="client_listener.connection_timeout">Timeout (s)</label><input id="client_listener.connection_timeout" type="number" min="1" /></div>
     </div>
-  </details>
+  </div>
 
-  <details class="collapsible" open>
-    <summary><span class="title">Serial ports</span> <span class="desc">Physical serial devices</span></summary>
-    <div class="section" id="serial_ports"></div>
-  </details>
+  <div class="config-section">
+    <div class="section-header"><span class="title">Loopback ports</span> <span class="desc">Software loopbacks</span></div>
+    <div id="loopback_ports"></div>
+  </div>
+  </div>
 
-  <details class="collapsible" open>
-    <summary><span class="title">Loopback ports</span> <span class="desc">Software loopbacks</span></summary>
-    <div class="section" id="loopback_ports"></div>
-  </details>
-
-  <details class="collapsible" open>
-    <summary><span class="title">Command ports</span> <span class="desc">Process-backed ports</span></summary>
-    <div class="section" id="command_ports"></div>
-  </details>
-
-  <details class="collapsible" open>
-    <summary><span class="title">Muxcon</span> <span class="desc">Federation and transport</span></summary>
+  <div id="view-muxcon" class="config-view" style="display:none">
+  <div class="config-section">
+    <div class="section-header"><span class="title">Muxcon</span> <span class="desc">Federation and transport</span></div>
     <div class="section" id="muxcon">
       <div class="field"><label for="muxcon.node_name">Node name (deprecated)</label><input id="muxcon.node_name" type="text" /></div>
-      <details class="collapsible">
-        <summary><span class="title">Advanced</span> <span class="desc">Timing, cache, filters, auth</span></summary>
-        <div class="section">
-          <div class="field"><label for="muxcon.heartbeat_interval">Heartbeat interval</label><input id="muxcon.heartbeat_interval" type="number" min="0" step="0.1" /></div>
-          <div class="field"><label for="muxcon.mpath_primary_stale_sec">MP stale sec</label><input id="muxcon.mpath_primary_stale_sec" type="number" min="0" step="0.1" /></div>
-          <div class="field"><label for="muxcon.mpath_failover_check_sec">MP check sec</label><input id="muxcon.mpath_failover_check_sec" type="number" min="0" step="0.1" /></div>
-          <div class="field"><label for="muxcon.mpath_strategy">MP strategy</label><select id="muxcon.mpath_strategy"><option value=""></option><option value="best_pref">best_pref</option></select></div>
-          <div class="field"><label for="muxcon.mpath_preemptive_promote">MP preemptive</label><input id="muxcon.mpath_preemptive_promote" type="checkbox" /></div>
-          <div class="field"><label for="muxcon.mpath_neighbor_idle_drop_sec">MP neighbor drop</label><input id="muxcon.mpath_neighbor_idle_drop_sec" type="number" min="0" step="0.1" /></div>
-          <div class="field"><label for="muxcon.federated_cache_enabled">Federated cache</label><input id="muxcon.federated_cache_enabled" type="checkbox" /></div>
-          <div class="field"><label for="muxcon.federated_cache_ttl_sec">Cache TTL (s)</label><input id="muxcon.federated_cache_ttl_sec" type="number" min="0" step="0.1" /></div>
-          <div class="field"><label for="muxcon.federated_cache_path">Cache path</label><input id="muxcon.federated_cache_path" type="text" /></div>
-          <div class="field"><label for="muxcon.auth_required">Auth required</label><input id="muxcon.auth_required" type="checkbox" /></div>
-          <div class="field"><label for="muxcon.auth_key_id">Auth key id</label><input id="muxcon.auth_key_id" type="text" /></div>
-          <div class="field"><label for="muxcon.auth_private_key">Private key</label><input id="muxcon.auth_private_key" type="text" /></div>
-        </div>
-      </details>
-      <div class="legend"><div class="title">Listeners</div><div class="desc">Incoming connections</div></div>
-      <div id="muxcon.listeners"></div>
-      <div class="legend" style="margin-top:10px"><div class="title">Initiators</div><div class="desc">Outgoing connections</div></div>
-      <div id="muxcon.initiators"></div>
-      <div class="legend" style="margin-top:10px"><div class="title">Public Keys</div><div class="desc">Ed25519 keys for muxcon federation</div></div>
-      <div id="muxcon.public_keys"></div>
     </div>
-  </details>
+  </div>
 
-  <details class="collapsible" open>
-    <summary><span class="title">Web status</span> <span class="desc">Read-only status server</span></summary>
+  <div class="config-section">
+    <div class="section-header"><span class="title">Listeners</span> <span class="desc">Incoming connections</span></div>
+    <div id="muxcon.listeners"></div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header"><span class="title">Initiators</span> <span class="desc">Outgoing connections</span></div>
+    <div id="muxcon.initiators"></div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header"><span class="title">Public Keys</span> <span class="desc">Ed25519 keys for muxcon federation</span></div>
+    <div id="muxcon.public_keys"></div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header"><span class="title">Advanced</span> <span class="desc">Timing, cache, filters, auth</span></div>
+    <div class="section">
+      <div class="field"><label for="muxcon.heartbeat_interval">Heartbeat interval</label><input id="muxcon.heartbeat_interval" type="number" min="0" step="0.1" /></div>
+      <div class="field"><label for="muxcon.mpath_primary_stale_sec">MP stale sec</label><input id="muxcon.mpath_primary_stale_sec" type="number" min="0" step="0.1" /></div>
+      <div class="field"><label for="muxcon.mpath_failover_check_sec">MP check sec</label><input id="muxcon.mpath_failover_check_sec" type="number" min="0" step="0.1" /></div>
+      <div class="field"><label for="muxcon.mpath_strategy">MP strategy</label><select id="muxcon.mpath_strategy"><option value=""></option><option value="best_pref">best_pref</option></select></div>
+      <div class="field"><label for="muxcon.mpath_preemptive_promote">MP preemptive</label><input id="muxcon.mpath_preemptive_promote" type="checkbox" /></div>
+      <div class="field"><label for="muxcon.mpath_neighbor_idle_drop_sec">MP neighbor drop</label><input id="muxcon.mpath_neighbor_idle_drop_sec" type="number" min="0" step="0.1" /></div>
+      <div class="field"><label for="muxcon.federated_cache_enabled">Federated cache</label><input id="muxcon.federated_cache_enabled" type="checkbox" /></div>
+      <div class="field"><label for="muxcon.federated_cache_ttl_sec">Cache TTL (s)</label><input id="muxcon.federated_cache_ttl_sec" type="number" min="0" step="0.1" /></div>
+      <div class="field"><label for="muxcon.federated_cache_path">Cache path</label><input id="muxcon.federated_cache_path" type="text" /></div>
+      <div class="field"><label for="muxcon.auth_required">Auth required</label><input id="muxcon.auth_required" type="checkbox" /></div>
+      <div class="field"><label for="muxcon.auth_key_id">Auth key id</label><input id="muxcon.auth_key_id" type="text" /></div>
+      <div class="field"><label for="muxcon.auth_private_key">Private key</label><input id="muxcon.auth_private_key" type="text" /></div>
+    </div>
+  </div>
+  </div>
+
+  <div id="view-setup-2" class="config-view">
+  <div class="config-section">
+    <div class="section-header"><span class="title">Web status</span> <span class="desc">Read-only status server</span></div>
     <div class="section">
       <div class="field"><label for="web_status.host">Host</label><input id="web_status.host" type="text" /></div>
       <div class="field"><label for="web_status.port">Port</label><input id="web_status.port" type="number" min="1" max="65535" /></div>
@@ -206,10 +238,10 @@
       <div class="field"><label for="web_status.cors_enable">CORS</label><input id="web_status.cors_enable" type="checkbox" /></div>
       <div class="field"><label for="web_status.enable_fault_injection">Fault injection</label><input id="web_status.enable_fault_injection" type="checkbox" /></div>
     </div>
-  </details>
+  </div>
 
-  <details class="collapsible" open>
-    <summary><span class="title">Web console</span> <span class="desc">Admin UI and WS console</span></summary>
+  <div class="config-section">
+    <div class="section-header"><span class="title">Web console</span> <span class="desc">Admin UI and WS console</span></div>
     <div class="section">
       <div class="field"><label for="web_console.host">Host</label><input id="web_console.host" type="text" /></div>
       <div class="field"><label for="web_console.port">Port</label><input id="web_console.port" type="number" min="1" max="65535" /></div>
@@ -231,10 +263,11 @@
       <div class="field"><label for="web_console.ssl_key">SSL key</label><input id="web_console.ssl_key" type="text" /></div>
       <div class="field"><label for="web_console.tls_autogen">Autogenerate cert</label><input id="web_console.tls_autogen" type="checkbox" /></div>
       <div class="field"><label for="web_console.tls_dir">TLS dir</label><input id="web_console.tls_dir" type="text" /></div>
-      <div class="legend"><div class="title">Plugins</div><div class="desc">Web plugin modules to load</div></div>
-      <div id="web_console.plugins"></div>
     </div>
-  </details>
+    <div class="legend"><div class="title">Plugins</div><div class="desc">Web plugin modules to load</div></div>
+    <div id="web_console.plugins"></div>
+  </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -250,6 +283,24 @@
         let activeEditorCleanup = null;
         let activeEditorValidate = null; // returns true if OK, false if missing required; also shows inline error
         let activeEditorSave = null; // programmatically save current editor if valid
+
+        let isDirty = false;
+        let isPopulating = false;
+        function markDirty(){ if(!isPopulating){ isDirty=true; updateStatus(); } }
+        function markClean(){ isDirty=false; updateStatus(); }
+        function updateStatus(){
+          const btn = document.getElementById('saveBtn');
+          if(btn){
+             if(isDirty) btn.textContent = 'Save *';
+             else btn.textContent = 'Save';
+          }
+        }
+        window.addEventListener('beforeunload', (e)=>{
+          if(isDirty){
+            e.preventDefault();
+            e.returnValue = '';
+          }
+        });
 
         function setStatus(ok, msg){ status.innerHTML=''; const el=document.createElement('div'); el.className=ok?'ok':'err'; el.textContent=msg; status.appendChild(el); }
 
@@ -456,12 +507,12 @@
   function buildTable(rootId, columns, options){ options = options||{}; const root = q(rootId); root.innerHTML=''; const wrap=document.createElement('div'); wrap.className='tbl-wrap'; const table=document.createElement('table'); table.className='config'; const thead=document.createElement('thead'); const tbody=document.createElement('tbody'); table.appendChild(thead); table.appendChild(tbody); wrap.appendChild(table); const addHost=document.createElement('div'); wrap.appendChild(addHost); root.appendChild(wrap);
     function renderHead(){ const tr=document.createElement('tr'); const visCols = columns.filter(c=>!c.hiddenList); visCols.forEach(c=>{const th=document.createElement('th'); const lbl=document.createElement('span'); lbl.textContent=c.label||c.key; th.appendChild(lbl); if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; th.appendChild(star); } tr.appendChild(th);}); const thA=document.createElement('th'); thA.textContent='Actions'; tr.appendChild(thA); thead.innerHTML=''; thead.appendChild(tr); }
           renderHead();
-    let rows=[]; let editingIndex=null; function setRows(newRows){ rows = Array.isArray(newRows)? JSON.parse(JSON.stringify(newRows)) : []; if(editingIndex!=null && editingIndex>=rows.length) editingIndex=null; renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); }catch(_e){} }
+    let rows=[]; let editingIndex=null; function setRows(newRows){ rows = Array.isArray(newRows)? JSON.parse(JSON.stringify(newRows)) : []; if(editingIndex!=null && editingIndex>=rows.length) editingIndex=null; renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} }
           function renderAddBar(){ addHost.innerHTML=''; if(editingIndex===null){ const addBar=document.createElement('div'); addBar.className='row'; const bA=document.createElement('button'); bA.className='btn'; bA.type='button'; bA.textContent='Add item'; bA.addEventListener('click',()=>{
                 // Open create editor without inserting a placeholder row; it will be added on save
                 editRow(rows.length);
               }); addBar.appendChild(bA); addHost.appendChild(addBar); } }
-  function renderBody(){ tbody.innerHTML=''; rows.forEach((row,idx)=>{ const tr=document.createElement('tr'); if(editingIndex===idx) tr.classList.add('editing'); const visCols = columns.filter(c=>!c.hiddenList); visCols.forEach(c=>{ const td=document.createElement('td'); const hasVal = !(row[c.key]===undefined || row[c.key]===null || row[c.key]===''); const v = hasVal ? row[c.key] : (c.default!==undefined ? c.default : undefined); td.textContent = toDisplay(v); td.className = (!hasVal && (c.default===undefined))? 'cell-muted':''; tr.appendChild(td); }); const tdA=document.createElement('td'); const bE=document.createElement('button'); bE.className='mini-btn'; bE.type='button'; bE.textContent='Edit'; bE.addEventListener('click',()=>{ if(activeEditorEl && typeof activeEditorValidate==='function'){ if(!activeEditorValidate()){ return; } } editRow(idx); }); const bR=document.createElement('button'); bR.className='mini-btn'; bR.type='button'; bR.textContent='Remove'; bR.addEventListener('click',()=>{ try{ if(typeof options.onBeforeRemove==='function'){ const proceed = options.onBeforeRemove(rows[idx], idx); if(proceed===false){ return; } } }catch(_e){} if(editingIndex===idx && activeEditorEl){ if(activeEditorEl.parentNode) activeEditorEl.parentNode.removeChild(activeEditorEl); activeEditorEl=null; if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; } rows.splice(idx,1); if(editingIndex!=null){ if(idx<editingIndex) editingIndex -= 1; else if(idx===editingIndex) editingIndex=null; } renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); }catch(_e){} }); tdA.appendChild(bE); tdA.appendChild(bR); tr.appendChild(tdA); tbody.appendChild(tr); }); renderAddBar(); }
+  function renderBody(){ tbody.innerHTML=''; rows.forEach((row,idx)=>{ const tr=document.createElement('tr'); if(editingIndex===idx) tr.classList.add('editing'); const visCols = columns.filter(c=>!c.hiddenList); visCols.forEach(c=>{ const td=document.createElement('td'); const hasVal = !(row[c.key]===undefined || row[c.key]===null || row[c.key]===''); const v = hasVal ? row[c.key] : (c.default!==undefined ? c.default : undefined); td.textContent = toDisplay(v); td.className = (!hasVal && (c.default===undefined))? 'cell-muted':''; tr.appendChild(td); }); const tdA=document.createElement('td'); const bE=document.createElement('button'); bE.className='mini-btn'; bE.type='button'; bE.textContent='Edit'; bE.addEventListener('click',()=>{ if(activeEditorEl && typeof activeEditorValidate==='function'){ if(!activeEditorValidate()){ return; } } editRow(idx); }); const bR=document.createElement('button'); bR.className='mini-btn'; bR.type='button'; bR.textContent='Remove'; bR.addEventListener('click',()=>{ try{ if(typeof options.onBeforeRemove==='function'){ const proceed = options.onBeforeRemove(rows[idx], idx); if(proceed===false){ return; } } }catch(_e){} if(editingIndex===idx && activeEditorEl){ if(activeEditorEl.parentNode) activeEditorEl.parentNode.removeChild(activeEditorEl); activeEditorEl=null; if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; } rows.splice(idx,1); if(editingIndex!=null){ if(idx<editingIndex) editingIndex -= 1; else if(idx===editingIndex) editingIndex=null; } renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} }); tdA.appendChild(bE); tdA.appendChild(bR); tr.appendChild(tdA); tbody.appendChild(tr); }); renderAddBar(); }
           function editRow(idx){ const row = rows[idx] || {}; if(activeEditorEl && activeEditorEl.parentNode){ activeEditorEl.parentNode.removeChild(activeEditorEl); } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; activeEditorSave=null; editingIndex = idx; renderBody(); const editor=document.createElement('div'); editor.className='section'; const lg=document.createElement('div'); lg.className='legend'; const t=document.createElement('div'); t.className='title'; t.textContent = (idx===rows.length)? 'Add item' : 'Edit item'; lg.appendChild(t); const d=document.createElement('div'); d.className='desc'; d.textContent='Fields marked * are required'; lg.appendChild(d); editor.appendChild(lg); const getters=[]; const reqChecks=[]; const errBox=document.createElement('div'); editor.appendChild(errBox);
             // Special inline row for serial 8-N-1 when editing serial_ports
             const isSerial = rootId==='serial_ports';
@@ -531,7 +582,7 @@
               if(c.placeholder){ input.placeholder=c.placeholder; }
               field.appendChild(input); if(c.help){ const help=document.createElement('span'); help.className='help'; help.textContent=c.help; field.appendChild(help);} if(c.default!==undefined){ const def=document.createElement('span'); def.className='default-hint'; const dval = (typeof c.default==='boolean') ? (c.default? 'true':'false') : String(c.default); def.textContent = `Default: ${dval}`; field.appendChild(def); } editor.appendChild(field); getters.push(()=>{ let v; if(c.type==='boolean') v=!!input.checked; else if(c.type==='number'||c.type==='integer') v=input.value!==''? Number(input.value):undefined; else if(c.type==='enum') v=input.value||undefined; else if(c.type==='array-string') v=input.value? input.value.split(',').map(s=>s.trim()).filter(s=>s.length>0):[]; else v=input.value||undefined; return [c.key, v]; }); if(c.required){ reqChecks.push(()=>{ const val = (c.type==='boolean')? !!input.checked : (c.type==='number'||c.type==='integer')? (input.value!=='' ? true : false) : (Array.isArray(input.value)? input.value.length>0 : (input.value && input.value.trim().length>0)); return {key:c.key, ok: !!val}; }); }
             });
-            const bar=document.createElement('div'); bar.className='row'; const bS=document.createElement('button'); bS.className='btn'; bS.textContent='Save item'; const bC=document.createElement('button'); bC.className='btn'; bC.textContent='Cancel'; bar.appendChild(bS); bar.appendChild(bC); editor.appendChild(bar); root.appendChild(editor); activeEditorEl = editor; activeEditorCleanup = ()=>{ editingIndex=null; renderBody(); }; activeEditorValidate = ()=>{ const missing = reqChecks.map(f=>f()).filter(r=>!r.ok).map(r=>r.key); if(missing.length>0){ errBox.className='err'; errBox.textContent = 'Missing required: ' + missing.join(', '); try{ editor.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){} return false; } errBox.textContent=''; return true; }; activeEditorSave = ()=>{ if(!activeEditorValidate || activeEditorValidate()){ const obj={}; getters.forEach(g=>{ const [k,v]=g(); if(v!==undefined) obj[k]=v; }); rows[idx]=obj; if(editor.parentNode) editor.parentNode.removeChild(editor); if(activeEditorEl===editor){ activeEditorEl=null; } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; activeEditorSave=null; renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); }catch(_e){} return true; } return false; };
+            const bar=document.createElement('div'); bar.className='row'; const bS=document.createElement('button'); bS.className='btn'; bS.textContent='Save item'; const bC=document.createElement('button'); bC.className='btn'; bC.textContent='Cancel'; bar.appendChild(bS); bar.appendChild(bC); editor.appendChild(bar); root.appendChild(editor); activeEditorEl = editor; activeEditorCleanup = ()=>{ editingIndex=null; renderBody(); }; activeEditorValidate = ()=>{ const missing = reqChecks.map(f=>f()).filter(r=>!r.ok).map(r=>r.key); if(missing.length>0){ errBox.className='err'; errBox.textContent = 'Missing required: ' + missing.join(', '); try{ editor.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){} return false; } errBox.textContent=''; return true; }; activeEditorSave = ()=>{ if(!activeEditorValidate || activeEditorValidate()){ const obj={}; getters.forEach(g=>{ const [k,v]=g(); if(v!==undefined) obj[k]=v; }); rows[idx]=obj; if(editor.parentNode) editor.parentNode.removeChild(editor); if(activeEditorEl===editor){ activeEditorEl=null; } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; activeEditorSave=null; renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} return true; } return false; };
             bS.addEventListener('click',()=>{ activeEditorSave && activeEditorSave(); }); bC.addEventListener('click',()=>{ if(editor.parentNode) editor.parentNode.removeChild(editor); if(activeEditorEl===editor){ activeEditorEl=null; } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } else { // Ensure editingIndex resets if cleanup not set
                 editingIndex=null; renderBody();
               } activeEditorValidate=null; activeEditorSave=null; }); }
@@ -1023,9 +1074,9 @@
           return out;
         }
 
-  async function loadCurrent(){ try{ const r=await fetch(withBase('/plugins/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } }
+  async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/plugins/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
   async function validateOnly(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Validation failed'); return; } try{ const r=await fetch(withBase('/plugins/config-editor/validate'),{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Validation OK'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Validation failed'); } }catch(e){ setStatus(false,String(e)); } }
-  async function saveConfig(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Save failed'); return; } try{ const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf; const r=await fetch(withBase('/plugins/config-editor/apply'),{method:'POST', headers, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Saved'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Save failed'); } }catch(e){ setStatus(false,String(e)); } }
+  async function saveConfig(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Save failed'); return; } try{ const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf; const r=await fetch(withBase('/plugins/config-editor/apply'),{method:'POST', headers, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ markClean(); setStatus(true,'Saved'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Save failed'); } }catch(e){ setStatus(false,String(e)); } }
 
         BTN('loadBtn').addEventListener('click', loadCurrent);
         BTN('validateBtn').addEventListener('click', validateOnly);
@@ -1080,11 +1131,88 @@
     if(!ok) return; doReload('full');
   }); }
 
+  function updateView() {
+      const params = new URLSearchParams(window.location.search);
+      const view = params.get('view') || 'ports';
+      
+      const vSetup = document.getElementById('view-setup');
+      const vPorts = document.getElementById('view-ports');
+      const vMuxcon = document.getElementById('view-muxcon');
+      const vSetup2 = document.getElementById('view-setup-2');
+      const vReload = document.getElementById('view-reload');
+      
+      const navSetup = document.getElementById('nav-config-setup');
+      const navPorts = document.getElementById('nav-config-ports');
+      const navMuxcon = document.getElementById('nav-config-muxcon');
+      const navReload = document.getElementById('nav-config-reload');
+      const navParent = document.getElementById('nav-config-parent');
+      const pageTitle = document.querySelector('.page');
+
+      if (view === 'ports') {
+          if(vSetup) vSetup.style.display = 'none';
+          if(vSetup2) vSetup2.style.display = 'none';
+          if(vMuxcon) vMuxcon.style.display = 'none';
+          if(vReload) vReload.style.display = 'none';
+          if(vPorts) vPorts.style.display = 'block';
+          
+          if(navSetup) navSetup.classList.remove('active');
+          if(navMuxcon) navMuxcon.classList.remove('active');
+          if(navReload) navReload.classList.remove('active');
+          if(navPorts) navPorts.classList.add('active');
+          if(pageTitle) pageTitle.textContent = 'Config Editor - Ports';
+      } else if (view === 'muxcon') {
+          if(vSetup) vSetup.style.display = 'none';
+          if(vSetup2) vSetup2.style.display = 'none';
+          if(vPorts) vPorts.style.display = 'none';
+          if(vReload) vReload.style.display = 'none';
+          if(vMuxcon) vMuxcon.style.display = 'block';
+          
+          if(navSetup) navSetup.classList.remove('active');
+          if(navPorts) navPorts.classList.remove('active');
+          if(navReload) navReload.classList.remove('active');
+          if(navMuxcon) navMuxcon.classList.add('active');
+          if(pageTitle) pageTitle.textContent = 'Config Editor - Muxcon';
+      } else if (view === 'reload') {
+          if(vSetup) vSetup.style.display = 'none';
+          if(vSetup2) vSetup2.style.display = 'none';
+          if(vPorts) vPorts.style.display = 'none';
+          if(vMuxcon) vMuxcon.style.display = 'none';
+          if(vReload) vReload.style.display = 'block';
+          
+          if(navSetup) navSetup.classList.remove('active');
+          if(navPorts) navPorts.classList.remove('active');
+          if(navMuxcon) navMuxcon.classList.remove('active');
+          if(navReload) navReload.classList.add('active');
+          if(pageTitle) pageTitle.textContent = 'Config Editor - Reload';
+      } else {
+          if(vSetup) vSetup.style.display = 'block';
+          if(vSetup2) vSetup2.style.display = 'block';
+          if(vPorts) vPorts.style.display = 'none';
+          if(vMuxcon) vMuxcon.style.display = 'none';
+          if(vReload) vReload.style.display = 'none';
+          
+          if(navSetup) navSetup.classList.add('active');
+          if(navPorts) navPorts.classList.remove('active');
+          if(navMuxcon) navMuxcon.classList.remove('active');
+          if(navReload) navReload.classList.remove('active');
+          if(pageTitle) pageTitle.textContent = 'Config Editor - Setup';
+      }
+      // Ensure parent is active
+      if(navParent) navParent.classList.add('active');
+  }
+
+  const formRoot = document.getElementById('formRoot');
+  if(formRoot){
+    formRoot.addEventListener('input', markDirty);
+    formRoot.addEventListener('change', markDirty);
+  }
+
   fetchCSRF();
   initStatic();
   injectHelps();
   injectDefaultHints();
   loadCurrent();
+  updateView();
       })();
 </script>
 {% endblock %}
