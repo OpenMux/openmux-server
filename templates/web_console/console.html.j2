@@ -77,7 +77,21 @@
   <script src="{{ base_path }}/static/xterm/lib/xterm.js"></script>
   <script src="{{ base_path }}/static/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
   <script>
-    const term = new Terminal({ convertEol: true, theme: { background: '#111111' } });
+    function getThemeColors() {
+      const style = getComputedStyle(document.documentElement);
+      return {
+        background: style.getPropertyValue('--bg-terminal').trim() || '#111',
+        foreground: style.getPropertyValue('--fg-terminal').trim() || '#fff'
+      };
+    }
+    const initialColors = getThemeColors();
+    const term = new Terminal({ convertEol: true, theme: { background: initialColors.background, foreground: initialColors.foreground } });
+    
+    window.addEventListener('theme-changed', () => {
+      const colors = getThemeColors();
+      term.options.theme = { background: colors.background, foreground: colors.foreground };
+    });
+
     const fitAddon = (window.FitAddon) ? new window.FitAddon.FitAddon() : null;
     if (fitAddon) term.loadAddon(fitAddon);
     const termEl = document.getElementById('term');

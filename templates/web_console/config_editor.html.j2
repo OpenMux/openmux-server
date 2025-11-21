@@ -14,46 +14,46 @@
   .row > * { margin: 0; }
   .status { margin-top: 8px; min-height: 24px; }
   .toolbar .status { margin-top: 0; min-height: 0; }
-  .status .ok { color: #2ecc71; }
-  .status .err { color: #e74c3c; white-space: pre-wrap; }
-  .hint { color: #999; font-size: 12px; }
+  .status .ok { color: var(--status-ok-color); }
+  .status .err { color: var(--status-err-color); white-space: pre-wrap; }
+  .hint { color: var(--text-muted); font-size: 12px; }
   .spacer { flex: 1; }
-  .section { border:1px solid #333; padding:8px; margin:8px 0; background:#0f0f0f; }
+  .section { border:1px solid var(--border-color); padding:8px; margin:8px 0; background:var(--bg-panel); }
   .section > .legend, .config-section > .legend { display:flex; align-items:baseline; gap:8px; margin-bottom: 4px; }
-  .legend .title { font-weight:600; color:#ddd; font-size:16px; }
-  .legend .desc { color:#888; font-size:12px; }
+  .legend .title { font-weight:600; color:var(--text-main); font-size:16px; }
+  .legend .desc { color:var(--text-muted); font-size:12px; }
   .field { display:flex; gap:8px; align-items:center; margin:4px 0; }
-  .field label { width: 220px; color:#bbb; }
-  .field .help { color:#888; font-size:12px; margin-left: 8px; }
-  .field .default-hint { color:#777; font-size:12px; margin-left: 8px; }
-  .field input[type="text"], .field input[type="number"], .field select { flex:1; padding:4px; background:#0d0d0d; color:#e7e7e7; border:1px solid #333; }
+  .field label { width: 220px; color:var(--text-main); }
+  .field .help { color:var(--text-muted); font-size:12px; margin-left: 8px; }
+  .field .default-hint { color:var(--text-muted); font-size:12px; margin-left: 8px; }
+  .field input[type="text"], .field input[type="number"], .field select { flex:1; padding:4px; background:var(--input-bg); color:var(--input-text); border:1px solid var(--border-color); }
   .field input[type="checkbox"] { width: 16px; height: 16px; }
-  .tbl-wrap { margin: 12px 0; border: 1px solid #333; border-radius: 4px; overflow: hidden; background: #111; }
+  .tbl-wrap { margin: 12px 0; border: 1px solid var(--border-color); border-radius: 4px; overflow: hidden; background: var(--bg-panel); }
   table.config { width:100%; border-collapse: collapse; border-spacing: 0; }
-  table.config th, table.config td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #333; font-size: 13px; }
-  table.config th { background: #1a1a1a; color: #e0e0e0; font-weight: 600; border-bottom: 1px solid #444; white-space: nowrap; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
-  table.config td { color: #ccc; }
+  table.config th, table.config td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border-color); font-size: 13px; }
+  table.config th { background: var(--table-header-bg); color: var(--table-header-text); font-weight: 600; border-bottom: 1px solid var(--border-color); white-space: nowrap; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+  table.config td { color: var(--text-main); }
   table.config tr:last-child td { border-bottom: none; }
-  table.config tr:hover td { background: #1f1f1f; }
-  table.config tr.editing td { background: #1a2330; color: #fff; }
-  table.config tr.editing td:first-child { border-left: 3px solid #3a6ea5; padding-left: 9px; }
-  table.config td .cell-muted { color: #666; font-style: italic; }
-  .tbl-wrap > div:last-child:not(:empty) { padding: 8px 12px; background: #161616; border-top: 1px solid #333; }
-  .mini-btn { padding: 4px 10px; font-size: 11px; border: 1px solid #444; background: #252525; color: #ccc; border-radius: 3px; cursor: pointer; margin-right: 6px; transition: all 0.2s; }
-  .mini-btn:hover { background: #333; color: #fff; border-color: #666; }
+  table.config tr:hover td { background: var(--table-row-hover); }
+  table.config tr.editing td { background: var(--table-row-active); color: var(--text-main); }
+  table.config tr.editing td:first-child { border-left: 3px solid var(--accent-color); padding-left: 9px; }
+  table.config td .cell-muted { color: var(--text-muted); font-style: italic; }
+  .tbl-wrap > div:last-child:not(:empty) { padding: 8px 12px; background: var(--bg-panel); border-top: 1px solid var(--border-color); }
+  .mini-btn { padding: 4px 10px; font-size: 11px; border: 1px solid var(--border-color); background: var(--btn-bg); color: var(--text-main); border-radius: 3px; cursor: pointer; margin-right: 6px; transition: all 0.2s; }
+  .mini-btn:hover { background: var(--btn-hover-bg); color: var(--text-main); border-color: var(--text-muted); }
   .toolbar { display:flex; gap:8px; align-items:center; }
-  .req { color:#d18; margin-left: 4px; font-size: 11px; }
-  .subtle { color:#aaa; font-size: 12px; }
+  .req { color:var(--req-color); margin-left: 4px; font-size: 11px; }
+  .subtle { color:var(--text-muted); font-size: 12px; }
   
   /* Section headers */
   .config-section { margin-bottom: 24px; }
-  .section-header { display: flex; align-items: baseline; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid #333; margin-bottom: 12px; }
-  .section-header .title { font-size: 18px; font-weight: 600; color: #eee; }
-  .section-header .desc { font-size: 13px; color: #888; }
+  .section-header { display: flex; align-items: baseline; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border-color); margin-bottom: 12px; }
+  .section-header .title { font-size: 18px; font-weight: 600; color: var(--text-main); }
+  .section-header .desc { font-size: 13px; color: var(--text-muted); }
 
 
   .advisory { margin-top: 6px; min-height: 20px; }
-  .advisory .warn { color: #f39c12; }
+  .advisory .warn { color: var(--warn-color); }
 </style>
 {% endblock %}
 

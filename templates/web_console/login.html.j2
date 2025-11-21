@@ -6,9 +6,20 @@
     <meta name="omx-base-path" content="{{ base_path }}" />
     <title>{{ realm }} Login</title>
   <link rel="stylesheet" href="{{ base_path }}/static/web_console.css" />
+  <script>
+    (function() {
+      try {
+        var theme = localStorage.getItem('omx_theme');
+        if (theme === 'light') {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      } catch(e) {}
+    })();
+  </script>
   </head>
   <body class="login">
-  <form class="card" method="POST" action="{{ base_path }}/login">
+  <form class="card" method="POST" action="{{ base_path }}/login" style="position: relative">
+      <button id="themeToggle" type="button" class="btn btn-icon" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; font-size: 16px; border-radius: 50%; background: transparent; border: none; color: var(--text-muted);" title="Toggle Theme">☀️</button>
       <div class="brand">
         {% if logo_url %}
           <img class="logo-img" src="{{ base_path }}{{ logo_url }}" alt="logo" />
@@ -20,7 +31,7 @@
           <div class="subtitle">Web Console</div>
         </div>
       </div>
-      {% if error %}<p style="color:#f66">Invalid username or password</p>{% endif %}
+      {% if error %}<p style="color:var(--status-err-text)">Invalid username or password</p>{% endif %}
       <h1>Sign in to {{ realm }}</h1>
       <input type="hidden" name="next" value="{{ next or '/' }}" />
       <input type="text" name="username" placeholder="Username" autocomplete="username" required />
@@ -29,4 +40,35 @@
       <div class="hint">After login you'll be redirected back.</div>
     </form>
   </body>
+  <script>
+      (function() {
+        const themeToggle = document.getElementById('themeToggle');
+        const THEME_KEY = 'omx_theme';
+
+        function setTheme(theme) {
+            if (theme === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+                if(themeToggle) themeToggle.textContent = '🌙';
+            } else {
+                document.documentElement.removeAttribute('data-theme');
+                if(themeToggle) themeToggle.textContent = '☀️';
+            }
+            localStorage.setItem(THEME_KEY, theme);
+        }
+
+        // Init theme state for button icon
+        const savedTheme = localStorage.getItem(THEME_KEY);
+        if (savedTheme) {
+            setTheme(savedTheme);
+        }
+
+        if (themeToggle) {
+            themeToggle.addEventListener('click', (e) => {
+                e.preventDefault();
+                const current = document.documentElement.getAttribute('data-theme');
+                setTheme(current === 'light' ? 'dark' : 'light');
+            });
+        }
+      })();
+    </script>
 </html>
