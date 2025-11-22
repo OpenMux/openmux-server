@@ -12,6 +12,34 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Optional, Set
 
 
+def _normalize_optional_str(value: Optional[Any]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_umask(value: Optional[Any]) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            # int(x, 0) respects prefixes like 0o for octal
+            parsed = int(text, 0)
+        elif isinstance(value, (int, float)):
+            parsed = int(value)
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    if parsed < 0:
+        return None
+    return parsed & 0o777
+
+
 def _normalize_str_set(values: Optional[Iterable[Any]], *, lower: bool = False) -> Set[str]:
     if not values:
         return set()
@@ -39,12 +67,20 @@ def _canonical_adapter_type(value: Optional[str]) -> str:
 
 
 @dataclass
+class CommandPrivilegePolicy:
+    enabled: bool = False
+    user: Optional[str] = None
+    group: Optional[str] = None
+    supplementary_groups: Set[str] = field(default_factory=set)
+    umask: Optional[int] = None
+
+
+@dataclass
 class SecurityPolicy:
     """In-memory representation of security.yaml.
 
     Attributes:
         allowed_modules: Python module dotted paths permitted for adapters.
-        allowed_sections: Config section names allowed for adapter instantiation.
         allowed_adapter_types: Adapter types (e.g. "serial") permitted in the
             unified adapter list.
         block_unlisted_modules: When True, adapters whose modules are not in
@@ -54,15 +90,16 @@ class SecurityPolicy:
         auth_rate_limits: Mapping containing ``window_seconds``,
             ``failure_threshold``, and ``base_lock_seconds`` overrides for
             AuthManager's failure tracker.
+        command_privilege_policy: Drop-to-user settings for the command adapter.
     """
 
     allowed_modules: Set[str] = field(default_factory=set)
-    allowed_sections: Set[str] = field(default_factory=set)
     allowed_adapter_types: Set[str] = field(default_factory=set)
     block_unlisted_modules: bool = True
     config_editor_writable_sections: Set[str] = field(default_factory=set)
     config_editor_enforced: bool = False
     auth_rate_limits: Dict[str, int] = field(default_factory=dict)
+    command_privilege_policy: CommandPrivilegePolicy = field(default_factory=CommandPrivilegePolicy)
 
     DEFAULT_ALLOWED_MODULES = {
         "openmux.server.adapters.loopback",
@@ -74,17 +111,6 @@ class SecurityPolicy:
         "openmux.server.adapters.muxcon",
         "openmux.server.adapters.web_status",
         "openmux.server.adapters.client_initiator",
-    }
-    DEFAULT_ALLOWED_SECTIONS = {
-        "loopback_ports",
-        "tcp_initiator_ports",
-        "serial_ports",
-        "command_ports",
-        "client_listener",
-        "web_console",
-        "muxcon",
-        "web_status",
-        "openmux_client_ports",
     }
     DEFAULT_ALLOWED_ADAPTER_TYPES = {
         "loopback",
@@ -109,14 +135,11 @@ class SecurityPolicy:
         adapters_cfg = (data.get("adapters") or {}) if isinstance(data, dict) else {}
         config_editor_cfg = (data.get("config_editor") or {}) if isinstance(data, dict) else {}
         rate_limits_cfg = (data.get("rate_limits") or {}) if isinstance(data, dict) else {}
+        command_cfg = (data.get("command_adapter") or {}) if isinstance(data, dict) else {}
 
         allowed_modules = _normalize_str_set(adapters_cfg.get("allowed_modules"))
         if not allowed_modules:
             allowed_modules = set(cls.DEFAULT_ALLOWED_MODULES)
-
-        allowed_sections = _normalize_str_set(adapters_cfg.get("allowed_sections"))
-        if not allowed_sections:
-            allowed_sections = set(cls.DEFAULT_ALLOWED_SECTIONS)
 
         allowed_adapter_types_raw = _normalize_str_set(
             adapters_cfg.get("allowed_adapter_types"), lower=True
@@ -146,21 +169,45 @@ class SecurityPolicy:
                 if isinstance(value, (int, float)):
                     auth_limits[key] = max(int(value), 1)
 
+        command_privileges = cls._parse_command_privileges(command_cfg)
+
         return cls(
             allowed_modules=allowed_modules,
-            allowed_sections=allowed_sections,
             allowed_adapter_types=allowed_adapter_types,
             block_unlisted_modules=block_unlisted,
             config_editor_writable_sections=writable_sections,
             config_editor_enforced=enforce_editor,
             auth_rate_limits=auth_limits,
+            command_privilege_policy=command_privileges,
+        )
+
+    @staticmethod
+    def _parse_command_privileges(command_cfg: Dict[str, Any]) -> CommandPrivilegePolicy:
+        if not isinstance(command_cfg, dict):
+            return CommandPrivilegePolicy()
+        drop_cfg = command_cfg.get("drop_privileges") or {}
+        if not isinstance(drop_cfg, dict):
+            return CommandPrivilegePolicy()
+        enabled = drop_cfg.get("enabled")
+        enabled_flag = True if enabled is None else bool(enabled)
+        user = _normalize_optional_str(drop_cfg.get("user"))
+        group = _normalize_optional_str(drop_cfg.get("group"))
+        supplementary = _normalize_str_set(drop_cfg.get("supplementary_groups"))
+        umask = _parse_umask(drop_cfg.get("umask"))
+        if not (user or group or supplementary or umask is not None):
+            return CommandPrivilegePolicy(enabled=False)
+        return CommandPrivilegePolicy(
+            enabled=enabled_flag,
+            user=user,
+            group=group,
+            supplementary_groups=supplementary,
+            umask=umask,
         )
 
     def is_adapter_allowed(
         self,
         *,
         module_name: Optional[str],
-        config_section: Optional[str],
         adapter_type: Optional[str],
     ) -> bool:
         """Return True if the adapter is permitted under this policy."""
@@ -172,10 +219,6 @@ class SecurityPolicy:
         if adapter_type:
             canon = _canonical_adapter_type(adapter_type)
             if self.allowed_adapter_types and canon not in self.allowed_adapter_types:
-                return False
-
-        if config_section:
-            if self.allowed_sections and config_section not in self.allowed_sections:
                 return False
 
         return True
@@ -195,3 +238,6 @@ class SecurityPolicy:
 
     def is_config_editor_enforced(self) -> bool:
         return self.config_editor_enforced
+
+    def get_command_privilege_policy(self) -> CommandPrivilegePolicy:
+        return self.command_privilege_policy

@@ -42,21 +42,20 @@ def dummy_registry():
     return registry
 
 
-def _policy(allowed_section):
+def _policy(allowed_types):
     module_name = DummyAdapter.__module__
     return SecurityPolicy.from_mapping(
         {
             "adapters": {
                 "allowed_modules": [module_name],
-                "allowed_sections": [allowed_section],
-                "allowed_adapter_types": ["dummy"],
+                "allowed_adapter_types": allowed_types,
             }
         }
     )
 
 
 def test_factory_creates_adapter_when_policy_allows(dummy_registry):
-    policy = _policy("dummy_section")
+    policy = _policy(["dummy"])
     factory = GenericAdapterFactory(dummy_registry, security_policy=policy)
     config = {"server": {}, "authentication": {}, "dummy_section": []}
 
@@ -66,8 +65,8 @@ def test_factory_creates_adapter_when_policy_allows(dummy_registry):
     assert isinstance(adapters[0], DummyAdapter)
 
 
-def test_factory_blocks_adapter_when_policy_denies_section(dummy_registry):
-    policy = _policy("other_section")
+def test_factory_blocks_adapter_when_policy_denies_type(dummy_registry):
+    policy = _policy(["other"])
     factory = GenericAdapterFactory(dummy_registry, security_policy=policy)
     config = {"server": {}, "authentication": {}, "dummy_section": []}
 

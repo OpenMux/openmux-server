@@ -6,11 +6,9 @@ from openmux.server.security_policy import SecurityPolicy
 def test_security_policy_defaults_allow_built_ins():
     policy = SecurityPolicy.from_mapping(None)
 
-    assert "serial_ports" in policy.allowed_sections
     assert not policy.is_config_editor_enforced()
     assert policy.is_adapter_allowed(
         module_name="openmux.server.adapters.serial",
-        config_section="serial_ports",
         adapter_type="serial",
     )
 
@@ -37,7 +35,6 @@ def test_security_policy_canonicalizes_adapter_types():
         {
             "adapters": {
                 "allowed_modules": [module_name],
-                "allowed_sections": ["dummy_section"],
                 "allowed_adapter_types": ["Tcp-Initiator"],
             }
         }
@@ -45,11 +42,38 @@ def test_security_policy_canonicalizes_adapter_types():
 
     assert policy.is_adapter_allowed(
         module_name=module_name,
-        config_section="dummy_section",
         adapter_type="tcp_initiator",
     )
     assert not policy.is_adapter_allowed(
         module_name=module_name,
-        config_section="blocked_section",
-        adapter_type="tcp_initiator",
+        adapter_type="serial",
     )
+
+
+def test_security_policy_parses_command_privilege_policy():
+    policy = SecurityPolicy.from_mapping(
+        {
+            "command_adapter": {
+                "drop_privileges": {
+                    "user": "openmux",
+                    "group": "tty",
+                    "supplementary_groups": ["dialout", "uucp"],
+                    "umask": "0o077",
+                }
+            }
+        }
+    )
+
+    drop = policy.get_command_privilege_policy()
+    assert drop.enabled is True
+    assert drop.user == "openmux"
+    assert drop.group == "tty"
+    assert drop.supplementary_groups == {"dialout", "uucp"}
+    assert drop.umask == 0o077
+
+
+def test_security_policy_disables_command_privileges_when_missing():
+    policy = SecurityPolicy.from_mapping({})
+    drop = policy.get_command_privilege_policy()
+    assert drop.enabled is False
+    assert drop.user is None

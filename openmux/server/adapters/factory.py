@@ -427,11 +427,9 @@ class GenericAdapterFactory:
         adapter_type: Optional[str],
     ) -> bool:
         module_name = getattr(plugin.adapter_class, "__module__", None)
-        section = plugin.config_section
         return policy.is_adapter_allowed(
             module_name=module_name,
-            config_section=section,
-            adapter_type=(adapter_type or section),
+            adapter_type=(adapter_type or plugin.config_section),
         )
 
     def _create_adapter_instances(self, plugin: AdapterPlugin, plugin_config: Any) -> List[BaseGenericAdapter]:
@@ -479,6 +477,13 @@ class GenericAdapterFactory:
 
         # Create adapter instance
         adapter = adapter_class(adapter_name, adapter_config)
+        if self.security_policy is not None:
+            setter = getattr(adapter, "set_security_policy", None)
+            if callable(setter):
+                try:
+                    setter(self.security_policy)
+                except Exception:
+                    logger.warning("Adapter %s failed to accept security policy", adapter_name, exc_info=True)
 
         # Create and attach port manager for dynamic lifecycle management
         port_manager = DynamicPortManager(adapter)

@@ -1,0 +1,52 @@
+# Security policy for OpenMux server components.
+# - Controls which adapter modules/types may be instantiated.
+# - Defines which sections the Config Editor can modify.
+# - Provides authentication rate-limit tuning.
+
+adapters:
+  block_unlisted: true
+  allowed_modules:
+    - openmux.server.adapters.loopback
+    - openmux.server.adapters.tcp_initiator
+    - openmux.server.adapters.serial
+    - openmux.server.adapters.command
+    - openmux.server.adapters.client_listener
+    - openmux.server.adapters.web_console
+    - openmux.server.adapters.muxcon
+    - openmux.server.adapters.web_status
+    - openmux.server.adapters.client_initiator
+  allowed_adapter_types:
+    - loopback
+    - tcp_initiator
+    - serial
+    - command
+    - client_listener
+    - web_console
+    - muxcon
+    - web_status
+    - openmux_client
+
+config_editor:
+  writable_sections:
+    - server
+    - logging
+    - loopback_ports
+    - serial_ports
+    - command_ports
+    - tcp_initiator_ports
+
+rate_limits:
+  authentication:
+    window_seconds: 300
+    failure_threshold: 5
+    base_lock_seconds: 30
+
+command_adapter:
+  drop_privileges:
+    # When the server runs as root, command adapter subprocesses can shed
+    # privileges before exec. Specify the target user/group here.
+    user: openmux
+    group: openmux
+    supplementary_groups:
+      - dialout
+    umask: 0o077

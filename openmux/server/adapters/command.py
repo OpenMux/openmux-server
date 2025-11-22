@@ -7,6 +7,8 @@ Provides command execution ports that run external processes.
 import asyncio
 import logging
 import os
+import pwd
+import grp
 import pty
 import shlex
 import signal
@@ -17,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
+from ..security_policy import CommandPrivilegePolicy
 
 
 class CommandPort:
@@ -60,10 +63,17 @@ class CommandPort:
 
     state: PortState  # enforced contract annotation
 
-    def __init__(self, name: str, config: Dict[str, Any], adapter: "CommandAdapter"):
+    def __init__(
+        self,
+        name: str,
+        config: Dict[str, Any],
+        adapter: "CommandAdapter",
+        privilege_policy: Optional[CommandPrivilegePolicy] = None,
+    ):
         self.name = name
         self.config = config
         self.adapter = adapter
+        self._privilege_policy = privilege_policy
         self.state = PortState.CONFIGURED
         self.logger = logging.getLogger(f"openmux.adapter.command.{name}")
 
@@ -310,6 +320,8 @@ class CommandPort:
             bool: True if the process was spawned and I/O initialized.
         """
         try:
+            drop_spec = self._resolve_privilege_drop_spec()
+            preexec_fn = self._build_preexec_fn(drop_spec)
             # Do not alter the user's command based on shell name.
             # If interactive flags are needed, they should be included in the configured command.
 
@@ -356,6 +368,14 @@ class CommandPort:
                 env.pop(bad, None)
             if isinstance(self.env, dict):
                 env.update(self.env)
+            if drop_spec:
+                user_name = drop_spec.get("user_name")
+                if user_name:
+                    env.setdefault("USER", user_name)
+                    env.setdefault("LOGNAME", user_name)
+                home_dir = drop_spec.get("home")
+                if home_dir:
+                    env.setdefault("HOME", home_dir)
 
             if self.use_pty:
                 try:
@@ -377,7 +397,7 @@ class CommandPort:
                             stderr=slave_fd,
                             cwd=self.cwd,
                             env=env,
-                            preexec_fn=os.setsid,
+                            preexec_fn=preexec_fn,
                         )
                     else:
                         parts = shlex.split(self.command)
@@ -388,7 +408,7 @@ class CommandPort:
                             stderr=slave_fd,
                             cwd=self.cwd,
                             env=env,
-                            preexec_fn=os.setsid,
+                            preexec_fn=preexec_fn,
                         )
                     try:
                         os.close(slave_fd)
@@ -408,6 +428,7 @@ class CommandPort:
                         stderr=asyncio.subprocess.STDOUT,
                         cwd=self.cwd,
                         env=env,
+                        preexec_fn=preexec_fn,
                     )
                 else:
                     parts = shlex.split(self.command)
@@ -418,6 +439,7 @@ class CommandPort:
                         stderr=asyncio.subprocess.STDOUT,
                         cwd=self.cwd,
                         env=env,
+                        preexec_fn=preexec_fn,
                     )
 
             # Readers/Writers
@@ -449,6 +471,138 @@ class CommandPort:
         except Exception as e:
             self.logger.error(f"Error spawning process for {self.name}: {e}", exc_info=True)
             return False
+
+    def _resolve_privilege_drop_spec(self) -> Optional[Dict[str, Any]]:
+        policy = getattr(self, "_privilege_policy", None)
+        if not policy:
+            return None
+        enabled = bool(getattr(policy, "enabled", False))
+        if not enabled:
+            return None
+        user_identifier = getattr(policy, "user", None)
+        group_identifier = getattr(policy, "group", None)
+        supplementary_cfg = set(getattr(policy, "supplementary_groups", set()) or set())
+        umask = getattr(policy, "umask", None)
+        require_root = bool(user_identifier or group_identifier or supplementary_cfg)
+        euid = os.geteuid()
+        if require_root and euid != 0:
+            self.logger.info(
+                "Command port %s requested privilege drop (user=%r group=%r) but server runs as euid=%s; skipping drop",
+                self.name,
+                user_identifier,
+                group_identifier,
+                euid,
+            )
+            user_identifier = None
+            group_identifier = None
+            supplementary_cfg = set()
+            require_root = False
+        uid = None
+        user_name = None
+        home_dir = None
+        pwd_record = None
+        if user_identifier:
+            pwd_record = self._lookup_user_record(user_identifier)
+            uid = pwd_record.pw_uid
+            user_name = pwd_record.pw_name
+            home_dir = pwd_record.pw_dir
+        gid = None
+        group_name = None
+        if group_identifier:
+            gid, group_name = self._lookup_group_record(group_identifier)
+        elif pwd_record is not None:
+            gid = pwd_record.pw_gid
+            try:
+                group_entry = grp.getgrgid(gid)
+                group_name = group_entry.gr_name
+            except KeyError:
+                group_name = None
+        supplementary_ids: List[int] = []
+        for grp_name in sorted(supplementary_cfg):
+            gid_value, _ = self._lookup_group_record(grp_name)
+            if gid_value not in supplementary_ids:
+                supplementary_ids.append(gid_value)
+        if uid is None and gid is None and not supplementary_ids and umask is None:
+            return None
+        if uid is not None or gid is not None or supplementary_ids:
+            self.logger.info(
+                "Command port %s will drop privileges user=%s gid=%s supp=%s",
+                self.name,
+                user_name or uid,
+                gid,
+                supplementary_ids,
+            )
+        return {
+            "uid": uid,
+            "gid": gid,
+            "user_name": user_name,
+            "group_name": group_name,
+            "home": home_dir,
+            "supplementary_gids": supplementary_ids if supplementary_ids else None,
+            "umask": umask,
+        }
+
+    @staticmethod
+    def _lookup_user_record(identifier: Any):
+        if isinstance(identifier, int):
+            try:
+                return pwd.getpwuid(identifier)
+            except KeyError as exc:
+                raise RuntimeError(f"User id {identifier} not found") from exc
+        text = str(identifier).strip()
+        if not text:
+            raise RuntimeError("Privilege drop user must be non-empty")
+        try:
+            if text.isdigit():
+                return pwd.getpwuid(int(text))
+            return pwd.getpwnam(text)
+        except KeyError as exc:
+            raise RuntimeError(f"User {text!r} not found") from exc
+
+    @staticmethod
+    def _lookup_group_record(identifier: Any):
+        if isinstance(identifier, int):
+            try:
+                entry = grp.getgrgid(identifier)
+            except KeyError as exc:
+                raise RuntimeError(f"Group id {identifier} not found") from exc
+            return entry.gr_gid, entry.gr_name
+        text = str(identifier).strip()
+        if not text:
+            raise RuntimeError("Privilege drop group must be non-empty")
+        try:
+            if text.isdigit():
+                entry = grp.getgrgid(int(text))
+                return entry.gr_gid, entry.gr_name
+            entry = grp.getgrnam(text)
+            return entry.gr_gid, entry.gr_name
+        except KeyError as exc:
+            raise RuntimeError(f"Group {text!r} not found") from exc
+
+    def _build_preexec_fn(self, drop_spec: Optional[Dict[str, Any]]):
+        needs_setsid = bool(self.use_pty)
+        if not needs_setsid and not drop_spec:
+            return None
+
+        def _preexec():
+            if needs_setsid:
+                os.setsid()
+            if not drop_spec:
+                return
+            umask = drop_spec.get("umask")
+            if isinstance(umask, int):
+                os.umask(umask)
+            supplementary = drop_spec.get("supplementary_gids")
+            if supplementary:
+                os.setgroups(supplementary)
+            gid = drop_spec.get("gid")
+            if gid is not None:
+                os.setgid(gid)
+            uid = drop_spec.get("uid")
+            if uid is not None:
+                os.setuid(uid)
+
+        return _preexec
 
     def _on_pty_read_ready(self):
         """Low-level PTY readability callback registered with event loop.
@@ -1109,6 +1263,8 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         super().__init__(plugin_name, config)
         self.ports: Dict[str, CommandPort] = {}
         self.logger = logging.getLogger(f"openmux.adapter.command.{plugin_name}")
+        self.security_policy = None
+        self._privilege_policy: Optional[CommandPrivilegePolicy] = None
 
     @property
     def adapter_type(self) -> str:
@@ -1129,6 +1285,13 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             AdapterCapability.PROVIDES_PORTS,
             AdapterCapability.BIDIRECTIONAL_DATA,
         }
+
+    def set_security_policy(self, policy) -> None:
+        self.security_policy = policy
+        try:
+            self._privilege_policy = policy.get_command_privilege_policy() if policy else None
+        except AttributeError:
+            self._privilege_policy = None
 
     @classmethod
     def validate_config(cls, config: Dict[str, Any]) -> bool:
@@ -1196,7 +1359,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             CommandPort | None: Created port on success; None on failure.
         """
         try:
-            command_port = CommandPort(port_name, config, self)
+            command_port = CommandPort(port_name, config, self, privilege_policy=self._privilege_policy)
             # Start immediately unless configured for on-demand spawn
             if getattr(command_port, "spawn_on_demand", False):
                 # Do not spawn the process yet; mark as configured
