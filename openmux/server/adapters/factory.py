@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Type
 
 from .base_adapter import BaseGenericAdapter
 from .lifecycle import DynamicPortManager
+from ..security_policy import SecurityPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +222,11 @@ class GenericAdapterFactory:
     enabled (default) missing or invalid adapters abort startup.
     """
 
-    def __init__(self, registry: Optional[PluginRegistry] = None):
+    def __init__(
+        self,
+        registry: Optional[PluginRegistry] = None,
+        security_policy: Optional[SecurityPolicy] = None,
+    ):
         """Create a factory bound to a plugin registry.
 
         If no registry is provided, a default `PluginRegistry` with built-in
@@ -231,8 +236,13 @@ class GenericAdapterFactory:
             registry: Optional external registry to use.
         """
         self.registry = registry or PluginRegistry()
+        self.security_policy = security_policy
 
-    def create_adapters_from_config(self, config: Dict[str, Any]) -> List[BaseGenericAdapter]:
+    def create_adapters_from_config(
+        self,
+        config: Dict[str, Any],
+        security_policy: Optional[SecurityPolicy] = None,
+    ) -> List[BaseGenericAdapter]:
         """Create all adapter instances from configuration.
 
         Args:
@@ -245,6 +255,7 @@ class GenericAdapterFactory:
             RuntimeError: In fail-fast mode when required adapters are missing.
         """
         adapters = []
+        policy = security_policy or self.security_policy
         # Fail-fast defaults to True unless explicitly set to False in either
         # top-level 'fail_fast_adapters' or 'server.fail_fast_adapters'. Any
         # truthy value keeps it enabled. Only explicit boolean false disables.
@@ -308,6 +319,15 @@ class GenericAdapterFactory:
                             logger.error(f"Invalid configuration for {adapter_type} adapter")
                             continue
 
+                    # Security policy enforcement
+                    if policy and not self._is_adapter_allowed(policy, plugin, adapter_type):
+                        logger.error(
+                            "Adapter '%s' (type=%s) blocked by security policy",
+                            adapter_name,
+                            adapter_type,
+                        )
+                        continue
+
                     # Create adapter instance
                     adapter = adapter_class(adapter_name, adapter_config)
                     adapters.append(adapter)
@@ -347,6 +367,24 @@ class GenericAdapterFactory:
                             logger.error(f"Invalid configuration for {plugin.name}")
                             raise ValueError(f"Invalid configuration for {plugin.name}")
 
+                    # Security policy enforcement (legacy sections)
+                    atype = None
+                    get_type = getattr(adapter_class, "get_adapter_type", None)
+                    if callable(get_type):
+                        try:
+                            atype = get_type(adapter_class)
+                        except Exception:
+                            try:
+                                atype = get_type()
+                            except Exception:
+                                atype = None
+                    if policy and not self._is_adapter_allowed(policy, plugin, atype):
+                        logger.error(
+                            "Adapter section '%s' blocked by security policy",
+                            plugin.config_section,
+                        )
+                        continue
+
                     # Create adapter instance(s) - all inherit from BaseGenericAdapter
                     created_adapters = self._create_adapter_instances(plugin, plugin_config)
                     adapters.extend(created_adapters)
@@ -378,6 +416,23 @@ class GenericAdapterFactory:
 
         logger.info(f"Successfully created {len(adapters)} total adapter instances")
         return adapters  # Returns List[BaseGenericAdapter]
+
+    def set_security_policy(self, policy: Optional[SecurityPolicy]) -> None:
+        self.security_policy = policy
+
+    def _is_adapter_allowed(
+        self,
+        policy: SecurityPolicy,
+        plugin: AdapterPlugin,
+        adapter_type: Optional[str],
+    ) -> bool:
+        module_name = getattr(plugin.adapter_class, "__module__", None)
+        section = plugin.config_section
+        return policy.is_adapter_allowed(
+            module_name=module_name,
+            config_section=section,
+            adapter_type=(adapter_type or section),
+        )
 
     def _create_adapter_instances(self, plugin: AdapterPlugin, plugin_config: Any) -> List[BaseGenericAdapter]:
         """Create one or more adapter instances for a plugin.

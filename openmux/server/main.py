@@ -27,7 +27,14 @@ class OpenMuxServer:
     The legacy connection adapter framework has been removed.
     """
 
-    def __init__(self, config_path: str, log_level: Optional[str] = None):
+    def __init__(
+        self,
+        config_path: str,
+        *,
+        auth_config_path: Optional[str] = None,
+        security_config_path: Optional[str] = None,
+        log_level: Optional[str] = None,
+    ):
         """Construct a server bound to a configuration file.
 
         Args:
@@ -38,8 +45,13 @@ class OpenMuxServer:
         self.logger = logging.getLogger("openmux.server")
 
         # Load configuration
-        self.config_manager = ConfigManager(config_path)
-        self.config_manager.load_config()
+        self.config_manager = ConfigManager(
+            config_path,
+            auth_config_path=auth_config_path,
+            security_config_path=security_config_path,
+        )
+        self.security_policy = None
+        self._reload_config_from_disk()
 
         # After loading config, re-evaluate logging level from config.logging.level (if present)
         try:
@@ -59,7 +71,10 @@ class OpenMuxServer:
             pass
 
         # Initialize core components
-        self.auth_manager = AuthManager(self.config_manager.get_authentication_config())
+        self.auth_manager = AuthManager(
+            self.config_manager.get_authentication_config(),
+            security_policy=self.security_policy,
+        )
         self.port_manager = PortManager({})
         # Expose config manager to port manager so adapters can reach server id
         try:
@@ -80,7 +95,7 @@ class OpenMuxServer:
         # Initialize unified adapters (for port adapters: loopback, serial, command, etc.)
         from .adapters import GenericAdapterFactory
 
-        self.unified_adapter_factory = GenericAdapterFactory()
+        self.unified_adapter_factory = GenericAdapterFactory(security_policy=self.security_policy)
         self.unified_adapters = []
 
         # Server state
@@ -92,6 +107,31 @@ class OpenMuxServer:
         self._control_socket_path = None
 
         # Legacy connection adapter configuration removed; unified adapters handle connections where applicable
+
+    def _refresh_security_policy(self) -> None:
+        try:
+            policy = self.config_manager.get_security_policy()
+        except Exception as exc:
+            self.logger.warning("Failed to load security policy: %s", exc)
+            return
+        self.security_policy = policy
+        auth = getattr(self, "auth_manager", None)
+        if auth and hasattr(auth, "update_security_policy"):
+            try:
+                auth.update_security_policy(policy)
+            except Exception:
+                self.logger.warning("AuthManager failed to apply security policy", exc_info=True)
+        factory = getattr(self, "unified_adapter_factory", None)
+        if factory and hasattr(factory, "set_security_policy"):
+            try:
+                factory.set_security_policy(policy)
+            except Exception:
+                self.logger.warning("Adapter factory failed to accept security policy", exc_info=True)
+
+    def _reload_config_from_disk(self) -> Dict[str, Any]:
+        cfg = self.config_manager.load_config()
+        self._refresh_security_policy()
+        return cfg
 
     async def _initialize_server_components(self):
         """Initialize server components and monitor shutdown event.
@@ -125,7 +165,7 @@ class OpenMuxServer:
         try:
             # Get the full configuration
             if not self.config_manager.config:
-                self.config_manager.load_config()
+                self._reload_config_from_disk()
 
             full_config = self.config_manager.config
             if not full_config:
@@ -618,7 +658,7 @@ class OpenMuxServer:
 
         try:
             # Load new configuration
-            self.config_manager.load_config()
+            self._reload_config_from_disk()
 
             # Update core components
             await self.auth_manager.update_config(self.config_manager.get_authentication_config())
@@ -711,7 +751,7 @@ class OpenMuxServer:
             self.logger.info(f"[reload-soft:{req_id}] Loading config from {cfg_path}")
             import time as _t
             _t0 = _t.time()
-            new_cfg = self.config_manager.load_config()
+            new_cfg = self._reload_config_from_disk()
             self.logger.info(f"[reload-soft:{req_id}] Config loaded in {_t.time()-_t0:.3f}s")
         except Exception as e:
             self.logger.error(f"[reload-soft:{req_id}] Config load failed: {e}", exc_info=True)
@@ -912,7 +952,7 @@ class OpenMuxServer:
                 self.logger.info(f"[reload-full:{req_id}] Loading config from {cfg_path}")
                 import time as _t
                 _t0 = _t.time()
-                self.config_manager.load_config()
+                self._reload_config_from_disk()
                 self.logger.info(f"[reload-full:{req_id}] Config loaded in {_t.time()-_t0:.3f}s")
             except Exception as e:
                 self.logger.error(f"Full reload: config load failed: {e}")
@@ -1147,6 +1187,14 @@ def _parse_arguments():
         help="Path to configuration file",
     )
     parser.add_argument(
+        "--auth-config",
+        help="Path to authentication configuration file (authentication.yaml)",
+    )
+    parser.add_argument(
+        "--security-config",
+        help="Path to security configuration file (security.yaml)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -1235,7 +1283,7 @@ def _setup_shutdown_handlers(loop, server):
     async def soft_reload_coroutine():
         try:
             # Reload config (for logging level and runtime settings)
-            server.config_manager.load_config()
+            server._reload_config_from_disk()
             # Reconfigure logging level from config if provided
             try:
                 cfg = getattr(server.config_manager, "config", {}) or {}
@@ -1371,6 +1419,8 @@ def main():
 
     # Find and validate config file
     config_path = _find_config_file(args.config)
+    auth_config = args.auth_config
+    security_config = args.security_config
 
     # Determine initial log level from CLI or config.logging.level
     cli_level = None
@@ -1381,7 +1431,11 @@ def main():
 
     config_level = None
     try:
-        cm = ConfigManager(config_path)
+        cm = ConfigManager(
+            config_path,
+            auth_config_path=auth_config,
+            security_config_path=security_config,
+        )
         cfg = cm.load_config()
         log_cfg = (cfg or {}).get("logging", {})
         lvl = log_cfg.get("level")
@@ -1391,7 +1445,12 @@ def main():
         config_level = None
 
     initial_level = cli_level or config_level or "WARNING"
-    server = OpenMuxServer(config_path, log_level=initial_level)
+    server = OpenMuxServer(
+        config_path,
+        auth_config_path=auth_config,
+        security_config_path=security_config,
+        log_level=initial_level,
+    )
     loop = None
 
     try:
@@ -1408,7 +1467,11 @@ def main():
             if not pidfile:
                 # Try config runtime.pidfile, else fall back to logs/openmux.pid
                 try:
-                    cm2 = ConfigManager(config_path)
+                    cm2 = ConfigManager(
+                        config_path,
+                        auth_config_path=auth_config,
+                        security_config_path=security_config,
+                    )
                     cfg2 = cm2.load_config() or {}
                     # Preferred location: server.pidfile
                     server_cfg = (cfg2 or {}).get("server", {}) or {}
@@ -1456,7 +1519,12 @@ def main():
             if not pidfile:
                 # Try to mirror the same resolution as during write, but best-effort only
                 try:
-                    cm3 = ConfigManager(_find_config_file(_parse_arguments().config))
+                    parsed_args = _parse_arguments()
+                    cm3 = ConfigManager(
+                        _find_config_file(parsed_args.config),
+                        auth_config_path=parsed_args.auth_config,
+                        security_config_path=parsed_args.security_config,
+                    )
                     cfg3 = cm3.load_config() or {}
                     pidfile = ((cfg3.get("server", {}) or {}).get("pidfile")
                                or (cfg3.get("runtime", {}) or {}).get("pidfile"))

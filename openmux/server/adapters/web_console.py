@@ -33,6 +33,7 @@ from typing import Callable
 
 from aiohttp import web
 from openmux.server.port_utils import safe_get_port
+from openmux.server.web_plugins import ADAPTER_APP_KEY
 import secrets
 import urllib.parse
 import importlib
@@ -200,7 +201,7 @@ async def auth_middleware(request: web.Request, handler):
     Public paths: /healthz, /livez, /readyz, /login, /static/*
     If not authenticated, redirect to /login?next=<original>.
     """
-    adapter = request.app.get("adapter")
+    adapter = request.app.get(ADAPTER_APP_KEY)
     if adapter is None:
         return web.Response(status=500, text="Adapter not initialized\n")
 
@@ -323,7 +324,7 @@ async def auth_middleware(request: web.Request, handler):
 
 
 async def handle_index(request: web.Request) -> web.Response:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     try:
         q = request.query_string or ""
         lq = q.lower()
@@ -369,7 +370,7 @@ async def handle_index(request: web.Request) -> web.Response:
 
 
 async def handle_console(request: web.Request) -> web.Response:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     try:
         username = request.get("username")
         try:
@@ -403,7 +404,7 @@ async def handle_console(request: web.Request) -> web.Response:
 
 
 async def handle_status(request: web.Request) -> web.Response:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     try:
         # Build an aggregated status payload similar to WebStatus adapter + CLI script
         data: Dict[str, Any] = {}
@@ -453,7 +454,7 @@ async def handle_status(request: web.Request) -> web.Response:
 
 async def handle_login(request: web.Request) -> web.Response:
     """Render login page (GET) or process login (POST)."""
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     if request.method == "POST":
         try:
             data = await request.post()
@@ -537,7 +538,7 @@ async def handle_login(request: web.Request) -> web.Response:
 
 
 async def handle_logout(request: web.Request) -> web.Response:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     # Remove session and expire cookie
     try:
         sid = request.cookies.get(adapter._session_cookie_name)
@@ -562,7 +563,7 @@ async def handle_logout(request: web.Request) -> web.Response:
 
 
 async def handle_api_ports(request: web.Request) -> web.Response:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     try:
         import json
 
@@ -583,7 +584,7 @@ async def handle_api_reload(request: web.Request) -> web.Response:
       - command_ports
       - tcp_initiator_ports
     """
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     # Require auth and permission
     username = request.get("username")
     if not username:
@@ -704,7 +705,7 @@ async def handle_api_reload(request: web.Request) -> web.Response:
 
 
 async def handle_healthz(request: web.Request) -> web.Response:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     if not adapter.enable_probes:
         raise web.HTTPNotFound()
     if adapter.probes_include_details:
@@ -716,7 +717,7 @@ async def handle_healthz(request: web.Request) -> web.Response:
 
 
 async def handle_livez(request: web.Request) -> web.Response:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     if not adapter.enable_probes:
         raise web.HTTPNotFound()
     if adapter.probes_include_details:
@@ -728,7 +729,7 @@ async def handle_livez(request: web.Request) -> web.Response:
 
 
 async def handle_readyz(request: web.Request) -> web.Response:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     if not adapter.enable_probes:
         raise web.HTTPNotFound()
     ready = True
@@ -754,7 +755,7 @@ async def handle_readyz(request: web.Request) -> web.Response:
 
 
 async def handle_ws(request: web.Request) -> web.StreamResponse:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username") or "web"
     port_name = request.match_info.get("port_name")
     if not port_name:
@@ -920,7 +921,7 @@ async def handle_ws_fqpn(request: web.Request) -> web.StreamResponse:
     This allows selecting among duplicate port names coming from different origins.
     If no exact match exists, a 404 is returned.
     """
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username") or "web"
     server_id = request.match_info.get("server_id")
     port_name = request.match_info.get("port_name")
@@ -1320,7 +1321,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 self.logger.warning(f"Template/static preparation warning: {prep_err}")
 
             app = web.Application(middlewares=[auth_middleware])
-            app["adapter"] = self
+            app[ADAPTER_APP_KEY] = self
 
             # --- Routes ---
             # Static files at /static/

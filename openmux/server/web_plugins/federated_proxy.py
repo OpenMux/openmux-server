@@ -6,6 +6,8 @@ import json
 import time
 from aiohttp import web, ClientSession, ClientTimeout
 from typing import Any, Dict, Optional, Tuple
+
+from . import ADAPTER_APP_KEY
 from urllib.parse import urlsplit
 
 # Federated admin proxy plugin (skeleton). Proxies selected admin endpoints to
@@ -14,7 +16,7 @@ from urllib.parse import urlsplit
 
 
 async def _handle_list(request: web.Request) -> web.StreamResponse:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()
@@ -230,7 +232,7 @@ async def _handle_proxy(request: web.Request) -> web.StreamResponse:
     V1 behavior: admin-only, GET-only, returns 501 Not Implemented (WS and HTTP pass-through to be added).
     Computes effective X-Forwarded-Prefix for upstream planning.
     """
-    adapter = request.app.get("adapter")
+    adapter = request.app.get(ADAPTER_APP_KEY)
     if adapter is None:
         raise web.HTTPInternalServerError(text="Adapter not available")
     # Admin-only guard

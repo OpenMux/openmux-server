@@ -59,6 +59,9 @@
 
   .advisory { margin-top: 6px; min-height: 20px; }
   .advisory .warn { color: var(--warn-color); }
+  [data-config-section].read-only { opacity: 0.6; position: relative; }
+  .read-only-note { font-size: 12px; color: var(--warn-color, #b45309); font-weight: 600; margin: 6px 0; }
+  [data-config-section].read-only .tbl-wrap.locked { pointer-events: none; }
 </style>
 {% endblock %}
 
@@ -79,7 +82,7 @@
 <div id="formRoot">
   <div id="view-setup" class="config-view">
 
-  <div class="config-section">
+  <div class="config-section" data-config-section="server">
     <div class="section-header"><span class="title">Server</span> <span class="desc">Server identity and description</span></div>
     <div class="section">
       <div class="field"><label for="server.id">Server ID</label><input id="server.id" type="text" /></div>
@@ -89,7 +92,7 @@
     </div>
   </div>
 
-  <div class="config-section">
+  <div class="config-section" data-config-section="authentication">
     <div class="section-header"><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and PAM</span></div>
     <div id="authSection">
       <div class="legend"><div class="title">Users</div><div class="desc">Basic-auth accounts</div></div>
@@ -114,7 +117,7 @@
     </div>
   </div>
 
-  <div class="config-section">
+  <div class="config-section" data-config-section="logging">
     <div class="section-header"><span class="title">Logging</span> <span class="desc">File and console logging</span></div>
     <div class="section">
       <div class="field"><label for="logging.level">Level</label>
@@ -129,6 +132,17 @@
       <div class="field"><label for="logging.log_dir">Log Dir</label><input id="logging.log_dir" type="text" /></div>
       <div class="field"><label for="logging.max_log_size">Max size</label><input id="logging.max_log_size" type="number" min="0" /></div>
       <div class="field"><label for="logging.log_backup_count">Backup count</label><input id="logging.log_backup_count" type="number" min="0" /></div>
+    </div>
+  </div>
+
+  <div class="config-section" data-config-section="client_listener">
+    <div class="section-header"><span class="title">Client listener</span> <span class="desc">TCP console endpoint</span></div>
+    <div class="section">
+      <div class="field"><label for="client_listener.enabled">Enable listener</label><input id="client_listener.enabled" type="checkbox" /></div>
+      <div class="field"><label for="client_listener.host">Host</label><input id="client_listener.host" type="text" /></div>
+      <div class="field"><label for="client_listener.port">Port</label><input id="client_listener.port" type="number" min="1" max="65535" /></div>
+      <div class="field"><label for="client_listener.max_connections">Max connections</label><input id="client_listener.max_connections" type="number" min="1" /></div>
+      <div class="field"><label for="client_listener.connection_timeout">Timeout (s)</label><input id="client_listener.connection_timeout" type="number" min="1" /></div>
     </div>
   </div>
   </div>
@@ -164,57 +178,51 @@
   </div>
 
   <div id="view-ports" class="config-view" style="display:none">
-  <div class="config-section">
+  <div class="config-section" data-config-section="serial_ports">
     <div class="section-header"><span class="title">Serial ports</span> <span class="desc">Physical serial devices</span></div>
     <div id="serial_ports"></div>
   </div>
 
-  <div class="config-section">
+  <div class="config-section" data-config-section="loopback_ports">
+    <div class="section-header"><span class="title">Loopback ports</span> <span class="desc">Software loopbacks</span></div>
+    <div id="loopback_ports"></div>
+  </div>
+
+  <div class="config-section" data-config-section="command_ports">
     <div class="section-header"><span class="title">Command ports</span> <span class="desc">Process-backed ports</span></div>
     <div id="command_ports"></div>
   </div>
 
-  <div class="config-section">
-    <div class="section-header"><span class="title">Client listener</span> <span class="desc">TCP console endpoint</span></div>
-    <div class="section">
-      <div class="field"><label for="client_listener.enabled">Enable listener</label><input id="client_listener.enabled" type="checkbox" /></div>
-      <div class="field"><label for="client_listener.host">Host</label><input id="client_listener.host" type="text" /></div>
-      <div class="field"><label for="client_listener.port">Port</label><input id="client_listener.port" type="number" min="1" max="65535" /></div>
-      <div class="field"><label for="client_listener.max_connections">Max connections</label><input id="client_listener.max_connections" type="number" min="1" /></div>
-      <div class="field"><label for="client_listener.connection_timeout">Timeout (s)</label><input id="client_listener.connection_timeout" type="number" min="1" /></div>
-    </div>
-  </div>
-
-  <div class="config-section">
-    <div class="section-header"><span class="title">Loopback ports</span> <span class="desc">Software loopbacks</span></div>
-    <div id="loopback_ports"></div>
+  <div class="config-section" data-config-section="tcp_initiator_ports">
+    <div class="section-header"><span class="title">TCP initiator ports</span> <span class="desc">Outbound TCP adapters</span></div>
+    <div id="tcp_initiator_ports"></div>
   </div>
   </div>
 
   <div id="view-muxcon" class="config-view" style="display:none">
-  <div class="config-section">
+  <div class="config-section" data-config-section="muxcon">
     <div class="section-header"><span class="title">Muxcon</span> <span class="desc">Federation and transport</span></div>
     <div class="section" id="muxcon">
       <div class="field"><label for="muxcon.node_name">Node name (deprecated)</label><input id="muxcon.node_name" type="text" /></div>
     </div>
   </div>
 
-  <div class="config-section">
+  <div class="config-section" data-config-section="muxcon">
     <div class="section-header"><span class="title">Listeners</span> <span class="desc">Incoming connections</span></div>
     <div id="muxcon.listeners"></div>
   </div>
 
-  <div class="config-section">
+  <div class="config-section" data-config-section="muxcon">
     <div class="section-header"><span class="title">Initiators</span> <span class="desc">Outgoing connections</span></div>
     <div id="muxcon.initiators"></div>
   </div>
 
-  <div class="config-section">
+  <div class="config-section" data-config-section="web_status">
     <div class="section-header"><span class="title">Public Keys</span> <span class="desc">Ed25519 keys for muxcon federation</span></div>
     <div id="muxcon.public_keys"></div>
   </div>
 
-  <div class="config-section">
+  <div class="config-section" data-config-section="web_console">
     <div class="section-header"><span class="title">Advanced</span> <span class="desc">Timing, cache, filters, auth</span></div>
     <div class="section">
       <div class="field"><label for="muxcon.heartbeat_interval">Heartbeat interval</label><input id="muxcon.heartbeat_interval" type="number" min="0" step="0.1" /></div>
@@ -234,7 +242,7 @@
   </div>
 
   <div id="view-setup-2" class="config-view">
-  <div class="config-section">
+  <div class="config-section" data-config-section="web_status">
     <div class="section-header"><span class="title">Web status</span> <span class="desc">Read-only status server</span></div>
     <div class="section">
       <div class="field"><label for="web_status.host">Host</label><input id="web_status.host" type="text" /></div>
@@ -245,7 +253,7 @@
     </div>
   </div>
 
-  <div class="config-section">
+  <div class="config-section" data-config-section="web_console">
     <div class="section-header"><span class="title">Web console</span> <span class="desc">Admin UI and WS console</span></div>
     <div class="section">
       <div class="field"><label for="web_console.host">Host</label><input id="web_console.host" type="text" /></div>
@@ -287,6 +295,10 @@
         const BTN = (id) => document.getElementById(id);
         let csrf = null;
         let current = {};
+        const INITIAL_WRITABLE_SECTIONS = {{ writable_sections|default([])|tojson|safe }};
+        const INITIAL_WRITABLE_ENFORCED = {{ writable_enforced|default(False)|tojson|safe }};
+        let writableSections = new Set(Array.isArray(INITIAL_WRITABLE_SECTIONS) ? INITIAL_WRITABLE_SECTIONS : []);
+        let writableEnforced = !!INITIAL_WRITABLE_ENFORCED;
         // Ensure a single open editor globally
         let activeEditorEl = null;
         let activeEditorCleanup = null;
@@ -310,6 +322,89 @@
             e.returnValue = '';
           }
         });
+
+        function sectionIsWritable(section){
+          if(!writableEnforced){
+            return true;
+          }
+          if(!section){
+            return writableSections.size > 0;
+          }
+          if(writableSections.size === 0){
+            return false;
+          }
+          return writableSections.has(section);
+        }
+
+        function applyWritableState(){
+          const sections = document.querySelectorAll('[data-config-section]');
+          sections.forEach((sec)=>{
+            const name = sec.getAttribute('data-config-section');
+            const writable = sectionIsWritable(name);
+            const enforced = writableEnforced;
+            sec.classList.toggle('read-only', enforced && !writable);
+            let note = sec.querySelector('.read-only-note');
+            if(enforced && !writable){
+              if(!note){
+                note = document.createElement('div');
+                note.className = 'read-only-note';
+                note.textContent = 'Read-only (security policy)';
+                const header = sec.querySelector('.section-header');
+                if(header && header.nextSibling){
+                  sec.insertBefore(note, header.nextSibling);
+                } else {
+                  sec.insertBefore(note, sec.firstChild);
+                }
+              }
+            } else if(note){
+              note.remove();
+            }
+            const controls = sec.querySelectorAll('input, select, textarea, button');
+            controls.forEach((ctrl)=>{
+              if(ctrl.dataset.allowReadonly === 'true') return;
+              if(enforced && !writable){
+                if(!ctrl.hasAttribute('data-prev-disabled')){
+                  ctrl.setAttribute('data-prev-disabled', ctrl.disabled ? '1' : '0');
+                }
+                ctrl.disabled = true;
+              } else if(ctrl.hasAttribute('data-prev-disabled')){
+                const prev = ctrl.getAttribute('data-prev-disabled');
+                ctrl.disabled = (prev === '1');
+                ctrl.removeAttribute('data-prev-disabled');
+              }
+            });
+            sec.querySelectorAll('.tbl-wrap').forEach((wrap)=>{
+              wrap.classList.toggle('locked', enforced && !writable);
+            });
+          });
+          const saveBtn = document.getElementById('saveBtn');
+          if(saveBtn){
+            if(writableEnforced && writableSections.size === 0){
+              if(!saveBtn.hasAttribute('data-prev-disabled')){
+                saveBtn.setAttribute('data-prev-disabled', saveBtn.disabled ? '1' : '0');
+              }
+              saveBtn.disabled = true;
+            } else if(saveBtn.hasAttribute('data-prev-disabled')){
+              const prev = saveBtn.getAttribute('data-prev-disabled');
+              saveBtn.disabled = (prev === '1');
+              saveBtn.removeAttribute('data-prev-disabled');
+            } else {
+              saveBtn.disabled = false;
+            }
+          }
+        }
+
+        function setWritableMetadata(sections, enforced){
+          if(Array.isArray(sections)){
+            writableSections = new Set(sections.map((s)=>String(s)));
+          } else {
+            writableSections = new Set();
+          }
+          if(typeof enforced === 'boolean'){
+            writableEnforced = enforced;
+          }
+          applyWritableState();
+        }
 
         function setStatus(ok, msg){ status.innerHTML=''; const el=document.createElement('div'); el.className=ok?'ok':'err'; el.textContent=msg; status.appendChild(el); }
 
@@ -733,6 +828,20 @@
             interactive: 'Allocate interactive TTY-like behavior.',
             always_buffer: 'Buffer early output until first client connects.'
           },
+          'tcp_initiator_ports': {
+            name: 'Logical name for this TCP initiator port.',
+            description: 'Optional description for the TCP initiator port.',
+            host: 'Remote host/IP to connect to.',
+            port: 'Remote TCP port number.',
+            use_tls: 'Enable TLS for the outbound connection.',
+            ssl_verify: 'Verify TLS certificates when TLS is enabled.',
+            timeout: 'Connection timeout in seconds.',
+            auto_reconnect: 'Automatically reconnect when the session drops.',
+            reconnect_delay: 'Seconds to wait before the next reconnect attempt.',
+            enable_batching: 'Buffer small writes briefly before sending to reduce syscall overhead.',
+            batch_size: 'Maximum bytes to accumulate before flushing a batch.',
+            batch_timeout: 'Maximum time to wait before flushing a batch (seconds).'
+          },
           'muxcon.listeners': {
             enabled: 'Enable or disable this listener entry.',
             host: 'Bind address for incoming muxcon connections.',
@@ -795,6 +904,7 @@
           'serial_ports': { baudrate: 115200, bytesize: 8, parity: 'N', stopbits: 1 },
           'loopback_ports': { max_read_write_users: 5, echo_delay: 0.0, buffer_size: 1024, sanitize_control: true },
           'command_ports': { max_read_write_users: 1, shell: false },
+          'tcp_initiator_ports': { use_tls: false, ssl_verify: true, timeout: 10.0, auto_reconnect: true, reconnect_delay: 5.0, enable_batching: true, batch_size: 1024, batch_timeout: 0.015 },
           // Default-safe: TLS on by default for muxcon listeners
           'muxcon.listeners': { use_tls: true, require_client_cert: false, tls_autogen: true },
           'muxcon.initiators': {
@@ -910,6 +1020,21 @@
             {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
             {key:'interactive', label:'Interactive', type:'boolean'},
             {key:'always_buffer', label:'Always buffer', type:'boolean'}
+          ])));
+
+          tables['tcp_initiator_ports'] = buildTable('tcp_initiator_ports', annotateColumnsWithDefaults('tcp_initiator_ports', annotateColumnsWithHelp('tcp_initiator_ports', [
+            {key:'name', label:'Name', type:'string', required:true},
+            {key:'description', label:'Description', type:'string'},
+            {key:'host', label:'Host', type:'string', required:true},
+            {key:'port', label:'Port', type:'integer', min:1, max:65535, required:true},
+            {key:'use_tls', label:'Use TLS', type:'boolean'},
+            {key:'ssl_verify', label:'Verify TLS', type:'boolean'},
+            {key:'timeout', label:'Timeout (s)', type:'number', min:0, step:0.1},
+            {key:'auto_reconnect', label:'Auto reconnect', type:'boolean'},
+            {key:'reconnect_delay', label:'Reconnect delay (s)', type:'number', min:0, step:0.1},
+            {key:'enable_batching', label:'Batch writes', type:'boolean'},
+            {key:'batch_size', label:'Batch size (bytes)', type:'integer', min:1},
+            {key:'batch_timeout', label:'Batch timeout (s)', type:'number', min:0, step:0.001}
           ])));
 
           tables['muxcon.listeners'] = buildTable('muxcon.listeners', annotateColumnsWithDefaults('muxcon.listeners', annotateColumnsWithHelp('muxcon.listeners', [
@@ -1031,6 +1156,8 @@
           tables['serial_ports']._set(deepGet(current, 'serial_ports')||[]);
           tables['loopback_ports']._set(deepGet(current, 'loopback_ports')||[]);
           tables['command_ports']._set(deepGet(current, 'command_ports')||[]);
+          const tcpInitPorts = deepGet(current, 'tcp_initiator_ports') || deepGet(current, 'openmux_client_ports') || [];
+          tables['tcp_initiator_ports']._set(Array.isArray(tcpInitPorts) ? tcpInitPorts : []);
 
           setVal('muxcon.node_name', deepGet(current, 'muxcon.node_name'));
           setVal('muxcon.heartbeat_interval', deepGet(current, 'muxcon.heartbeat_interval'));
@@ -1147,6 +1274,7 @@
           const sps = tables['serial_ports']._get(); if(sps && sps.length>0) deepSet(out,'serial_ports', sps);
           const lps = tables['loopback_ports']._get(); if(lps && lps.length>0) deepSet(out,'loopback_ports', lps);
           const cps = tables['command_ports']._get(); if(cps && cps.length>0) deepSet(out,'command_ports', cps);
+          const tips = tables['tcp_initiator_ports']._get(); if(tips && tips.length>0) deepSet(out,'tcp_initiator_ports', tips);
           // muxcon
           const listeners = tables['muxcon.listeners']._get(); const initsFlat = tables['muxcon.initiators']._get(); const inits = (initsFlat||[]).map(it=>{ const {host,port,share_ports,accept_ports,request_ports, ...rest}=it; const opts={}; Object.keys(rest||{}).forEach(k=>{ if(k.startsWith('options.')){ const kk = k.substring('options.'.length); opts[kk] = rest[k]; } }); const obj={}; if(host!==undefined) obj.host=host; if(port!==undefined) obj.port=port; if(Array.isArray(share_ports)) obj.share_ports=share_ports; if(Array.isArray(accept_ports)) obj.accept_ports=accept_ports; if(Array.isArray(request_ports)) obj.request_ports=request_ports; if(Object.keys(opts).length>0) obj.options=opts; return obj; }); const muxcon={}; if(getVal('muxcon.node_name')!==undefined) muxcon.node_name = getVal('muxcon.node_name'); ['heartbeat_interval','mpath_primary_stale_sec','mpath_failover_check_sec','mpath_strategy','mpath_preemptive_promote','mpath_neighbor_idle_drop_sec','federated_cache_enabled','federated_cache_ttl_sec','federated_cache_path','auth_required','auth_key_id','auth_private_key'].forEach(k=>{ const v=getVal('muxcon.'+k); if(v!==undefined) muxcon[k]=v; }); if(listeners && listeners.length>0) muxcon.listeners = listeners; if(inits && inits.length>0) muxcon.initiators = inits; const pkRows = tables['muxcon.public_keys']._get(); if(pkRows && pkRows.length>0) muxcon.public_keys = pkRows.map(r=>{ const m={key_id:r.key_id, public_key:r.public_key}; try{ if(r.advertise_filters){ m.advertise_filters = JSON.parse(r.advertise_filters); } }catch(_e){} try{ if(r.accept_filters){ m.accept_filters = JSON.parse(r.accept_filters); } }catch(_e){} return m; }); if(Object.keys(muxcon).length>0) deepSet(out,'muxcon', muxcon);
           // web_status
@@ -1163,7 +1291,7 @@
           return out;
         }
 
-  async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/plugins/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
+  async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/plugins/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); if('writable_sections' in j || 'writable_enforced' in j){ setWritableMetadata(j.writable_sections||[], j.writable_enforced); } markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
   async function validateOnly(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Validation failed'); return; } try{ const r=await fetch(withBase('/plugins/config-editor/validate'),{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Validation OK'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Validation failed'); } }catch(e){ setStatus(false,String(e)); } }
   async function saveConfig(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Save failed'); return; } try{ const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf; const r=await fetch(withBase('/plugins/config-editor/apply'),{method:'POST', headers, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ markClean(); setStatus(true,'Saved'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Save failed'); } }catch(e){ setStatus(false,String(e)); } }
 
@@ -1300,6 +1428,7 @@
   initStatic();
   injectHelps();
   injectDefaultHints();
+  setWritableMetadata(INITIAL_WRITABLE_SECTIONS, INITIAL_WRITABLE_ENFORCED);
   loadCurrent();
   updateView();
       })();

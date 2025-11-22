@@ -77,7 +77,9 @@ def config_manager(sample_config, tmp_path):
     with open(config_file, "w") as f:
         yaml.dump(sample_config, f)
 
-    return ConfigManager(str(config_file))
+    manager = ConfigManager(str(config_file))
+    manager.load_config()
+    return manager
 
 
 @pytest_asyncio.fixture

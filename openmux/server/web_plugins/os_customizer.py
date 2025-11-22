@@ -1,12 +1,14 @@
 from aiohttp import web
 from typing import Any, Dict, Optional
 
+from . import ADAPTER_APP_KEY
+
 # OS customizer plugin (skeleton). Provides read-only view and a stub endpoint
 # to apply changes via a privileged helper (not implemented here).
 
 
 async def _handle_view(request: web.Request) -> web.StreamResponse:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()
@@ -22,7 +24,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
 
 
 async def _handle_apply_network(request: web.Request) -> web.StreamResponse:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     adapter._require_permission(request, ("admin",))
     if not adapter._check_csrf(request):
         raise web.HTTPForbidden(text="CSRF")

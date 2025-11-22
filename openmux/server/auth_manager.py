@@ -17,9 +17,11 @@ from typing import Any, Dict, Optional, Tuple
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from .security_policy import SecurityPolicy
+
 
 class AuthManager:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], security_policy: Optional[SecurityPolicy] = None):
         """Initialize the authentication manager.
 
         Args:
@@ -67,10 +69,12 @@ class AuthManager:
         self._pw_hmac_challenges = {}
         # Authentication failure tracking: (username, ip) -> {failures, first_failure, locked_until}
         self._fail_tracker = {}
-        # Policy parameters (could be made configurable)
+        # Policy parameters (overridable via security policy)
         self._max_fail_window = 300  # seconds window for counting failures
         self._base_lock_seconds = 30  # initial lock duration after threshold
         self._failure_threshold = 5  # failures before lock engages
+        self._security_policy = security_policy
+        self._apply_security_policy(security_policy)
 
     async def update_config(self, new_config: Dict[str, Any]):
         """Replace the active authentication configuration.
@@ -106,6 +110,28 @@ class AuthManager:
         # Clear outstanding challenges (they reference old keys)
         self._pk_challenges.clear()
         self._pw_hmac_challenges.clear()
+        # Re-apply security policy in case rate limits depend on config
+        self._apply_security_policy(self._security_policy)
+
+    def update_security_policy(self, policy: Optional[SecurityPolicy]) -> None:
+        """Apply a new security policy at runtime."""
+
+        self._security_policy = policy
+        self._apply_security_policy(policy)
+
+    def _apply_security_policy(self, policy: Optional[SecurityPolicy]) -> None:
+        if not policy:
+            return
+        limits = policy.get_auth_rate_limits()
+        window = limits.get("window_seconds")
+        threshold = limits.get("failure_threshold")
+        base = limits.get("base_lock_seconds")
+        if isinstance(window, int) and window > 0:
+            self._max_fail_window = window
+        if isinstance(threshold, int) and threshold > 0:
+            self._failure_threshold = threshold
+        if isinstance(base, int) and base > 0:
+            self._base_lock_seconds = base
 
     # =================== Password HMAC Challenge (Upgrade Path) ===================
     def _normalize_public_keys(self, pk_list):

@@ -1,9 +1,10 @@
 from aiohttp import web
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import time
 import uuid
 
 from openmux.server.config_manager import ConfigManager
+from . import ADAPTER_APP_KEY
 
 
 def _find_config_manager(adapter) -> Optional[ConfigManager]:
@@ -50,12 +51,71 @@ def _find_config_manager(adapter) -> Optional[ConfigManager]:
     except Exception:
         return None
 
+
+def _get_writable_metadata(cm: Optional[ConfigManager]) -> Tuple[List[str], bool]:
+    if not cm:
+        return [], False
+    try:
+        policy = cm.get_security_policy()
+        return sorted(policy.get_writable_sections()), policy.is_config_editor_enforced()
+    except Exception:
+        return [], False
+
+
+def _normalize_section_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        normalized_dict = {}
+        for key, val in value.items():
+            normalized_val = _normalize_section_value(val)
+            if normalized_val is not None:
+                normalized_dict[key] = normalized_val
+        return normalized_dict or None
+    if isinstance(value, list):
+        normalized_list = []
+        for item in value:
+            normalized_item = _normalize_section_value(item)
+            if normalized_item is not None:
+                normalized_list.append(normalized_item)
+        return normalized_list or None
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value if value != "" else None
+    return value
+
+
+def _detect_modified_sections(current: Optional[Dict[str, Any]], new_cfg: Dict[str, Any]) -> Set[str]:
+    modified: Set[str] = set()
+    current = current or {}
+    keys = set(current.keys()) | set(new_cfg.keys())
+    for key in keys:
+        if _normalize_section_value(current.get(key)) != _normalize_section_value(new_cfg.get(key)):
+            modified.add(key)
+    return modified
+
+
+def _enforce_writable_sections(cm: ConfigManager, payload: Dict[str, Any]) -> Set[str]:
+    try:
+        policy = cm.get_security_policy()
+    except Exception:
+        return set()
+    if not policy.is_config_editor_enforced():
+        return set()
+    current_cfg = cm.config or cm.load_config() or {}
+    modified = _detect_modified_sections(current_cfg, payload)
+    writable = policy.get_writable_sections()
+    if not modified:
+        return set()
+    if not writable:
+        return modified
+    return {section for section in modified if section not in writable}
+
 # Minimal config editor plugin with read-only GET and guarded POST apply.
 # Requires admin permissions for write operations and CSRF token for session-auth requests.
 
 
 async def _handle_view(request: web.Request) -> web.StreamResponse:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()
@@ -85,6 +145,8 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
                 base_path = adapter._effective_base_path(request) if hasattr(adapter, "_effective_base_path") else ""
             except Exception:
                 base_path = ""
+            cm = _find_config_manager(adapter)
+            writable_sections, writable_enforced = _get_writable_metadata(cm)
             html_text = tmpl.render(
                 realm=adapter.realm,
                 logo_url=adapter._get_logo_url() if hasattr(adapter, "_get_logo_url") else None,
@@ -95,6 +157,8 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
                 ports=ports,
                 current_port=current_port,
                 user_permission=user_permission,
+                writable_sections=writable_sections,
+                writable_enforced=writable_enforced,
             )
             return web.Response(body=html_text.encode("utf-8"), content_type="text/html")
     except Exception:
@@ -103,15 +167,26 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
     try:
         cm = _find_config_manager(adapter)
         config = cm.config if cm and getattr(cm, "config", None) is not None else {}
+        writable_sections, writable_enforced = _get_writable_metadata(cm)
     except Exception:
         config = {}
+        writable_sections, writable_enforced = [], False
     import json
-    return web.Response(body=json.dumps({"config": config}).encode("utf-8"), content_type="application/json")
+    return web.Response(
+        body=json.dumps(
+            {
+                "config": config,
+                "writable_sections": writable_sections,
+                "writable_enforced": writable_enforced,
+            }
+        ).encode("utf-8"),
+        content_type="application/json",
+    )
 
 
 async def _handle_data(request: web.Request) -> web.StreamResponse:
     """Return current effective config as JSON for the editor UI."""
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()
@@ -120,14 +195,25 @@ async def _handle_data(request: web.Request) -> web.StreamResponse:
     try:
         cm = _find_config_manager(adapter)
         config = cm.config if cm and getattr(cm, "config", None) is not None else {}
+        writable_sections, writable_enforced = _get_writable_metadata(cm)
     except Exception:
         config = {}
+        writable_sections, writable_enforced = [], False
     import json
-    return web.Response(body=json.dumps({"config": config}).encode("utf-8"), content_type="application/json")
+    return web.Response(
+        body=json.dumps(
+            {
+                "config": config,
+                "writable_sections": writable_sections,
+                "writable_enforced": writable_enforced,
+            }
+        ).encode("utf-8"),
+        content_type="application/json",
+    )
 
 
 async def _handle_apply(request: web.Request) -> web.StreamResponse:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     try:
         # Enforce admin role and CSRF
         adapter._require_permission(request, ("admin",))
@@ -161,6 +247,17 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
             except Exception:
                 pass
             return web.json_response({"error": True, "message": err or "Validation failed"}, status=400)
+
+        disallowed = _enforce_writable_sections(cm, payload)
+        if disallowed:
+            detail = ", ".join(sorted(disallowed))
+            return web.json_response(
+                {
+                    "error": True,
+                    "message": f"Changes to {detail} are blocked by the security policy",
+                },
+                status=403,
+            )
 
         # Persist config
         try:
@@ -197,7 +294,7 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
 
     Returns a JSON summary of applied changes per adapter or an error JSON.
     """
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     req_id = uuid.uuid4().hex[:8]
     username = request.get("username")
     try:
@@ -371,7 +468,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
     This will interrupt listeners and reconnect paths; clients may be dropped.
     Requires admin + CSRF. Returns a summary of stopped/started adapters and errors.
     """
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     req_id = uuid.uuid4().hex[:8]
     username = request.get("username")
     try:
@@ -427,7 +524,11 @@ def _validate_payload(payload: Dict[str, Any], cm: ConfigManager) -> Tuple[bool,
     """
     try:
         # Create a throwaway manager pointing at the same path to reuse behavior
-        temp_cm = ConfigManager(cm.config_path)
+        temp_cm = ConfigManager(
+            cm.config_path,
+            auth_config_path=getattr(cm, "auth_config_path", None),
+            security_config_path=getattr(cm, "security_config_path", None),
+        )
         # Directly assign and validate
         temp_cm.config = payload
         # Use internal validation routine; it raises on error
@@ -449,7 +550,7 @@ def _validate_payload(payload: Dict[str, Any], cm: ConfigManager) -> Tuple[bool,
 
 
 async def _handle_validate(request: web.Request) -> web.StreamResponse:
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     # Require admin permission (no CSRF needed as no state change occurs)
     adapter._require_permission(request, ("admin",))
     try:
@@ -485,7 +586,7 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
     via ConfigManager remains the source of truth.
     """
     # Admin-only visibility for the schema endpoint
-    adapter = request.app["adapter"]
+    adapter = request.app[ADAPTER_APP_KEY]
     adapter._require_permission(request, ("admin",))
     # Try to load YAML schema from well-known locations
     schema: Dict[str, Any] = {}

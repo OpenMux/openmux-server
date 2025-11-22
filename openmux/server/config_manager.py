@@ -46,17 +46,34 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from .security_policy import SecurityPolicy
+
 
 class ConfigManager:
-    def __init__(self, config_path: str):
+    def __init__(
+        self,
+        config_path: str,
+        *,
+        auth_config_path: Optional[str] = None,
+        security_config_path: Optional[str] = None,
+    ):
         """Initialize the configuration manager.
 
         Args:
             config_path: Path to the YAML configuration file.
         """
         self.config_path = config_path
+        self.auth_config_path = auth_config_path or self._derive_sidecar_path("authentication.yaml")
+        self.security_config_path = security_config_path or self._derive_sidecar_path("security.yaml")
         self.logger = logging.getLogger("openmux.config")
         self.config: Optional[Dict[str, Any]] = None
+        self._authentication_config: Optional[Dict[str, Any]] = None
+        self._inline_authentication = False
+        self._security_policy: Optional[SecurityPolicy] = None
+
+    def _derive_sidecar_path(self, filename: str) -> str:
+        base_dir = os.path.dirname(os.path.abspath(self.config_path)) or os.getcwd()
+        return os.path.join(base_dir, filename)
 
     def load_config(self) -> Dict[str, Any]:
         """Load, validate, and return the configuration.
@@ -96,6 +113,9 @@ class ConfigManager:
             if self.config is None:
                 raise ValueError("Configuration is None after loading and validation")
 
+            # Reset cached policy so next access reflects any sidecar updates
+            self._security_policy = None
+
             return self.config
         except FileNotFoundError:
             self.logger.error(f"Configuration file not found: {self.config_path}")
@@ -125,10 +145,19 @@ class ConfigManager:
             ValueError: If any required section is missing.
         """
         assert self.config is not None  # Type narrowing
-        required_sections = ["server", "authentication"]
+        required_sections = ["server"]
         for section in required_sections:
             if section not in self.config:
                 raise ValueError(f"Missing required configuration section: {section}")
+
+        # Handle authentication section which may live in an external file
+        if "authentication" in self.config and isinstance(self.config["authentication"], dict):
+            self._inline_authentication = True
+            self._authentication_config = self.config["authentication"]
+        else:
+            self._inline_authentication = False
+            auth_data = self._load_authentication_file()
+            self.config["authentication"] = auth_data
 
     def _validate_server_config(self):
         """Validate the ``server`` section (metadata only).
@@ -209,6 +238,8 @@ class ConfigManager:
         assert self.config is not None  # Type narrowing
         if "serial_ports" in self.config:
             self._validate_serial_ports_config()
+        # Cache resolved authentication config for downstream callers
+        self._authentication_config = self.config.get("authentication")
 
     def get_server_host(self) -> str:
         """Deprecated: Return effective console host (client_listener.host).
@@ -269,7 +300,14 @@ class ConfigManager:
         if not self.config:
             self.load_config()
         assert self.config is not None  # Type narrowing
-        return self.config["authentication"]
+        if self._authentication_config is None:
+            if self._inline_authentication:
+                self._authentication_config = self.config.get("authentication", {})
+            else:
+                self._authentication_config = self._load_authentication_file()
+                # Keep runtime copy attached for consumers expecting single mapping
+                self.config["authentication"] = self._authentication_config
+        return self._authentication_config
 
     def get_serial_ports_config(self) -> list:
         """Return the ``serial_ports`` configuration section.
@@ -322,7 +360,7 @@ class ConfigManager:
 
         return None
 
-    def save_config(self, config: Dict[str, Any]) -> bool:
+    def save_config(self, config: Dict[str, Any], authentication: Optional[Dict[str, Any]] = None) -> bool:
         """Persist a configuration mapping back to disk.
 
         Creates a ``.bak`` backup of the existing file (if present) before
@@ -330,26 +368,73 @@ class ConfigManager:
 
         Args:
             config: The configuration mapping to serialize and save.
+            authentication: Optional authentication config to persist when
+                using a separate authentication.yaml file.
 
         Returns:
             True on success, False if an error occurs (also logged).
         """
         try:
-            # Create a backup of the current config
-            if os.path.exists(self.config_path):
-                backup_path = f"{self.config_path}.bak"
-                with (
-                    open(self.config_path, "r") as src,
-                    open(backup_path, "w") as dst,
-                ):
-                    dst.write(src.read())
+            inline_auth = self._inline_authentication
+            auth_payload = authentication
+            if auth_payload is None and config.get("authentication"):
+                auth_payload = config.get("authentication")
 
-            # Write new config
-            with open(self.config_path, "w") as f:
-                yaml.dump(config, f, default_flow_style=False)
+            server_payload = dict(config)
+            if inline_auth:
+                # Ensure inline auth remains embedded
+                if auth_payload is not None:
+                    server_payload["authentication"] = auth_payload
+                self._write_yaml_with_backup(self.config_path, server_payload)
+                self._authentication_config = auth_payload if isinstance(auth_payload, dict) else self._authentication_config
+            else:
+                server_payload.pop("authentication", None)
+                self._write_yaml_with_backup(self.config_path, server_payload)
+                if auth_payload is None:
+                    raise ValueError("Authentication configuration missing for external auth file")
+                self._write_yaml_with_backup(self.auth_config_path, auth_payload)
+                self._authentication_config = auth_payload
+                # Keep runtime composite view in memory for existing consumers
+                server_payload["authentication"] = auth_payload
 
-            self.config = config
+            self.config = server_payload
             return True
         except Exception as e:
             self.logger.error(f"Error saving configuration: {e}", exc_info=True)
             return False
+
+    def _write_yaml_with_backup(self, path: str, data: Dict[str, Any]) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        if os.path.exists(path):
+            backup_path = f"{path}.bak"
+            with open(path, "r", encoding="utf-8") as src, open(backup_path, "w", encoding="utf-8") as dst:
+                dst.write(src.read())
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.dump(data, handle, default_flow_style=False)
+
+    def _load_authentication_file(self) -> Dict[str, Any]:
+        path = self.auth_config_path
+        if not path:
+            raise ValueError("Authentication configuration path is undefined")
+        if not os.path.exists(path):
+            raise ValueError(f"Authentication configuration file not found: {path}")
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        if not isinstance(data, dict):
+            raise ValueError("Authentication configuration must be a mapping")
+        self._authentication_config = data
+        return data
+
+    def get_security_policy(self) -> SecurityPolicy:
+        if self._security_policy is None:
+            policy_data: Dict[str, Any] = {}
+            path = self.security_config_path
+            if path and os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as fh:
+                        policy_data = yaml.safe_load(fh) or {}
+                except Exception as exc:
+                    self.logger.warning("Failed to load security policy from %s: %s", path, exc)
+                    policy_data = {}
+            self._security_policy = SecurityPolicy.from_mapping(policy_data)
+        return self._security_policy

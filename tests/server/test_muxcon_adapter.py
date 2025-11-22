@@ -628,7 +628,7 @@ def test_derive_peer_key_and_generation_rollover(monkeypatch):
 
     # Rollover: retire older instance for same server_id
     closed: List[str] = []
-    async def fake_close(cid):
+    def fake_close(cid):
         closed.append(cid)
     a._close_connection = fake_close  # type: ignore
     now = time.time()
