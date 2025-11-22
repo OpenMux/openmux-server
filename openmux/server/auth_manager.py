@@ -465,8 +465,9 @@ class AuthManager:
         if not result and self._pam_enabled:
             result = self._pam_authenticate(username, password)
 
-        # Update cache
-        self.auth_cache[cache_key] = {"result": result, "time": time.time()}
+        # Update cache (only cache successes to avoid silencing transient failures or locking out retries)
+        if result:
+            self.auth_cache[cache_key] = {"result": result, "time": time.time()}
 
         return result
 
@@ -534,18 +535,35 @@ class AuthManager:
         """
         # Policy checks before invoking PAM
         if (not getattr(self, "_pam_allow_root", False)) and username == "root":
+            self.logger.warning("PAM auth denied: root login disabled by policy")
             return False
         if self._pam_allowed_users is not None and username not in self._pam_allowed_users:
+            self.logger.warning("PAM auth denied: user '%s' not in allowed_users list", username)
             return False
         try:
             # Try python-pam (module name: pam)
             import pam  # type: ignore
+            import os
 
             p = pam.pam()
             ok = bool(p.authenticate(username, password, service=self._pam_service))
             if not ok:
-                # Optional: log minimal reason without sensitive info
-                self.logger.debug("PAM auth failed for user '%s' (service=%s)", username, self._pam_service)
+                # Log reason if available (python-pam often provides .reason or .code)
+                reason = getattr(p, "reason", "Authentication failed")
+                code = getattr(p, "code", "?")
+
+                extra_hint = ""
+                if code == 7 and os.geteuid() != 0:
+                    extra_hint = " (Hint: Authenticating other users usually requires running as root)"
+
+                self.logger.warning(
+                    "PAM auth failed for user '%s' (service=%s): %s (code=%s)%s",
+                    username,
+                    self._pam_service,
+                    reason,
+                    code,
+                    extra_hint,
+                )
             return ok
         except Exception as e:  # pragma: no cover - environment-dependent
             # PAM not available or error during auth; do not crash
