@@ -59,12 +59,20 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()
+    # Enforce admin permission for the UI
+    adapter._require_permission(request, ("admin",))
     # Render a Jinja2 template if available; fall back to JSON only if template missing
+    user_permission: Optional[str] = None
+    if hasattr(adapter, "_get_effective_permission"):
+        try:
+            user_permission = adapter._get_effective_permission(username, request)  # type: ignore[attr-defined]
+        except Exception:
+            user_permission = None
     try:
         env = getattr(adapter, "_jinja_env", None)
         if env:
             tmpl = env.get_template("config_editor.html.j2")
-            plugin_nav = adapter._get_allowed_plugin_nav(username) if hasattr(adapter, "_get_allowed_plugin_nav") else []
+            plugin_nav = adapter._get_allowed_plugin_nav(username, request=request) if hasattr(adapter, "_get_allowed_plugin_nav") else []
             
             ports = adapter._get_ports_snapshot() if hasattr(adapter, "_get_ports_snapshot") else []
             current_port = request.query.get("port") or request.query.get("console")
@@ -86,6 +94,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
                 base_path=base_path,
                 ports=ports,
                 current_port=current_port,
+                user_permission=user_permission,
             )
             return web.Response(body=html_text.encode("utf-8"), content_type="text/html")
     except Exception:
@@ -106,6 +115,8 @@ async def _handle_data(request: web.Request) -> web.StreamResponse:
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()
+    # Enforce admin permission for data access
+    adapter._require_permission(request, ("admin",))
     try:
         cm = _find_config_manager(adapter)
         config = cm.config if cm and getattr(cm, "config", None) is not None else {}

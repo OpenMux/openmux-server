@@ -68,25 +68,28 @@
           </a>
           {% if plugin_nav and plugin_nav|length > 0 %}
             {% for item in plugin_nav %}
-              {% if item.path == '/plugins/config-editor' %}
-                 <div class="nav-group">
-                    <div class="nav-item-row">
-                        <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="#" onclick="toggleConfigMenu(event)" id="nav-config-parent">
-                            <span class="icon">⚙️</span> {{ item.title }}
-                        </a>
-                        <button class="nav-expand" id="config-expand-btn" onclick="toggleConfigMenu(event)">+</button>
-                    </div>
-                    <div class="nav-sub" id="config-menu" style="display:none">
-                        <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=ports" id="nav-config-ports">Ports</a>
-                        <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=muxcon" id="nav-config-muxcon">Muxcon</a>
-                        <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=setup" id="nav-config-setup">Setup</a>
-                        <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=reload" id="nav-config-reload">Reload</a>
-                    </div>
-                 </div>
-              {% else %}
-                <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="{{ base_path }}{{ item.path }}">
-                  <span class="icon">🔌</span> {{ item.title }}
-                </a>
+              {% set required = item.require %}
+              {% if not required or required == user_permission %}
+                {% if item.path == '/plugins/config-editor' %}
+                   <div class="nav-group">
+                      <div class="nav-item-row">
+                          <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="#" onclick="toggleConfigMenu(event)" id="nav-config-parent">
+                              <span class="icon">⚙️</span> {{ item.title }}
+                          </a>
+                          <button class="nav-expand" id="config-expand-btn" onclick="toggleConfigMenu(event)">+</button>
+                      </div>
+                      <div class="nav-sub" id="config-menu" style="display:none">
+                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=ports" id="nav-config-ports">Ports</a>
+                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=muxcon" id="nav-config-muxcon">Muxcon</a>
+                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=setup" id="nav-config-setup">Setup</a>
+                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=reload" id="nav-config-reload">Reload</a>
+                      </div>
+                   </div>
+                {% else %}
+                  <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="{{ base_path }}{{ item.path }}">
+                    <span class="icon">🔌</span> {{ item.title }}
+                  </a>
+                {% endif %}
               {% endif %}
             {% endfor %}
           {% endif %}
