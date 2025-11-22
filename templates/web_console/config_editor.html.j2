@@ -135,6 +135,9 @@
     </div>
   </div>
 
+  </div>
+
+  <div id="view-listeners" class="config-view" style="display:none">
   <div class="config-section" data-config-section="client_listener">
     <div class="section-header"><span class="title">Client listener</span> <span class="desc">TCP console endpoint</span></div>
     <div class="section">
@@ -1378,13 +1381,15 @@
       const view = params.get('view') || 'ports';
       
       const vSetup = document.getElementById('view-setup');
-      const vPorts = document.getElementById('view-ports');
+        const vPorts = document.getElementById('view-ports');
+        const vListeners = document.getElementById('view-listeners');
       const vMuxcon = document.getElementById('view-muxcon');
       const vSetup2 = document.getElementById('view-setup-2');
       const vReload = document.getElementById('view-reload');
       
       const navSetup = document.getElementById('nav-config-setup');
       const navPorts = document.getElementById('nav-config-ports');
+        const navListeners = document.getElementById('nav-config-listeners');
       const navMuxcon = document.getElementById('nav-config-muxcon');
       const navReload = document.getElementById('nav-config-reload');
       const navParent = document.getElementById('nav-config-parent');
@@ -1396,22 +1401,40 @@
           if(vMuxcon) vMuxcon.style.display = 'none';
           if(vReload) vReload.style.display = 'none';
           if(vPorts) vPorts.style.display = 'block';
+          if(vListeners) vListeners.style.display = 'none';
           
           if(navSetup) navSetup.classList.remove('active');
           if(navMuxcon) navMuxcon.classList.remove('active');
           if(navReload) navReload.classList.remove('active');
           if(navPorts) navPorts.classList.add('active');
+          if(navListeners) navListeners.classList.remove('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Ports';
+        } else if (view === 'listeners') {
+          if(vSetup) vSetup.style.display = 'none';
+          if(vSetup2) vSetup2.style.display = 'none';
+          if(vPorts) vPorts.style.display = 'none';
+          if(vMuxcon) vMuxcon.style.display = 'none';
+          if(vReload) vReload.style.display = 'none';
+          if(vListeners) vListeners.style.display = 'block';
+          
+          if(navSetup) navSetup.classList.remove('active');
+          if(navPorts) navPorts.classList.remove('active');
+          if(navMuxcon) navMuxcon.classList.remove('active');
+          if(navReload) navReload.classList.remove('active');
+          if(navListeners) navListeners.classList.add('active');
+          if(pageTitle) pageTitle.textContent = 'Config Editor - Listeners';
       } else if (view === 'muxcon') {
           if(vSetup) vSetup.style.display = 'none';
           if(vSetup2) vSetup2.style.display = 'none';
           if(vPorts) vPorts.style.display = 'none';
           if(vReload) vReload.style.display = 'none';
+          if(vListeners) vListeners.style.display = 'none';
           if(vMuxcon) vMuxcon.style.display = 'block';
           
           if(navSetup) navSetup.classList.remove('active');
           if(navPorts) navPorts.classList.remove('active');
           if(navReload) navReload.classList.remove('active');
+          if(navListeners) navListeners.classList.remove('active');
           if(navMuxcon) navMuxcon.classList.add('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Muxcon';
       } else if (view === 'reload') {
@@ -1420,10 +1443,12 @@
           if(vPorts) vPorts.style.display = 'none';
           if(vMuxcon) vMuxcon.style.display = 'none';
           if(vReload) vReload.style.display = 'block';
+          if(vListeners) vListeners.style.display = 'none';
           
           if(navSetup) navSetup.classList.remove('active');
           if(navPorts) navPorts.classList.remove('active');
           if(navMuxcon) navMuxcon.classList.remove('active');
+          if(navListeners) navListeners.classList.remove('active');
           if(navReload) navReload.classList.add('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Reload';
       } else {
@@ -1432,11 +1457,13 @@
           if(vPorts) vPorts.style.display = 'none';
           if(vMuxcon) vMuxcon.style.display = 'none';
           if(vReload) vReload.style.display = 'none';
+          if(vListeners) vListeners.style.display = 'none';
           
           if(navSetup) navSetup.classList.add('active');
           if(navPorts) navPorts.classList.remove('active');
           if(navMuxcon) navMuxcon.classList.remove('active');
           if(navReload) navReload.classList.remove('active');
+          if(navListeners) navListeners.classList.remove('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Setup';
       }
       // Ensure parent is active
