@@ -40,6 +40,14 @@ client_listener (TCP console) (runtime defaults from openmux/server/adapters/cli
 - client_listener.max_connections: 100 (schema default)
 - client_listener.connection_timeout: 30 (schema default, seconds)
 
+telnet_listener (per-listener entry; upcoming adapter defaults)
+- bind_host: 0.0.0.0 (bind all interfaces unless overridden)
+- bind_port: required (no implicit default)
+- target: required (no implicit default)
+- read_only: false
+- acl: empty / missing list means allow all sources
+- authentication: not performed (listener relies solely on ACL + network trust)
+
 serial_ports (per-port) (schema defaults, plus adapter runtime behavior)
 - baudrate: 9600
 - bytesize: 8

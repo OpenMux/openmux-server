@@ -8,6 +8,7 @@ port_adapters and connection_adapters into a single, flexible plugin architectur
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .client_initiator import OpenMuxClientAdapter, OpenMuxClientPort
 from .client_listener import TcpServerAdapter
+from .telnet_listener import TelnetListenerAdapter
 from .factory import AdapterPlugin, GenericAdapterFactory, PluginRegistry
 from .lifecycle import DynamicPortManager, PortLifecycleEvent, PortState
 from .tcp_initiator import TcpInitiatorAdapter, TcpInitiatorPort
@@ -22,6 +23,7 @@ __all__ = [
     "PluginRegistry",
     "AdapterPlugin",
     "TcpServerAdapter",  # client_listener
+    "TelnetListenerAdapter",
     "TcpInitiatorAdapter",
     "TcpInitiatorPort",
     "OpenMuxClientAdapter",

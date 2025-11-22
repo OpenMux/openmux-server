@@ -15,6 +15,7 @@ adapters:
     - openmux.server.adapters.muxcon
     - openmux.server.adapters.web_status
     - openmux.server.adapters.client_initiator
+    - openmux.server.adapters.telnet_listener
   allowed_adapter_types:
     - loopback
     - tcp_initiator
@@ -25,6 +26,7 @@ adapters:
     - muxcon
     - web_status
     - openmux_client
+    - telnet_listener
 
 config_editor:
   writable_sections:
@@ -34,6 +36,11 @@ config_editor:
     - serial_ports
     - command_ports
     - tcp_initiator_ports
+    - client_listener
+    - muxcon
+    - web_console
+    - web_status
+    - telnet_listener
 
 rate_limits:
   authentication:

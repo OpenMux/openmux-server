@@ -145,6 +145,11 @@
       <div class="field"><label for="client_listener.connection_timeout">Timeout (s)</label><input id="client_listener.connection_timeout" type="number" min="1" /></div>
     </div>
   </div>
+
+  <div class="config-section" data-config-section="telnet_listener">
+    <div class="section-header"><span class="title">Telnet listener</span> <span class="desc">Expose OpenMux ports over raw TCP</span></div>
+    <div id="telnet_listener"></div>
+  </div>
   </div>
 
   <div id="view-reload" class="config-view" style="display:none">
@@ -842,6 +847,15 @@
             batch_size: 'Maximum bytes to accumulate before flushing a batch.',
             batch_timeout: 'Maximum time to wait before flushing a batch (seconds).'
           },
+          'telnet_listener': {
+            name: 'Listener identifier used in logs and client banners.',
+            bind_host: 'Interface or IP to bind. Use 0.0.0.0 for all IPv4 interfaces.',
+            bind_port: 'TCP port that telnet clients will connect to (1-65535).',
+            target: 'OpenMux port to attach (local::name, server_id::name, or bare name).',
+            read_only: 'Drop client keystrokes and stream port output only.',
+            enabled: 'Temporarily disable this listener without deleting it.',
+            acl: 'Comma-separated IP or CIDR allowlist. Leave blank to permit all clients.'
+          },
           'muxcon.listeners': {
             enabled: 'Enable or disable this listener entry.',
             host: 'Bind address for incoming muxcon connections.',
@@ -905,6 +919,7 @@
           'loopback_ports': { max_read_write_users: 5, echo_delay: 0.0, buffer_size: 1024, sanitize_control: true },
           'command_ports': { max_read_write_users: 1, shell: false },
           'tcp_initiator_ports': { use_tls: false, ssl_verify: true, timeout: 10.0, auto_reconnect: true, reconnect_delay: 5.0, enable_batching: true, batch_size: 1024, batch_timeout: 0.015 },
+          'telnet_listener': { bind_host: '0.0.0.0', read_only: false, enabled: true },
           // Default-safe: TLS on by default for muxcon listeners
           'muxcon.listeners': { use_tls: true, require_client_cert: false, tls_autogen: true },
           'muxcon.initiators': {
@@ -1036,6 +1051,15 @@
             {key:'batch_size', label:'Batch size (bytes)', type:'integer', min:1},
             {key:'batch_timeout', label:'Batch timeout (s)', type:'number', min:0, step:0.001}
           ])));
+          tables['telnet_listener'] = buildTable('telnet_listener', annotateColumnsWithDefaults('telnet_listener', annotateColumnsWithHelp('telnet_listener', [
+            {key:'name', label:'Name', type:'string', required:true},
+            {key:'bind_host', label:'Bind host', type:'string', placeholder:'0.0.0.0'},
+            {key:'bind_port', label:'Port', type:'integer', min:1, max:65535, required:true},
+            {key:'target', label:'Target port', type:'string', required:true},
+            {key:'read_only', label:'Read-only', type:'boolean'},
+            {key:'enabled', label:'Enabled', type:'boolean'},
+            {key:'acl', label:'ACL (IP/CIDR, comma)', type:'array-string'}
+          ])));
 
           tables['muxcon.listeners'] = buildTable('muxcon.listeners', annotateColumnsWithDefaults('muxcon.listeners', annotateColumnsWithHelp('muxcon.listeners', [
             {key:'enabled', label:'Enabled', type:'boolean', required:true},
@@ -1158,6 +1182,7 @@
           tables['command_ports']._set(deepGet(current, 'command_ports')||[]);
           const tcpInitPorts = deepGet(current, 'tcp_initiator_ports') || deepGet(current, 'openmux_client_ports') || [];
           tables['tcp_initiator_ports']._set(Array.isArray(tcpInitPorts) ? tcpInitPorts : []);
+          tables['telnet_listener']._set(deepGet(current, 'telnet_listener')||[]);
 
           setVal('muxcon.node_name', deepGet(current, 'muxcon.node_name'));
           setVal('muxcon.heartbeat_interval', deepGet(current, 'muxcon.heartbeat_interval'));
@@ -1235,18 +1260,17 @@
           const users = tables['auth.users']._get(); const api_keys = tables['auth.api_keys']._get(); const pub_keys = tables['auth.public_keys']._get(); if(users && users.length>0) deepSet(out, 'authentication.users', users); if(api_keys && api_keys.length>0) deepSet(out, 'authentication.api_keys', api_keys); if(pub_keys && pub_keys.length>0) deepSet(out, 'authentication.public_keys', pub_keys);
           // PAM save: include pam block only if enabled toggle is true
           const pamEnabled = getVal('auth.pam.enabled');
-          if(pamEnabled===true){
-            const pam = { enabled: true };
-            const svc = getVal('auth.pam.service_name'); if(svc!==undefined) pam.service_name = svc;
-            const allowRoot = getVal('auth.pam.allow_root'); if(allowRoot!==undefined) pam.allow_root = allowRoot;
-            const au = getVal('auth.pam.allowed_users'); if(typeof au==='string' && au.trim().length>0){ pam.allowed_users = au.split(',').map(s=>s.trim()).filter(s=>s.length>0); }
-            const groups = {};
-            const gAdmin = getVal('auth.pam.groups.admin_group'); if(gAdmin!==undefined) groups.admin_group = gAdmin;
-            const gWrite = getVal('auth.pam.groups.write_group'); if(gWrite!==undefined) groups.write_group = gWrite;
-            const gRead = getVal('auth.pam.groups.read_group'); if(gRead!==undefined) groups.read_group = gRead;
-            if(Object.keys(groups).length>0) pam.groups = groups;
-            deepSet(out, 'authentication.pam', pam);
-          }
+          const pam = {};
+          if(pamEnabled!==undefined){ pam.enabled = pamEnabled===true; }
+          const svc = getVal('auth.pam.service_name'); if(svc!==undefined) pam.service_name = svc;
+          const allowRoot = getVal('auth.pam.allow_root'); if(allowRoot!==undefined) pam.allow_root = allowRoot;
+          const au = getVal('auth.pam.allowed_users'); if(typeof au==='string' && au.trim().length>0){ pam.allowed_users = au.split(',').map(s=>s.trim()).filter(s=>s.length>0); }
+          const groups = {};
+          const gAdmin = getVal('auth.pam.groups.admin_group'); if(gAdmin!==undefined) groups.admin_group = gAdmin;
+          const gWrite = getVal('auth.pam.groups.write_group'); if(gWrite!==undefined) groups.write_group = gWrite;
+          const gRead = getVal('auth.pam.groups.read_group'); if(gRead!==undefined) groups.read_group = gRead;
+          if(Object.keys(groups).length>0) pam.groups = groups;
+          if(Object.keys(pam).length>0) deepSet(out, 'authentication.pam', pam);
           // logging
           maybeSet('logging.level','logging.level'); maybeSet('logging.console','logging.console'); maybeSet('logging.file','logging.file'); maybeSet('logging.log_dir','logging.log_dir'); maybeSet('logging.max_log_size','logging.max_log_size'); maybeSet('logging.log_backup_count','logging.log_backup_count');
           // client_listener: explicit enabled flag
@@ -1275,6 +1299,7 @@
           const lps = tables['loopback_ports']._get(); if(lps && lps.length>0) deepSet(out,'loopback_ports', lps);
           const cps = tables['command_ports']._get(); if(cps && cps.length>0) deepSet(out,'command_ports', cps);
           const tips = tables['tcp_initiator_ports']._get(); if(tips && tips.length>0) deepSet(out,'tcp_initiator_ports', tips);
+          const tls = tables['telnet_listener']._get(); if(tls && tls.length>0) deepSet(out,'telnet_listener', tls);
           // muxcon
           const listeners = tables['muxcon.listeners']._get(); const initsFlat = tables['muxcon.initiators']._get(); const inits = (initsFlat||[]).map(it=>{ const {host,port,share_ports,accept_ports,request_ports, ...rest}=it; const opts={}; Object.keys(rest||{}).forEach(k=>{ if(k.startsWith('options.')){ const kk = k.substring('options.'.length); opts[kk] = rest[k]; } }); const obj={}; if(host!==undefined) obj.host=host; if(port!==undefined) obj.port=port; if(Array.isArray(share_ports)) obj.share_ports=share_ports; if(Array.isArray(accept_ports)) obj.accept_ports=accept_ports; if(Array.isArray(request_ports)) obj.request_ports=request_ports; if(Object.keys(opts).length>0) obj.options=opts; return obj; }); const muxcon={}; if(getVal('muxcon.node_name')!==undefined) muxcon.node_name = getVal('muxcon.node_name'); ['heartbeat_interval','mpath_primary_stale_sec','mpath_failover_check_sec','mpath_strategy','mpath_preemptive_promote','mpath_neighbor_idle_drop_sec','federated_cache_enabled','federated_cache_ttl_sec','federated_cache_path','auth_required','auth_key_id','auth_private_key'].forEach(k=>{ const v=getVal('muxcon.'+k); if(v!==undefined) muxcon[k]=v; }); if(listeners && listeners.length>0) muxcon.listeners = listeners; if(inits && inits.length>0) muxcon.initiators = inits; const pkRows = tables['muxcon.public_keys']._get(); if(pkRows && pkRows.length>0) muxcon.public_keys = pkRows.map(r=>{ const m={key_id:r.key_id, public_key:r.public_key}; try{ if(r.advertise_filters){ m.advertise_filters = JSON.parse(r.advertise_filters); } }catch(_e){} try{ if(r.accept_filters){ m.accept_filters = JSON.parse(r.accept_filters); } }catch(_e){} return m; }); if(Object.keys(muxcon).length>0) deepSet(out,'muxcon', muxcon);
           // web_status

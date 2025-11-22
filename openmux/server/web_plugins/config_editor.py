@@ -702,6 +702,7 @@ def _read_defaults_doc() -> Dict[str, Any]:
         top_sections = {
             "server": ("server", False),
             "client_listener": ("client_listener", False),  # (prefix, is_table)
+            "telnet_listener": ("telnet_listener", True),
             "web_status": ("web_status", False),
             "web_console": ("web_console", False),
             "logging": ("logging", False),
