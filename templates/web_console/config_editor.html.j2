@@ -44,6 +44,11 @@
   .toolbar { display:flex; gap:8px; align-items:center; }
   .req { color:var(--req-color); margin-left: 4px; font-size: 11px; }
   .subtle { color:var(--text-muted); font-size: 12px; }
+  .password-helper { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; align-items:center; }
+  .password-helper input[type="password"] { flex:1; min-width:200px; }
+  .password-helper-status { font-size:12px; min-height:16px; color:var(--text-muted); }
+  .password-helper-status.ok { color: var(--status-ok-color); }
+  .password-helper-status.err { color: var(--status-err-color); }
   
   /* Section headers */
   .config-section { margin-bottom: 24px; }
@@ -504,6 +509,71 @@
         function getVal(id){ const el=q(id); if(!el) return undefined; if(el.type==='checkbox') return !!el.checked; if(el.type==='number') return el.value? Number(el.value) : undefined; const val = el.value; return val===''? undefined : val; }
 
         function toDisplay(v){ if(v===undefined||v===null||v==='') return '—'; if(typeof v==='boolean') return v?'true':'false'; return String(v); }
+
+        const _cryptoObj = (typeof globalThis !== 'undefined' && (globalThis.crypto || globalThis.msCrypto)) ? (globalThis.crypto || globalThis.msCrypto) : null;
+        const _textEncoder = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
+
+        async function sha256Hex(str){
+          if(!_cryptoObj || !_cryptoObj.subtle || !_textEncoder){
+            throw new Error('Browser does not support Web Crypto SHA-256');
+          }
+          const data = _textEncoder.encode(str);
+          const digest = await _cryptoObj.subtle.digest('SHA-256', data);
+          return Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,'0')).join('');
+        }
+
+        function attachPasswordHelper(fieldEl, targetInput){
+          const helper = document.createElement('div');
+          helper.className = 'password-helper';
+          const plainInput = document.createElement('input');
+          plainInput.type = 'password';
+          plainInput.placeholder = 'Enter plaintext password';
+          plainInput.autocomplete = 'new-password';
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'mini-btn';
+          btn.textContent = 'Hash password';
+          const status = document.createElement('span');
+          status.className = 'password-helper-status';
+          helper.appendChild(plainInput);
+          helper.appendChild(btn);
+          helper.appendChild(status);
+          fieldEl.appendChild(helper);
+
+          const setStatus = (msg, variant)=>{
+            status.textContent = msg || '';
+            status.classList.remove('ok','err');
+            if(!msg) return;
+            if(variant==='ok') status.classList.add('ok');
+            if(variant==='err') status.classList.add('err');
+          };
+
+          async function hashAndFill(){
+            const plain = plainInput.value || '';
+            if(!plain){
+              setStatus('Enter a password to hash', 'err');
+              return;
+            }
+            try{
+              btn.disabled = true;
+              setStatus('Hashing…', 'ok');
+              const hex = await sha256Hex(plain);
+              targetInput.value = hex;
+              plainInput.value = '';
+              setStatus('Password hashed and applied', 'ok');
+              markDirty();
+              setTimeout(()=>setStatus('', 'ok'), 3000);
+            } catch(err){
+              console.error('Password hash helper failed', err);
+              setStatus(err && err.message ? err.message : 'Hash failed', 'err');
+            } finally {
+              btn.disabled = false;
+            }
+          }
+
+          btn.addEventListener('click', (ev)=>{ ev.preventDefault(); hashAndFill(); });
+          plainInput.addEventListener('keydown', (ev)=>{ if(ev.key === 'Enter'){ ev.preventDefault(); hashAndFill(); } });
+        }
   function buildTable(rootId, columns, options){ options = options||{}; const root = q(rootId); root.innerHTML=''; const wrap=document.createElement('div'); wrap.className='tbl-wrap'; const table=document.createElement('table'); table.className='config'; const thead=document.createElement('thead'); const tbody=document.createElement('tbody'); table.appendChild(thead); table.appendChild(tbody); wrap.appendChild(table); const addHost=document.createElement('div'); wrap.appendChild(addHost); root.appendChild(wrap);
     function renderHead(){ const tr=document.createElement('tr'); const visCols = columns.filter(c=>!c.hiddenList); visCols.forEach(c=>{const th=document.createElement('th'); const lbl=document.createElement('span'); lbl.textContent=c.label||c.key; th.appendChild(lbl); if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; th.appendChild(star); } tr.appendChild(th);}); const thA=document.createElement('th'); thA.textContent='Actions'; tr.appendChild(thA); thead.innerHTML=''; thead.appendChild(tr); }
           renderHead();
@@ -580,7 +650,12 @@
               // Default field rendering
               const lab=document.createElement('label'); lab.textContent=c.label||c.key; if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; lab.appendChild(star); } const field=document.createElement('div'); field.className='field'; field.appendChild(lab); let input; if(c.type==='boolean'){ input=document.createElement('input'); input.type='checkbox'; if(row[c.key]!==undefined && row[c.key]!==null){ input.checked=!!row[c.key]; } else if(c.default!==undefined){ input.checked=!!c.default; } else { input.checked=false; } } else if(c.type==='enum'){ input=document.createElement('select'); const blank=document.createElement('option'); blank.value=''; blank.textContent=''; input.appendChild(blank); (c.enum||[]).forEach(v=>{ const o=document.createElement('option'); o.value=String(v); o.textContent=String(v); if(String(row[c.key])===String(v)) o.selected=true; input.appendChild(o); }); } else if(c.type==='number'||c.type==='integer'){ input=document.createElement('input'); input.type='number'; if(c.min!==undefined) input.min=String(c.min); if(c.max!==undefined) input.max=String(c.max); if(c.step!==undefined) input.step=String(c.step); if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } } else if(c.type==='array-string'){ input=document.createElement('input'); input.type='text'; input.placeholder='comma,separated,values'; if(Array.isArray(row[c.key])) input.value=row[c.key].join(','); } else { input=document.createElement('input'); input.type='text'; if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } }
               if(c.placeholder){ input.placeholder=c.placeholder; }
-              field.appendChild(input); if(c.help){ const help=document.createElement('span'); help.className='help'; help.textContent=c.help; field.appendChild(help);} if(c.default!==undefined){ const def=document.createElement('span'); def.className='default-hint'; const dval = (typeof c.default==='boolean') ? (c.default? 'true':'false') : String(c.default); def.textContent = `Default: ${dval}`; field.appendChild(def); } editor.appendChild(field); getters.push(()=>{ let v; if(c.type==='boolean') v=!!input.checked; else if(c.type==='number'||c.type==='integer') v=input.value!==''? Number(input.value):undefined; else if(c.type==='enum') v=input.value||undefined; else if(c.type==='array-string') v=input.value? input.value.split(',').map(s=>s.trim()).filter(s=>s.length>0):[]; else v=input.value||undefined; return [c.key, v]; }); if(c.required){ reqChecks.push(()=>{ const val = (c.type==='boolean')? !!input.checked : (c.type==='number'||c.type==='integer')? (input.value!=='' ? true : false) : (Array.isArray(input.value)? input.value.length>0 : (input.value && input.value.trim().length>0)); return {key:c.key, ok: !!val}; }); }
+              field.appendChild(input);
+              const needsPasswordHelper = (rootId==='auth.users' && c.key==='password_hash');
+              if(needsPasswordHelper){
+                try{ attachPasswordHelper(field, input); }catch(_e){ /* non-fatal */ }
+              }
+              if(c.help){ const help=document.createElement('span'); help.className='help'; help.textContent=c.help; field.appendChild(help);} if(c.default!==undefined){ const def=document.createElement('span'); def.className='default-hint'; const dval = (typeof c.default==='boolean') ? (c.default? 'true':'false') : String(c.default); def.textContent = `Default: ${dval}`; field.appendChild(def); } editor.appendChild(field); getters.push(()=>{ let v; if(c.type==='boolean') v=!!input.checked; else if(c.type==='number'||c.type==='integer') v=input.value!==''? Number(input.value):undefined; else if(c.type==='enum') v=input.value||undefined; else if(c.type==='array-string') v=input.value? input.value.split(',').map(s=>s.trim()).filter(s=>s.length>0):[]; else v=input.value||undefined; return [c.key, v]; }); if(c.required){ reqChecks.push(()=>{ const val = (c.type==='boolean')? !!input.checked : (c.type==='number'||c.type==='integer')? (input.value!=='' ? true : false) : (Array.isArray(input.value)? input.value.length>0 : (input.value && input.value.trim().length>0)); return {key:c.key, ok: !!val}; }); }
             });
             const bar=document.createElement('div'); bar.className='row'; const bS=document.createElement('button'); bS.className='btn'; bS.textContent='Save item'; const bC=document.createElement('button'); bC.className='btn'; bC.textContent='Cancel'; bar.appendChild(bS); bar.appendChild(bC); editor.appendChild(bar); root.appendChild(editor); activeEditorEl = editor; activeEditorCleanup = ()=>{ editingIndex=null; renderBody(); }; activeEditorValidate = ()=>{ const missing = reqChecks.map(f=>f()).filter(r=>!r.ok).map(r=>r.key); if(missing.length>0){ errBox.className='err'; errBox.textContent = 'Missing required: ' + missing.join(', '); try{ editor.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){} return false; } errBox.textContent=''; return true; }; activeEditorSave = ()=>{ if(!activeEditorValidate || activeEditorValidate()){ const obj={}; getters.forEach(g=>{ const [k,v]=g(); if(v!==undefined) obj[k]=v; }); rows[idx]=obj; if(editor.parentNode) editor.parentNode.removeChild(editor); if(activeEditorEl===editor){ activeEditorEl=null; } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; activeEditorSave=null; renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} return true; } return false; };
             bS.addEventListener('click',()=>{ activeEditorSave && activeEditorSave(); }); bC.addEventListener('click',()=>{ if(editor.parentNode) editor.parentNode.removeChild(editor); if(activeEditorEl===editor){ activeEditorEl=null; } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } else { // Ensure editingIndex resets if cleanup not set
@@ -598,7 +673,7 @@
         const COLUMN_HELP = {
           'auth.users': {
             username: 'Login username for HTTP basic-auth.',
-            password_hash: 'SHA-256 hex password hash of the password.',
+            password_hash: 'SHA-256 hex password hash. Use the Hash password helper to derive it client-side without leaving the browser.',
             is_admin: 'Grant full admin access to the UI and APIs.',
             permissions: 'Role for future fine-grained access control.'
           },
