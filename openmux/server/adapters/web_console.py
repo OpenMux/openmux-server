@@ -26,6 +26,7 @@ import ssl
 import hmac
 import hashlib
 import json
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 from typing import Callable
@@ -115,7 +116,12 @@ def _fallback_with_base(raw: bytes, base_path: str) -> bytes:
         return raw
 
 
-def _render_login_fallback(adapter, error: bool = False, next_url: Optional[str] = None) -> bytes:
+def _render_login_fallback(
+    adapter,
+    error: bool = False,
+    next_url: Optional[str] = None,
+    message: Optional[str] = None,
+) -> bytes:
     """Module-level fallback login page renderer used when adapter method is unavailable.
 
     This is base-path aware and will scope static links and form action to the
@@ -126,7 +132,16 @@ def _render_login_fallback(adapter, error: bool = False, next_url: Optional[str]
     except Exception:
         realm = "OpenMux"
 
-    msg = "<p style='color:#f66'>Invalid username or password</p>" if error else ""
+    try:
+        msg_text = str(message) if message is not None else None
+    except Exception:
+        msg_text = message
+    if msg_text:
+        msg = f"<p style='color:#f66'>{html.escape(msg_text)}</p>"
+    elif error:
+        msg = "<p style='color:#f66'>Invalid username or password</p>"
+    else:
+        msg = ""
 
     try:
         nxt = html.escape(str(next_url or "/"))
@@ -450,6 +465,23 @@ async def handle_login(request: web.Request) -> web.Response:
             username = ""
             password = ""
             next_url = "/"
+        safe_next = str(next_url or "/")
+        try:
+            client_ip = adapter._get_client_ip(request) if hasattr(adapter, "_get_client_ip") else None
+        except Exception:
+            client_ip = None
+        renderer = getattr(adapter, "_render_login", None)
+
+        def _render_login_response(error: bool, message: Optional[str] = None) -> web.Response:
+            if callable(renderer):
+                body = renderer(error=error, next_url=safe_next, message=message)
+            else:
+                body = _render_login_fallback(adapter, error, safe_next, message)
+            return web.Response(body=body, content_type="text/html")
+
+        throttle_message = adapter._check_login_throttle(client_ip)
+        if throttle_message:
+            return _render_login_response(True, throttle_message)
         ok = False
         if adapter.auth_manager and username:
             try:
@@ -460,12 +492,8 @@ async def handle_login(request: web.Request) -> web.Response:
             # Create session
             sid = secrets.token_urlsafe(32)
             now = time.time()
-            ip = None
-            try:
-                ip = adapter._get_client_ip(request) if hasattr(adapter, "_get_client_ip") else None
-            except Exception:
-                ip = None
-            adapter._sessions[sid] = {"username": username, "created": now, "last_seen": now, "ip": ip}
+            adapter._clear_login_failures(client_ip)
+            adapter._sessions[sid] = {"username": username, "created": now, "last_seen": now, "ip": client_ip}
             resp = web.HTTPFound(location=str(next_url))
             cookie_kwargs = {
                 "httponly": True,
@@ -491,10 +519,8 @@ async def handle_login(request: web.Request) -> web.Response:
             resp.set_cookie(adapter._session_cookie_name, sid, **cookie_kwargs)
             raise resp
         # Failure -> show login page with message
-        renderer = getattr(adapter, "_render_login", None)
-        safe_next = str(next_url or "/")
-        body = renderer(error=True, next_url=safe_next) if callable(renderer) else _render_login_fallback(adapter, True, safe_next)
-        return web.Response(body=body, content_type="text/html")
+        adapter._record_login_failure(client_ip)
+        return _render_login_response(True)
 
     # GET: if already authenticated, bounce to next
     try:
@@ -1015,6 +1041,13 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             self._session_cookie_name = "omx_session"
         self.session_ttl_seconds = int(cfg.get("session_ttl_seconds", 8 * 3600))
+        self.login_throttle_max_attempts = int(cfg.get("login_throttle_max_attempts", 10))
+        self.login_throttle_window_seconds = int(cfg.get("login_throttle_window_seconds", 60))
+        self.login_throttle_lock_seconds = int(cfg.get("login_throttle_lock_seconds", 5 * 60))
+        self.login_throttle_enabled = (
+            self.login_throttle_max_attempts > 0 and self.login_throttle_lock_seconds > 0
+        )
+        self._login_failures: Dict[str, Dict[str, Any]] = {}
         # Plugins configuration
         self.plugins_cfg = cfg.get("plugins", [])
         # Collected plugin navigation items (if templates wish to render them)
@@ -2501,6 +2534,76 @@ class WebConsoleAdapter(BaseGenericAdapter):
             return out
         return out
 
+    # --- Login throttling helpers ---
+    def _check_login_throttle(self, ip: Optional[str]) -> Optional[str]:
+        if not (self.login_throttle_enabled and ip):
+            return None
+        record = self._login_failures.get(ip)
+        if not record:
+            return None
+        now = time.time()
+        attempts = record.get("attempts")
+        if not isinstance(attempts, deque):
+            attempts = deque()
+            record["attempts"] = attempts
+        cutoff = now - float(self.login_throttle_window_seconds)
+        while attempts and attempts[0] < cutoff:
+            attempts.popleft()
+        blocked_until = float(record.get("blocked_until") or 0.0)
+        if blocked_until and now < blocked_until:
+            remaining = max(1, int(blocked_until - now))
+            minutes, seconds = divmod(remaining, 60)
+            if minutes and seconds:
+                wait = f"{minutes}m {seconds}s"
+            elif minutes:
+                wait = f"{minutes}m"
+            else:
+                wait = f"{seconds}s"
+            return f"Too many failed attempts from this address. Try again in {wait}."
+        if blocked_until and now >= blocked_until:
+            record["blocked_until"] = 0.0
+        if not attempts and not record.get("blocked_until"):
+            self._login_failures.pop(ip, None)
+        return None
+
+    def _record_login_failure(self, ip: Optional[str]) -> None:
+        if not (self.login_throttle_enabled and ip):
+            return
+        now = time.time()
+        record = self._login_failures.setdefault(ip, {"attempts": deque(), "blocked_until": 0.0})
+        attempts = record.get("attempts")
+        if not isinstance(attempts, deque):
+            attempts = deque()
+            record["attempts"] = attempts
+        cutoff = now - float(self.login_throttle_window_seconds)
+        while attempts and attempts[0] < cutoff:
+            attempts.popleft()
+        if record.get("blocked_until"):
+            # Already blocked; do not extend window to avoid indefinite locks
+            return
+        attempts.append(now)
+        if len(attempts) >= self.login_throttle_max_attempts:
+            record["blocked_until"] = now + float(self.login_throttle_lock_seconds)
+            attempts.clear()
+            try:
+                self.logger.warning(
+                    "Login throttling triggered for %s (locked %ss)", ip, self.login_throttle_lock_seconds
+                )
+            except Exception:
+                pass
+
+    def _clear_login_failures(self, ip: Optional[str]) -> None:
+        if not (self.login_throttle_enabled and ip):
+            return
+        record = self._login_failures.get(ip)
+        if not record:
+            return
+        attempts = record.get("attempts")
+        if isinstance(attempts, deque):
+            attempts.clear()
+        record["blocked_until"] = 0.0
+        self._login_failures.pop(ip, None)
+
     # --- Utility: IP extraction ---
     def _get_client_ip(self, request: web.Request) -> Optional[str]:
         """Best-effort client IP from headers or transport.
@@ -2602,7 +2705,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
             meta["type"] = "websocket" if str(client_id).startswith("ws:") else None
         return meta
 
-    def _render_login(self, error: bool = False, next_url: Optional[str] = None) -> bytes:
+    def _render_login(
+        self,
+        error: bool = False,
+        next_url: Optional[str] = None,
+        message: Optional[str] = None,
+    ) -> bytes:
         """Render a simple login form, with optional Jinja2 template support.
 
         Template name: 'login.html.j2' with variables: error (bool), next (str), realm (str)
@@ -2612,13 +2720,29 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if self._jinja_env:
                 tmpl = self._jinja_env.get_template("login.html.j2")
                 base_path = self._effective_base_path(None)
-                html_text = tmpl.render(error=bool(error), next=next_url or "/", realm=self.realm, logo_url=self._get_logo_url(), base_path=base_path)
+                html_text = tmpl.render(
+                    error=bool(error),
+                    next=next_url or "/",
+                    realm=self.realm,
+                    logo_url=self._get_logo_url(),
+                    base_path=base_path,
+                    message=message,
+                )
                 return html_text.encode("utf-8")
         except Exception as e:
             self.logger.debug(f"login template render failed: {e}")
 
         # Inline fallback
-        msg = "<p style='color:#f66'>Invalid username or password</p>" if error else ""
+        try:
+            msg_text = str(message) if message is not None else None
+        except Exception:
+            msg_text = message
+        if msg_text:
+            msg = f"<p style='color:#f66'>{html.escape(msg_text)}</p>"
+        elif error:
+            msg = "<p style='color:#f66'>Invalid username or password</p>"
+        else:
+            msg = ""
         nxt = html.escape(str(next_url or "/"))
         # Compute logo abbreviation from realm (first two initials)
         try:

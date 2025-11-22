@@ -31,7 +31,11 @@
           <div class="subtitle">Web Console</div>
         </div>
       </div>
-      {% if error %}<p style="color:var(--status-err-text)">Invalid username or password</p>{% endif %}
+      {% if message %}
+      <p style="color:var(--status-err-text)">{{ message }}</p>
+      {% elif error %}
+      <p style="color:var(--status-err-text)">Invalid username or password</p>
+      {% endif %}
       <h1>Sign in to {{ realm }}</h1>
       <input type="hidden" name="next" value="{{ next or '/' }}" />
       <input type="text" name="username" placeholder="Username" autocomplete="username" required />
