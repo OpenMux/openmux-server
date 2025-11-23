@@ -26,6 +26,7 @@ import ssl
 import hmac
 import hashlib
 import json
+import re
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
@@ -110,6 +111,8 @@ _HTML_FALLBACK = b"""<!doctype html>
   </body>
   </html>"""
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-9;?]*[ -/]*[@-~]")
+
 def _fallback_with_base(raw: bytes, base_path: str) -> bytes:
     try:
         bp = base_path or ""
@@ -118,19 +121,33 @@ def _fallback_with_base(raw: bytes, base_path: str) -> bytes:
         return raw
 
 
-    def _tail_file(path: Path, limit: int) -> list[str]:
-        """Return the last ``limit`` lines from ``path``.
+def _tail_file(path: Path, limit: int) -> list[str]:
+    """Return the last ``limit`` lines from ``path``.
 
-        Reads the entire file via a bounded deque to keep implementation simple
-        while avoiding excessive memory for large files.
-        """
+    Reads the entire file via a bounded deque to keep implementation simple
+    while avoiding excessive memory for large files.
+    """
 
-        limit = max(1, limit)
-        lines: deque[str] = deque(maxlen=limit)
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                lines.append(line.rstrip("\n"))
-        return list(lines)
+    limit = max(1, limit)
+    lines: deque[str] = deque(maxlen=limit)
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            lines.append(line.rstrip("\n"))
+    return list(lines)
+
+
+def _sanitize_log_line(line: str) -> str:
+    """Strip carriage returns, ANSI escapes, and control chars for UI display."""
+
+    if not line:
+        return ""
+    try:
+        cleaned = line.replace("\r", "")
+        cleaned = _ANSI_ESCAPE_RE.sub("", cleaned)
+        cleaned = "".join(ch for ch in cleaned if ((ch >= " " and ch != "\x7f") or ch == "\t"))
+        return cleaned
+    except Exception:
+        return line.replace("\r", "")
 
 
 def _render_login_fallback(
@@ -463,7 +480,7 @@ async def handle_logs(request: web.Request) -> web.Response:
                 log_path = logger.get_log_path(port_name, port_obj)
                 if log_path.exists():
                     try:
-                        log_lines = _tail_file(log_path, tail)
+                        log_lines = [_sanitize_log_line(line) for line in _tail_file(log_path, tail)]
                     except Exception:
                         log_lines = []
                         log_error = "Failed to read log file."

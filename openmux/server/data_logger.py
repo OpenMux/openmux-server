@@ -6,8 +6,10 @@ either line-oriented text or JSON Lines (jsonl) with byte-hex previews.
 Features:
 - Per-port files with configurable path via port config (`log_file`).
 - Two formats: `line` (default) and `jsonl` (config key `log_format`).
-- Direction filters via `log_direction`/`log_directions` ("in", "out").
-    Lifecycle "meta" events bypass direction filters and are always recorded.
+- Direction filters via `log_direction`/`log_directions` ("in", "out"),
+    where "in" means data entering from the port adapter toward clients and
+    "out" means client traffic headed toward the port adapter. Lifecycle
+    "meta" events bypass direction filters and are always recorded.
 - Backpressure-safe: uses an `asyncio.Queue` and a single writer task.
 
 Usage example:
@@ -30,7 +32,8 @@ class LogEvent:
     Attributes:
         ts: Event timestamp (epoch seconds, UTC).
         port: Logical port name.
-        direction: Flow direction, "in" or "out".
+        direction: Flow direction. "in" = from port adapter toward clients,
+            "out" = client writes headed to the port adapter.
         size: Size of `data` in bytes.
         client_id: Optional client/session identifier.
         data: Raw bytes payload (may include binary data).
@@ -402,7 +405,8 @@ class DataLogger:
 
         Uses cached results per port and consults port config via
         `log_direction` or `log_directions` (string or iterable) to
-        restrict to one or both of {"in", "out"}. Defaults to both.
+        restrict to one or both of {"in", "out"}. Defaults to
+        {"in"} (port -> client traffic only).
 
         Args:
             port_name: Logical port name.
@@ -423,8 +427,8 @@ class DataLogger:
         cached = self._direction_cache.get(port_name)
         if cached is not None:
             return d in cached
-        # Resolve from config
-        allowed = {"in", "out"}  # default both
+        # Resolve from config (default to port->client traffic only)
+        allowed = {"in"}
         try:
             obj = port_obj
             if obj is not None and hasattr(obj, "unified_port"):

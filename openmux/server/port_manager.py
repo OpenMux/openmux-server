@@ -782,7 +782,7 @@ class PortManager:
                     DataLogger.get().record(
                         port_name=port_name,
                         data=data,
-                        direction="in",
+                        direction="out",
                         client_id=str(client_id),
                         meta=None,
                         port_obj=port,
@@ -873,7 +873,7 @@ class PortManager:
                     DataLogger.get().record(
                         port_name=port_name,
                         data=data,
-                        direction="out",
+                        direction="in",
                         client_id=None,
                         meta=None,
                         port_obj=getattr(port, "unified_port", None) or port,
