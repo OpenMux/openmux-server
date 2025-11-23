@@ -33,6 +33,7 @@
         </td>
         <td class="actions">
             <a class="btn" href="{{ base_path }}/console?console={{ p.name | urlencode }}&autoconnect=1">Open Console</a>
+          <a class="btn" href="{{ base_path }}/logs?port={{ p.name | urlencode }}">Show Logs</a>
         </td>
       </tr>
       {% endfor %}

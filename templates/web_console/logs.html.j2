@@ -1,0 +1,47 @@
+{% extends "layout.html.j2" %}
+
+{% set active_page = 'logs' %}
+
+{% block title %}Port Logs{% endblock %}
+
+{% block page_title %}Logs{% endblock %}
+
+{% block header_actions %}
+  <a class="btn" href="{{ base_path }}/">Summary</a>
+  <a class="btn" href="{{ base_path }}/console">Console</a>
+{% endblock %}
+
+{% block content %}
+  <h2>Port Logs</h2>
+  <form class="log-controls" method="get">
+    <label for="logPort">Port</label>
+    <select name="port" id="logPort">
+      <option value="">Select a port…</option>
+      {% for p in ports %}
+        <option value="{{ p.name }}" {% if current_port == p.name %}selected{% endif %}>{{ p.name }}{% if p.description %} — {{ p.description }}{% endif %}</option>
+      {% endfor %}
+    </select>
+    <label for="logTail">Lines</label>
+    <input id="logTail" name="tail" type="number" min="10" max="2000" value="{{ tail }}" />
+    <button class="btn" type="submit">Refresh</button>
+  </form>
+  {% if current_port %}
+    <div class="log-meta">
+      <div><strong>Port:</strong> {{ current_port }}</div>
+      {% if log_path %}<div><strong>File:</strong> <code>{{ log_path }}</code></div>{% endif %}
+      {% if log_size is not none %}<div><strong>Size:</strong> {{ (log_size / 1024)|round(1) }} KiB</div>{% endif %}
+      {% if log_mtime %}<div><strong>Updated:</strong> {{ log_mtime|fmt_ts }}</div>{% endif %}
+    </div>
+  {% endif %}
+  {% if log_error %}
+    <div class="card" role="alert">{{ log_error }}</div>
+  {% endif %}
+  <div class="log-viewer">
+    {% if log_lines %}
+      <pre>{% for line in log_lines %}{{ line }}
+{% endfor %}</pre>
+    {% else %}
+      <div class="muted">No log entries available.</div>
+    {% endif %}
+  </div>
+{% endblock %}

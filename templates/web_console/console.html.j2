@@ -22,6 +22,7 @@
   </div>
   <button class="btn" id="menuToggle" type="button" title="Open control menu">Menu</button>
   <button class="btn" id="infoToggle" type="button" title="Show port info">Info</button>
+  <button class="btn" id="logsButton" type="button" title="Open logs in new window">Show Logs</button>
 {% endblock %}
 
 {% block content_wrapper %}
@@ -108,6 +109,7 @@
     const bannerEl = document.getElementById('banner');
     const selectEl = document.getElementById('portSelect');
     const connectBtn = document.getElementById('connect');
+    const logsBtn = document.getElementById('logsButton');
     let ws; let ports = []; let currentConnectedPort = null; let portIsUp = false;
     // Debounce timer to delay showing WS-down banner during fast reconnects
     let wsDownTimer = null;
@@ -390,6 +392,14 @@
     term.onData((data) => { try { ws && ws.send(data); } catch (e) {} });
     function isConnected() { return ws && ws.readyState === WebSocket.OPEN; }
     function currentPort() { return (selectEl.value || '').trim(); }
+    function openLogsWindow() {
+      const port = currentPort();
+      if (!port) { alert('Select a port first.'); return; }
+      const url = new URL('{{ base_path }}/logs', window.location.origin);
+      url.searchParams.set('port', port);
+      window.open(url.toString(), '_blank', 'noopener');
+    }
+    if (logsBtn) logsBtn.addEventListener('click', openLogsWindow);
     function showBanner(msg, kind='error') {
       if (!bannerEl) return;
       bannerEl.textContent = msg;
