@@ -45,6 +45,13 @@ class LoopbackPort:
         # Loopback ports are virtual; consider them connected while active
         self.is_connected = False
 
+        # Human-friendly label surfaced in UI/port listings
+        desc = config.get("description")
+        if isinstance(desc, str) and desc.strip():
+            self.description = desc.strip()
+        else:
+            self.description = f"Loopback port {name}"
+
         # Loopback-specific configuration (backward compatible)
         self.echo_delay = config.get("echo_delay", 0.0)
         self.buffer_size = config.get("buffer_size", 1024)
