@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from urllib.error import URLError, HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 ASSETS = [
@@ -17,24 +17,24 @@ ASSETS = [
         "xterm/css/xterm.css",
         "xterm.js stylesheet",
         [
-            "https://unpkg.com/xterm@5.3.0/css/xterm.css",
-            "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css",
+            "https://unpkg.com/xterm@latest/css/xterm.css",
+            "https://cdn.jsdelivr.net/npm/xterm@latest/css/xterm.css",
         ],
     ),
     (
         "xterm/lib/xterm.js",
         "xterm.js library",
         [
-            "https://unpkg.com/xterm@5.3.0/lib/xterm.js",
-            "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js",
+            "https://unpkg.com/xterm@latest/lib/xterm.js",
+            "https://cdn.jsdelivr.net/npm/xterm@latest/lib/xterm.js",
         ],
     ),
     (
         "xterm-addon-fit/lib/xterm-addon-fit.js",
         "xterm fit addon",
         [
-            "https://unpkg.com/xterm-addon-fit@0.9.0/lib/xterm-addon-fit.js",
-            "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.9.0/lib/xterm-addon-fit.js",
+            "https://unpkg.com/xterm-addon-fit@latest/lib/xterm-addon-fit.js",
+            "https://cdn.jsdelivr.net/npm/xterm-addon-fit@latest/lib/xterm-addon-fit.js",
         ],
     ),
 ]

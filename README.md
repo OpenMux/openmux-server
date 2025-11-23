@@ -44,7 +44,7 @@ python -m openmux.server --config-dir ./config/
 
 ### Web Console Assets
 
-The Web Console serves bundled xterm.js files from `static/`. Download the correct versions before enabling the adapter:
+The Web Console serves bundled xterm.js files from `static/`. Download the latest xterm.js assets before enabling the adapter:
 
 ```bash
 scripts/install_xtermjs.py
@@ -54,7 +54,7 @@ scripts/install_xtermjs.py --force            # re-download even if files exist
 scripts/install_xtermjs.py --static-dir /var/lib/openmux/static
 ```
 
-The script verifies that `xterm.js`, `xterm.css`, and the fit addon are present before exiting so browsers never rely on CDN fetches at runtime.
+The script fetches the latest `xterm.js`, `xterm.css`, and fit addon builds and verifies they exist locally before exiting, so browsers never rely on CDN fetches at runtime.
 
 ## Features
 
