@@ -139,6 +139,9 @@ class CommandPort:
         self.data_callback = None
         self._read_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
+        # Queue handling hints consumed by PortManager/legacy wrappers
+        self.drop_oldest_on_full = True
+        self._queue_fallback_logged = False
 
         # Restart config
         self.auto_restart = bool(config.get("auto_restart", False))
@@ -212,6 +215,76 @@ class CommandPort:
         """
         return None
 
+    def _port_manager(self):
+        """Return the bound PortManager instance if available."""
+        return getattr(self.adapter, "main_port_manager", None)
+
+    async def _emit_output_chunk(
+        self,
+        chunk: bytes,
+        *,
+        require_clients: Optional[bool] = None,
+        drop_oldest: bool = True,
+    ) -> None:
+        """Forward process output through the centralized logging path."""
+        if not chunk:
+            return
+        pm = self._port_manager()
+        require_clients_flag = (not self.always_buffer) if require_clients is None else require_clients
+        if pm:
+            try:
+                ok = await pm.send_data_from_unified_port(
+                    self.name,
+                    chunk,
+                    require_clients=require_clients_flag,
+                    drop_oldest=drop_oldest,
+                )
+                if ok:
+                    return
+            except Exception:
+                self.logger.error(f"PortManager forwarding failed for {self.name}", exc_info=True)
+        # Fallback for early startup/tests when PortManager isn't wired
+        if not self._queue_fallback_logged:
+            self.logger.error(
+                "Command port %s falling back to local queue; PortManager missing or send failure",
+                self.name,
+            )
+            self._queue_fallback_logged = True
+        if self.data_queue is None:
+            self._start_data_buffering()
+        if self.data_queue is None:
+            return
+        while True:
+            try:
+                self.data_queue.put_nowait(chunk)
+                break
+            except asyncio.QueueFull:
+                if drop_oldest:
+                    try:
+                        self.data_queue.get_nowait()
+                    except Exception:
+                        self.logger.warning(f"Failed to free space in queue for {self.name}; dropping output chunk")
+                        break
+                    continue
+                self.logger.warning(f"Data queue full for {self.name}; dropping output chunk")
+                break
+
+    def _schedule_notice_emit(self, payload: bytes) -> None:
+        """Schedule emission of a notice chunk via the centralized path."""
+        if not payload:
+            return
+        async def _do_emit():
+            await self._emit_output_chunk(payload, require_clients=False)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.logger.error(
+                "No running event loop available to emit notice for %s; dropping notice",
+                self.name,
+            )
+            return
+        loop.create_task(_do_emit())
+
     def on_client_count_changed(self, count: int):
         """Handle change in connected client count.
 
@@ -242,15 +315,12 @@ class CommandPort:
                 except Exception:
                     self.logger.error("Failed to trigger on-demand start for %s", self.name, exc_info=True)
             if (not self.process_active) and not self._stopped_notice_sent:
-                try:
-                    if self.data_queue:
-                        hint = "spawn" if getattr(self, "spawn_on_demand", False) else "respawn"
-                        self.data_queue.put_nowait(
-                            f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
-                        )
-                        self._stopped_notice_sent = True
-                except asyncio.QueueFull:
-                    pass  # justification: dropping advisory notice when queue full avoids blocking critical path
+                hint = "spawn" if getattr(self, "spawn_on_demand", False) else "respawn"
+                notice = (
+                    f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
+                )
+                self._stopped_notice_sent = True
+                self._schedule_notice_emit(notice)
         elif old > 0 and count == 0:
             self._stop_data_buffering()
             if not self.process_active:
@@ -664,15 +734,11 @@ class CommandPort:
 
                     asyncio.create_task(buffer_data(data))
                 else:
-                    if (self.client_count > 0 or self.always_buffer) and self.data_queue:
+                    if data:
                         try:
-                            self.data_queue.put_nowait(data)
-                        except asyncio.QueueFull:
-                            try:
-                                self.data_queue.get_nowait()
-                                self.data_queue.put_nowait(data)
-                            except Exception:  # justification: queue contention while dropping oldest item; safe to ignore
-                                pass
+                            asyncio.create_task(self._emit_output_chunk(data))
+                        except Exception:
+                            self.logger.error(f"Failed to schedule output forwarding for {self.name}", exc_info=True)
         except OSError as e:
             if self._loop and self._pty_reader_added:
                 try:
@@ -707,15 +773,7 @@ class CommandPort:
                             pass
                     if self.output_crlf and data:
                         data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-                    if (self.client_count > 0 or self.always_buffer) and self.data_queue:
-                        try:
-                            self.data_queue.put_nowait(data)
-                        except asyncio.QueueFull:
-                            try:
-                                self.data_queue.get_nowait()
-                                self.data_queue.put_nowait(data)
-                            except asyncio.QueueEmpty:  # justification: benign race emptying queue; ignore
-                                pass
+                    await self._emit_output_chunk(data)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -767,15 +825,8 @@ class CommandPort:
                     self._first_data_time = None
                 else:
                     to_send = None
-            if to_send and (self.client_count > 0 or self.always_buffer) and self.data_queue:
-                try:
-                    self.data_queue.put_nowait(to_send)
-                except asyncio.QueueFull:
-                    try:
-                        self.data_queue.get_nowait()
-                        self.data_queue.put_nowait(to_send)
-                    except Exception:  # justification: queue contention while replacing oldest batch; safe to drop
-                        pass
+            if to_send:
+                await self._emit_output_chunk(to_send)
 
     async def _monitor_loop(self):
         """Monitor process exit and perform auto-restart if enabled.
@@ -1146,14 +1197,14 @@ class CommandWriter:
                     return
             if not self.port._stopped_notice_sent:
                 self.port._stopped_notice_sent = True
+                hint = "spawn" if getattr(self.port, "spawn_on_demand", False) else "respawn"
+                notice = (
+                    f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self.port._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
+                )
                 try:
-                    if self.port.data_queue:
-                        hint = "spawn" if getattr(self.port, "spawn_on_demand", False) else "respawn"
-                        self.port.data_queue.put_nowait(
-                            f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self.port._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
-                        )
-                except Exception:  # justification: advisory stopped notice enqueue failure is non-fatal
-                    pass
+                    await self.port._emit_output_chunk(notice, require_clients=False)
+                except Exception:
+                    self.logger.debug("Failed to emit stopped notice", exc_info=True)
             return
         if not self._batching_enabled:
             await self._write_direct(data)
@@ -1218,10 +1269,9 @@ class CommandWriter:
                         pass
             if getattr(self.port, "local_echo", False):
                 try:
-                    if self.port.data_queue:
-                        self.port.data_queue.put_nowait(data)
+                    await self.port._emit_output_chunk(data, require_clients=False)
                 except Exception:  # justification: local echo enqueue failure is advisory; safe to ignore
-                    pass
+                    self.logger.debug("Local echo emit failed", exc_info=True)
         except Exception as e:
             self.logger.error(f"Error writing to command {self.port.name}: {e}", exc_info=True)
 

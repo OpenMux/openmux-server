@@ -8,6 +8,32 @@ import pytest
 from openmux.server.adapters.command import CommandAdapter, CommandPort, CommandWriter
 
 
+class StubConfigManager:
+    def __init__(self, config=None):
+        self.config = config or {"server": {"id": "srv-123"}}
+
+    def load_config(self):
+        return self.config
+
+
+class CapturingPortManager:
+    def __init__(self, config=None):
+        self.output_queue = asyncio.Queue()
+        cfg = config or {"server": {"id": "srv-123"}}
+        self.config_manager = StubConfigManager(cfg)
+
+    async def send_data_from_unified_port(
+        self,
+        port_name: str,
+        chunk: bytes,
+        *,
+        require_clients: bool = True,
+        drop_oldest: bool = True,
+    ) -> bool:
+        await self.output_queue.put(chunk)
+        return True
+
+
 class DummyStreamWriter:
     def __init__(self):
         self.buffer = bytearray()
@@ -39,11 +65,8 @@ class FakeProcess:
 @pytest.mark.asyncio
 async def test_stopped_notice_and_client_notice_prefix(monkeypatch):
     # Build adapter with a config manager to provide server.id for prefix
-    class CfgMgr:
-        def __init__(self):
-            self.config = {"server": {"id": "srv-123"}}
-
-    adapter: Any = SimpleNamespace(main_port_manager=SimpleNamespace(config_manager=CfgMgr()))
+    pm = CapturingPortManager({"server": {"id": "srv-123"}})
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
     port = CommandPort("cp1", {"command": "echo"}, adapter)
 
     # read_data on inactive returns stopped notice once
@@ -56,17 +79,17 @@ async def test_stopped_notice_and_client_notice_prefix(monkeypatch):
     # Client count change from 0->1 enqueues notice if banner not yet sent
     port._stopped_notice_sent = False
     port.on_client_count_changed(1)
-    got = await port.read_data(0.01)
+    got = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
     assert b"PROCESS_NOT_RUNNING srv-123/cp1" in got
 
 
 @pytest.mark.asyncio
 async def test_writer_normalization_and_local_echo():
-    adapter: Any = SimpleNamespace()
+    pm = CapturingPortManager()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
     port = CommandPort("cp2", {"command": "echo", "normalize_newlines": True, "local_echo": True}, adapter)
     port.process_active = True
     port.use_pty = False
-    port.data_queue = asyncio.Queue()
     writer = CommandWriter(DummyStreamWriter(), port)
     # Disable batching for direct write
     writer._batching_enabled = False
@@ -76,7 +99,7 @@ async def test_writer_normalization_and_local_echo():
     # Pipe mode maps to LF
     assert bytes(cast(Any, writer.stdin_stream).buffer) == b"A\nB\nC\n"
     # Local echo enqueued same mapped data
-    echoed = await port.data_queue.get()
+    echoed = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
     assert echoed == b"A\nB\nC\n"
 
 
@@ -86,7 +109,6 @@ async def test_writer_respawn_on_newline(monkeypatch):
     port = CommandPort("cp3", {"command": "echo", "normalize_newlines": True}, adapter)
     port.process_active = False
     port.use_pty = False
-    port.data_queue = asyncio.Queue()
     # Writer requires a stream in pipe mode to avoid early return
     writer = CommandWriter(DummyStreamWriter(), port)
 
@@ -114,20 +136,20 @@ def test_xtgettcap_interception():
 
 @pytest.mark.asyncio
 async def test_pty_read_ready_queueing():
-    adapter: Any = SimpleNamespace()
+    pm = CapturingPortManager()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
     port = CommandPort("cp5", {"command": "echo"}, adapter)
     port.is_running = True
     port.use_pty = True
     port.always_buffer = True
     port._output_batching_enabled = False
-    port.data_queue = asyncio.Queue()
     rfd, wfd = os.pipe()
     os.set_blocking(rfd, False)
     port._pty_master_fd = rfd
     try:
         os.write(wfd, b"abc\n")
         port._on_pty_read_ready()
-        got = await asyncio.wait_for(port.data_queue.get(), timeout=0.1)
+        got = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
         # PTY path maps newlines to CRLF
         assert got == b"abc\r\n"
     finally:
@@ -137,15 +159,15 @@ async def test_pty_read_ready_queueing():
 
 @pytest.mark.asyncio
 async def test_stdout_reader_task_queueing():
-    adapter: Any = SimpleNamespace()
+    pm = CapturingPortManager()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
     port = CommandPort("cp6", {"command": "echo"}, adapter)
     port.is_running = True
     port.use_pty = False
     port.always_buffer = True
-    port.data_queue = asyncio.Queue()
     port.process = cast(Any, FakeProcess([b"foo\r\n", b""]))
     await port._stdout_reader_task()
-    got = await asyncio.wait_for(port.data_queue.get(), timeout=0.1)
+    got = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
     # Pipe path normalizes CRLF to LF
     assert got == b"foo\n"
 
@@ -169,7 +191,6 @@ async def test_adapter_config_status_create_destroy_write(monkeypatch):
             async def fake_start(self):
                 self.is_running = True
                 self.process_active = True
-                self.data_queue = asyncio.Queue()
                 return True
 
             monkeypatch.setattr(CommandPort, "start", fake_start)
@@ -257,8 +278,6 @@ async def test_on_demand_banner_and_spawn_on_first_client(monkeypatch):
         called["start"] += 1
         port.is_running = True
         port.process_active = True
-        if port.data_queue is None:
-            port.data_queue = asyncio.Queue()
         return True
 
     monkeypatch.setattr(port, "start", fake_start)

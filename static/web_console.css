@@ -138,6 +138,8 @@ th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--bord
 table.table-compact th, table.table-compact td { padding: 2px 6px; }
 /* Narrow first column for +/- */
 th.col-toggle, td.col-toggle { width: 28px; padding-left: 4px; padding-right: 4px; }
+td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+td.actions .btn { flex: none; }
 tr:hover { background: var(--bg-hover); }
 
 /* Console layout */
@@ -175,6 +177,13 @@ body.port-down header.site { background: #2a2015; border-bottom-color: #6b5a2f; 
 .chip { display: inline-block; padding: 4px 8px; border-radius: 14px; background: var(--bg-hover); color: var(--text-main); border: 1px solid var(--border-color); font-size: 12px; }
 .chip.ok { border-color: var(--status-ok-text); }
 .chip.bad { border-color: var(--status-err-text); }
+
+.log-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.log-controls select, .log-controls input { min-width: 160px; }
+.log-meta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; font-size: 13px; color: var(--text-muted); }
+.log-meta code { font-size: 12px; }
+.log-viewer { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; max-height: 70vh; overflow: auto; }
+.log-viewer pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
 
 .mini-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
 .mini-table th, .mini-table td { border-bottom: 1px solid var(--border-color); padding: 4px 6px; }

@@ -210,6 +210,9 @@ class PortManager:
                     self.data_queue = existing_q
                 else:
                     self.data_queue = asyncio.Queue(maxsize=100)
+                # Surface adapter-specific buffering hints so the manager can honor them
+                self.always_buffer = bool(getattr(unified_port, "always_buffer", False))
+                self.drop_oldest_on_full = bool(getattr(unified_port, "drop_oldest_on_full", False))
 
             def get_status(self):
                 """Return a status snapshot for this unified wrapper."""
@@ -837,14 +840,30 @@ class PortManager:
 
         return None
 
-    def handle_incoming_port_data(self, port_name: str, data: bytes) -> bool:
+    def handle_incoming_port_data(
+        self,
+        port_name: str,
+        data: bytes,
+        *,
+        require_clients: Optional[bool] = None,
+        drop_oldest: Optional[bool] = None,
+    ) -> bool:
         """Synchronous handler: log and optionally enqueue incoming port data.
 
-        Used by legacy Port callbacks to avoid async scheduling races. Performs
-        a single port-level outbound log, then enqueues only if there are
-        connected clients.
+        Args:
+            port_name: Logical port name.
+            data: Payload bytes to log/forward.
+            require_clients: When True (default) data is enqueued only when at
+                least one client is connected. When False the queue is used even
+                with zero clients. When None, adapter-level hints (e.g.
+                ``always_buffer``) control the behavior.
+            drop_oldest: When True the oldest queued item is dropped on
+                overflow. When False (default) a full queue drops the new data.
+                When None, adapter-level preferences (``drop_oldest_on_full``)
+                are applied.
 
-        Returns True if accepted/logged; False on queue or unexpected errors.
+        Returns:
+            True if accepted/logged; False on queue or unexpected errors.
         """
         if port_name in self.ports:
             port = self.ports[port_name]
@@ -862,17 +881,47 @@ class PortManager:
                 except Exception:
                     self.logger.debug(f"DataLogger record failed for {port_name}", exc_info=True)
 
-                # Only enqueue when clients are connected
+                # Only enqueue when clients are connected (unless told otherwise)
                 if hasattr(port, "data_queue") and hasattr(port, "connected_clients"):
-                    if len(getattr(port, "connected_clients", [])) > 0:
+                    client_list = getattr(port, "connected_clients", []) or []
+                    always_buffer = bool(getattr(port, "always_buffer", False))
+                    require_clients_flag = True if require_clients is None else bool(require_clients)
+                    should_enqueue = False
+                    if not require_clients_flag:
+                        should_enqueue = True
+                    elif len(client_list) > 0:
+                        should_enqueue = True
+                    elif always_buffer:
+                        should_enqueue = True
+
+                    if should_enqueue and port.data_queue is not None:
+                        drop_oldest_flag = (
+                            bool(getattr(port, "drop_oldest_on_full", False))
+                            if drop_oldest is None
+                            else bool(drop_oldest)
+                        )
                         try:
                             port.data_queue.put_nowait(data)
                             self.logger.debug(
-                                f"Queued {len(data)} bytes for port {port_name} to {len(port.connected_clients)} clients"
+                                f"Queued {len(data)} bytes for port {port_name} to {len(client_list)} clients"
                             )
                         except asyncio.QueueFull:
-                            self.logger.warning(f"Data queue full for port {port_name}, dropping data")
-                            return False
+                            if drop_oldest_flag:
+                                try:
+                                    port.data_queue.get_nowait()
+                                    port.data_queue.put_nowait(data)
+                                    self.logger.debug(
+                                        f"Queue full for {port_name}; dropped oldest chunk to enqueue {len(data)} bytes"
+                                    )
+                                except Exception:
+                                    self.logger.warning(
+                                        f"Data queue contention for port {port_name}; dropping data after retry",
+                                        exc_info=True,
+                                    )
+                                    return False
+                            else:
+                                self.logger.warning(f"Data queue full for port {port_name}, dropping data")
+                                return False
                     else:
                         self.logger.debug(f"No clients connected to port {port_name}; logged and not queued")
                 return True
@@ -882,7 +931,14 @@ class PortManager:
         self.logger.error(f"Port {port_name} not found for data handling")
         return False
 
-    async def send_data_from_unified_port(self, port_name: str, data: bytes) -> bool:
+    async def send_data_from_unified_port(
+        self,
+        port_name: str,
+        data: bytes,
+        *,
+        require_clients: Optional[bool] = None,
+        drop_oldest: Optional[bool] = None,
+    ) -> bool:
         """Centralized enqueue/log for incoming port data (legacy or unified).
 
         Always records a single port-level outbound log entry, then enqueues
@@ -892,11 +948,22 @@ class PortManager:
             port_name: Port name.
             data: Bytes from the adapter/port.
 
+        Args:
+            port_name: Port name.
+            data: Bytes from the adapter/port.
+            require_clients: See :meth:`handle_incoming_port_data`.
+            drop_oldest: See :meth:`handle_incoming_port_data`.
+
         Returns:
             True if logged/accepted (even if not enqueued due to no clients);
             False only on queue or unexpected errors.
         """
-        return self.handle_incoming_port_data(port_name, data)
+        return self.handle_incoming_port_data(
+            port_name,
+            data,
+            require_clients=require_clients,
+            drop_oldest=drop_oldest,
+        )
 
     def get_client_mode(self, client_id: str, port_name: str) -> Optional[str]:
         """Return a client's mode (if known) for a specific port.
@@ -1036,21 +1103,19 @@ class PortManager:
 
             # Set up data callback for proper integration with console manager
             # Create a callback that will handle incoming data from the federated port
-            def federated_data_callback(data: bytes):
+            async def federated_data_callback(data: bytes):
                 """Callback for federated port data - integrates with console manager"""
                 try:
                     self.logger.debug(f"🚀 FEDERATED CALLBACK: Received {len(data)} bytes for port {port_name}")
-
-                    # Put data in the proxy's queue for client consumption (this enables get_port_data to work)
-                    if hasattr(remote_proxy, "data_queue"):
-                        remote_proxy.data_queue.put_nowait(data)
-                        self.logger.debug(f"🚀 FEDERATED CALLBACK: Added data to queue for console manager polling")
-                    else:
-                        self.logger.warning(f"🚀 FEDERATED CALLBACK: RemotePortProxy has no data_queue")
-
-                    # Don't try to send directly to clients here - let the console manager handle broadcasting
-                    # The console manager polls get_port_data and broadcasts to all connected TCP clients
-
+                    ok = await self.send_data_from_unified_port(port_name, data, require_clients=False)
+                    if not ok and hasattr(remote_proxy, "data_queue"):
+                        try:
+                            remote_proxy.data_queue.put_nowait(data)
+                        except Exception:
+                            self.logger.warning(
+                                f"🚀 FEDERATED CALLBACK: Failed fallback queue enqueue for {port_name}",
+                                exc_info=True,
+                            )
                     self.logger.debug(f"Processed {len(data)} bytes for federated port {port_name}")
                 except Exception as e:
                     self.logger.error(f"Error in federated port data callback for {port_name}: {e}", exc_info=True)

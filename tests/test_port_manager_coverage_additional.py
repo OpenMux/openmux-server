@@ -91,6 +91,8 @@ class DummyRemoteProxy:
         self.data_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=10)
         self._cb = None
         self.server_adapter = object()
+        self.connected_clients: list[Dict[str, Any]] = []
+        self.max_read_write_users = 5
 
     def set_port_manager(self, pm):
         self.pm = pm
@@ -233,7 +235,7 @@ async def test_register_federated_and_enrichment():
     assert name == "rf"
     # callback should add data to queue
     assert proxy._cb is not None
-    proxy._cb(b"data")
+    await proxy._cb(b"data")
     assert not proxy.data_queue.empty()
 
     # Enrichment in list

@@ -124,6 +124,8 @@ async def test_unified_wrapper_and_queueing():
     assert await pm.register_unified_port("u1", up, adapter) is True
     wrapper = pm.get_port("u1")
     assert wrapper is not None and hasattr(wrapper, "unified_port")
+    dq = wrapper.data_queue
+    assert dq is not None
 
     # Exercise wrapper write paths (bool and int conversions)
     ok_a = await wrapper.write_data(b"abc")
@@ -132,12 +134,16 @@ async def test_unified_wrapper_and_queueing():
 
     # No clients -> send_data_from_unified_port should drop but return True
     assert await pm.send_data_from_unified_port("u1", b"X") is True
+    assert dq.empty()
+
+    # Force enqueue even without clients
+    assert await pm.send_data_from_unified_port("u1", b"forced", require_clients=False) is True
+    assert dq.get_nowait() == b"forced"
 
     # Add a client and enqueue data
     wrapper.connected_clients.append({"client_id": "c1", "mode": "read-only"})
     assert await pm.send_data_from_unified_port("u1", b"Y") is True
     # Read from the unified port's queue via the shared queue reference
-    dq = wrapper.data_queue
     got = dq.get_nowait()
     assert got == b"Y"
 
@@ -235,7 +241,7 @@ async def test_register_unregister_federated_and_enrichment(monkeypatch, simple_
 
     # Simulate inbound data via callback and retrieve using get_port_data
     assert rp1._cb is not None
-    rp1._cb(b"hello")
+    await rp1._cb(b"hello")
     data = await pm.get_port_data("rf1")
     assert data == b"hello"
 
@@ -260,6 +266,46 @@ async def test_get_port_list_is_empty_without_unified_ports():
     pm = PortManager([])
     ports = await pm.get_port_list()
     assert ports == []
+
+
+@pytest.mark.asyncio
+async def test_force_enqueue_and_drop_oldest(monkeypatch):
+    from openmux.server import data_logger as dl_mod
+
+    dummy = DummyDataLogger()
+    monkeypatch.setattr(dl_mod.DataLogger, "get", classmethod(lambda cls: dummy))
+
+    pm = PortManager([])
+
+    class DummyPort:
+        def __init__(self):
+            self.name = "pbuf"
+            self.description = "buffered"
+            self.state = SimpleNamespace(value="active")
+            self.data_queue = asyncio.Queue(maxsize=2)
+            self.connected_clients: List[Dict[str, Any]] = []
+            self.max_read_write_users = 1
+            self.always_buffer = False
+            self.drop_oldest_on_full = True
+
+    port = DummyPort()
+    pm.ports["pbuf"] = port
+
+    # Default behavior: no clients -> data only logged
+    assert await pm.send_data_from_unified_port("pbuf", b"A") is True
+    assert port.data_queue.empty()
+
+    # Force enqueue with zero clients
+    assert await pm.send_data_from_unified_port("pbuf", b"B", require_clients=False) is True
+    assert port.data_queue.get_nowait() == b"B"
+
+    # Fill queue and ensure oldest entry is dropped when full
+    await port.data_queue.put(b"1")
+    await port.data_queue.put(b"2")
+    assert await pm.send_data_from_unified_port("pbuf", b"3", require_clients=False) is True
+    first = port.data_queue.get_nowait()
+    second = port.data_queue.get_nowait()
+    assert first == b"2" and second == b"3"
 
 
 @pytest.mark.asyncio

@@ -61,6 +61,36 @@ class LoopbackPort:
         self.max_read_write_users = int(config.get("max_read_write_users", 5))
         # Unified interface placeholders
         self.data_callback = None  # Set by adapter/manager if used
+        # Hints for port manager queue policy
+        self.always_buffer = False
+        self.drop_oldest_on_full = False
+        self._queue_fallback_logged = False
+
+    def _port_manager(self):
+        """Return bound PortManager instance if adapter registered one."""
+        return getattr(self.adapter, "main_port_manager", None)
+
+    async def _emit_data(self, payload: bytes) -> None:
+        """Send sanitized payload through the centralized port manager."""
+        if not payload:
+            return
+        pm = self._port_manager()
+        if pm:
+            try:
+                ok = await pm.send_data_from_unified_port(self.name, payload)
+                if ok:
+                    return
+            except Exception:
+                    self.logger.error(f"PortManager forwarding failed for {self.name}", exc_info=True)
+        # Fallback for unit tests or when manager unavailable
+        if not self._queue_fallback_logged:
+            self.logger.error(
+                "Loopback port %s falling back to local queue; PortManager missing or send failure",
+                self.name,
+            )
+            self._queue_fallback_logged = True
+        if self.data_queue is not None:
+            await self.data_queue.put(payload)
 
     async def start(self) -> bool:
         """Initialize internal queues and mark port active.
@@ -135,11 +165,12 @@ class LoopbackPort:
                 continue
             safe_part = self.sanitize_data(part)
             if safe_part:
-                await self.data_queue.put(safe_part.replace(b"\r", b"").replace(b"\n", b""))
+                trimmed = safe_part.replace(b"\r", b"").replace(b"\n", b"")
+                await self._emit_data(trimmed)
             # If this part ends with a newline (CR or LF or CRLF), emit banner now
             if safe_part and (safe_part.endswith(b"\n") or safe_part.endswith(b"\r")):
                 feedback_msg = b"[ENTER]\r\n"
-                await self.data_queue.put(feedback_msg)
+                await self._emit_data(feedback_msg)
 
         self.logger.debug(f"Loopback write: {len(data)} bytes")
         return len(data)

@@ -34,6 +34,7 @@ from typing import Callable
 from aiohttp import web
 from openmux.server.port_utils import safe_get_port
 from openmux.server.web_plugins import ADAPTER_APP_KEY
+from openmux.server.data_logger import DataLogger
 import secrets
 import urllib.parse
 import importlib
@@ -115,6 +116,21 @@ def _fallback_with_base(raw: bytes, base_path: str) -> bytes:
         return raw.replace(b"%BASE%", bp.encode("utf-8"))
     except Exception:
         return raw
+
+
+    def _tail_file(path: Path, limit: int) -> list[str]:
+        """Return the last ``limit`` lines from ``path``.
+
+        Reads the entire file via a bounded deque to keep implementation simple
+        while avoiding excessive memory for large files.
+        """
+
+        limit = max(1, limit)
+        lines: deque[str] = deque(maxlen=limit)
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                lines.append(line.rstrip("\n"))
+        return list(lines)
 
 
 def _render_login_fallback(
@@ -400,6 +416,86 @@ async def handle_console(request: web.Request) -> web.Response:
         except Exception:
             bp = ""
         body = _fallback_with_base(_HTML_FALLBACK, bp)
+    return web.Response(body=body, content_type="text/html")
+
+
+async def handle_logs(request: web.Request) -> web.Response:
+    adapter = request.app[ADAPTER_APP_KEY]
+    try:
+        username = request.get("username")
+        try:
+            plugin_nav = adapter._get_allowed_plugin_nav(username, request=request)
+        except Exception:
+            plugin_nav = []
+        try:
+            user_perm = adapter._get_effective_permission(username, request)
+        except Exception:
+            user_perm = None
+
+        ports = adapter._get_ports_snapshot()
+        port_name = request.match_info.get("port_name")
+        if not port_name:
+            port_name = request.rel_url.query.get("port") or request.rel_url.query.get("console")
+        port_name = (port_name or "").strip()
+        tail_param = request.rel_url.query.get("tail")
+        tail = 200
+        try:
+            if tail_param:
+                tail = int(tail_param)
+        except Exception:
+            tail = 200
+        tail = max(10, min(2000, tail))
+
+        log_lines: list[str] = []
+        log_error: Optional[str] = None
+        log_path: Optional[Path] = None
+        log_size: Optional[int] = None
+        log_mtime: Optional[float] = None
+
+        if port_name:
+            try:
+                pm = getattr(adapter.console_manager, "port_manager", None) if adapter.console_manager else None
+                port_obj = safe_get_port(pm, port_name) if pm else None
+            except Exception:
+                port_obj = None
+            try:
+                logger = DataLogger.get()
+                log_path = logger.get_log_path(port_name, port_obj)
+                if log_path.exists():
+                    try:
+                        log_lines = _tail_file(log_path, tail)
+                    except Exception:
+                        log_lines = []
+                        log_error = "Failed to read log file."
+                    stat = log_path.stat()
+                    log_size = stat.st_size
+                    log_mtime = stat.st_mtime
+                else:
+                    log_error = "No log file found for this port."
+            except Exception as exc:
+                adapter.logger.error(f"/logs read error for {port_name}: {exc}", exc_info=True)
+                log_error = "Unable to resolve log path for this port."
+        else:
+            log_error = "Select a port to view logs."
+
+        if hasattr(adapter, "_render_logs"):
+            body = adapter._render_logs(
+                ports=ports,
+                plugin_nav=plugin_nav,
+                current_port=port_name or None,
+                user_permission=user_perm,
+                log_lines=log_lines,
+                log_error=log_error,
+                log_path=str(log_path) if log_path else None,
+                log_size=log_size,
+                log_mtime=log_mtime,
+                tail=tail,
+            )  # type: ignore[attr-defined]
+        else:
+            raise AttributeError("Adapter missing _render_logs")
+    except Exception as re:
+        adapter.logger.error(f"Logs template render failed: {re}")
+        body = b"<html><body><h1>Logs</h1><p>Unable to render logs page.</p></body></html>"
     return web.Response(body=body, content_type="text/html")
 
 
@@ -1334,6 +1430,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if self.enable_ui:
                 app.router.add_get("/index.html", handle_index)
                 app.router.add_get("/console", handle_console)
+                app.router.add_get("/logs", handle_logs)
+                app.router.add_get("/logs/{port_name}", handle_logs)
                 app.router.add_get("/status", handle_status)
             # Login/logout
             app.router.add_get("/login", handle_login)
@@ -1688,6 +1786,77 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             bp = ""
         return _fallback_with_base(_HTML_FALLBACK, bp)
+
+    def _render_logs(
+        self,
+        plugin_nav: Optional[list[Dict[str, Any]]] = None,
+        ports: Optional[list[dict[str, Any]]] = None,
+        current_port: Optional[str] = None,
+        user_permission: Optional[str] = None,
+        log_lines: Optional[list[str]] = None,
+        log_error: Optional[str] = None,
+        log_path: Optional[str] = None,
+        log_size: Optional[int] = None,
+        log_mtime: Optional[float] = None,
+        tail: int = 200,
+    ) -> bytes:
+        """Render the per-port log viewer page."""
+
+        try:
+            if self._jinja_env:
+                tmpl = self._jinja_env.get_template("logs.html.j2")
+                base_path = self._effective_base_path(None)
+                html_text = tmpl.render(
+                    realm=self.realm,
+                    logo_url=self._get_logo_url(),
+                    title="OpenMux Logs",
+                    base_path=base_path,
+                    plugin_nav=plugin_nav,
+                    ports=ports or [],
+                    current_port=current_port,
+                    user_permission=user_permission,
+                    log_lines=log_lines or [],
+                    log_error=log_error,
+                    log_path=log_path,
+                    log_size=log_size,
+                    log_mtime=log_mtime,
+                    tail=tail,
+                )
+                return html_text.encode("utf-8")
+        except Exception as e:
+            self.logger.debug(f"logs template render failed: {e}")
+
+        # Fallback minimal view if templates are unavailable
+        try:
+            lines = "<br/>".join(html.escape(line) for line in (log_lines or [])) or "<em>No log lines</em>"
+        except Exception:
+            lines = "<em>No log lines</em>"
+        msg = html.escape(log_error) if log_error else ""
+        msg_block = f"<p class='muted'>{msg}</p>" if msg else ""
+        try:
+            bp = self._effective_base_path(None) or ""
+        except Exception:
+            bp = ""
+        body = f"""
+<!doctype html>
+<html>
+  <head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>OpenMux Logs</title>
+    <link rel=\"stylesheet\" href=\"{bp}/static/web_console.css\" />
+  </head>
+  <body>
+    <header class=\"site\"><div class=\"brand\">OpenMux</div><div class=\"page\">Logs</div><div class=\"actions\"><a class=\"btn\" href=\"{bp}/\">Summary</a><a class=\"btn\" href=\"{bp}/console\">Console</a></div></header>
+    <main>
+      <h1>Port Logs</h1>
+    {msg_block}
+      <div class=\"card\" style=\"overflow:auto;\"><pre>{lines}</pre></div>
+    </main>
+  </body>
+</html>
+"""
+        return body.encode("utf-8")
 
     def _render_status(
         self,

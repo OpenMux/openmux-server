@@ -17,7 +17,6 @@ Usage example:
 import asyncio
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -93,8 +92,8 @@ class DataLogger:
         self.default_format = "line"
         # Default line template: "YYYY-MM-DDTHH:MM:SSZ: <text>"
         self.default_line_template = "{ts}: {text}"
-        # Per-file buffers for partial lines (bytes) when using line format
-        self._line_buffers = {}
+        # Per-file buffers for partial lines when using line format
+        self._line_buffers: Dict[str, bytearray] = {}
         # Direction filters cache: port_name -> set({'in','out'})
         self._direction_cache = {}
 
@@ -161,6 +160,16 @@ class DataLogger:
             self.logger.error("Error resolving log path for port", exc_info=True)
         return self._default_path(port_name)
 
+    def get_log_path(self, port_name: str, port_obj: Optional[Any] = None) -> Path:
+        """Return the filesystem path for a port's log file.
+
+        This is a thin wrapper around the internal resolver so external
+        components (like the Web Console) can discover the same location the
+        logger writes to.
+        """
+
+        return self._resolve_path_for_port(port_name, port_obj)
+
     async def _writer_loop(self) -> None:
         """Background task that serializes events to per-port files.
 
@@ -203,8 +212,7 @@ class DataLogger:
                     fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
                     fh.flush()
                 else:
-                    # Line-oriented format using newline-aware splitting.
-                    # Map session newlines to file newlines exactly.
+                    # Line-oriented format: buffer until a newline is observed.
                     key = str(path)
                     buf = self._line_buffers.get(key)
                     if buf is None:
@@ -214,7 +222,6 @@ class DataLogger:
                         # Emit a single meta line immediately (no buffering)
                         ts = datetime.utcfromtimestamp(ev.ts).strftime("%Y-%m-%dT%H:%M:%SZ")
                         template = self._resolve_line_template_for_port(ev.port, port_obj)
-                        # Compose message
                         evt = None
                         extras = ""
                         try:
@@ -234,18 +241,14 @@ class DataLogger:
                         fh.write(line + "\n")
                         fh.flush()
                     else:
-                        # Append new bytes
                         buf.extend(ev.data)
-                        # Emit complete lines for each LF encountered
                         while True:
                             try:
                                 idx = buf.index(0x0A)  # '\n'
                             except ValueError:
                                 break
                             raw_line = bytes(buf[:idx])
-                            # Remove processed segment + LF
                             del buf[: idx + 1]
-                            # Strip a trailing CR if present (CRLF handling)
                             if raw_line.endswith(b"\r"):
                                 raw_line = raw_line[:-1]
                             text = raw_line.decode("utf-8", errors="replace")
