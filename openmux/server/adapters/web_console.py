@@ -936,6 +936,18 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
             + (f"({mode})" if attached else "(meta-only)")
         )
 
+        if attached:
+            try:
+                granted_mode = "read-write" if mode == "read-write" else "read-only"
+                payload = {
+                    "type": "client_mode",
+                    "ok": True,
+                    "mode": granted_mode,
+                }
+                await ws.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
+            except Exception:
+                pass
+
         # Register this client for event-driven meta pushes on this port
         if want_meta:
             try:
