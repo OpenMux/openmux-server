@@ -995,6 +995,14 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
             except Exception as e:
                 adapter.logger.error(f"Write to port error: {e}", exc_info=True)
                 break
+    except asyncio.CancelledError:
+        # Shutdown path cancels pending receives; exit quietly
+        try:
+            await ws.close(code=1011, message=b"Server shutting down")
+        except Exception:
+            pass
+    except Exception as e:
+        adapter.logger.error(f"Websocket loop error for {port_name}: {e}", exc_info=True)
     finally:
         # No background metadata task (event-driven only)
         # Remove subscription for event-driven meta
