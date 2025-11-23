@@ -182,8 +182,15 @@ body.port-down header.site { background: #2a2015; border-bottom-color: #6b5a2f; 
 .log-controls select, .log-controls input { min-width: 160px; }
 .log-meta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; font-size: 13px; color: var(--text-muted); }
 .log-meta code { font-size: 12px; }
-.log-viewer { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; max-height: 70vh; overflow: auto; }
-.log-viewer pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.log-viewer { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; min-height: 0; flex: 1 1 auto; overflow: auto; display: flex; }
+.log-viewer pre { margin: 0; white-space: pre-wrap; word-break: break-word; flex: 1 1 auto; }
+
+.main-content main.log-page { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+.log-page { min-height: 0; }
+.log-page h2 { margin-bottom: 8px; }
+.log-page .log-controls,
+.log-page .log-meta,
+.log-page .card { flex-shrink: 0; }
 
 .mini-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
 .mini-table th, .mini-table td { border-bottom: 1px solid var(--border-color); padding: 4px 6px; }

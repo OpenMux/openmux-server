@@ -7,9 +7,9 @@
 {% block page_title %}Logs{% endblock %}
 
 {% block header_actions %}
-  <a class="btn" href="{{ base_path }}/">Summary</a>
-  <a class="btn" href="{{ base_path }}/console">Console</a>
 {% endblock %}
+
+{% block main_class %}log-page{% endblock %}
 
 {% block content %}
   <h2>Port Logs</h2>
@@ -36,7 +36,7 @@
   {% if log_error %}
     <div class="card" role="alert">{{ log_error }}</div>
   {% endif %}
-  <div class="log-viewer">
+  <div class="log-viewer" id="logViewer">
     {% if log_lines %}
       <pre>{% for line in log_lines %}{{ line }}
 {% endfor %}</pre>
@@ -44,4 +44,18 @@
       <div class="muted">No log entries available.</div>
     {% endif %}
   </div>
+{% endblock %}
+
+{% block scripts %}
+  {{ super() }}
+  <script>
+    (function() {
+      const viewer = document.getElementById('logViewer');
+      if (!viewer) return;
+      // Scroll to bottom after paint so newest entries are visible
+      requestAnimationFrame(() => {
+        viewer.scrollTop = viewer.scrollHeight;
+      });
+    })();
+  </script>
 {% endblock %}
