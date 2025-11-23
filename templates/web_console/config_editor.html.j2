@@ -80,17 +80,7 @@
 <div class="subtle" style="margin-top:6px">Fields marked with <span class="req">*</span> are required.</div>
 
 <div id="formRoot">
-  <div id="view-setup" class="config-view">
-
-  <div class="config-section" data-config-section="server">
-    <div class="section-header"><span class="title">Server</span> <span class="desc">Server identity and description</span></div>
-    <div class="section">
-      <div class="field"><label for="server.id">Server ID</label><input id="server.id" type="text" /></div>
-      <div class="field"><label for="server.description">Description</label><input id="server.description" type="text" /></div>
-      <div class="field"><label for="server.control_socket">Control socket path</label><input id="server.control_socket" type="text" placeholder="logs/openmux.sock" /><span class="help">Unix domain socket for local CLI control (status/reload). Env override: OPENMUX_CTL_SOCK.</span></div>
-      <div class="field"><label for="server.pidfile">PID file path</label><input id="server.pidfile" type="text" placeholder="logs/openmux.pid" /><span class="help">PID file used for signal-based control (HUP soft reload, USR1 full reload). Env override: OPENMUX_PIDFILE.</span></div>
-    </div>
-  </div>
+  <div id="view-auth" class="config-view" style="display:none">
 
   <div class="config-section" data-config-section="authentication">
     <div class="section-header"><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and PAM</span></div>
@@ -114,6 +104,20 @@
           <div class="field"><label for="auth.pam.groups.read_group">Read group</label><input id="auth.pam.groups.read_group" type="text" placeholder="openmux_read" /></div>
       </div>
       </div>
+    </div>
+  </div>
+
+  </div>
+
+  <div id="view-setup" class="config-view">
+
+  <div class="config-section" data-config-section="server">
+    <div class="section-header"><span class="title">Server</span> <span class="desc">Server identity and description</span></div>
+    <div class="section">
+      <div class="field"><label for="server.id">Server ID</label><input id="server.id" type="text" /></div>
+      <div class="field"><label for="server.description">Description</label><input id="server.description" type="text" /></div>
+      <div class="field"><label for="server.control_socket">Control socket path</label><input id="server.control_socket" type="text" placeholder="logs/openmux.sock" /><span class="help">Unix domain socket for local CLI control (status/reload). Env override: OPENMUX_CTL_SOCK.</span></div>
+      <div class="field"><label for="server.pidfile">PID file path</label><input id="server.pidfile" type="text" placeholder="logs/openmux.pid" /><span class="help">PID file used for signal-based control (HUP soft reload, USR1 full reload). Env override: OPENMUX_PIDFILE.</span></div>
     </div>
   </div>
 
@@ -1381,6 +1385,7 @@
       const view = params.get('view') || 'ports';
       
       const vSetup = document.getElementById('view-setup');
+      const vAuth = document.getElementById('view-auth');
         const vPorts = document.getElementById('view-ports');
         const vListeners = document.getElementById('view-listeners');
       const vMuxcon = document.getElementById('view-muxcon');
@@ -1388,6 +1393,7 @@
       const vReload = document.getElementById('view-reload');
       
       const navSetup = document.getElementById('nav-config-setup');
+      const navAuth = document.getElementById('nav-config-auth');
       const navPorts = document.getElementById('nav-config-ports');
         const navListeners = document.getElementById('nav-config-listeners');
       const navMuxcon = document.getElementById('nav-config-muxcon');
@@ -1397,6 +1403,7 @@
 
       if (view === 'ports') {
           if(vSetup) vSetup.style.display = 'none';
+            if(vAuth) vAuth.style.display = 'none';
           if(vSetup2) vSetup2.style.display = 'none';
           if(vMuxcon) vMuxcon.style.display = 'none';
           if(vReload) vReload.style.display = 'none';
@@ -1404,6 +1411,7 @@
           if(vListeners) vListeners.style.display = 'none';
           
           if(navSetup) navSetup.classList.remove('active');
+            if(navAuth) navAuth.classList.remove('active');
           if(navMuxcon) navMuxcon.classList.remove('active');
           if(navReload) navReload.classList.remove('active');
           if(navPorts) navPorts.classList.add('active');
@@ -1411,6 +1419,7 @@
           if(pageTitle) pageTitle.textContent = 'Config Editor - Ports';
         } else if (view === 'listeners') {
           if(vSetup) vSetup.style.display = 'none';
+            if(vAuth) vAuth.style.display = 'none';
           if(vSetup2) vSetup2.style.display = 'none';
           if(vPorts) vPorts.style.display = 'none';
           if(vMuxcon) vMuxcon.style.display = 'none';
@@ -1418,13 +1427,31 @@
           if(vListeners) vListeners.style.display = 'block';
           
           if(navSetup) navSetup.classList.remove('active');
+            if(navAuth) navAuth.classList.remove('active');
           if(navPorts) navPorts.classList.remove('active');
           if(navMuxcon) navMuxcon.classList.remove('active');
           if(navReload) navReload.classList.remove('active');
           if(navListeners) navListeners.classList.add('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Listeners';
+          } else if (view === 'auth') {
+            if(vSetup) vSetup.style.display = 'none';
+            if(vAuth) vAuth.style.display = 'block';
+            if(vSetup2) vSetup2.style.display = 'none';
+            if(vPorts) vPorts.style.display = 'none';
+            if(vMuxcon) vMuxcon.style.display = 'none';
+            if(vReload) vReload.style.display = 'none';
+            if(vListeners) vListeners.style.display = 'none';
+          
+            if(navSetup) navSetup.classList.remove('active');
+            if(navPorts) navPorts.classList.remove('active');
+            if(navListeners) navListeners.classList.remove('active');
+            if(navMuxcon) navMuxcon.classList.remove('active');
+            if(navReload) navReload.classList.remove('active');
+            if(navAuth) navAuth.classList.add('active');
+            if(pageTitle) pageTitle.textContent = 'Config Editor - Authentication';
       } else if (view === 'muxcon') {
           if(vSetup) vSetup.style.display = 'none';
+            if(vAuth) vAuth.style.display = 'none';
           if(vSetup2) vSetup2.style.display = 'none';
           if(vPorts) vPorts.style.display = 'none';
           if(vReload) vReload.style.display = 'none';
@@ -1435,10 +1462,12 @@
           if(navPorts) navPorts.classList.remove('active');
           if(navReload) navReload.classList.remove('active');
           if(navListeners) navListeners.classList.remove('active');
+            if(navAuth) navAuth.classList.remove('active');
           if(navMuxcon) navMuxcon.classList.add('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Muxcon';
       } else if (view === 'reload') {
           if(vSetup) vSetup.style.display = 'none';
+            if(vAuth) vAuth.style.display = 'none';
           if(vSetup2) vSetup2.style.display = 'none';
           if(vPorts) vPorts.style.display = 'none';
           if(vMuxcon) vMuxcon.style.display = 'none';
@@ -1449,10 +1478,12 @@
           if(navPorts) navPorts.classList.remove('active');
           if(navMuxcon) navMuxcon.classList.remove('active');
           if(navListeners) navListeners.classList.remove('active');
+            if(navAuth) navAuth.classList.remove('active');
           if(navReload) navReload.classList.add('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Reload';
       } else {
           if(vSetup) vSetup.style.display = 'block';
+            if(vAuth) vAuth.style.display = 'none';
           if(vSetup2) vSetup2.style.display = 'block';
           if(vPorts) vPorts.style.display = 'none';
           if(vMuxcon) vMuxcon.style.display = 'none';
@@ -1464,6 +1495,7 @@
           if(navMuxcon) navMuxcon.classList.remove('active');
           if(navReload) navReload.classList.remove('active');
           if(navListeners) navListeners.classList.remove('active');
+            if(navAuth) navAuth.classList.remove('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Setup';
       }
       // Ensure parent is active
