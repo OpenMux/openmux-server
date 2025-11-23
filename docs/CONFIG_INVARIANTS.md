@@ -35,7 +35,7 @@ The primary config (`server.yaml`) may reference two sidecar files: `authenticat
 
 - `authentication.yaml` contains only the `authentication` mapping (users, API keys, public keys, PAM). When externalized, `server.yaml` MUST omit inline credentials, and ConfigManager MUST keep the merged runtime view consistent for consumers.
 - `security.yaml` defines the adapter allow-list (`allowed_modules`, `allowed_adapter_types`), `config_editor.writable_sections`, authentication rate-limit overrides, and (optionally) the drop-to-user policy for the Command adapter. `block_unlisted` defaults to true; disabling it must be an explicit, documented choice.
-- CLI flags `--auth-config` and `--security-config` MUST remain available so deployments can relocate sidecars. Defaults derive from the directory containing `server.yaml`.
+- CLI flags `-a/--auth-config` and `-s/--security-config` MUST remain available so deployments can relocate sidecars. Defaults derive from the directory containing `server.yaml`.
 - Config Editor and hot-reload operations MUST honor `config_editor.writable_sections`. Empty list => read-only UI; absence of the block => legacy editable behavior.
 
 Any future sidecar files (e.g., secrets) require expanding this section with invariants before implementation.

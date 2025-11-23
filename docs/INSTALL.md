@@ -237,6 +237,8 @@ sudo apt-get remove -y openmux
 openmux-server -c /etc/openmux/server.yaml   # if you place your config under /etc
 # or point to a project config
 openmux-server -c /path/to/loopback_test.yaml
+openmux-server --config-dir /etc/openmux     # loads server/auth/security sidecars
+openmux-server -c server.yaml -a authentication.yaml -s security.yaml
 
 openmuxctl status
 openmuxctl reload --soft
@@ -246,7 +248,8 @@ openmuxctl reload --soft
 
 ## Configuration locations and defaults
 
-- You can run with any YAML config path via `-c`/`--config`.
+- Use `--config-dir /path/to/config` to load `server.yaml`, `authentication.yaml`, and `security.yaml` from the same directory, or point directly at a server YAML via `-c/--config`.
+- Override sidecar locations explicitly with `-a/--auth-config` and `-s/--security-config`.
 - Control socket and pidfile defaults (can be overridden in config or env):
   - `server.control_socket`: `logs/openmux.sock` (override with `OPENMUX_CTL_SOCK`)
   - `server.pidfile`: `logs/openmux.pid` (override with `OPENMUX_PIDFILE`)

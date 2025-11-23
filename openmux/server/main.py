@@ -1183,14 +1183,24 @@ def _parse_arguments():
     parser.add_argument(
         "-c",
         "--config",
-        default="/etc/openmux/server.yaml",
-        help="Path to configuration file",
+        default=None,
+        help="Path to the primary server configuration file (server.yaml)",
     )
     parser.add_argument(
+        "--config-dir",
+        help=(
+            "Directory containing server.yaml, authentication.yaml, and security.yaml. "
+            "Values derived from this directory are used only for files not explicitly set via"
+            " --config/--auth-config/--security-config."
+        ),
+    )
+    parser.add_argument(
+        "-a",
         "--auth-config",
         help="Path to authentication configuration file (authentication.yaml)",
     )
     parser.add_argument(
+        "-s",
         "--security-config",
         help="Path to security configuration file (security.yaml)",
     )
@@ -1201,7 +1211,23 @@ def _parse_arguments():
         default=0,
         help="Increase verbosity (-v=INFO, -vv or more=DEBUG)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # When --config-dir is provided, derive any unspecified config paths from it
+    if args.config_dir:
+        base_dir = os.path.abspath(args.config_dir)
+        if not args.config:
+            args.config = os.path.join(base_dir, "server.yaml")
+        if not args.auth_config:
+            args.auth_config = os.path.join(base_dir, "authentication.yaml")
+        if not args.security_config:
+            args.security_config = os.path.join(base_dir, "security.yaml")
+
+    # Preserve legacy default when nothing else was provided
+    if not args.config:
+        args.config = "/etc/openmux/server.yaml"
+
+    return args
 
 
 def _find_config_file(config_path: str) -> str:
