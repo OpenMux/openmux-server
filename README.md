@@ -17,6 +17,45 @@ python -m openmux.server -c config/server.yaml
 python -m openmux.client server.example.com
 ```
 
+### Configuration Files
+
+OpenMux now keeps credentials and security policy in dedicated sidecar files so they can be managed independently of the main server config:
+
+- `config/server.yaml` – core server metadata plus adapter sections (serial, loopback, tcp initiator, muxcon, etc.).
+- `config/authentication.yaml` – users, API keys, public keys, and PAM settings.
+- `config/security.yaml` – adapter/module allow-lists, Config Editor writable sections, and authentication rate-limit overrides.
+
+When starting the server manually, pass all three paths so reloads and the Config Editor stay in sync:
+
+```bash
+python -m openmux.server \
+  -c config/server.yaml \
+  -a config/authentication.yaml \
+  -s config/security.yaml
+
+# long-form flags `--auth-config` and `--security-config` remain available if you prefer explicit names.
+```
+
+Optionally you can also specify the directory with these config files instead using the `--config-dir <dir>` command.
+
+```
+python -m openmux.server --config-dir ./config/
+```
+
+### Web Console Assets
+
+The Web Console serves bundled xterm.js files from `static/`. Download the correct versions before enabling the adapter:
+
+```bash
+scripts/install_xtermjs.py
+
+# optional flags
+scripts/install_xtermjs.py --force            # re-download even if files exist
+scripts/install_xtermjs.py --static-dir /var/lib/openmux/static
+```
+
+The script verifies that `xterm.js`, `xterm.css`, and the fit addon are present before exiting so browsers never rely on CDN fetches at runtime.
+
 ## Features
 
 ### Server
@@ -93,6 +132,15 @@ Control socket details:
 git clone https://github.com/yourusername/openmux.git
 cd openmux
 
+# Optionally create a virtualenv
+# Some systems require the use of venv, as they don't allow modification of the 
+# built-in python libraried outside its own package-repository
+python3 -m venv .venv
+
+#NOTE: When using venv, the venv needs to be loaded prior to using any openmux commands.
+source .venv/bin/activate
+
+
 # Install required dependencies
 pip install -e .
 
@@ -102,6 +150,136 @@ pip install -e ".[web]"
 # For PAM authentication support (and web together)
 pip install -e ".[web,pam]"
 ```
+
+## Configuration
+
+By default the CLI above assumes the configuration directory layout from `config/`. Packaged deployments may place these YAML files under `/etc/openmux/`. All of the examples below reference the sidecar structure described earlier.
+
+### Example Server Configuration
+
+Create a YAML configuration file for the server:
+
+```yaml
+server:
+  id: rack-controller
+  description: "Primary lab console host"
+  control_socket: logs/openmux.sock
+  pidfile: logs/openmux.pid
+
+client_listener:
+  enabled: true
+  host: 127.0.0.1
+  port: 8023
+  max_connections: 100
+  connection_timeout: 30
+
+logging:
+  level: INFO
+  console: true
+  log_dir: logs
+
+loopback_ports:
+  - name: loop1
+    description: Loopback test port
+    max_read_write_users: 2
+
+command_ports:
+  - name: ssh_server
+    description: SSH to remote server
+    command: "ssh user@remote-server"
+    max_read_write_users: 1
+
+serial_ports:
+  - name: console1
+    description: Main Server Console
+    device: /dev/ttyS0
+    baudrate: 9600
+    bytesize: 8
+    parity: N
+    stopbits: 1
+    max_read_write_users: 1
+```
+
+Because authentication now lives in `config/authentication.yaml`, accompanying credentials are defined there:
+
+```yaml
+# config/authentication.yaml
+users:
+  - username: admin
+    password_hash: <REPLACE_WITH_SECURE_HASH>
+    permissions: admin
+  - username: user1
+    password_hash: <REPLACE_WITH_SECURE_HASH>
+    permissions: read-write
+api_keys:
+  - name: lab-agent
+    key: <REPLACE_WITH_RANDOM_SECRET>
+    permissions: read-only
+pam:
+  enabled: false
+```
+
+### Security Policy (`config/security.yaml`)
+
+The security sidecar enforces which adapters may run, which modules may be imported, and which Config Editor sections are writable. A minimal example:
+
+```yaml
+adapters:
+  block_unlisted: true
+  allowed_modules:
+    - openmux.server.adapters.serial
+    - openmux.server.adapters.loopback
+    - openmux.server.adapters.command
+    - openmux.server.adapters.tcp_initiator
+  allowed_adapter_types:
+    - serial
+    - loopback
+    - command
+    - tcp_initiator
+
+config_editor:
+  writable_sections:
+    - server
+    - logging
+    - serial_ports
+```
+
+Any adapter whose module or type is not listed is rejected before it can start. Leaving `config_editor.writable_sections` empty makes the UI read-only; omitting the block entirely keeps legacy behavior (all sections editable).
+
+#### Command Adapter Privilege Drop
+When the OpenMux server runs as root, the command adapter can optionally drop
+to an unprivileged user before executing subprocesses. Configure the target
+identity in `config/security.yaml`:
+
+```yaml
+command_adapter:
+  drop_privileges:
+    user: openmux
+    group: openmux
+    supplementary_groups:
+      - dialout
+    umask: 0o077
+```
+
+The drop only occurs when a privileged server (euid 0) launches the adapter.
+If the server already runs as a non-root user, the command adapter logs that
+it skipped the drop and continues normally. Supplementary groups and umask are
+optional; omit them to keep the defaults.
+
+#### Adapter Fail-Fast (Default-On)
+The server aborts startup (exit code 2) if a top-level adapter-like section is present
+but no plugin registered it (typo or import failure). Disable explicitly with either:
+```
+fail_fast_adapters: false
+```
+or inside `server:`:
+```
+server:
+  fail_fast_adapters: false
+```
+Details: [Adapter Fail-Fast Mode](docs/configuration/adapter_fail_fast.md)
+
+
 
 ## Usage
 

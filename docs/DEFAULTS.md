@@ -132,7 +132,6 @@ web_console (runtime defaults from openmux/server/adapters/web_console.py)
 - respect_forwarded_prefix: true
 - enable_ui: true (schema default)
 - realm: OpenMux (schema default)
-- download_xterm_if_missing: true (schema default)
 - enable_probes: true (schema default)
 - probes_include_details: false (schema default)
 - use_tls: false (schema default)

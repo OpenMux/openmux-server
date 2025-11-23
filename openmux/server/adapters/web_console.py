@@ -961,7 +961,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
         realm: "OpenMux" (str)  # Basic-Auth realm
         static_dir: <path> (str, optional)  # where /static/ is served from; created if missing
         template_dir: <path> (str, optional) # jinja2 templates directory (index.html.j2, console.html.j2, status.html.j2)
-        download_xterm_if_missing: true (bool)  # auto-download xterm assets if not present under static_dir
         enable_probes: true (bool)  # register /healthz, /livez, /readyz endpoints
         probes_include_details: false (bool)  # when true, probes return JSON with version/uptime/clients
     """
@@ -986,7 +985,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
         # Optional template/static configuration
         self.template_dir = cfg.get("template_dir")  # directory with Jinja2 templates
         self.static_dir = cfg.get("static_dir")  # directory to serve /static from
-        self.download_xterm = bool(cfg.get("download_xterm_if_missing", True))
         # Probe / health endpoint configuration
         self.enable_probes = bool(cfg.get("enable_probes", True))
         self.probes_include_details = bool(cfg.get("probes_include_details", False))
@@ -3139,7 +3137,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         return ports
 
     async def _ensure_assets(self) -> None:
-        """Ensure xterm assets exist locally; optionally download if missing."""
+        """Ensure required xterm assets exist locally before serving the UI."""
         xterm_css = Path(self.static_dir) / "xterm" / "css" / "xterm.css"
         xterm_js = Path(self.static_dir) / "xterm" / "lib" / "xterm.js"
         fit_js = Path(self.static_dir) / "xterm-addon-fit" / "lib" / "xterm-addon-fit.js"
@@ -3148,57 +3146,28 @@ class WebConsoleAdapter(BaseGenericAdapter):
         need_fit = not fit_js.is_file()
         if not (need_css or need_js or need_fit):
             return
-        if not self.download_xterm:
-            self.logger.warning("xterm assets missing and auto-download disabled; UI may not load.")
-            return
-        # Create directories
-        xterm_css.parent.mkdir(parents=True, exist_ok=True)
-        xterm_js.parent.mkdir(parents=True, exist_ok=True)
-        fit_js.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            import urllib.request
-        except Exception as e:
-            self.logger.warning(f"urllib not available to download xterm assets: {e}")
-            return
-        # Candidate URLs
-        sources = {
-            "css": [
-                "https://unpkg.com/xterm@5.3.0/css/xterm.css",
-                "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css",
-            ],
-            "js": [
-                "https://unpkg.com/xterm@5.3.0/lib/xterm.js",
-                "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js",
-            ],
-            "fit": [
-                "https://unpkg.com/xterm-addon-fit@0.9.0/lib/xterm-addon-fit.js",
-                "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.9.0/lib/xterm-addon-fit.js",
-            ],
-        }
 
-        def _download(url: str, dest: Path) -> bool:
-            try:
-                self.logger.info(f"Downloading asset: {url}")
-                with urllib.request.urlopen(url, timeout=20) as resp:
-                    data = resp.read()
-                dest.write_bytes(data)
-                return True
-            except Exception as e:
-                self.logger.warning(f"Download failed {url}: {e}")
-                return False
-
+        missing = []
         if need_css:
-            for url in sources["css"]:
-                if _download(url, xterm_css):
-                    break
+            missing.append(xterm_css)
         if need_js:
-            for url in sources["js"]:
-                if _download(url, xterm_js):
-                    break
+            missing.append(xterm_js)
         if need_fit:
-            for url in sources["fit"]:
-                if _download(url, fit_js):
-                    break
+            missing.append(fit_js)
+
+        rel_missing = []
+        for path in missing:
+            try:
+                rel_missing.append(str(path.relative_to(self.static_dir)))
+            except Exception:
+                rel_missing.append(str(path))
+
+        script_hint = "scripts/install_xtermjs.py"
+        msg = (
+            "Missing xterm assets ({missing}) under static_dir='{static_dir}'. "
+            "Install them with {script} or copy the files manually before starting the web console."
+        ).format(missing=", ".join(rel_missing), static_dir=self.static_dir, script=script_hint)
+        raise RuntimeError(msg)
 
     # Client manager API used by ConsoleManager to forward data to clients
     async def send_data_to_client(self, client_id: str, data: bytes) -> bool:

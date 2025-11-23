@@ -246,6 +246,20 @@ openmuxctl reload --soft
 
 ---
 
+## Install xterm.js Assets
+
+The Web Console depends on locally bundled xterm.js files. Run the helper script before enabling `web_console`:
+
+```sh
+scripts/install_xtermjs.py                 # installs into ./static by default
+scripts/install_xtermjs.py --force         # re-download even if files exist
+scripts/install_xtermjs.py --static-dir /var/lib/openmux/static
+```
+
+The script exits with an error if any of `xterm.js`, `xterm.css`, or the fit addon fail to download, so failures are caught during installation—not at runtime.
+
+---
+
 ## Configuration locations and defaults
 
 - Use `--config-dir /path/to/config` to load `server.yaml`, `authentication.yaml`, and `security.yaml` from the same directory, or point directly at a server YAML via `-c/--config`.

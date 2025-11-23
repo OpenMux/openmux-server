@@ -1,0 +1,52 @@
+authentication:
+  api_keys:
+  - key: test-key-123
+    name: Test API Key
+    permissions: admin
+  users:
+  - is_admin: true
+    password_hash: 8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
+    username: admin
+  - is_admin: false
+    password_hash: 04f8996da763b7a969b1028ee3007569eaf3a635486ddab211d512c85b9df8fb
+    username: user
+client_listener:
+  connection_timeout: 30
+  host: 127.0.0.1
+  max_connections: 100
+  port: 8025
+command_ports:
+- command: cat
+  description: Echo Command Test Port
+  max_read_write_users: 2
+  name: echo_command
+  shell: false
+logging:
+  console: true
+  file: /tmp/openmux_loopback.log
+  level: DEBUG
+loopback_ports:
+- buffer_size: 1024
+  description: Loopback Port 1 - Echo Test
+  echo_delay: 0
+  max_read_write_users: 5
+  name: loopback1
+server:
+  id: loopback-web-server
+web_console:
+  enable_probes: true
+  enable_ui: true
+  host: 127.0.0.1
+  port: 8082
+  probes_include_details: true
+  realm: OpenMux
+  static_dir: static
+  template_dir: templates/web_console/
+  tls_autogen: false
+  use_tls: false
+web_status:
+  cors_enable: true
+  enable_fault_injection: true
+  enable_http_api: true
+  host: 127.0.0.1
+  port: 8081

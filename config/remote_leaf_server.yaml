@@ -99,6 +99,5 @@ web_console:
   ssl_port: 8443
   use_tls: true
   tls_autogen: true
-  download_xterm_if_missing: false
   respect_forwarded_prefix: true
   realm: OpenMux

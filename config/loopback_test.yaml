@@ -83,14 +83,13 @@ server:
   control_socket: logs/openmux.sock
   pidfile: logs/openmux.pid
 web_console:
-  download_xterm_if_missing: false
   enable_probes: true
   enable_ui: true
   host: 0.0.0.0
   plugins:
   - openmux.server.web_plugins.config_editor
-  - openmux.server.web_plugins.os_customizer
-  - openmux.server.web_plugins.federated_proxy
+  #- openmux.server.web_plugins.os_customizer
+  #- openmux.server.web_plugins.federated_proxy
   port: 80
   probes_include_details: true
   realm: OpenMux

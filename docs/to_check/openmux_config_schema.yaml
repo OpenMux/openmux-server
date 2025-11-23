@@ -97,22 +97,6 @@ properties:
       port: { type: integer, minimum: 1, maximum: 65535, default: 8023 }
       max_connections: { type: integer, minimum: 1, default: 100 }
       connection_timeout: { type: integer, minimum: 1, default: 30 }
-  telnet_listener:
-    type: array
-    items:
-      type: object
-      additionalProperties: false
-      required: [name, bind_port, target]
-      properties:
-        name: { type: string }
-        bind_host: { type: string, default: 0.0.0.0 }
-        bind_port: { type: integer, minimum: 1, maximum: 65535 }
-        target: { type: string }
-        read_only: { type: boolean, default: false }
-        enabled: { type: boolean, default: true }
-        acl:
-          type: array
-          items: { type: string }
   serial_ports:
     type: array
     items:
