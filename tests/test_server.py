@@ -49,14 +49,14 @@ def sample_config():
                 "bytesize": 8,
                 "parity": "N",
                 "stopbits": 1,
-                "read_write_users": 1,
+                "max_read_write_users": 1,
             },
             {
                 "name": "console2",
                 "description": "Test Console 2",
                 "adapter": "command",
                 "command": "ssh localhost",
-                "read_write_users": 2,
+                "max_read_write_users": 2,
             },
         ],
     }

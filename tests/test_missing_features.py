@@ -52,7 +52,7 @@ def sample_config():
                 "bytesize": 8,
                 "parity": "N",
                 "stopbits": 1,
-                "read_write_users": 1,
+                "max_read_write_users": 1,
             }
         ],
         "logging": {

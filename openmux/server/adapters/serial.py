@@ -35,7 +35,7 @@ class SerialPortConfig:
         flow_control: Flow control mode string.
         dtr: Initial DTR state.
         rts: Initial RTS state.
-        read_write_users: Max simultaneous read-write users.
+        max_read_write_users: Max simultaneous read-write users.
     """
 
     name: str
@@ -49,7 +49,7 @@ class SerialPortConfig:
     flow_control: str = "none"
     dtr: bool = True  # vulture: ignore (configured via runtime, accessed through config)
     rts: bool = True  # vulture: ignore (configured via runtime, accessed through config)
-    read_write_users: int = 1  # Maximum number of users with write access
+    max_read_write_users: int = 1  # Maximum number of users with write access
     log_file: Optional[str] = None  # Optional per-port data log file path
     log_format: Optional[str] = None  # 'line' or 'jsonl'
     log_line_template: Optional[str] = None  # For 'line' format
@@ -95,7 +95,7 @@ class SerialPortWrapper:
         self.config = config
         self.name = config.name  # Add name attribute for port manager compatibility
         self.description = config.description
-        self.max_read_write_users = config.read_write_users  # For port manager compatibility
+        self.max_read_write_users = config.max_read_write_users  # For port manager compatibility
         self.logger = logger.getChild(f"serial.{config.name}")
         # Best-effort callback into PortManager listeners via adapter
         self._meta_notify = meta_notify
@@ -468,6 +468,40 @@ class SerialAdapter(BaseGenericAdapter):
 
         return True
 
+    def _resolve_max_rw_users(self, port_config: Dict[str, Any], *, port_name: Optional[str] = None, default: int = 1) -> int:
+        """Resolve the max_read_write_users value with legacy fallback."""
+
+        value = port_config.get("max_read_write_users")
+        legacy = False
+        if value is None and "read_write_users" in port_config:
+            value = port_config.get("read_write_users")
+            legacy = True
+        if value is None:
+            return max(1, int(default))
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            self.logger.warning(
+                "Port %s has invalid max_read_write_users=%r; falling back to %s",
+                port_name or port_config.get("name") or "unknown",
+                value,
+                default,
+            )
+            return max(1, int(default))
+        if resolved < 1:
+            self.logger.warning(
+                "Port %s has max_read_write_users=%s < 1; clamping to 1",
+                port_name or port_config.get("name") or "unknown",
+                resolved,
+            )
+            return 1
+        if legacy:
+            self.logger.info(
+                "Port %s uses deprecated read_write_users; rename to max_read_write_users",
+                port_name or port_config.get("name") or "unknown",
+            )
+        return resolved
+
     def _parse_port_configs(self) -> None:
         """Parse configuration and build ``SerialPortWrapper`` objects.
 
@@ -496,6 +530,7 @@ class SerialAdapter(BaseGenericAdapter):
                 continue
 
             try:
+                max_rw_users = self._resolve_max_rw_users(port_config, port_name=port_config.get("name"))
                 # Create SerialPortConfig with validation
                 serial_config = SerialPortConfig(
                     name=port_config["name"],
@@ -509,7 +544,7 @@ class SerialAdapter(BaseGenericAdapter):
                     flow_control=port_config.get("flow_control", "none"),
                     dtr=port_config.get("dtr", True),
                     rts=port_config.get("rts", True),
-                    read_write_users=port_config.get("read_write_users", 1),
+                    max_read_write_users=max_rw_users,
                     log_file=port_config.get("log_file"),
                     log_format=port_config.get("log_format"),
                     log_line_template=port_config.get("log_line_template"),
@@ -823,9 +858,12 @@ class SerialAdapter(BaseGenericAdapter):
                 "flow_control",
                 "dtr",
                 "rts",
-                "read_write_users",
+                "max_read_write_users",
             ]
-            return {k: port_cfg.get(k) for k in keys}
+            mat = {k: port_cfg.get(k) for k in keys}
+            if mat.get("max_read_write_users") is None and "read_write_users" in port_cfg:
+                mat["max_read_write_users"] = port_cfg.get("read_write_users")
+            return mat
 
         updated: list[str] = []
         unchanged: list[str] = []
@@ -845,7 +883,7 @@ class SerialAdapter(BaseGenericAdapter):
                     "flow_control": spw.config.flow_control,
                     "dtr": spw.config.dtr,
                     "rts": spw.config.rts,
-                    "read_write_users": spw.config.read_write_users,
+                    "max_read_write_users": spw.config.max_read_write_users,
                 }
             except Exception:
                 old_cfg = {}
@@ -891,6 +929,7 @@ class SerialAdapter(BaseGenericAdapter):
         # Apply additions and re-creations
         async def _add_port_from_config(pcfg: Dict[str, Any]) -> None:
             try:
+                max_rw = self._resolve_max_rw_users(pcfg, port_name=pcfg.get("name"))
                 # Build validated dataclass; will raise on invalid values
                 serial_cfg = SerialPortConfig(
                     name=pcfg["name"],
@@ -904,7 +943,7 @@ class SerialAdapter(BaseGenericAdapter):
                     flow_control=pcfg.get("flow_control", "none"),
                     dtr=pcfg.get("dtr", True),
                     rts=pcfg.get("rts", True),
-                    read_write_users=pcfg.get("read_write_users", 1),
+                    max_read_write_users=max_rw,
                     log_file=pcfg.get("log_file"),
                     log_format=pcfg.get("log_format"),
                     log_line_template=pcfg.get("log_line_template"),

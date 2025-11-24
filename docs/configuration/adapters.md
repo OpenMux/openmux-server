@@ -227,7 +227,7 @@ Supported options per port:
 - `flow_control`: Flow control mode (default: "none")
 - `dtr`: Set DTR on open (default: true)
 - `rts`: Set RTS on open (default: true)
-- `read_write_users`: Max concurrent writers (default: 1)
+- `max_read_write_users`: Max concurrent writers (default: 1; legacy `read_write_users` is still accepted with a warning)
 
 Adapter-level performance options:
 - `read_coalesce` (default: true): Enable small, time-bounded coalescing of rapid serial read bursts before forwarding to clients. This reduces visual artifacts when devices emit very small chunks quickly (e.g., repeated CR/LF while holding Enter), without adding noticeable latency.
@@ -245,7 +245,7 @@ serial_ports:
     parity: N
     stopbits: 1
     timeout: 1.0
-    read_write_users: 1
+    max_read_write_users: 1
 
   # Adapter-level knobs (applies to this adapter instance)
   read_coalesce: true                 # reduce small-chunk fragmentation
@@ -469,7 +469,7 @@ This document describes only the current adapter configuration. Legacy formats (
 
 1. Use descriptive `name` and `description` values for each port
 2. Prefer secure transports: enable `ssl` and keep `ssl_verify` on where applicable
-3. Right-size writer limits: use `read_write_users`/`max_read_write_users` appropriately
+3. Right-size writer limits: set `max_read_write_users` appropriately for each port
 4. Start simple: use `loopback_ports` to validate client flows
 5. Document custom commands: include `cwd`/`env` and comments for complex setups
 

@@ -816,7 +816,7 @@
             flow_control: 'Hardware/software flow control (none/rtscts/dsrdtr/xonxoff).',
             dtr: 'Initial DTR line state.',
             rts: 'Initial RTS line state.',
-            read_write_users: 'Max concurrent read/write users for this port.'
+            max_read_write_users: 'Max concurrent read/write users for this port.'
           },
           'loopback_ports': {
             name: 'Logical name for the software loopback port.',
@@ -824,8 +824,7 @@
             buffer_size: 'Size of the internal buffer (bytes).',
             echo_delay: 'Artificial echo delay in seconds.',
             sanitize_control: 'Replace non-printable control characters with visible placeholders (e.g., show ^C instead of raw control bytes); helps prevent terminal glitches when testing.',
-            max_read_write_users: 'Max concurrent users for this loopback.',
-            read_write_users: 'Legacy concurrency field (backward-compat).'
+            max_read_write_users: 'Max concurrent users for this loopback.'
           },
           'command_ports': {
             name: 'Logical name for this command-backed port.',
@@ -1017,7 +1016,7 @@
             {key:'flow_control', label:'Flow', type:'enum', enum:['none','rtscts','dsrdtr','xonxoff']},
             {key:'dtr', label:'DTR', type:'boolean'},
             {key:'rts', label:'RTS', type:'boolean'},
-            {key:'read_write_users', label:'RW users', type:'integer', min:1}
+            {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1}
           ])));
 
           tables['loopback_ports'] = buildTable('loopback_ports', annotateColumnsWithDefaults('loopback_ports', annotateColumnsWithHelp('loopback_ports', [
@@ -1026,8 +1025,7 @@
             {key:'buffer_size', label:'Buffer size', type:'integer', min:1},
             {key:'echo_delay', label:'Echo delay', type:'number', min:0, step:0.1},
             {key:'sanitize_control', label:'Sanitize control', type:'boolean'},
-            {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
-            {key:'read_write_users', label:'RW users (legacy)', type:'integer', min:1}
+            {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1}
           ])));
 
           tables['command_ports'] = buildTable('command_ports', annotateColumnsWithDefaults('command_ports', annotateColumnsWithHelp('command_ports', [

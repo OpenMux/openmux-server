@@ -50,7 +50,7 @@ async def test_unified_port_lifecycle_and_io(monkeypatch):
     ok1 = await pm.add_client_to_port("p1", client_id="c1", username="u1", mode="read-only")
     ok2 = await pm.add_client_to_port("p1", client_id="c2", username="u2", mode="read-write")
     assert ok1 is True and ok2 is True
-    # Third client exceeds read_write_users=2
+    # Third client exceeds max_read_write_users=2
     ok3 = await pm.add_client_to_port("p1", client_id="c3", username="u3", mode="read-only")
     assert ok3 is False
 
