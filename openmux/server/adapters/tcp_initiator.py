@@ -369,6 +369,10 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
     def adapter_type(self) -> str:
         return "tcp_initiator"
 
+    def get_adapter_type(self) -> str:
+        """Return adapter type identifier for legacy factory compatibility."""
+        return "tcp_initiator"
+
     async def start(self) -> bool:
         self.logger.info(f"Starting TCP initiator adapter {self.name}")
         ports_config = self.get_port_configurations()
