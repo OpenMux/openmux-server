@@ -418,6 +418,7 @@ class ConfigManager:
             raise ValueError("Authentication configuration path is undefined")
         if not os.path.exists(path):
             raise ValueError(f"Authentication configuration file not found: {path}")
+        self.logger.info(f"Loading authentication configuration from {path}")
         with open(path, "r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
         if not isinstance(data, dict):
@@ -430,11 +431,14 @@ class ConfigManager:
             policy_data: Dict[str, Any] = {}
             path = self.security_config_path
             if path and os.path.exists(path):
+                self.logger.info(f"Loading security policy from {path}")
                 try:
                     with open(path, "r", encoding="utf-8") as fh:
                         policy_data = yaml.safe_load(fh) or {}
                 except Exception as exc:
                     self.logger.warning("Failed to load security policy from %s: %s", path, exc)
                     policy_data = {}
+            else:
+                self.logger.warning("Security policy file not found at %s; using defaults", path)
             self._security_policy = SecurityPolicy.from_mapping(policy_data)
         return self._security_policy
