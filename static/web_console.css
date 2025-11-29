@@ -5,11 +5,13 @@
   --bg-sidebar: #1b1b1b;
   --bg-header: #1b1b1b;
   --bg-card: #1a1a1a;
+  --bg-panel: #1a1a1a;
+  --toolbar-bg: #111;
   --bg-input: #0f0f0f;
   --bg-hover: #2a2a2a;
   --bg-active: #333;
   --bg-sub-nav: rgba(0,0,0,0.2);
-  --bg-sub-nav-hover: rgba(255,255,255,0.05);
+  --bg-sub-nav-hover: rgba(125, 103, 103, 0.05);
   --bg-sub-nav-active: rgba(255,255,255,0.08);
   
   --border-color: #333;
@@ -41,6 +43,8 @@
   --bg-sidebar: #dfe5eb;
   --bg-header: #dfe5eb;
   --bg-card: #ffffff;
+  --bg-panel: #ffffff;
+  --toolbar-bg: #ffffff;
   --bg-input: #f1f4f8;
   --bg-hover: #ced6e0;
   --bg-active: #bdc5d1;
