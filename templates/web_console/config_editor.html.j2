@@ -11,6 +11,7 @@
 {% block head_extras %}
 <style>
   .row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
+  .toolbar-row { position: sticky; top: 0; z-index: 50; background: var(--bg-main, #101010); padding: 12px 0; box-shadow: 0 1px 2px rgba(0,0,0,0.2); border-bottom: 1px solid var(--border-color); }
   .row > * { margin: 0; }
   .status { margin-top: 8px; min-height: 24px; }
   .toolbar .status { margin-top: 0; min-height: 0; }
@@ -76,7 +77,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="row">
+<div class="row toolbar-row">
   <div class="toolbar">
     <button class="btn" id="loadBtn" title="Load current config">Load</button>
     <button class="btn" id="validateBtn" title="Validate without saving">Validate</button>
@@ -1373,13 +1374,37 @@
 
   async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/plugins/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); if('writable_sections' in j || 'writable_enforced' in j){ setWritableMetadata(j.writable_sections||[], j.writable_enforced); } markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
   async function validateOnly(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Validation failed'); return; } try{ const r=await fetch(withBase('/plugins/config-editor/validate'),{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Validation OK'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Validation failed'); } }catch(e){ setStatus(false,String(e)); } }
-  async function saveConfig(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Save failed'); return; } try{ const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf; const r=await fetch(withBase('/plugins/config-editor/apply'),{method:'POST', headers, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ markClean(); setStatus(true,'Saved'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Save failed'); } }catch(e){ setStatus(false,String(e)); } }
+  async function saveConfig(){
+    let payload;
+    try{ payload=buildConfig(); }
+    catch(e){ setStatus(false, e.message||'Save failed'); return; }
+    try{
+      const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf;
+      const r=await fetch(withBase('/plugins/config-editor/apply'),{method:'POST', headers, body: JSON.stringify(payload)});
+      const j=await r.json();
+      if(r.ok && j.ok){
+        markClean();
+        setStatus(true,'Saved; running soft reload…');
+        const reloadOutcome = await requestReload('soft');
+        setReloadStatus(reloadOutcome.ok, reloadOutcome.payload);
+        if(reloadOutcome.ok){
+          const detail = typeof reloadOutcome.payload === 'string' ? reloadOutcome.payload : 'Soft reload completed';
+          setStatus(true, `Saved; ${detail}`);
+        } else {
+          const errMsg = typeof reloadOutcome.payload === 'string' ? reloadOutcome.payload : 'Soft reload failed';
+          setStatus(false, `Saved but soft reload failed: ${errMsg}. See Reload tab for details.`);
+        }
+      } else {
+        setStatus(false, (j&&(j.message||j.error)) || 'Save failed');
+      }
+    }catch(e){ setStatus(false,String(e)); }
+  }
 
         BTN('loadBtn').addEventListener('click', loadCurrent);
         BTN('validateBtn').addEventListener('click', validateOnly);
         BTN('saveBtn').addEventListener('click', saveConfig);
 
-  // Reload handlers
+  // Reload helpers
   const reloadStatus = document.getElementById('reloadStatus');
   function setReloadStatus(ok, msgOrObj){
     if(!reloadStatus) return;
@@ -1399,26 +1424,29 @@
     }
     reloadStatus.appendChild(el);
   }
-  async function doReload(kind){
+  async function requestReload(kind){
     try{
       const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf;
       const url = kind==='soft' ? '/plugins/config-editor/reload/soft' : '/plugins/config-editor/reload/full';
       const r = await fetch(withBase(url), { method:'POST', headers, credentials: 'same-origin' });
-      // Detect auth redirect to login or non-JSON responses
       const ct = (r.headers && r.headers.get('content-type')) || '';
       if (r.redirected || (r.url && r.url.indexOf('/login') !== -1) || (ct && ct.indexOf('application/json') === -1)){
-        setReloadStatus(false, 'Not authorized or session expired. Please sign in again and retry.');
-        return;
+        return { ok:false, payload:'Not authorized or session expired. Please sign in again and retry.' };
       }
       const j = await r.json().catch(()=>({}));
       if(r.ok && (j.ok===undefined || j.ok===true)){
         const payload = j.summary || j.message || (kind==='soft' ? 'Soft reload completed' : 'Full reload completed');
-        setReloadStatus(true, payload);
-      } else {
-        const err = (j&&(j.message||j.error)) || `Reload ${kind} failed`;
-        setReloadStatus(false, err);
+        return { ok:true, payload };
       }
-    }catch(e){ setReloadStatus(false, String(e)); }
+      const err = (j&&(j.message||j.error)) || `Reload ${kind} failed`;
+      return { ok:false, payload: err };
+    }catch(e){
+      return { ok:false, payload: String(e) };
+    }
+  }
+  async function doReload(kind){
+    const result = await requestReload(kind);
+    setReloadStatus(result.ok, result.payload);
   }
   const softBtn = document.getElementById('softReloadBtn');
   if(softBtn){ softBtn.addEventListener('click', ()=> doReload('soft')); }
