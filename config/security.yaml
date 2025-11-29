@@ -29,18 +29,35 @@ adapters:
     - telnet_listener
 
 config_editor:
+  # Writable section keys control which top-level config blocks the Web Config Editor
+  # is allowed to mutate. Available values (matching the YAML structure) are:
+  #   server               - Server identity/metadata.
+  #   authentication       - User accounts, API keys, and PAM options.
+  #   logging              - Log files, console logging, rotation limits.
+  #   loopback_ports       - Loopback adapter definitions.
+  #   serial_ports         - Serial/TTY adapter definitions.
+  #   command_ports        - Command adapter entries (process-backed ports).
+  #   tcp_initiator_ports  - Outbound TCP initiator adapter entries.
+  #   openmux_client_ports - Remote OpenMux client adapter entries.
+  #   client_listener      - Primary client listener settings.
+  #   telnet_listener      - Telnet listener bridges.
+  #   muxcon               - Federation (MuxCon) settings.
+  #   web_console          - Web console listener + UI behavior.
+  #   web_status           - Status API listener.
   writable_sections:
     - server
+    - authentication
     - logging
     - loopback_ports
     - serial_ports
     - command_ports
     - tcp_initiator_ports
+    - openmux_client_ports
     - client_listener
+    - telnet_listener
     - muxcon
     - web_console
     - web_status
-    - telnet_listener
 
 rate_limits:
   authentication:
