@@ -30,7 +30,7 @@ async def test_reload_serial_ports_incremental(tmp_path):
                 {
                     "username": "admin",
                     "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
-                    "is_admin": True,
+                    "permissions": "admin",
                 }
             ]
         }

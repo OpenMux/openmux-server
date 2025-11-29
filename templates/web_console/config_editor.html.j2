@@ -846,7 +846,6 @@
           'auth.users': {
             username: 'Login username for HTTP basic-auth.',
             password_hash: 'SHA-256 hex password hash. Use the Hash password helper to derive it client-side without leaving the browser.',
-            is_admin: 'Grant full admin access to the UI and APIs.',
             permissions: 'Role for future fine-grained access control.'
           },
           'auth.api_keys': {
@@ -1045,7 +1044,6 @@
           tables['auth.users'] = buildTable('auth.users', annotateColumnsWithDefaults('auth.users', annotateColumnsWithHelp('auth.users', [
             {key:'username', label:'Username', type:'string', required:true},
             {key:'password_hash', label:'Password hash', type:'string', required:true, hiddenList:true},
-            {key:'is_admin', label:'Is admin', type:'boolean'},
             {key:'permissions', label:'Permissions', type:'enum', enum:['admin','read-write','read-only']}
           ])));
           tables['auth.api_keys'] = buildTable('auth.api_keys', annotateColumnsWithDefaults('auth.api_keys', annotateColumnsWithHelp('auth.api_keys', [

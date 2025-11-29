@@ -104,7 +104,7 @@ def test_authenticate_cache_and_user_api_permissions():
     cfg = {
         "users": [
             {"username": "rw", "password_hash": sha256_hex("pw")},
-            {"username": "adm", "password_hash": sha256_hex("pw"), "is_admin": True},
+            {"username": "adm", "password_hash": sha256_hex("pw"), "permissions": "admin"},
             {"username": "ro", "password_hash": sha256_hex("pw"), "permissions": "read-only"},
         ],
         "api_keys": [

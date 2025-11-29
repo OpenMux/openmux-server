@@ -29,7 +29,6 @@ properties:
           properties:
             username: { type: string }
             password_hash: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
-            is_admin: { type: boolean }
             permissions: { type: string, enum: [admin, read-write, read-only] }
       api_keys:
         type: array

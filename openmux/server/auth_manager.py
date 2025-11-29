@@ -520,9 +520,8 @@ class AuthManager:
 
         Precedence:
             1. Explicit "permissions" field (static users)
-            2. If is_admin True -> "admin" (static users)
-            3. PAM group mapping if PAM enabled (admin > write > read)
-            4. Default -> "read-write"
+            2. PAM group mapping if PAM enabled (admin > write > read)
+            3. Default -> "read-write"
 
         Args:
             username: Account identifier.
@@ -537,9 +536,6 @@ class AuthManager:
                     # Explicit permissions field
                     if "permissions" in user:
                         return user["permissions"]
-                    # Backward-compat admin toggle
-                    if user.get("is_admin", False):
-                        return "admin"
                     # Fall through to default if static user matched
                     return "read-write"
 
