@@ -37,9 +37,17 @@
   table.config tr:hover td { background: var(--table-row-hover); }
   table.config tr.editing td { background: var(--table-row-active); color: var(--text-main); }
   table.config tr.editing td:first-child { border-left: 3px solid var(--accent-color); padding-left: 9px; }
+  table.config tr.inline-editor-row,
+  table.config tr.inline-editor-row:hover { background: var(--bg-panel); }
+  table.config tr.inline-editor-row td { padding: 0; background: var(--bg-panel); border-bottom: 1px solid var(--border-color); }
+  table.config tr.inline-editor-row:hover td,
+  table.config tr.inline-editor-row td:hover { background: var(--bg-panel); }
   table.config td .cell-muted { color: var(--text-muted); font-style: italic; }
   .tbl-wrap > div:last-child:not(:empty) { padding: 8px 12px; background: var(--bg-panel); border-top: 1px solid var(--border-color); }
+  .inline-editor-panel { margin: 0; border: none; background: transparent; padding: 12px; }
+  .inline-editor-panel .legend { margin-top: 0; }
   .mini-btn { padding: 4px 10px; font-size: 11px; border: 1px solid var(--border-color); background: var(--btn-bg); color: var(--text-main); border-radius: 3px; cursor: pointer; margin-right: 6px; transition: all 0.2s; }
+  .mini-btn.edit-toggle { min-width: 64px; text-align: center; }
   .mini-btn:hover { background: var(--btn-hover-bg); color: var(--text-main); border-color: var(--text-muted); }
   .toolbar { display:flex; gap:8px; align-items:center; }
   .req { color:var(--req-color); margin-left: 4px; font-size: 11px; }
@@ -691,15 +699,57 @@
           plainInput.addEventListener('keydown', (ev)=>{ if(ev.key === 'Enter'){ ev.preventDefault(); hashAndFill(); } });
         }
   function buildTable(rootId, columns, options){ options = options||{}; const root = q(rootId); root.innerHTML=''; const wrap=document.createElement('div'); wrap.className='tbl-wrap'; const table=document.createElement('table'); table.className='config'; const thead=document.createElement('thead'); const tbody=document.createElement('tbody'); table.appendChild(thead); table.appendChild(tbody); wrap.appendChild(table); const addHost=document.createElement('div'); wrap.appendChild(addHost); root.appendChild(wrap);
-    function renderHead(){ const tr=document.createElement('tr'); const visCols = columns.filter(c=>!c.hiddenList); visCols.forEach(c=>{const th=document.createElement('th'); const lbl=document.createElement('span'); lbl.textContent=c.label||c.key; th.appendChild(lbl); if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; th.appendChild(star); } tr.appendChild(th);}); const thA=document.createElement('th'); thA.textContent='Actions'; tr.appendChild(thA); thead.innerHTML=''; thead.appendChild(tr); }
+    const visibleColumns = columns.filter(c=>!c.hiddenList);
+    const visibleColumnCount = visibleColumns.length + 1; // include Actions column
+    function renderHead(){ const tr=document.createElement('tr'); visibleColumns.forEach(c=>{const th=document.createElement('th'); const lbl=document.createElement('span'); lbl.textContent=c.label||c.key; th.appendChild(lbl); if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; th.appendChild(star); } tr.appendChild(th);}); const thA=document.createElement('th'); thA.textContent='Actions'; tr.appendChild(thA); thead.innerHTML=''; thead.appendChild(tr); }
           renderHead();
-    let rows=[]; let editingIndex=null; function setRows(newRows){ rows = Array.isArray(newRows)? JSON.parse(JSON.stringify(newRows)) : []; if(editingIndex!=null && editingIndex>=rows.length) editingIndex=null; renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} }
+    let rows=[]; let editingIndex=null; function setRows(newRows){
+            if(activeEditorEl && wrap.contains(activeEditorEl)){
+              if(typeof activeEditorCleanup==='function'){
+                activeEditorCleanup({render:false});
+                activeEditorCleanup=null;
+              } else {
+                activeEditorEl.parentNode && activeEditorEl.parentNode.removeChild(activeEditorEl);
+                activeEditorEl=null;
+                activeEditorValidate=null;
+                activeEditorSave=null;
+                editingIndex=null;
+              }
+            }
+            rows = Array.isArray(newRows)? JSON.parse(JSON.stringify(newRows)) : [];
+            if(editingIndex!=null && editingIndex>=rows.length) editingIndex=null;
+            renderBody();
+            try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){}
+          }
           function renderAddBar(){ addHost.innerHTML=''; if(editingIndex===null){ const addBar=document.createElement('div'); addBar.className='row'; const bA=document.createElement('button'); bA.className='btn'; bA.type='button'; bA.textContent='Add item'; bA.addEventListener('click',()=>{
                 // Open create editor without inserting a placeholder row; it will be added on save
                 editRow(rows.length);
               }); addBar.appendChild(bA); addHost.appendChild(addBar); } }
-  function renderBody(){ tbody.innerHTML=''; rows.forEach((row,idx)=>{ const tr=document.createElement('tr'); if(editingIndex===idx) tr.classList.add('editing'); const visCols = columns.filter(c=>!c.hiddenList); visCols.forEach(c=>{ const td=document.createElement('td'); const hasVal = !(row[c.key]===undefined || row[c.key]===null || row[c.key]===''); const v = hasVal ? row[c.key] : (c.default!==undefined ? c.default : undefined); td.textContent = toDisplay(v); td.className = (!hasVal && (c.default===undefined))? 'cell-muted':''; tr.appendChild(td); }); const tdA=document.createElement('td'); const bE=document.createElement('button'); bE.className='mini-btn'; bE.type='button'; bE.textContent='Edit'; bE.addEventListener('click',()=>{ if(activeEditorEl && typeof activeEditorValidate==='function'){ if(!activeEditorValidate()){ return; } } editRow(idx); }); const bR=document.createElement('button'); bR.className='mini-btn'; bR.type='button'; bR.textContent='Remove'; bR.addEventListener('click',()=>{ try{ if(typeof options.onBeforeRemove==='function'){ const proceed = options.onBeforeRemove(rows[idx], idx); if(proceed===false){ return; } } }catch(_e){} if(editingIndex===idx && activeEditorEl){ if(activeEditorEl.parentNode) activeEditorEl.parentNode.removeChild(activeEditorEl); activeEditorEl=null; if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; } rows.splice(idx,1); if(editingIndex!=null){ if(idx<editingIndex) editingIndex -= 1; else if(idx===editingIndex) editingIndex=null; } renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} }); tdA.appendChild(bE); tdA.appendChild(bR); tr.appendChild(tdA); tbody.appendChild(tr); }); renderAddBar(); }
-          function editRow(idx){ const row = rows[idx] || {}; if(activeEditorEl && activeEditorEl.parentNode){ activeEditorEl.parentNode.removeChild(activeEditorEl); } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; activeEditorSave=null; editingIndex = idx; renderBody(); const editor=document.createElement('div'); editor.className='section'; const lg=document.createElement('div'); lg.className='legend'; const t=document.createElement('div'); t.className='title'; t.textContent = (idx===rows.length)? 'Add item' : 'Edit item'; lg.appendChild(t); const d=document.createElement('div'); d.className='desc'; d.textContent='Fields marked * are required'; lg.appendChild(d); editor.appendChild(lg); const getters=[]; const reqChecks=[]; const errBox=document.createElement('div'); editor.appendChild(errBox);
+          function renderBody(){ tbody.innerHTML=''; rows.forEach((row,idx)=>{ const tr=document.createElement('tr'); if(editingIndex===idx) tr.classList.add('editing'); visibleColumns.forEach(c=>{ const td=document.createElement('td'); const hasVal = !(row[c.key]===undefined || row[c.key]===null || row[c.key]===''); const v = hasVal ? row[c.key] : (c.default!==undefined ? c.default : undefined); td.textContent = toDisplay(v); td.className = (!hasVal && (c.default===undefined))? 'cell-muted':''; tr.appendChild(td); }); const tdA=document.createElement('td'); const bE=document.createElement('button'); bE.className='mini-btn edit-toggle'; bE.type='button'; const isEditingRow = (editingIndex===idx);
+            bE.textContent = isEditingRow ? 'Close' : 'Edit';
+            bE.addEventListener('click',()=>{
+              if(editingIndex===idx && activeEditorEl){
+                if(typeof activeEditorCleanup==='function'){
+                  const cleanup = activeEditorCleanup; activeEditorCleanup=null; cleanup();
+                } else if(activeEditorEl.parentNode){
+                  activeEditorEl.parentNode.removeChild(activeEditorEl);
+                  activeEditorEl=null;
+                  activeEditorValidate=null;
+                  activeEditorSave=null;
+                  editingIndex=null;
+                  renderBody();
+                }
+                return;
+              }
+              if(activeEditorEl && typeof activeEditorValidate==='function'){
+                if(!activeEditorValidate()){
+                  return;
+                }
+              }
+              editRow(idx);
+            });
+            const bR=document.createElement('button'); bR.className='mini-btn'; bR.type='button'; bR.textContent='Remove'; bR.addEventListener('click',()=>{ try{ if(typeof options.onBeforeRemove==='function'){ const proceed = options.onBeforeRemove(rows[idx], idx); if(proceed===false){ return; } } }catch(_e){} if(editingIndex===idx && activeEditorEl && wrap.contains(activeEditorEl)){ if(typeof activeEditorCleanup==='function'){ activeEditorCleanup({render:false}); activeEditorCleanup=null; } else { activeEditorEl.parentNode && activeEditorEl.parentNode.removeChild(activeEditorEl); activeEditorEl=null; } activeEditorValidate=null; activeEditorSave=null; } rows.splice(idx,1); if(editingIndex!=null){ if(idx<editingIndex) editingIndex -= 1; else if(idx===editingIndex) editingIndex=null; } renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} }); tdA.appendChild(bE); tdA.appendChild(bR); tr.appendChild(tdA); tbody.appendChild(tr); }); renderAddBar(); }
+          function editRow(idx){ const row = rows[idx] || {}; if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } else if(activeEditorEl && activeEditorEl.parentNode){ activeEditorEl.parentNode.removeChild(activeEditorEl); activeEditorEl=null; } activeEditorValidate=null; activeEditorSave=null; editingIndex = idx; renderBody(); const editorRow=document.createElement('tr'); editorRow.className='inline-editor-row'; const editorCell=document.createElement('td'); editorCell.colSpan = visibleColumnCount; editorRow.appendChild(editorCell); const editor=document.createElement('div'); editor.className='section inline-editor-panel'; const lg=document.createElement('div'); lg.className='legend'; const t=document.createElement('div'); t.className='title'; t.textContent = (idx===rows.length)? 'Add item' : 'Edit item'; lg.appendChild(t); const d=document.createElement('div'); d.className='desc'; d.textContent='Fields marked * are required'; lg.appendChild(d); editor.appendChild(lg); const getters=[]; const reqChecks=[]; const errBox=document.createElement('div'); editor.appendChild(errBox);
             // Special inline row for serial 8-N-1 when editing serial_ports
             const isSerial = rootId==='serial_ports';
             columns.forEach(c=>{
@@ -773,10 +823,12 @@
               }
               if(c.help){ const help=document.createElement('span'); help.className='help'; help.textContent=c.help; field.appendChild(help);} if(c.default!==undefined){ const def=document.createElement('span'); def.className='default-hint'; const dval = (typeof c.default==='boolean') ? (c.default? 'true':'false') : String(c.default); def.textContent = `Default: ${dval}`; field.appendChild(def); } editor.appendChild(field); getters.push(()=>{ let v; if(c.type==='boolean') v=!!input.checked; else if(c.type==='number'||c.type==='integer') v=input.value!==''? Number(input.value):undefined; else if(c.type==='enum') v=input.value||undefined; else if(c.type==='array-string') v=input.value? input.value.split(',').map(s=>s.trim()).filter(s=>s.length>0):[]; else v=input.value||undefined; return [c.key, v]; }); if(c.required){ reqChecks.push(()=>{ const val = (c.type==='boolean')? !!input.checked : (c.type==='number'||c.type==='integer')? (input.value!=='' ? true : false) : (Array.isArray(input.value)? input.value.length>0 : (input.value && input.value.trim().length>0)); return {key:c.key, ok: !!val}; }); }
             });
-            const bar=document.createElement('div'); bar.className='row'; const bS=document.createElement('button'); bS.className='btn'; bS.textContent='Save item'; const bC=document.createElement('button'); bC.className='btn'; bC.textContent='Cancel'; bar.appendChild(bS); bar.appendChild(bC); editor.appendChild(bar); root.appendChild(editor); activeEditorEl = editor; activeEditorCleanup = ()=>{ editingIndex=null; renderBody(); }; activeEditorValidate = ()=>{ const missing = reqChecks.map(f=>f()).filter(r=>!r.ok).map(r=>r.key); if(missing.length>0){ errBox.className='err'; errBox.textContent = 'Missing required: ' + missing.join(', '); try{ editor.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){} return false; } errBox.textContent=''; return true; }; activeEditorSave = ()=>{ if(!activeEditorValidate || activeEditorValidate()){ const obj={}; getters.forEach(g=>{ const [k,v]=g(); if(v!==undefined) obj[k]=v; }); rows[idx]=obj; if(editor.parentNode) editor.parentNode.removeChild(editor); if(activeEditorEl===editor){ activeEditorEl=null; } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } activeEditorValidate=null; activeEditorSave=null; renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} return true; } return false; };
-            bS.addEventListener('click',()=>{ activeEditorSave && activeEditorSave(); }); bC.addEventListener('click',()=>{ if(editor.parentNode) editor.parentNode.removeChild(editor); if(activeEditorEl===editor){ activeEditorEl=null; } if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } else { // Ensure editingIndex resets if cleanup not set
-                editingIndex=null; renderBody();
-              } activeEditorValidate=null; activeEditorSave=null; }); }
+            const bar=document.createElement('div'); bar.className='row'; const bS=document.createElement('button'); bS.className='btn'; bS.textContent='Save item'; const bC=document.createElement('button'); bC.className='btn'; bC.textContent='Cancel'; bar.appendChild(bS); bar.appendChild(bC); editor.appendChild(bar); editorCell.appendChild(editor); const anchor = tbody.children[idx] || tbody.lastElementChild; if(anchor){ anchor.insertAdjacentElement('afterend', editorRow); } else { tbody.appendChild(editorRow); } try{ editor.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){}
+            activeEditorEl = editorRow;
+            activeEditorCleanup = (cleanupOpts)=>{ if(editorRow.parentNode) editorRow.parentNode.removeChild(editorRow); if(activeEditorEl===editorRow){ activeEditorEl=null; } activeEditorValidate=null; activeEditorSave=null; editingIndex=null; if(!cleanupOpts || cleanupOpts.render !== false){ renderBody(); } };
+            activeEditorValidate = ()=>{ const missing = reqChecks.map(f=>f()).filter(r=>!r.ok).map(r=>r.key); if(missing.length>0){ errBox.className='err'; errBox.textContent = 'Missing required: ' + missing.join(', '); try{ editor.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){} return false; } errBox.textContent=''; return true; };
+            activeEditorSave = ()=>{ if(!activeEditorValidate || activeEditorValidate()){ const obj={}; getters.forEach(g=>{ const [k,v]=g(); if(v!==undefined) obj[k]=v; }); rows[idx]=obj; const cleanup = activeEditorCleanup; activeEditorCleanup=null; if(typeof cleanup==='function'){ cleanup(); } else if(editorRow.parentNode){ editorRow.parentNode.removeChild(editorRow); editingIndex=null; renderBody(); } try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} return true; } return false; };
+            bS.addEventListener('click',()=>{ activeEditorSave && activeEditorSave(); }); bC.addEventListener('click',()=>{ if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } else if(editorRow.parentNode){ editorRow.parentNode.removeChild(editorRow); editingIndex=null; renderBody(); } activeEditorValidate=null; activeEditorSave=null; }); }
           renderAddBar();
           wrap._get = ()=> rows;
           wrap._set = setRows;
