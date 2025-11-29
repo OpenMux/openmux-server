@@ -39,13 +39,15 @@
   table.config tr.editing td:first-child { border-left: 3px solid var(--accent-color); padding-left: 9px; }
   table.config tr.inline-editor-row,
   table.config tr.inline-editor-row:hover { background: var(--bg-panel); }
-  table.config tr.inline-editor-row td { padding: 0; background: var(--bg-panel); border-bottom: 1px solid var(--border-color); }
+  table.config tr.inline-editor-row td { padding: 0; background: var(--bg-panel); border-bottom: 1px solid var(--border-color); border-left: 3px solid var(--accent-color); }
   table.config tr.inline-editor-row:hover td,
   table.config tr.inline-editor-row td:hover { background: var(--bg-panel); }
+  table.config tr.editing td { border-bottom: none; }
+  table.config tr.editing + tr.inline-editor-row td { border-top: none; }
   table.config td .cell-muted { color: var(--text-muted); font-style: italic; }
   .tbl-wrap > div:last-child:not(:empty) { padding: 8px 12px; background: var(--bg-panel); border-top: 1px solid var(--border-color); }
-  .inline-editor-panel { margin: 0; border: none; background: transparent; padding: 12px; }
-  .inline-editor-panel .legend { margin-top: 0; }
+  .inline-editor-panel { margin: 0; border: none; background: transparent; padding: 12px; padding-left: 9px; }
+  .inline-editor-panel .legend { margin-top: 0; padding-left: 0; }
   .mini-btn { padding: 4px 10px; font-size: 11px; border: 1px solid var(--border-color); background: var(--btn-bg); color: var(--text-main); border-radius: 3px; cursor: pointer; margin-right: 6px; transition: all 0.2s; }
   .mini-btn.edit-toggle { min-width: 64px; text-align: center; }
   .mini-btn:hover { background: var(--btn-hover-bg); color: var(--text-main); border-color: var(--text-muted); }
