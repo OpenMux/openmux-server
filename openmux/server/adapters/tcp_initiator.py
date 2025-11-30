@@ -141,6 +141,9 @@ class TcpInitiatorPort:
         except asyncio.TimeoutError:
             self.logger.warning(f"Connection timeout to {self.host}:{self.port} (after {self.timeout}s)")
             return False
+        except ConnectionRefusedError as e:
+            self.logger.warning(f"Connection refused to {self.host}:{self.port}: {e}")
+            return False
         except Exception as e:
             self.logger.warning(f"Connection failed to {self.host}:{self.port}: {e}", exc_info=True)
             return False
