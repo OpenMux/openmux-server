@@ -356,6 +356,36 @@ async def auth_middleware(request: web.Request, handler):
     raise web.HTTPFound(location=login_url)
 
 
+def _assemble_status_payload(adapter, preloaded_ports: Optional[list[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Build the aggregated status payload used by both index and /status views."""
+
+    data: Dict[str, Any] = {}
+    try:
+        data["status"] = adapter._build_status_adapter_snapshot()  # type: ignore[attr-defined]
+    except Exception:
+        data["status"] = {}
+    if preloaded_ports is None:
+        try:
+            data["ports"] = adapter._get_ports_snapshot()
+        except Exception:
+            data["ports"] = []
+    else:
+        data["ports"] = preloaded_ports
+    try:
+        data["federation"] = adapter._gather_federation_overview()  # type: ignore[attr-defined]
+    except Exception:
+        data["federation"] = {}
+    try:
+        data["multipath"] = adapter._gather_multipath_overview()  # type: ignore[attr-defined]
+    except Exception:
+        data["multipath"] = {}
+    try:
+        data["web_clients"] = adapter._gather_web_clients()  # type: ignore[attr-defined]
+    except Exception:
+        data["web_clients"] = []
+    return data
+
+
 async def handle_index(request: web.Request) -> web.Response:
     adapter = request.app[ADAPTER_APP_KEY]
     try:
@@ -383,7 +413,11 @@ async def handle_index(request: web.Request) -> web.Response:
         
         current_port = request.query.get("port") or request.query.get("console")
 
-        if hasattr(adapter, "_render_index"):
+        status_payload = _assemble_status_payload(adapter, preloaded_ports=ports)
+
+        if hasattr(adapter, "_render_status"):
+            body = adapter._render_status(status_payload, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
+        elif hasattr(adapter, "_render_index"):
             body = adapter._render_index(ports, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
         else:
             # Older adapter without rendering helpers: silent fallback
@@ -520,27 +554,7 @@ async def handle_status(request: web.Request) -> web.Response:
     adapter = request.app[ADAPTER_APP_KEY]
     try:
         # Build an aggregated status payload similar to WebStatus adapter + CLI script
-        data: Dict[str, Any] = {}
-        try:
-            data["status"] = adapter._build_status_adapter_snapshot()  # type: ignore[attr-defined]
-        except Exception:
-            data["status"] = {}
-        try:
-            data["ports"] = adapter._get_ports_snapshot()
-        except Exception:
-            data["ports"] = []
-        try:
-            data["federation"] = adapter._gather_federation_overview()  # type: ignore[attr-defined]
-        except Exception:
-            data["federation"] = {}
-        try:
-            data["multipath"] = adapter._gather_multipath_overview()  # type: ignore[attr-defined]
-        except Exception:
-            data["multipath"] = {}
-        try:
-            data["web_clients"] = adapter._gather_web_clients()  # type: ignore[attr-defined]
-        except Exception:
-            data["web_clients"] = []
+        data = _assemble_status_payload(adapter)
 
         # Prepare plugin navigation filtered by permission
         username = request.get("username")
@@ -1884,7 +1898,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
     <link rel=\"stylesheet\" href=\"{bp}/static/web_console.css\" />
   </head>
   <body>
-    <header class=\"site\"><div class=\"brand\">OpenMux</div><div class=\"page\">Logs</div><div class=\"actions\"><a class=\"btn\" href=\"{bp}/\">Summary</a><a class=\"btn\" href=\"{bp}/console\">Console</a></div></header>
+    <header class=\"site\"><div class=\"brand\">OpenMux</div><div class=\"page\">Logs</div><div class=\"actions\"><a class=\"btn\" href=\"{bp}/\">Status</a><a class=\"btn\" href=\"{bp}/console\">Console</a></div></header>
     <main>
       <h1>Port Logs</h1>
     {msg_block}
@@ -2021,7 +2035,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
     <link rel=\"stylesheet\" href=\"/static/web_console.css\" />
   </head>
   <body>
-    <header class=\"site\"><div class=\"brand\">OpenMux</div><div class=\"page\">Status</div><div class=\"actions\"><a class=\"btn\" href=\"/\">Summary</a><a class=\"btn\" href=\"/console\">Console</a><a class=\"btn\" href=\"/logout\">Logout</a></div></header>
+    <header class=\"site\"><div class=\"brand\">OpenMux</div><div class=\"page\">Status</div><div class=\"actions\"><a class=\"btn\" href=\"/\">Status</a><a class=\"btn\" href=\"/console\">Console</a><a class=\"btn\" href=\"/logout\">Logout</a></div></header>
     <main>
       <h2>Ports</h2>
       <table>

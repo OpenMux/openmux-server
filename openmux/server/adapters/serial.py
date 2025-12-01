@@ -405,6 +405,22 @@ class SerialPortWrapper:
         except asyncio.QueueEmpty:
             return None
 
+    def get_status_snapshot(self) -> Dict[str, Any]:
+        """Return static config details for port listings."""
+        return {
+            "serial_config": {
+                "device": self.config.device,
+                "baudrate": self.config.baudrate,
+                "bytesize": self.config.bytesize,
+                "parity": self.config.parity,
+                "stopbits": self.config.stopbits,
+                "flow_control": self.config.flow_control,
+                "timeout": self.config.timeout,
+                "dtr": self.config.dtr,
+                "rts": self.config.rts,
+            }
+        }
+
 
 class SerialAdapter(BaseGenericAdapter):
     """Adapter orchestrating multiple serial port wrappers.

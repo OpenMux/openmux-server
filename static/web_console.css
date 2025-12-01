@@ -105,6 +105,8 @@ header .brand .subtitle { color: var(--text-muted); font-size: 12px; margin-top:
 /* Buttons and inputs */
 a.btn, button.btn { display: inline-block; padding: 6px 10px; background: var(--bg-hover); border: 1px solid var(--border-light); border-radius: 4px; color: var(--text-main); text-decoration: none; cursor: pointer; }
 a.btn:hover, button.btn:hover { background: var(--bg-active); }
+/* Compact utility for table action buttons */
+a.btn.tiny, button.btn.tiny { padding: 2px 6px; font-size: 12px; line-height: 1.1; }
 /* Compact icon-style button for +/- toggles */
 button.btn.btn-icon { width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center; line-height: 1; font-weight: 600; }
 

@@ -216,7 +216,7 @@ class PortManager:
 
             def get_status(self):
                 """Return a status snapshot for this unified wrapper."""
-                return {
+                status = {
                     "name": self.name,
                     "description": self.description,
                     "adapter": self.adapter_type,
@@ -227,6 +227,23 @@ class PortManager:
                     "connected_clients": len(self.connected_clients),
                     "max_read_write_users": self.max_read_write_users,
                 }
+                # Include adapter-provided snapshot details when available
+                snapshot = getattr(self.unified_port, "get_status_snapshot", None)
+                if callable(snapshot):
+                    try:
+                        extra = snapshot() or {}
+                        if isinstance(extra, dict):
+                            status.update(extra)
+                    except Exception:
+                        self.logger.debug(
+                            f"Unified port {self.name} get_status_snapshot failed",
+                            exc_info=True,
+                        )
+                elif hasattr(self.unified_port, "status_snapshot"):
+                    extra = getattr(self.unified_port, "status_snapshot")
+                    if isinstance(extra, dict):
+                        status.update(extra)
+                return status
 
             def add_client(self, client: Any) -> None:
                 """Register a client and trigger the adapter hook if present."""

@@ -35,8 +35,8 @@
           </div>
         </div>
         <nav class="sidebar-nav">
-          <a class="nav-item {% if active_page == 'summary' %}active{% endif %}" href="{{ base_path }}/">
-            <span class="icon">🏠</span> Port list
+          <a class="nav-item {% if active_page == 'status' %}active{% endif %}" href="{{ base_path }}/">
+            <span class="icon">🏠</span> System Status
           </a>
           <div class="nav-group">
             <div class="nav-item-row">
@@ -63,9 +63,6 @@
               {% endif %}
             </div>
           </div>
-          <a class="nav-item {% if active_page == 'status' %}active{% endif %}" href="{{ base_path }}/status">
-            <span class="icon">📊</span> System Status
-          </a>
           {% if plugin_nav and plugin_nav|length > 0 %}
             {% for item in plugin_nav %}
               {% set required = item.require %}
