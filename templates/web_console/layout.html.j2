@@ -20,6 +20,7 @@
     {% block head_extras %}{% endblock %}
   </head>
   <body class="{% block body_class %}{% endblock %}">
+    {% set nav_ports = sidebar_ports if (sidebar_ports is defined and sidebar_ports) else ports %}
     <div class="app-layout">
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
@@ -46,13 +47,13 @@
               <button class="nav-expand" id="console-expand-btn" onclick="toggleConsolePorts(event)" title="Show ports">+</button>
             </div>
             <div class="nav-sub" id="console-ports" style="display:none">
-              {% if ports %}
-                {% for p in ports[:24] %}
+              {% if nav_ports %}
+                {% for p in nav_ports[:24] %}
                   <a class="nav-sub-item {% if current_port == p.name %}active{% endif %}" href="{{ base_path }}/console?port={{ p.name }}">{{ p.name }}</a>
                 {% endfor %}
-                {% if ports|length > 24 %}
+                {% if nav_ports|length > 24 %}
                   <div id="nav-more-ports" style="display:none">
-                    {% for p in ports[24:] %}
+                    {% for p in nav_ports[24:] %}
                       <a class="nav-sub-item {% if current_port == p.name %}active{% endif %}" href="{{ base_path }}/console?port={{ p.name }}">{{ p.name }}</a>
                     {% endfor %}
                   </div>

@@ -13,7 +13,7 @@
 {% block content %}
   {% macro info_table(p) %}
     {% set adapter = (p.adapter or p.adapter_type) %}
-    {% set sc = p.serial_config|default(p.serial_settings|default({})) %}
+    {% set sc = p.serial_config|default({}) %}
     {% set ls = p.line_status or {} %}
     {% set conn = (p.connected if ('connected' in p) else (p.is_running or false)) %}
     {% set lseen = (p.last_seen if ('last_seen' in p) else ((ports_by_name[p.name].last_seen) if (ports_by_name and (p.name in ports_by_name) and ('last_seen' in ports_by_name[p.name])) else None)) %}
@@ -62,6 +62,24 @@
       </tbody>
     </table>
   {% endmacro %}
+  {% macro sort_header(label, key) %}
+    {% set is_active = (sort_key == key) %}
+    {% if is_active %}
+      {% set next_dir = 'desc' if sort_dir == 'asc' else 'asc' %}
+    {% else %}
+      {% set next_dir = 'asc' %}
+    {% endif %}
+    {% set query = 'sort=' ~ key ~ '&dir=' ~ next_dir %}
+    {% if sort_query %}
+      {% set query = query ~ '&' ~ sort_query %}
+    {% endif %}
+    <a class="sort-link{% if is_active %} active{% endif %}" href="{{ base_path }}{{ status_path }}?{{ query }}" title="Sort by {{ label }}">
+      <span>{{ label }}</span>
+      {% if is_active %}
+        <span class="sort-indicator">{% if sort_dir == 'asc' %}↑{% else %}↓{% endif %}</span>
+      {% endif %}
+    </a>
+  {% endmacro %}
   <div class="cards">
     <div class="card">
       <div class="muted">Total Ports</div>
@@ -86,13 +104,13 @@
     <thead>
       <tr>
         <th class="col-toggle"></th>
-        <th>Name</th>
-        <th>Description</th>
-        <th>Device</th>
+        <th>{{ sort_header('Name', 'name') }}</th>
+        <th>{{ sort_header('Description', 'description') }}</th>
+        <th>{{ sort_header('Device', 'device') }}</th>
         <th>Speed</th>
-        <th>Origin</th>
-        <th>Status</th>
-        <th>Clients</th>
+        <th>{{ sort_header('Origin', 'origin') }}</th>
+        <th>{{ sort_header('Status', 'status') }}</th>
+        <th>{{ sort_header('Clients', 'clients') }}</th>
         <th>Actions</th>
       </tr>
     </thead>
@@ -100,7 +118,7 @@
       {% for p in ports %}
       <tr>
         {% set pid = ('ports-' ~ (p.name | replace(' ', '_') | replace(':','_'))) %}
-        {% set sc = (p.serial_config|default(None)) or (p.serial_settings|default(None)) %}
+        {% set sc = p.serial_config|default(None) %}
         {% set device_path = sc.device if sc and sc.device is not none else None %}
         {% set device_path = device_path or (p.device|default(p.physical_device|default(None))) %}
         {% set parity = (sc.parity|string).upper() if sc and sc.parity is defined else '' %}
@@ -128,7 +146,15 @@
           <span class="tag {% if conn %}ok{% else %}bad{% endif %}">{{ conn and 'connected' or 'down' }}</span>
         </td>
         <td>
-          {% set cnt = p.clients_count or p.client_count %}
+          {% set cnt = p.client_count %}
+          {% if cnt is none %}
+            {% set cc = p.connected_clients %}
+            {% if cc is iterable %}
+              {% set cnt = cc | length %}
+            {% else %}
+              {% set cnt = cc %}
+            {% endif %}
+          {% endif %}
           {{ cnt or 0 }}
           {% if p.client_details %}
             {# Show up to 5 entries with username (type@ip) #}

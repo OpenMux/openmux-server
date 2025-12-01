@@ -29,7 +29,7 @@ import json
 import re
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from typing import Callable
 
 from aiohttp import web
@@ -120,6 +120,115 @@ def _fallback_with_base(raw: bytes, base_path: str) -> bytes:
     except Exception:
         return raw
 
+
+_PORT_SORT_KEYS = {"name", "description", "device", "origin", "status", "clients"}
+
+
+def _assemble_status_payload(adapter, preloaded_ports: Optional[list[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Collect status/federation/multipath snapshots for UI rendering."""
+
+    data: Dict[str, Any] = {}
+    try:
+        data["status"] = adapter._build_status_adapter_snapshot()  # type: ignore[attr-defined]
+    except Exception:
+        data["status"] = {}
+    if preloaded_ports is None:
+        try:
+            data["ports"] = adapter._get_ports_snapshot()
+        except Exception:
+            data["ports"] = []
+    else:
+        data["ports"] = preloaded_ports
+    try:
+        data["federation"] = adapter._gather_federation_overview()  # type: ignore[attr-defined]
+    except Exception:
+        data["federation"] = {}
+    try:
+        data["multipath"] = adapter._gather_multipath_overview()  # type: ignore[attr-defined]
+    except Exception:
+        data["multipath"] = {}
+    try:
+        data["web_clients"] = adapter._gather_web_clients()  # type: ignore[attr-defined]
+    except Exception:
+        data["web_clients"] = []
+    return data
+
+
+def _port_device_value(port: Dict[str, Any]) -> str:
+    try:
+        sc = port.get("serial_config") or {}
+        if not isinstance(sc, dict):
+            sc = {}
+        device = sc.get("device") or port.get("device") or port.get("physical_device")
+        return str(device or "").lower()
+    except Exception:
+        return ""
+
+
+def _port_clients_value(port: Dict[str, Any]) -> int:
+    val = port.get("client_count")
+    if val is not None:
+        try:
+            return int(val)
+        except Exception:
+            pass
+    connected = port.get("connected_clients")
+    if isinstance(connected, list):
+        return len(connected)
+    if connected is not None:
+        try:
+            return int(connected)
+        except Exception:
+            pass
+    return 0
+
+
+def _port_status_value(port: Dict[str, Any]) -> int:
+    try:
+        connected = port.get("connected")
+        if connected is None:
+            connected = port.get("is_running")
+        return 0 if bool(connected) else 1
+    except Exception:
+        return 1
+
+
+def _sort_ports_list(ports: List[Dict[str, Any]], sort_key: str, descending: bool) -> List[Dict[str, Any]]:
+    if not ports:
+        return ports
+
+    def _key(port: Dict[str, Any]):
+        name = str(port.get("name", "")).lower()
+        if sort_key == "description":
+            return ((port.get("description") or "").lower(), name)
+        if sort_key == "device":
+            return (_port_device_value(port), name)
+        if sort_key == "origin":
+            origin = port.get("origin_server_id") or ("remote" if port.get("remote") else "local")
+            return (str(origin).lower(), name)
+        if sort_key == "status":
+            return (_port_status_value(port), name)
+        if sort_key == "clients":
+            return (_port_clients_value(port), name)
+        return (name,)
+
+    try:
+        return sorted(ports, key=_key, reverse=descending)
+    except Exception:
+        return ports
+
+
+def _extract_sort_params(request: web.Request) -> Tuple[str, str, str]:
+    query = request.rel_url.query
+    sort_key = str(query.get("sort", "name")).lower()
+    if sort_key not in _PORT_SORT_KEYS:
+        sort_key = "name"
+    sort_dir = str(query.get("dir", "asc")).lower()
+    if sort_dir not in {"asc", "desc"}:
+        sort_dir = "asc"
+    preserved = [(k, v) for k, v in query.items() if k not in ("sort", "dir")]
+    base_query = urllib.parse.urlencode(preserved, doseq=True)
+    return sort_key, sort_dir, base_query
 
 def _tail_file(path: Path, limit: int) -> list[str]:
     """Return the last ``limit`` lines from ``path``.
@@ -355,37 +464,6 @@ async def auth_middleware(request: web.Request, handler):
     login_url = _pref("/login") + f"?next={next_url}"
     raise web.HTTPFound(location=login_url)
 
-
-def _assemble_status_payload(adapter, preloaded_ports: Optional[list[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Build the aggregated status payload used by both index and /status views."""
-
-    data: Dict[str, Any] = {}
-    try:
-        data["status"] = adapter._build_status_adapter_snapshot()  # type: ignore[attr-defined]
-    except Exception:
-        data["status"] = {}
-    if preloaded_ports is None:
-        try:
-            data["ports"] = adapter._get_ports_snapshot()
-        except Exception:
-            data["ports"] = []
-    else:
-        data["ports"] = preloaded_ports
-    try:
-        data["federation"] = adapter._gather_federation_overview()  # type: ignore[attr-defined]
-    except Exception:
-        data["federation"] = {}
-    try:
-        data["multipath"] = adapter._gather_multipath_overview()  # type: ignore[attr-defined]
-    except Exception:
-        data["multipath"] = {}
-    try:
-        data["web_clients"] = adapter._gather_web_clients()  # type: ignore[attr-defined]
-    except Exception:
-        data["web_clients"] = []
-    return data
-
-
 async def handle_index(request: web.Request) -> web.Response:
     adapter = request.app[ADAPTER_APP_KEY]
     try:
@@ -413,7 +491,14 @@ async def handle_index(request: web.Request) -> web.Response:
         
         current_port = request.query.get("port") or request.query.get("console")
 
+        sort_key, sort_dir, preserved_query = _extract_sort_params(request)
         status_payload = _assemble_status_payload(adapter, preloaded_ports=ports)
+        status_payload["sidebar_ports"] = status_payload.get("ports", [])
+        status_payload["ports"] = _sort_ports_list(status_payload.get("ports", []), sort_key, sort_dir == "desc")
+        status_payload["sort_key"] = sort_key
+        status_payload["sort_dir"] = sort_dir
+        status_payload["sort_query"] = preserved_query
+        status_payload["status_path"] = request.rel_url.path or "/"
 
         if hasattr(adapter, "_render_status"):
             body = adapter._render_status(status_payload, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
@@ -554,7 +639,14 @@ async def handle_status(request: web.Request) -> web.Response:
     adapter = request.app[ADAPTER_APP_KEY]
     try:
         # Build an aggregated status payload similar to WebStatus adapter + CLI script
+        sort_key, sort_dir, preserved_query = _extract_sort_params(request)
         data = _assemble_status_payload(adapter)
+        data["sidebar_ports"] = data.get("ports", [])
+        data["ports"] = _sort_ports_list(data.get("ports", []), sort_key, sort_dir == "desc")
+        data["sort_key"] = sort_key
+        data["sort_dir"] = sort_dir
+        data["sort_query"] = preserved_query
+        data["status_path"] = request.rel_url.path or "/status"
 
         # Prepare plugin navigation filtered by permission
         username = request.get("username")
@@ -1119,7 +1211,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         super().__init__(name, config)
         cfg = config.get("web_console", config)
         self.host = cfg.get("host", "0.0.0.0")
-        self.port = int(cfg.get("port", 8081))
+        self.port = int(cfg.get("port", 8081))  # Default port for the web console
         self.enable_ui = bool(cfg.get("enable_ui", True))
         self.realm = str(cfg.get("realm", "OpenMux"))
         # Base path configuration (UI may be served under a subpath)
@@ -1127,7 +1219,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             self.base_path = str(cfg.get("base_path", "/"))
         except Exception:
             self.base_path = "/"
-        # Respect X-Forwarded-Prefix for URL generation (does not affect routing)
+        # Respect X-Forwarded-Prefix for URL generation (does not affect routing) 
         self.respect_forwarded_prefix = bool(cfg.get("respect_forwarded_prefix", True))
         # Optional template/static configuration
         self.template_dir = cfg.get("template_dir")  # directory with Jinja2 templates
@@ -1758,7 +1850,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         for p in ports:
             name = html.escape(str(p.get("name", "?")))
             desc = html.escape(str(p.get("description", "")))
-            clients = int(p.get("clients_count", 0) or 0)
+            clients = _port_clients_value(p)
             extra = ""
             if desc:
                 extra += f" — {desc}"
@@ -1932,6 +2024,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 tmpl = self._jinja_env.get_template("status.html.j2")
                 # Compute a few top-level metrics for cards
                 ports = data.get("ports", []) or []
+                sidebar_ports = data.get("sidebar_ports") or ports
                 total_ports = len(ports)
                 connected_ports = sum(1 for p in ports if p.get("connected") or p.get("is_running"))
                 fed = data.get("federation") or {}
@@ -1981,9 +2074,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 except Exception:
                     pass
                 base_path = self._effective_base_path(None)
+                sort_key = data.get("sort_key") or "name"
+                sort_dir = data.get("sort_dir") or "asc"
+                sort_query = data.get("sort_query") or ""
+                status_path = data.get("status_path") or "/"
                 html_text = tmpl.render(
                     data=data,
                     ports=ports,
+                    sidebar_ports=sidebar_ports,
                     ports_by_name={p.get("name"): p for p in ports if isinstance(p, dict) and p.get("name")},
                     total_ports=total_ports,
                     connected_ports=connected_ports,
@@ -2003,6 +2101,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     base_path=base_path,
                     current_port=current_port,
                     user_permission=user_permission,
+                    sort_key=sort_key,
+                    sort_dir=sort_dir,
+                    sort_query=sort_query,
+                    status_path=status_path,
                 )
                 return html_text.encode("utf-8")
         except Exception as e:
@@ -2020,7 +2122,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 name = esc(p.get("name", ""))
                 adapter = esc(p.get("adapter") or p.get("adapter_type") or "")
                 desc = esc(p.get("description", ""))
-                clients = esc(p.get("clients_count", 0))
+                clients = esc(_port_clients_value(p))
                 rows.append(f"<tr><td>{name}</td><td>{adapter}</td><td>{desc}</td><td>{clients}</td></tr>")
             except Exception:
                 continue
@@ -3240,7 +3342,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         try:
                             cc = getattr(port, "connected_clients", None)
                             if isinstance(cc, list):
-                                info["clients_count"] = len(cc)
+                                info["client_count"] = len(cc)
                                 # Best-effort usernames list
                                 usernames = []
                                 details = []
@@ -3285,7 +3387,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                             continue
                                     extra = [cid for cid, meta in (self._client_meta or {}).items() if isinstance(meta, dict) and meta.get("port") == name and str(cid) not in existing_ids]
                                     if extra:
-                                        info["clients_count"] = int(info.get("clients_count", 0)) + len(extra)
+                                        info["client_count"] = int(info.get("client_count", 0)) + len(extra)
                                         try:
                                             ex_usernames = [str((self._client_meta.get(cid) or {}).get("username") or cid) for cid in extra]
                                             info.setdefault("clients", [])
@@ -3313,7 +3415,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                 try:
                                     extras = [cid for cid, meta in (self._client_meta or {}).items() if isinstance(meta, dict) and meta.get("port") == name]
                                     if extras:
-                                        info["clients_count"] = len(extras)
+                                        info["client_count"] = len(extras)
                                         try:
                                             info["clients"] = [str((self._client_meta.get(cid) or {}).get("username") or cid) for cid in extras]
                                             # Build details list as well
