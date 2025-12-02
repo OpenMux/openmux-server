@@ -137,6 +137,8 @@ if [[ ! -f "$CONFIG_DST" ]]; then
   fi
 fi
 
+CONFIG_DIR="$(dirname "$CONFIG_DST")"
+
 # Create default client config if missing by copying template when available
 CLIENT_CFG="/etc/openmux/client.yaml"
 if [[ ! -f "$CLIENT_CFG" ]]; then
@@ -163,7 +165,7 @@ User=$OM_USER
 Group=$OM_GROUP
 WorkingDirectory=$PREFIX
 Environment=PYTHONUNBUFFERED=1
-ExecStart=$BIN_DIR/python -m openmux.server.main -c $CONFIG_DST
+ExecStart=$BIN_DIR/python -m openmux.server.main --config-dir $CONFIG_DIR
 ExecReload=/bin/kill -HUP \$MAINPID
 # Allow binding to privileged ports (e.g., 80) without running as root
 AmbientCapabilities=CAP_NET_BIND_SERVICE
