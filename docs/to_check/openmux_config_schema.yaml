@@ -29,7 +29,6 @@ properties:
           properties:
             username: { type: string }
             password_hash: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
-            is_admin: { type: boolean }
             permissions: { type: string, enum: [admin, read-write, read-only] }
       api_keys:
         type: array
@@ -115,7 +114,7 @@ properties:
         flow_control: { type: string, enum: [none, rtscts, dsrdtr, xonxoff], default: none }
         dtr: { type: boolean, default: true }
         rts: { type: boolean, default: true }
-        read_write_users: { type: integer, minimum: 1, default: 1 }
+        max_read_write_users: { type: integer, minimum: 1, default: 1 }
   loopback_ports:
     type: array
     items:
@@ -128,7 +127,6 @@ properties:
         buffer_size: { type: integer, minimum: 1, default: 1024 }
         echo_delay: { type: number, minimum: 0, default: 0.0 }
         max_read_write_users: { type: integer, minimum: 1, default: 5 }
-        read_write_users: { type: integer, minimum: 1, default: 1 }
   command_ports:
     type: array
     items:
