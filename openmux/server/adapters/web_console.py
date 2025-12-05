@@ -524,6 +524,15 @@ async def handle_index(request: web.Request) -> web.Response:
 async def handle_console(request: web.Request) -> web.Response:
     adapter = request.app[ADAPTER_APP_KEY]
     try:
+        if getattr(adapter, "_asset_error", None):
+            try:
+                await adapter._ensure_assets()
+            except Exception as asset_exc:
+                adapter._asset_error = str(asset_exc)
+                try:
+                    adapter.logger.debug(f"xterm assets still missing: {asset_exc}")
+                except Exception:
+                    pass
         username = request.get("username")
         try:
             plugin_nav = adapter._get_allowed_plugin_nav(username, request=request)
@@ -1290,6 +1299,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self.plugins_cfg = cfg.get("plugins", [])
         # Collected plugin navigation items (if templates wish to render them)
         self._plugin_nav = []
+        # Cached error message describing missing static assets
+        self._asset_error: Optional[str] = None
 
         # SSO trust header (for federated proxy) – optional, disabled unless secret is set
         try:
@@ -1901,6 +1912,15 @@ class WebConsoleAdapter(BaseGenericAdapter):
         Tries Jinja2 'console.html.j2'; otherwise uses the built-in fallback
         HTML that embeds xterm.js and connects to /ws/{port}.
         """
+        asset_error = getattr(self, "_asset_error", None)
+        if asset_error:
+            return self._render_console_error(
+                asset_error,
+                plugin_nav=plugin_nav,
+                ports=ports,
+                current_port=current_port,
+                user_permission=user_permission,
+            )
         try:
             if self._jinja_env:
                 tmpl = self._jinja_env.get_template("console.html.j2")
@@ -1929,6 +1949,69 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             bp = ""
         return _fallback_with_base(_HTML_FALLBACK, bp)
+
+    def _render_console_error(
+        self,
+        message: str,
+        plugin_nav: Optional[list[Dict[str, Any]]] = None,
+        ports: Optional[list] = None,
+        current_port: Optional[str] = None,
+        user_permission: Optional[str] = None,
+    ) -> bytes:
+        """Render a friendly error page when console assets are missing."""
+        try:
+            if self._jinja_env:
+                tmpl = self._jinja_env.get_template("console_error.html.j2")
+                base_path = self._effective_base_path(None)
+                html_text = tmpl.render(
+                    realm=self.realm,
+                    logo_url=self._get_logo_url(),
+                    title="OpenMux Console",
+                    base_path=base_path,
+                    plugin_nav=plugin_nav or [],
+                    ports=ports or [],
+                    current_port=current_port,
+                    user_permission=user_permission,
+                    error_message=message,
+                )
+                return html_text.encode("utf-8")
+        except Exception as e:
+            self.logger.debug(f"console error template render failed: {e}")
+        try:
+            bp = self._effective_base_path(None) or ""
+        except Exception:
+            bp = ""
+        try:
+            brand_logo = self._get_logo_url()
+        except Exception:
+            brand_logo = None
+        if brand_logo:
+            brand_html = f'<img class="logo-img" src="{html.escape(str(brand_logo))}" alt="logo">'
+        else:
+            brand_html = '<div class="logo">OM</div>'
+        safe_message = html.escape(message or "Console unavailable.")
+        body = f"""
+<!doctype html>
+<html>
+    <head>
+        <meta charset=\"utf-8\" />
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+        <title>OpenMux Console</title>
+        <link rel=\"stylesheet\" href=\"{bp}/static/web_console.css\" />
+    </head>
+    <body>
+        <header class=\"site\"><div class=\"brand\">{brand_html}<div class=\"title\">OpenMux</div></div><div class=\"page\">Console</div><div class=\"actions\"><a class=\"btn\" href=\"{bp}/\">Status</a><a class=\"btn\" href=\"{bp}/logout\">Logout</a></div></header>
+        <main>
+            <h1>Console Unavailable</h1>
+            <div class=\"card warning\">
+                <p>{safe_message}</p>
+                <p>Install the missing files and reload this page once they are available.</p>
+            </div>
+        </main>
+    </body>
+</html>
+"""
+        return body.encode("utf-8")
 
     def _render_logs(
         self,
@@ -3467,6 +3550,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         need_js = not xterm_js.is_file()
         need_fit = not fit_js.is_file()
         if not (need_css or need_js or need_fit):
+            self._asset_error = None
             return
 
         missing = []
@@ -3489,6 +3573,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             "Missing xterm assets ({missing}) under static_dir='{static_dir}'. "
             "Install them with {script} or copy the files manually before starting the web console."
         ).format(missing=", ".join(rel_missing), static_dir=self.static_dir, script=script_hint)
+        self._asset_error = msg
         raise RuntimeError(msg)
 
     # Client manager API used by ConsoleManager to forward data to clients
