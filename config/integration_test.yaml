@@ -1,0 +1,52 @@
+# Minimal server config for smoke tests
+server:
+  id: "smoke-server"
+  description: "OpenMux Smoke Server"
+  fail_fast_adapters: false
+
+# Authentication credentials live in authentication.yaml residing next to this
+# config. Update that file to change the users/API keys referenced by tests.
+
+loopback_ports:
+  - name: "loop1"
+    description: "Loopback for smoke test"
+    echo_delay: 0.0
+    buffer_size: 1024
+    max_read_write_users: 2
+
+command_ports:
+  - name: "cat"
+    description: "/bin/cat passthrough"
+    command: "/bin/cat"
+    shell: false
+    max_read_write_users: 1
+    interactive: true
+    use_pty: false
+    normalize_newlines: true
+
+# Optional serial: point to /tmp/vserial1 if setup_virtual_serial.sh is running
+serial_ports:
+  - name: "vserial1"
+    description: "Virtual serial for smoke test"
+    device: "/tmp/vserial1"
+    baudrate: 115200
+    bytesize: 8
+    parity: "N"
+    stopbits: 1
+    max_read_write_users: 1
+
+logging:
+  level: "INFO"
+  file: "logs/openmux_smoke_server.log"
+  console: true
+
+muxcon:
+  shutdown_grace_timeout_sec: 3.0
+  context_idle_timeout_sec: 10.0
+  shutdown_ack_flush_ms: 50
+
+client_listener:
+  host: "127.0.0.1"
+  port: 8123
+  max_connections: 50
+  connection_timeout: 30

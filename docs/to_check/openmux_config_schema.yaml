@@ -2,10 +2,12 @@
 "$id": "https://openmux.org/schema/server-config"
 title: OpenMux Server Configuration Schema (Simplified)
 description: >
-  Validates core OpenMux configuration. This simplified schema covers common
-  sections and defaults and is compatible with loopback and web demos.
+  Validates core OpenMux configuration. Authentication credentials now live in
+  authentication.yaml (see openmux_authentication_schema.yaml) and are not part
+  of server.yaml. This simplified schema covers common sections and defaults and
+  is compatible with loopback and web demos.
 type: object
-required: [server, authentication]
+required: [server]
 additionalProperties: false
 properties:
   server:
@@ -16,67 +18,6 @@ properties:
       description: { type: string }
       control_socket: { type: string, default: logs/openmux.sock }
       pidfile: { type: string, default: logs/openmux.pid }
-  authentication:
-    type: object
-    additionalProperties: false
-    properties:
-      users:
-        type: array
-        items:
-          type: object
-          additionalProperties: false
-          required: [username, password_hash]
-          properties:
-            username: { type: string }
-            password_hash: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
-            permissions: { type: string, enum: [admin, read-write, read-only] }
-      api_keys:
-        type: array
-        items:
-          type: object
-          additionalProperties: false
-          required: [key]
-          properties:
-            name: { type: string }
-            key: { type: string }
-            permissions: { type: string, enum: [admin, read-write, read-only] }
-      public_keys:
-        type: array
-        items:
-          type: object
-          additionalProperties: false
-          required: [key_id, public_key]
-          properties:
-            username: { type: string }
-            key_id: { type: string }
-            public_key: { type: string }
-            allowed_uses:
-              type: array
-              items: { type: string, enum: [client, muxcon] }
-              uniqueItems: true
-      pam:
-        type: object
-        additionalProperties: false
-        properties:
-          enabled: { type: boolean, default: false }
-          service_name: { type: string, default: login }
-          allow_root: { type: boolean, default: false }
-          allowed_users:
-            type: array
-            items: { type: string }
-            uniqueItems: true
-          groups:
-            type: object
-            additionalProperties: false
-            properties:
-              admin_group: { type: string, default: openmux_admin }
-              write_group: { type: string, default: openmux_write }
-              read_group: { type: string, default: openmux_read }
-    anyOf:
-      - required: [users]
-      - required: [api_keys]
-      - required: [public_keys]
-      - required: [pam]
   logging:
     type: object
     additionalProperties: false

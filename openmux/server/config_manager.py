@@ -9,11 +9,9 @@ Key responsibilities
 - Load YAML from a filesystem path with basic I/O guards (existence, non-empty content).
 - Parse YAML into a Python dictionary via yaml.safe_load.
 - Validate required sections and normalize legacy fields:
-    * Required top-level sections: "server", "authentication".
-        * Server: legacy host/port/bind_address removed from usage; keep only metadata
-            (e.g., id/description). For backwards compatibility, metadata getters
-            proxy to client_listener.host/port when requested.
-    * Authentication: require either users or api_keys to be present.
+        * Required top-level sections: "server" (authentication now lives in a sidecar
+            file). Server metadata remains in the main config file, while authentication
+            is sourced from authentication.yaml.
     * Serial ports: support both old list format and new unified adapter format {adapter_type: "serial", ports: [...]}; validate required fields.
 - Provide getters that lazily load configuration on first access.
 - Persist configuration changes atomically with a simple .bak backup of the previous file.
@@ -68,7 +66,6 @@ class ConfigManager:
         self.logger = logging.getLogger("openmux.config")
         self.config: Optional[Dict[str, Any]] = None
         self._authentication_config: Optional[Dict[str, Any]] = None
-        self._inline_authentication = False
         self._security_policy: Optional[SecurityPolicy] = None
 
     def _derive_sidecar_path(self, filename: str) -> str:
@@ -136,13 +133,17 @@ class ConfigManager:
         if self.config is None:
             raise ValueError("Configuration file could not be loaded properly - empty or invalid YAML")
 
-    def _validate_required_sections(self):
+    def _validate_required_sections(self, *, allow_inline_authentication: bool) -> None:
         """Validate presence of required top-level sections.
 
-        Required sections are: ``server`` and ``authentication``.
+        ``server`` must be present in the main configuration. Authentication data
+        must be loaded from a sidecar file unless inline authentication is
+        explicitly allowed (used only for validation of merged payloads in tests
+        and the Config Editor).
 
         Raises:
-            ValueError: If any required section is missing.
+            ValueError: If any required section is missing or inline
+                authentication is present when not allowed.
         """
         assert self.config is not None  # Type narrowing
         required_sections = ["server"]
@@ -150,14 +151,22 @@ class ConfigManager:
             if section not in self.config:
                 raise ValueError(f"Missing required configuration section: {section}")
 
-        # Handle authentication section which may live in an external file
-        if "authentication" in self.config and isinstance(self.config["authentication"], dict):
-            self._inline_authentication = True
-            self._authentication_config = self.config["authentication"]
+        self._authentication_config = None
+
+        if "authentication" in self.config:
+            if not allow_inline_authentication:
+                raise ValueError(
+                    "Authentication data must be stored in authentication.yaml; remove the "
+                    "authentication section from server.yaml"
+                )
+            auth_section = self.config["authentication"]
+            if not isinstance(auth_section, dict):
+                raise ValueError("Authentication section must be a mapping when provided inline")
+            self._authentication_config = auth_section
         else:
-            self._inline_authentication = False
             auth_data = self._load_authentication_file()
             self.config["authentication"] = auth_data
+            self._authentication_config = auth_data
 
     def _validate_server_config(self):
         """Validate the ``server`` section (metadata only).
@@ -227,10 +236,10 @@ class ConfigManager:
                 # In unified system, adapter type is determined by section name
                 # No need to check for 'adapter' field anymore
 
-    def _validate_config(self):
+    def _validate_config(self, *, allow_inline_authentication: bool = False) -> None:
         """Run all validation and normalization steps on the config."""
         self._check_config_loaded()
-        self._validate_required_sections()
+        self._validate_required_sections(allow_inline_authentication=allow_inline_authentication)
         self._validate_server_config()
         self._validate_authentication_config()
 
@@ -301,12 +310,11 @@ class ConfigManager:
             self.load_config()
         assert self.config is not None  # Type narrowing
         if self._authentication_config is None:
-            if self._inline_authentication:
-                self._authentication_config = self.config.get("authentication", {})
-            else:
-                self._authentication_config = self._load_authentication_file()
-                # Keep runtime copy attached for consumers expecting single mapping
-                self.config["authentication"] = self._authentication_config
+            auth_section = self.config.get("authentication")
+            if not isinstance(auth_section, dict):
+                auth_section = self._load_authentication_file()
+                self.config["authentication"] = auth_section
+            self._authentication_config = auth_section
         return self._authentication_config
 
     def get_serial_ports_config(self) -> list:
@@ -375,29 +383,23 @@ class ConfigManager:
             True on success, False if an error occurs (also logged).
         """
         try:
-            inline_auth = self._inline_authentication
             auth_payload = authentication
-            if auth_payload is None and config.get("authentication"):
+            if auth_payload is None and isinstance(config.get("authentication"), dict):
                 auth_payload = config.get("authentication")
 
             server_payload = dict(config)
-            if inline_auth:
-                # Ensure inline auth remains embedded
-                if auth_payload is not None:
-                    server_payload["authentication"] = auth_payload
-                self._write_yaml_with_backup(self.config_path, server_payload)
-                self._authentication_config = auth_payload if isinstance(auth_payload, dict) else self._authentication_config
-            else:
-                server_payload.pop("authentication", None)
-                self._write_yaml_with_backup(self.config_path, server_payload)
-                if auth_payload is None:
-                    raise ValueError("Authentication configuration missing for external auth file")
-                self._write_yaml_with_backup(self.auth_config_path, auth_payload)
-                self._authentication_config = auth_payload
-                # Keep runtime composite view in memory for existing consumers
-                server_payload["authentication"] = auth_payload
+            server_payload.pop("authentication", None)
+            self._write_yaml_with_backup(self.config_path, server_payload)
 
-            self.config = server_payload
+            if auth_payload is None:
+                raise ValueError("Authentication configuration missing for external auth file")
+
+            self._write_yaml_with_backup(self.auth_config_path, auth_payload)
+            self._authentication_config = auth_payload
+
+            combined_payload = dict(server_payload)
+            combined_payload["authentication"] = auth_payload
+            self.config = combined_payload
             return True
         except Exception as e:
             self.logger.error(f"Error saving configuration: {e}", exc_info=True)

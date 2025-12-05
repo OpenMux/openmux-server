@@ -1,0 +1,66 @@
+"$schema": "https://json-schema.org/draft/2020-12/schema"
+"$id": "https://openmux.org/schema/authentication-config"
+title: OpenMux Authentication Configuration Schema
+description: >
+  Defines the structure of authentication.yaml containing OpenMux user
+  credentials, API keys, public keys, and PAM integration settings.
+type: object
+additionalProperties: false
+properties:
+  users:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [username, password_hash]
+      properties:
+        username: { type: string }
+        password_hash: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+        permissions: { type: string, enum: [admin, read-write, read-only] }
+  api_keys:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [key]
+      properties:
+        name: { type: string }
+        key: { type: string }
+        permissions: { type: string, enum: [admin, read-write, read-only] }
+  public_keys:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [key_id, public_key]
+      properties:
+        username: { type: string }
+        key_id: { type: string }
+        public_key: { type: string }
+        allowed_uses:
+          type: array
+          items: { type: string, enum: [client, muxcon] }
+          uniqueItems: true
+  pam:
+    type: object
+    additionalProperties: false
+    properties:
+      enabled: { type: boolean, default: false }
+      service_name: { type: string, default: login }
+      allow_root: { type: boolean, default: false }
+      allowed_users:
+        type: array
+        items: { type: string }
+        uniqueItems: true
+      groups:
+        type: object
+        additionalProperties: false
+        properties:
+          admin_group: { type: string, default: openmux_admin }
+          write_group: { type: string, default: openmux_write }
+          read_group: { type: string, default: openmux_read }
+anyOf:
+  - required: [users]
+  - required: [api_keys]
+  - required: [public_keys]
+  - required: [pam]

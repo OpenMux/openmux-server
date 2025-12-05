@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import yaml
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, cast
 
@@ -104,18 +105,24 @@ class FakeSerialAdapter(FakeAdapter):
 
 
 def write_temp_config(tmp_path) -> str:
-    cfg_text = """
-server:
-  host: 127.0.0.1
-  port: 0
-authentication:
-  users:
-    - username: test
-      password_hash: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  # sha256("")
-"""
-    p = tmp_path / "server.yaml"
-    p.write_text(cfg_text)
-    return str(p)
+    server_cfg = {
+        "server": {"host": "127.0.0.1", "port": 0},
+        "logging": {"level": "INFO"},
+    }
+    auth_cfg = {
+        "users": [
+            {
+                "username": "test",
+                "password_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "permissions": "admin",
+            }
+        ]
+    }
+    server_path = tmp_path / "server.yaml"
+    auth_path = tmp_path / "authentication.yaml"
+    server_path.write_text(yaml.safe_dump(server_cfg, sort_keys=False))
+    auth_path.write_text(yaml.safe_dump(auth_cfg, sort_keys=False))
+    return str(server_path)
 
 
 def test_parse_arguments_defaults(monkeypatch):

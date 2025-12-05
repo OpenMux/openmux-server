@@ -14,31 +14,36 @@ from tests.support.protocol_handler import OpenMuxProtocolHandler as ClientManag
 
 
 @pytest.fixture
+def sample_authentication():
+    """Authentication configuration used for tests."""
+    return {
+        "users": [
+            {
+                "username": "admin",
+                "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
+                "permissions": "admin",
+            },
+            {
+                "username": "user",
+                "password_hash": "e606e38b0d8c19b24cf0ee3808183162ea7cd63ff7912dbb22b5e803286b4446",
+                "permissions": "read-write",
+            },
+        ],
+        "api_keys": [
+            {
+                "name": "test_key",
+                "key": "12345abcde",
+                "permissions": "read-only",
+            }
+        ],
+    }
+
+
+@pytest.fixture
 def sample_config():
     """Return a sample configuration for testing"""
     return {
         "server": {"host": "127.0.0.1", "port": 8023},
-        "authentication": {
-            "users": [
-                {
-                    "username": "admin",
-                    "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
-                    "permissions": "admin",
-                },
-                {
-                    "username": "user",
-                    "password_hash": "e606e38b0d8c19b24cf0ee3808183162ea7cd63ff7912dbb22b5e803286b4446",
-                    "permissions": "read-write",
-                },
-            ],
-            "api_keys": [
-                {
-                    "name": "test_key",
-                    "key": "12345abcde",
-                    "permissions": "read-only",
-                }
-            ],
-        },
         "serial_ports": [
             {
                 "name": "console1",
@@ -63,21 +68,24 @@ def sample_config():
 
 
 @pytest.fixture
-def auth_manager(sample_config):
+def auth_manager(sample_authentication):
     """Create an auth manager for testing"""
-    return AuthManager(sample_config["authentication"])
+    return AuthManager(sample_authentication)
 
 
 @pytest.fixture
-def config_manager(sample_config, tmp_path):
+def config_manager(sample_config, sample_authentication, tmp_path):
     """Create a config manager for testing"""
     config_file = tmp_path / "test_config.yaml"
+    auth_file = tmp_path / "authentication.yaml"
     import yaml
 
     with open(config_file, "w") as f:
         yaml.dump(sample_config, f)
+    with open(auth_file, "w") as f:
+        yaml.dump(sample_authentication, f)
 
-    manager = ConfigManager(str(config_file))
+    manager = ConfigManager(str(config_file), auth_config_path=str(auth_file))
     manager.load_config()
     return manager
 
@@ -193,20 +201,26 @@ class TestConfigManager:
         assert "serial_ports" in config
 
     @pytest.mark.unit
-    def test_save_config(self, config_manager, tmp_path):
+    def test_save_config(self, config_manager, sample_authentication, tmp_path):
         """Test saving configuration"""
-        test_config = {"test": "value"}
+        test_config = {"server": {"id": "save-test"}, "authentication": sample_authentication}
         config_file = tmp_path / "save_test_config.yaml"
+        auth_file = tmp_path / "save_authentication.yaml"
 
         config_manager.config_path = str(config_file)
-        config_manager.save_config(test_config)
+        config_manager.auth_config_path = str(auth_file)
+        assert config_manager.save_config(test_config)
 
         import yaml
 
         with open(config_file, "r") as f:
             loaded_config = yaml.safe_load(f)
 
-        assert loaded_config == test_config
+        with open(auth_file, "r") as f:
+            loaded_auth = yaml.safe_load(f)
+
+        assert "authentication" not in loaded_config
+        assert loaded_auth == sample_authentication
 
 
 @pytest.mark.asyncio

@@ -532,7 +532,7 @@ def _validate_payload(payload: Dict[str, Any], cm: ConfigManager) -> Tuple[bool,
         # Directly assign and validate
         temp_cm.config = payload
         # Use internal validation routine; it raises on error
-        temp_cm._validate_config()  # type: ignore[attr-defined]
+        temp_cm._validate_config(allow_inline_authentication=True)  # type: ignore[attr-defined]
         return True, None, None
     except Exception as e:
         # Log full traceback to aid debugging of 400 validation errors
@@ -638,7 +638,6 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
             "additionalProperties": True,
             "properties": {
                 "server": {"type": "object"},
-                "authentication": {"type": "object"},
                 "logging": {"type": "object"},
                 "client_listener": {"type": "object"},
                 "serial_ports": {"type": ["array", "object"]},

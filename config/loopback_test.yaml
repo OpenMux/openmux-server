@@ -1,27 +1,5 @@
-authentication:
-  api_keys:
-  - key: test-key-123
-    name: Test API Key
-    permissions: admin
-  pam:
-    allow_root: false
-    enabled: true
-    groups:
-      admin_group: staff
-    service_name: login
-  public_keys:
-  - allowed_uses:
-    - client
-    key_id: test_key
-    public_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQI6FeEv+E43SRpww5uTgv6sKTDdSe/EQvKGL8Vt81O
-    username: test_key
-  users:
-  - permissions: admin
-    password_hash: 8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
-    username: admin
-  - permissions: read-write
-    password_hash: 04f8996da763b7a969b1028ee3007569eaf3a635486ddab211d512c85b9df8fb
-    username: user
+# Authentication, API keys, and public keys now live in authentication.yaml
+# located next to this file. Update that file to change credentials.
 client_listener:
   enabled: true
 command_ports:

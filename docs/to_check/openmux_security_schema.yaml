@@ -1,0 +1,59 @@
+"$schema": "https://json-schema.org/draft/2020-12/schema"
+"$id": "https://openmux.org/schema/security-config"
+title: OpenMux Security Configuration Schema
+description: >
+  Defines security.yaml, covering adapter whitelists, Config Editor
+  permissions, authentication rate limits, and command adapter privilege drop
+  settings.
+type: object
+additionalProperties: false
+required: [adapters, config_editor]
+properties:
+  adapters:
+    type: object
+    additionalProperties: false
+    properties:
+      block_unlisted: { type: boolean, default: true }
+      allowed_modules:
+        type: array
+        items: { type: string }
+        uniqueItems: true
+      allowed_adapter_types:
+        type: array
+        items: { type: string }
+        uniqueItems: true
+  config_editor:
+    type: object
+    additionalProperties: false
+    properties:
+      writable_sections:
+        type: array
+        items: { type: string }
+        uniqueItems: true
+      enforce_writable_sections: { type: boolean, default: false }
+  rate_limits:
+    type: object
+    additionalProperties: false
+    properties:
+      authentication:
+        type: object
+        additionalProperties: false
+        properties:
+          window_seconds: { type: integer, minimum: 1 }
+          failure_threshold: { type: integer, minimum: 1 }
+          base_lock_seconds: { type: integer, minimum: 0 }
+  command_adapter:
+    type: object
+    additionalProperties: false
+    properties:
+      drop_privileges:
+        type: object
+        additionalProperties: false
+        properties:
+          user: { type: string }
+          group: { type: string }
+          supplementary_groups:
+            type: array
+            items: { type: string }
+            uniqueItems: true
+          umask: { type: [string, integer] }

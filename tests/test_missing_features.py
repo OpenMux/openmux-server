@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,7 +20,7 @@ from tests.support.protocol_handler import OpenMuxProtocolHandler as ClientManag
 @pytest.fixture
 def sample_config():
     """Return a sample configuration for testing"""
-    return {
+    return copy.deepcopy({
         "server": {"host": "127.0.0.1", "port": 8023},
         "authentication": {
             "users": [
@@ -76,7 +77,19 @@ def sample_config():
                 "community": "public",
             },
         },
-    }
+    })
+
+
+def _write_server_and_auth_config(tmp_path, config):
+    server_cfg = copy.deepcopy(config)
+    auth_cfg = server_cfg.pop("authentication", {})
+    config_file = tmp_path / "config.yaml"
+    auth_file = tmp_path / "authentication.yaml"
+    with open(config_file, "w") as f:
+        yaml.safe_dump(server_cfg, f)
+    with open(auth_file, "w") as f:
+        yaml.safe_dump(auth_cfg, f)
+    return config_file
 
 
 # Tests for PortManager Integration
@@ -111,9 +124,7 @@ class TestServerMetricsMonitoring:
         # Implement the _collect_metrics method in OpenMuxServer class
 
         # Create a temporary config file
-        config_file = tmp_path / "config.yaml"
-        with open(config_file, "w") as f:
-            yaml.dump(sample_config, f)
+        config_file = _write_server_and_auth_config(tmp_path, sample_config)
 
         # Create server with metrics enabled
         server = OpenMuxServer(str(config_file))
@@ -130,9 +141,7 @@ class TestServerMetricsMonitoring:
         # Implement health monitoring in OpenMuxServer class
 
         # Create a temporary config file
-        config_file = tmp_path / "config.yaml"
-        with open(config_file, "w") as f:
-            yaml.dump(sample_config, f)
+        config_file = _write_server_and_auth_config(tmp_path, sample_config)
 
         # Create server with monitoring enabled
         server = OpenMuxServer(str(config_file))
@@ -148,11 +157,9 @@ class TestServerMetricsMonitoring:
         # Implement SNMP traps in OpenMuxServer class
 
         # Create a temporary config file
-        config_file = tmp_path / "config.yaml"
-        # Enable SNMP traps
-        sample_config["monitoring"]["snmp_traps"]["enabled"] = True
-        with open(config_file, "w") as f:
-            yaml.dump(sample_config, f)
+        config = copy.deepcopy(sample_config)
+        config["monitoring"]["snmp_traps"]["enabled"] = True
+        config_file = _write_server_and_auth_config(tmp_path, config)
 
         # Create server with SNMP traps enabled
         server = OpenMuxServer(str(config_file))

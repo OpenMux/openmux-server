@@ -10,16 +10,24 @@ from openmux.server.main import OpenMuxServer
 @pytest.mark.asyncio
 async def test_control_socket_status_and_reloads(tmp_path):
     # Create a minimal config file
+    auth_path = tmp_path / "authentication.yaml"
+    auth_path.write_text(
+        textwrap.dedent(
+            """
+            users:
+              - username: admin
+                password_hash: 5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8
+                permissions: admin
+            """
+        )
+    )
+
     cfg_path = tmp_path / "server.yaml"
     cfg_path.write_text(
         textwrap.dedent(
             """
             server:
               id: test
-            authentication:
-              users:
-                - username: admin
-                  password: secret
             logging:
               level: WARNING
             runtime:
