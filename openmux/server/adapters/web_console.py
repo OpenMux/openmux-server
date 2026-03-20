@@ -1131,6 +1131,14 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
     except Exception as e:
         adapter.logger.error(f"Websocket loop error for {port_name}: {e}", exc_info=True)
     finally:
+        adapter.logger.info(
+            "Web client %s websocket loop ending for port %s (closed=%s close_code=%s exception=%r)",
+            client_id,
+            port_name,
+            getattr(ws, "closed", None),
+            getattr(ws, "close_code", None),
+            ws.exception() if hasattr(ws, "exception") else None,
+        )
         # No background metadata task (event-driven only)
         # Remove subscription for event-driven meta
         try:
@@ -3576,10 +3584,44 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self._asset_error = msg
         raise RuntimeError(msg)
 
+    async def _drop_client_channel(self, client_id: str, ws: Optional[Any] = None, detach_port: bool = True) -> None:
+        """Remove websocket delivery state for a client, optionally detaching it from the port."""
+        if ws is None:
+            ws = self._clients.get(client_id)
+
+        self._clients.pop(client_id, None)
+        if ws is not None:
+            self._ws_to_client.pop(ws, None)
+
+        if isinstance(self._client_meta, dict):
+            self._client_meta.pop(client_id, None)
+
+        for port_name, subscribers in list(self._meta_subscribers.items()):
+            if not isinstance(subscribers, set):
+                continue
+            subscribers.discard(client_id)
+            if not subscribers:
+                self._meta_subscribers.pop(port_name, None)
+
+        manager = self.console_manager
+        if manager is None or not detach_port:
+            return
+
+        try:
+            port_map = getattr(manager, "client_port_map", {})
+            port_name = port_map.get(client_id) if isinstance(port_map, dict) else None
+            if port_name and hasattr(manager, "disconnect_client_from_port"):
+                await manager.disconnect_client_from_port(client_id, port_name)
+            if hasattr(manager, "unregister_client_channel"):
+                manager.unregister_client_channel(client_id)
+        except Exception:
+            self.logger.exception("Client cleanup failed for %s", client_id)
+
     # Client manager API used by ConsoleManager to forward data to clients
     async def send_data_to_client(self, client_id: str, data: bytes) -> bool:
         ws = self._clients.get(client_id)
-        if not ws:
+        if ws is None:
+            await self._drop_client_channel(client_id, detach_port=False)
             return False
         try:
             # aiohttp WebSocketResponse expects send_bytes for binary
@@ -3589,8 +3631,18 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 # Fallback (shouldn't happen with aiohttp)
                 await ws.send_str(data.decode("utf-8", errors="ignore"))
             return True
-        except Exception as e:
-            self.logger.warning(f"WebSocket send failed for {client_id}: {e}")
+        except (ConnectionResetError, OSError) as e:
+            self.logger.warning(f"WebSocket transport failed for {client_id}: {e}")
+            await self._drop_client_channel(client_id, ws, detach_port=False)
+            return False
+        except RuntimeError as e:
+            self.logger.warning(
+                "WebSocket send runtime error for %s: %s (closed=%s close_code=%s)",
+                client_id,
+                e,
+                getattr(ws, "closed", None),
+                getattr(ws, "close_code", None),
+            )
             return False
 
     def get_status_info(self) -> Dict[str, Any]:

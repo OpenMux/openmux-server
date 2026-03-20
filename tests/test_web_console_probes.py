@@ -187,3 +187,99 @@ async def test_websocket_connect_and_send(tmp_path):
             assert getattr(dummy, "last_write", None) == b"hello"
 
     await adapter.stop()
+
+@pytest.mark.asyncio
+async def test_websocket_transport_failure_prunes_delivery_channel_only():
+    class DummyPort:
+        def __init__(self, name):
+            self.name = name
+            self.description = "dummy"
+            self.connected_clients = []
+            self.max_read_write_users = 5
+            self.is_running = True
+
+        async def write_data(self, data):
+            return len(data)
+
+        def get_status(self):
+            return {"name": self.name, "is_running": True}
+
+    class FailingWS:
+        closed = False
+
+        async def send_bytes(self, data):
+            raise ConnectionResetError("socket reset")
+
+    pm = PortManager([])
+    pm.ports["console1"] = DummyPort("console1")  # type: ignore[attr-defined]
+    auth = AuthManager(
+        {"users": [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]}
+    )
+    cm = ConsoleManager(pm, auth)
+    adapter = WebConsoleAdapter("wc", {"web_console": {"enable_ui": False}})
+    adapter.set_auth_manager(auth)
+    adapter.set_console_manager(cm)
+
+    ok, _mode = await cm.connect_client_to_port("ws:test", "console1", "u")
+    assert ok is True
+    cm.register_client_channel("ws:test", adapter)
+    failing_ws = FailingWS()
+    adapter._clients["ws:test"] = failing_ws
+
+    result = await adapter.send_data_to_client("ws:test", b"abc")
+
+    assert result is False
+    assert "ws:test" not in adapter._clients
+    assert "ws:test" in cm.client_port_map
+    assert pm.ports["console1"].connected_clients[0]["client_id"] == "ws:test"
+
+
+@pytest.mark.asyncio
+async def test_websocket_send_uses_falsy_socket_object():
+    class DummyPort:
+        def __init__(self, name):
+            self.name = name
+            self.description = "dummy"
+            self.connected_clients = []
+            self.max_read_write_users = 5
+            self.is_running = True
+
+        async def write_data(self, data):
+            return len(data)
+
+        def get_status(self):
+            return {"name": self.name, "is_running": True}
+
+    class FalsyWS:
+        closed = False
+
+        def __init__(self):
+            self.sent = []
+
+        def __bool__(self):
+            return False
+
+        async def send_bytes(self, data):
+            self.sent.append(data)
+
+    pm = PortManager([])
+    pm.ports["console1"] = DummyPort("console1")  # type: ignore[attr-defined]
+    auth = AuthManager(
+        {"users": [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]}
+    )
+    cm = ConsoleManager(pm, auth)
+    adapter = WebConsoleAdapter("wc", {"web_console": {"enable_ui": False}})
+    adapter.set_auth_manager(auth)
+    adapter.set_console_manager(cm)
+
+    ok, _mode = await cm.connect_client_to_port("ws:test", "console1", "u")
+    assert ok is True
+    cm.register_client_channel("ws:test", adapter)
+    falsy_ws = FalsyWS()
+    adapter._clients["ws:test"] = falsy_ws
+
+    result = await adapter.send_data_to_client("ws:test", b"abc")
+
+    assert result is True
+    assert falsy_ws.sent == [b"abc"]
+    assert "ws:test" in adapter._clients
