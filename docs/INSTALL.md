@@ -258,6 +258,15 @@ scripts/install_xtermjs.py --static-dir /var/lib/openmux/static
 
 The script exits with an error if any of `xterm.js`, `xterm.css`, or the fit addon fail to download, so failures are caught during installation—not at runtime.
 
+Recommended approach:
+
+- Use xterm.js as vendored static assets under `static/`.
+- Do not require Node.js or `npm` on deployment targets just to run OpenMux.
+- Do not fetch xterm.js during Debian package builds or at service startup.
+- Pin the xterm.js and `xterm-addon-fit` versions during development or release preparation, then ship those files in the source tree and packages.
+
+This is the lowest-friction option for OpenMux because it keeps packaging simple, avoids network access during installation, and ensures the Web Console works without any runtime CDN dependency.
+
 ---
 
 ## Configuration locations and defaults

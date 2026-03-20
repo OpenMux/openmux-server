@@ -94,6 +94,15 @@ scripts/install_xtermjs.py --static-dir /var/lib/openmux/static
 
 The script fetches the latest `xterm.js`, `xterm.css`, and fit addon builds and verifies they exist locally before exiting, so browsers never rely on CDN fetches at runtime.
 
+Recommended dependency model:
+
+- Treat xterm.js as vendored static web assets, not as a runtime Node.js dependency.
+- Keep the required browser files in `static/` and ship them with OpenMux packages.
+- Pin the xterm.js and `xterm-addon-fit` versions during release preparation instead of downloading them on target systems.
+- Avoid CDN fetches in production so installs and Debian builds stay deterministic.
+
+In practice this means the repository and release artifacts should contain the required xterm.js files ahead of time, and packaging should install them as ordinary static assets.
+
 ## Features
 
 ### Server

@@ -38,7 +38,7 @@ reload-full:
 	venv venv-dev venv-destroy \
 	build package install install-dev install-user uninstall \
 	dist upload upload-test check \
-	deploy-remote help vulture \
+	deploy-remote help vulture xterm-assets \
 	validate-config validate-all-configs
 
 # Project configuration
@@ -108,6 +108,7 @@ help:
 	@echo "  build          Build the package"
 	@echo "  package        Create distribution packages"
 	@echo "  dist           Create source and wheel distributions"
+	@echo "  xterm-assets   Download xterm.js assets and license files if missing"
 	@echo "  check          Check package for common issues"
 	@echo ""
 	@echo "$(COLOR_GREEN)Installation:$(COLOR_RESET)"
@@ -306,7 +307,15 @@ ci: venv-dev
 DEB_REVISION ?= 1
 DEB_DIST ?= unstable
 DEB_SNAPSHOT ?= off
-deb: clean
+XTERM_VERSION ?= latest
+XTERM_ADDON_FIT_VERSION ?= latest
+
+xterm-assets:
+	$(call print_status,"Ensuring xterm.js assets and license files are present...")
+	$(PYTHON) scripts/install_xtermjs.py --xterm-version $(XTERM_VERSION) --xterm-addon-fit-version $(XTERM_ADDON_FIT_VERSION)
+	$(call print_success,"xterm.js assets and license files are available")
+
+deb: clean xterm-assets
 	$(call print_status,"Building Debian package with dh+pybuild...")
 	@if ! command -v dpkg-buildpackage >/dev/null 2>&1; then \
 		echo "dpkg-buildpackage not found. Install dpkg-dev: sudo apt-get install dpkg-dev devscripts"; \
