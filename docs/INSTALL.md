@@ -44,6 +44,32 @@ Uninstall:
 python3 -m pip uninstall openmux
 ```
 
+### Generate a user password hash
+
+OpenMux user entries store `password_hash` as a SHA-256 hex digest.
+
+Example commands:
+
+```sh
+python3 -c 'import hashlib; print(hashlib.sha256("your-password".encode()).hexdigest())'
+
+printf '%s' 'your-password' | sha256sum | awk '{print $1}'
+```
+
+Use the resulting 64-character hex string in `authentication.yaml`:
+
+```yaml
+users:
+  - username: admin
+    password_hash: <SHA256_HEX_OF_PASSWORD>
+    permissions: admin
+```
+
+Notes:
+- Do not include a trailing newline in the hashed password input.
+- OpenMux currently expects SHA-256 hex specifically.
+- PAM authentication is separate and only applies when PAM is enabled.
+
 ---
 
 ## Install from source in a virtualenv (development)
