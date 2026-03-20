@@ -49,6 +49,37 @@ Optionally you can also specify the directory with these config files instead us
 python -m openmux.server --config-dir ./config/
 ```
 
+### Password Hashes For Users
+
+OpenMux stores `users[].password_hash` as a plain SHA-256 hex digest of the password text.
+
+Generate a hash with Python:
+
+```bash
+python3 -c 'import hashlib; print(hashlib.sha256("your-password".encode()).hexdigest())'
+```
+
+Or with `sha256sum`:
+
+```bash
+printf '%s' 'your-password' | sha256sum | awk '{print $1}'
+```
+
+Then place the resulting 64-character hex string in `authentication.yaml`:
+
+```yaml
+users:
+  - username: admin
+    password_hash: <SHA256_HEX_OF_PASSWORD>
+    permissions: admin
+```
+
+Important details:
+
+- Hash the exact password string without a trailing newline.
+- OpenMux currently expects raw SHA-256 hex, not bcrypt, PBKDF2, or Argon2.
+- The client sends the password through an HMAC challenge flow, but the server-side stored value is still the SHA-256 hex digest.
+
 ### Web Console Assets
 
 The Web Console serves bundled xterm.js files from `static/`. Download the latest xterm.js assets before enabling the adapter:
