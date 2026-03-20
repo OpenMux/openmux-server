@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+
+# Use dh + pybuild to build and install the Python package from pyproject.toml
+%:
+	dh $@ --with python3 --buildsystem=pybuild
+
+# Skip running tests during package build by default (can be enabled later)
+override_dh_auto_test:
+	@echo "Skipping tests during build (override_dh_auto_test)"
+
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0644 debian/openmux/usr/share/openmux/default-config/*.yaml

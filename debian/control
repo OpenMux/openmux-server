@@ -1,0 +1,26 @@
+Source: openmux
+Section: python
+Priority: optional
+Maintainer: OpenMux Team <info@openmux.eu>
+Build-Depends: debhelper-compat (= 13), dh-python, python3-all, pybuild-plugin-pyproject
+Standards-Version: 4.6.2
+Homepage: https://github.com/openmux/openmux
+Rules-Requires-Root: no
+
+Package: openmux
+Architecture: all
+Depends: adduser, ${python3:Depends}, ${misc:Depends},
+ python3-aiohttp, python3-jinja2, python3-websockets,
+ python3-cryptography, python3-serial, python3-serial-asyncio,
+ python3-yaml, python3-six
+Recommends: python3-pam
+Description: Serial port multiplexing server and client
+ OpenMux is a serial/console multiplexer and remote access service. It
+ provides a server with adapters for loopback, serial, command, and
+ federation (muxcon), plus a web console and local control CLI.
+ .
+ This package installs the Python modules into dist-packages and exposes
+ console scripts similar to pip installation:
+  - openmux-server
+  - openmux-client
+  - openmuxctl%

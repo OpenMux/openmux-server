@@ -1,0 +1,11 @@
+# OpenMux Client Configuration
+
+# Default server to connect to if not specified
+default_server: localhost
+
+# List of known servers
+servers:
+  - name: localhost
+    host: localhost
+    port: 8023
+    username: admin

@@ -1,0 +1,12 @@
+debian/package-config/authentication.yaml usr/share/openmux/default-config/
+debian/package-config/client.yaml usr/share/openmux/default-config/
+debian/package-config/security.yaml usr/share/openmux/default-config/
+debian/package-config/server.yaml usr/share/openmux/default-config/
+debian/openmux-server.service lib/systemd/system/
+static/logo.svg usr/share/openmux/static/
+static/web_console.css usr/share/openmux/static/
+static/xterm usr/share/openmux/static/
+static/xterm-addon-fit usr/share/openmux/static/
+templates/web_console/* usr/share/openmux/templates/web_console/
+third_party_licenses/xterm/* usr/share/doc/openmux/third-party-licenses/xterm/
+third_party_licenses/xterm-addon-fit/* usr/share/doc/openmux/third-party-licenses/xterm-addon-fit/

@@ -1,0 +1,40 @@
+#!/bin/sh
+set -e
+
+if ! getent group openmux >/dev/null 2>&1; then
+	addgroup --system openmux
+fi
+
+if ! getent passwd openmux >/dev/null 2>&1; then
+	adduser --system \
+		--ingroup openmux \
+		--home /var/lib/openmux \
+		--no-create-home \
+		--shell /usr/sbin/nologin \
+		--gecos "OpenMux service user" \
+		openmux
+fi
+
+if getent group dialout >/dev/null 2>&1; then
+	adduser openmux dialout >/dev/null 2>&1 || true
+fi
+
+install -d -o openmux -g openmux /var/lib/openmux /var/log/openmux
+
+install -d -m 0750 -o root -g openmux /etc/openmux
+
+for cfg in authentication.yaml client.yaml security.yaml server.yaml; do
+	default_cfg="/usr/share/openmux/default-config/$cfg"
+	target_cfg="/etc/openmux/$cfg"
+	if [ -f "$default_cfg" ] && [ ! -e "$target_cfg" ]; then
+		cp "$default_cfg" "$target_cfg"
+	fi
+	if [ -e "$target_cfg" ]; then
+		chown root:openmux "$target_cfg" || true
+		chmod 0640 "$target_cfg" || true
+	fi
+done
+
+chmod 0750 /etc/openmux || true
+
+#DEBHELPER#

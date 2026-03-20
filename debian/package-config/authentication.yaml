@@ -1,0 +1,22 @@
+pam:
+  allow_root: false
+  enabled: false
+  groups:
+    admin_group: openmux_admin
+    read_group: openmux_read
+    write_group: openmux_write
+  service_name: login
+# `users[].password_hash` must be a SHA-256 hex digest of the plaintext password.
+# Example generation commands:
+#   python3 -c 'import hashlib; print(hashlib.sha256("your-password".encode()).hexdigest())'
+#   printf '%s' 'your-password' | sha256sum | awk '{print $1}'
+users:
+- permissions: admin
+  password_hash: 58fd66f3110e038e19b613984a774418c59a9156c1dd88ce984fe8a7a8003f33
+  username: admin
+- permissions: read-write
+  password_hash: a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
+  username: user1
+- permissions: read-only
+  password_hash: 628a7476ada25574e51158f5e9cec7a6b0a3356c93466ec78a768be9b6a394e1
+  username: viewer

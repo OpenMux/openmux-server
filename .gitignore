@@ -3,8 +3,7 @@
 venv/
 env/
 ENV/
-.pybuild/
-debian/openmux/
+
 
 # IDE files
 .vscode/
@@ -92,4 +91,20 @@ $RECYCLE.BIN/
 old/
 backup/
 device-configs/
-static/xterm*/
+
+# Build artifacts
+.pybuild/
+debian/files
+debian/debhelper-build-stamp
+debian/openmux.substvars
+debian/openmux.debhelper.log
+debian/openmux.postinst.debhelper
+debian/openmux.postrm.debhelper
+debian/openmux.prerm.debhelper
+debian/.debhelper/
+debian/openmux/
+*.deb
+*.buildinfo
+*.changes
+*.dsc
+*.tar.*

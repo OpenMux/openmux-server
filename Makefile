@@ -72,15 +72,15 @@ COLOR_RESET = \033[0m
 
 # Helper function to print colored output
 define print_status
-	@echo "$(COLOR_YELLOW)[INFO]$(COLOR_RESET) $(1)"
+	@printf '%b %s\n' "$(COLOR_YELLOW)[INFO]$(COLOR_RESET)" $(1)
 endef
 
 define print_success
-	@echo "$(COLOR_GREEN)[SUCCESS]$(COLOR_RESET) $(1)"
+	@printf '%b %s\n' "$(COLOR_GREEN)[SUCCESS]$(COLOR_RESET)" $(1)
 endef
 
 define print_error
-	@echo "$(COLOR_RED)[ERROR]$(COLOR_RESET) $(1)"
+	@printf '%b %s\n' "$(COLOR_RED)[ERROR]$(COLOR_RESET)" $(1)
 endef
 
 # Default target: show help

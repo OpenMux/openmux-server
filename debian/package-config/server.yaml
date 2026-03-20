@@ -1,0 +1,50 @@
+# OpenMux Server Configuration (Debian package defaults)
+
+server:
+  id: "primary-server"
+  description: "Primary OpenMux Server"
+  pidfile: "/run/openmux/openmux.pid"
+
+loopback_ports:
+  - name: "loopback"
+    description: "Loopback Test Console"
+    echo_delay: 0.0
+    buffer_size: 1024
+    max_read_write_users: 5
+
+serial_ports:
+  - name: "console1"
+    description: "Main Server Console"
+    device: "/dev/ttyS0"
+    baudrate: 9600
+    bytesize: 8
+    parity: "N"
+    stopbits: 1
+    read_write_users: 5
+
+logging:
+  level: "INFO"
+  file: "/var/log/openmux/openmux_server.log"
+  console: true
+
+client_listener:
+  host: "127.0.0.1"
+  port: 8023
+  max_connections: 200
+  connection_timeout: 30
+
+web_console:
+  enable_probes: true
+  enable_ui: true
+  host: 0.0.0.0
+  plugins:
+  - openmux.server.web_plugins.config_editor
+  port: 80
+  probes_include_details: true
+  realm: OpenMux
+  respect_forwarded_prefix: false
+  ssl_port: 443
+  static_dir: /usr/share/openmux/static
+  template_dir: /usr/share/openmux/templates/web_console
+  tls_autogen: true
+  use_tls: true
