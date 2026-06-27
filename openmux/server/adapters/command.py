@@ -199,22 +199,6 @@ class CommandPort:
         except asyncio.TimeoutError:
             return b""
 
-    def _start_data_buffering(self) -> None:
-        """Ensure an output queue exists for buffering process data.
-
-        Allocates a bounded queue if not already present; no-op if exists.
-        """
-        if self.data_queue is None:
-            self.data_queue = asyncio.Queue(maxsize=100)
-
-    def _stop_data_buffering(self) -> None:
-        """Hook for disabling buffering (currently a no-op).
-
-        Maintains queue for potential later reuse. Could be extended to
-        drain or clear the queue if memory pressure warranted.
-        """
-        return None
-
     def _port_manager(self):
         """Return the bound PortManager instance if available."""
         return getattr(self.adapter, "main_port_manager", None)
@@ -250,24 +234,8 @@ class CommandPort:
                 self.name,
             )
             self._queue_fallback_logged = True
-        if self.data_queue is None:
-            self._start_data_buffering()
-        if self.data_queue is None:
-            return
-        while True:
-            try:
-                self.data_queue.put_nowait(chunk)
-                break
-            except asyncio.QueueFull:
-                if drop_oldest:
-                    try:
-                        self.data_queue.get_nowait()
-                    except Exception:
-                        self.logger.warning(f"Failed to free space in queue for {self.name}; dropping output chunk")
-                        break
-                    continue
-                self.logger.warning(f"Data queue full for {self.name}; dropping output chunk")
-                break
+        # PortManager is the required data path; absence is an error, not a buffer opportunity.
+        # Drop the chunk to avoid unbounded state accumulation.
 
     def _schedule_notice_emit(self, payload: bytes) -> None:
         """Schedule emission of a notice chunk via the centralized path."""
@@ -300,7 +268,8 @@ class CommandPort:
         self.client_count = count
         self.logger.info(f"Client count changed for {self.name}: {old} -> {count}")
         if old == 0 and count > 0:
-            self._start_data_buffering()
+            if self.data_queue is None:
+                self.data_queue = asyncio.Queue(maxsize=100)
             # Cancel any pending idle-stop since a client re-appeared
             try:
                 if self._idle_stop_task and not self._idle_stop_task.done():
@@ -322,7 +291,6 @@ class CommandPort:
                 self._stopped_notice_sent = True
                 self._schedule_notice_emit(notice)
         elif old > 0 and count == 0:
-            self._stop_data_buffering()
             if not self.process_active:
                 self._stopped_notice_sent = False
             # Schedule idle stop if configured
@@ -1415,10 +1383,8 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                 # Do not spawn the process yet; mark as configured
                 self.ports[port_name] = command_port
                 # Ensure a queue exists so the wrapper will reuse it
-                try:
-                    command_port._start_data_buffering()
-                except Exception:
-                    pass
+                if command_port.data_queue is None:
+                    command_port.data_queue = asyncio.Queue(maxsize=100)
                 # Register with the main PortManager so the port is discoverable immediately
                 try:
                     if self.main_port_manager:
@@ -1433,10 +1399,8 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if await command_port.start():
                     self.ports[port_name] = command_port
                     # Ensure a queue exists so the wrapper will reuse it
-                    try:
-                        command_port._start_data_buffering()
-                    except Exception:
-                        pass
+                    if command_port.data_queue is None:
+                        command_port.data_queue = asyncio.Queue(maxsize=100)
                     # Register with the main PortManager
                     try:
                         if self.main_port_manager:

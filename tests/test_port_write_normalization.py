@@ -66,8 +66,20 @@ async def test_openmux_client_write_data_returns_len(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_loopback_write_data_round_trip():
-    lb = LoopbackPort("lb", {}, adapter=types.SimpleNamespace())  # type: ignore[arg-type]
+    adapter = types.SimpleNamespace()
+    lb = LoopbackPort("lb", {}, adapter=adapter)  # type: ignore[arg-type]
     await lb.start()
+
+    # Wire a minimal PortManager stub so the primary I/O path is exercised.
+    # Without PM the fallback no longer buffers (PM absence is an error per contract).
+    class _StubPM:
+        async def send_data_from_unified_port(self, name: str, data: bytes) -> bool:
+            if lb.data_queue is not None:
+                lb.data_queue.put_nowait(data)
+            return True
+
+    adapter.main_port_manager = _StubPM()
+
     wrote = await lb.write_data(b"hello")
     assert wrote == 5
     data = await lb.read_data(0.1)

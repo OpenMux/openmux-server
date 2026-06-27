@@ -6,6 +6,24 @@ import pytest
 from openmux.server.adapters.loopback import LoopbackAdapter, LoopbackPort
 
 
+class _PortManagerStub:
+    """Minimal PortManager stub for unit tests.
+
+    Routes send_data_from_unified_port directly into the named port's data_queue,
+    mirroring what PortManager.handle_incoming_port_data does via the wrapper alias.
+    Keyed by a dict reference so it stays in sync when the adapter populates ports lazily.
+    """
+
+    def __init__(self, ports: dict):
+        self._ports = ports
+
+    async def send_data_from_unified_port(self, name: str, data: bytes) -> bool:
+        port = self._ports.get(name)
+        if port is not None and getattr(port, "data_queue", None) is not None:
+            port.data_queue.put_nowait(data)
+        return True
+
+
 @pytest.mark.asyncio
 async def test_port_lifecycle_and_errors():
     adapter = LoopbackAdapter("loopback", {"loopback_ports": []})
@@ -53,6 +71,7 @@ async def test_write_and_banners_cr_lf_variants():
     adapter = LoopbackAdapter("loopback", {"loopback_ports": []})
     port = LoopbackPort("lp2", {"buffer_size": 8}, adapter)
     await port.start()
+    adapter.main_port_manager = _PortManagerStub({"lp2": port})
 
     # Plain chunk without newline
     n = await port.write_data(b"abc")
@@ -115,6 +134,7 @@ async def test_echo_delay_execution():
     adapter = LoopbackAdapter("loopback", {"loopback_ports": []})
     port = LoopbackPort("lp5", {"buffer_size": 8, "echo_delay": 0.01}, adapter)
     await port.start()
+    adapter.main_port_manager = _PortManagerStub({"lp5": port})
     await port.write_data(b"Z\n")
     # Should still echo correctly after delay
     assert await port.read_data(0.1) == b"Z"
@@ -137,6 +157,9 @@ def test_adapter_config_and_ports_enumeration():
 async def test_adapter_start_write_stop_and_missing_port():
     cfg = {"loopback_ports": [{"name": "c"}]}
     adapter = LoopbackAdapter("loop", cfg)
+    # Wire PM stub before start so ports dict is shared by reference;
+    # the stub routes data directly into each port's data_queue.
+    adapter.main_port_manager = _PortManagerStub(adapter.ports)
 
     # Start creates ports
     ok = await adapter.start()

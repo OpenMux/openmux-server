@@ -89,15 +89,13 @@ class LoopbackPort:
                     return
             except Exception:
                     self.logger.error(f"PortManager forwarding failed for {self.name}", exc_info=True)
-        # Fallback for unit tests or when manager unavailable
+        # PortManager is the required data path; absence is an error, not a buffer opportunity.
         if not self._queue_fallback_logged:
             self.logger.error(
-                "Loopback port %s falling back to local queue; PortManager missing or send failure",
+                "Loopback port %s: PortManager missing or send failure; dropping data",
                 self.name,
             )
             self._queue_fallback_logged = True
-        if self.data_queue is not None:
-            await self.data_queue.put(payload)
 
     async def start(self) -> bool:
         """Initialize internal queues and mark port active.
