@@ -127,30 +127,41 @@ _PORT_SORT_KEYS = {"name", "description", "device", "origin", "status", "clients
 def _assemble_status_payload(adapter, preloaded_ports: Optional[list[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Collect status/federation/multipath snapshots for UI rendering."""
 
+    _log = getattr(adapter, "logger", None)
     data: Dict[str, Any] = {}
     try:
         data["status"] = adapter._build_status_adapter_snapshot()  # type: ignore[attr-defined]
-    except Exception:
+    except Exception as exc:
         data["status"] = {}
+        if _log:
+            _log.warning("status snapshot failed: %s", exc)
     if preloaded_ports is None:
         try:
             data["ports"] = adapter._get_ports_snapshot()
-        except Exception:
+        except Exception as exc:
             data["ports"] = []
+            if _log:
+                _log.warning("ports snapshot failed: %s", exc)
     else:
         data["ports"] = preloaded_ports
     try:
         data["federation"] = adapter._gather_federation_overview()  # type: ignore[attr-defined]
-    except Exception:
+    except Exception as exc:
         data["federation"] = {}
+        if _log:
+            _log.warning("federation overview failed: %s", exc)
     try:
         data["multipath"] = adapter._gather_multipath_overview()  # type: ignore[attr-defined]
-    except Exception:
+    except Exception as exc:
         data["multipath"] = {}
+        if _log:
+            _log.warning("multipath overview failed: %s", exc)
     try:
         data["web_clients"] = adapter._gather_web_clients()  # type: ignore[attr-defined]
-    except Exception:
+    except Exception as exc:
         data["web_clients"] = []
+        if _log:
+            _log.warning("web clients listing failed: %s", exc)
     return data
 
 
@@ -464,6 +475,52 @@ async def auth_middleware(request: web.Request, handler):
     login_url = _pref("/login") + f"?next={next_url}"
     raise web.HTTPFound(location=login_url)
 
+async def _render_status_page(
+    request: web.Request,
+    adapter,
+    *,
+    preloaded_ports: Optional[list] = None,
+    default_status_path: str = "/",
+) -> web.Response:
+    """Shared status-page rendering used by handle_index and handle_status."""
+    try:
+        ports = adapter._get_ports_snapshot() if preloaded_ports is None else preloaded_ports
+        username = request.get("username")
+        try:
+            plugin_nav = adapter._get_allowed_plugin_nav(username, request=request)
+        except Exception:
+            plugin_nav = []
+        try:
+            user_perm = adapter._get_effective_permission(username, request)
+        except Exception:
+            user_perm = None
+        current_port = request.query.get("port") or request.query.get("console")
+        sort_key, sort_dir, preserved_query = _extract_sort_params(request)
+        status_payload = _assemble_status_payload(adapter, preloaded_ports=ports)
+        status_payload["sidebar_ports"] = status_payload.get("ports", [])
+        status_payload["ports"] = _sort_ports_list(status_payload.get("ports", []), sort_key, sort_dir == "desc")
+        status_payload["sort_key"] = sort_key
+        status_payload["sort_dir"] = sort_dir
+        status_payload["sort_query"] = preserved_query
+        status_payload["status_path"] = request.rel_url.path or default_status_path
+        if hasattr(adapter, "_render_status"):
+            body = adapter._render_status(status_payload, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
+        else:
+            try:
+                bp = adapter._effective_base_path(request)
+            except Exception:
+                bp = ""
+            body = _fallback_with_base(_HTML_FALLBACK, bp)
+    except Exception as exc:
+        adapter.logger.error(f"Status page render failed, using fallback: {exc}")
+        try:
+            bp = adapter._effective_base_path(request)
+        except Exception:
+            bp = ""
+        body = _fallback_with_base(_HTML_FALLBACK, bp)
+    return web.Response(body=body, content_type="text/html")
+
+
 async def handle_index(request: web.Request) -> web.Response:
     adapter = request.app[ADAPTER_APP_KEY]
     try:
@@ -474,51 +531,11 @@ async def handle_index(request: web.Request) -> web.Response:
             bp = base_path or ""
             location = f"{bp}/console" + (f"?{q}" if q else "")
             raise web.HTTPFound(location)
+    except web.HTTPException:
+        raise
     except Exception:
         pass
-    try:
-        ports = adapter._get_ports_snapshot()
-        # Prepare plugin navigation filtered by permission
-        username = request.get("username")
-        try:
-            plugin_nav = adapter._get_allowed_plugin_nav(username, request=request)
-        except Exception:
-            plugin_nav = []
-        try:
-            user_perm = adapter._get_effective_permission(username, request)
-        except Exception:
-            user_perm = None
-        
-        current_port = request.query.get("port") or request.query.get("console")
-
-        sort_key, sort_dir, preserved_query = _extract_sort_params(request)
-        status_payload = _assemble_status_payload(adapter, preloaded_ports=ports)
-        status_payload["sidebar_ports"] = status_payload.get("ports", [])
-        status_payload["ports"] = _sort_ports_list(status_payload.get("ports", []), sort_key, sort_dir == "desc")
-        status_payload["sort_key"] = sort_key
-        status_payload["sort_dir"] = sort_dir
-        status_payload["sort_query"] = preserved_query
-        status_payload["status_path"] = request.rel_url.path or "/"
-
-        if hasattr(adapter, "_render_status"):
-            body = adapter._render_status(status_payload, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
-        elif hasattr(adapter, "_render_index"):
-            body = adapter._render_index(ports, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
-        else:
-            # Older adapter without rendering helpers: silent fallback
-            try:
-                bp = adapter._effective_base_path(request)
-            except Exception:
-                bp = ""
-            body = _fallback_with_base(_HTML_FALLBACK, bp)
-    except Exception as re:
-        adapter.logger.error(f"Template render failed, using fallback: {re}")
-        try:
-            bp = adapter._effective_base_path(request)
-        except Exception:
-            bp = ""
-        body = _fallback_with_base(_HTML_FALLBACK, bp)
-    return web.Response(body=body, content_type="text/html")
+    return await _render_status_page(request, adapter, default_status_path="/")
 
 
 async def handle_console(request: web.Request) -> web.Response:
@@ -646,38 +663,7 @@ async def handle_logs(request: web.Request) -> web.Response:
 
 async def handle_status(request: web.Request) -> web.Response:
     adapter = request.app[ADAPTER_APP_KEY]
-    try:
-        # Build an aggregated status payload similar to WebStatus adapter + CLI script
-        sort_key, sort_dir, preserved_query = _extract_sort_params(request)
-        data = _assemble_status_payload(adapter)
-        data["sidebar_ports"] = data.get("ports", [])
-        data["ports"] = _sort_ports_list(data.get("ports", []), sort_key, sort_dir == "desc")
-        data["sort_key"] = sort_key
-        data["sort_dir"] = sort_dir
-        data["sort_query"] = preserved_query
-        data["status_path"] = request.rel_url.path or "/status"
-
-        # Prepare plugin navigation filtered by permission
-        username = request.get("username")
-        try:
-            plugin_nav = adapter._get_allowed_plugin_nav(username, request=request)
-        except Exception:
-            plugin_nav = []
-        try:
-            user_perm = adapter._get_effective_permission(username, request)
-        except Exception:
-            user_perm = None
-
-        current_port = request.query.get("port") or request.query.get("console")
-
-        if hasattr(adapter, "_render_status"):
-            body = adapter._render_status(data, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
-        else:
-            body = b"<html><body><h1>Status</h1><p>OK</p></body></html>"
-    except Exception as re:
-        adapter.logger.error(f"Status template render failed: {re}")
-        body = b"<html><body><h1>Status</h1><p>Failed to render status.</p></body></html>"
-    return web.Response(body=body, content_type="text/html")
+    return await _render_status_page(request, adapter, default_status_path="/status")
 
 
 async def handle_login(request: web.Request) -> web.Response:
@@ -793,8 +779,6 @@ async def handle_logout(request: web.Request) -> web.Response:
 async def handle_api_ports(request: web.Request) -> web.Response:
     adapter = request.app[ADAPTER_APP_KEY]
     try:
-        import json
-
         ports = adapter._get_ports_snapshot()
         payload = json.dumps({"ports": ports}).encode("utf-8")
         return web.Response(body=payload, content_type="application/json")
@@ -938,8 +922,6 @@ async def handle_healthz(request: web.Request) -> web.Response:
         raise web.HTTPNotFound()
     if adapter.probes_include_details:
         details = adapter._probe_details()
-        import json
-
         return web.Response(body=json.dumps(details).encode("utf-8"), content_type="application/json")
     return web.Response(text="ok\n", content_type="text/plain")
 
@@ -950,8 +932,6 @@ async def handle_livez(request: web.Request) -> web.Response:
         raise web.HTTPNotFound()
     if adapter.probes_include_details:
         details = adapter._probe_details(live_only=True)
-        import json
-
         return web.Response(body=json.dumps(details).encode("utf-8"), content_type="application/json")
     return web.Response(text="live\n", content_type="text/plain")
 
@@ -974,7 +954,6 @@ async def handle_readyz(request: web.Request) -> web.Response:
         details["ready"] = ready and not reasons
         if reasons:
             details["reasons"] = reasons
-        import json
         status = 200 if details["ready"] else 503
         return web.Response(status=status, body=json.dumps(details).encode("utf-8"), content_type="application/json")
     if ready:
@@ -985,7 +964,7 @@ async def handle_readyz(request: web.Request) -> web.Response:
 async def handle_ws(request: web.Request) -> web.StreamResponse:
     adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username") or "web"
-    port_name = request.match_info.get("port_name")
+    port_name = request.get("_fqpn_port") or request.match_info.get("port_name")
     if not port_name:
         raise web.HTTPBadRequest(text="Missing port name")
     port_name = html.unescape(port_name)
@@ -1090,9 +1069,8 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                     # Handle client control frames starting with 'OMXCTRL '
                     try:
                         if isinstance(msg.data, str) and msg.data.startswith("OMXCTRL "):
-                            import json as _json
                             payload = msg.data[len("OMXCTRL "):]
-                            req = _json.loads(payload)
+                            req = json.loads(payload)
                             if isinstance(req, dict) and req.get("type") in ("request_rw", "promote"):
                                 ok = False
                                 try:
@@ -1102,7 +1080,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 # Reply with a client_mode control frame so UI can update
                                 resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
                                 try:
-                                    await ws.send_str("OMXCTRL " + _json.dumps(resp, separators=(",", ":")))
+                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
                                     pass
                                 continue  # handled control; do not forward
@@ -1201,9 +1179,9 @@ async def handle_ws_fqpn(request: web.Request) -> web.StreamResponse:
     except Exception:
         raise web.HTTPNotFound(text="Port not found for given server_id")
 
-    # From here on, reuse the plain handler by setting port_name
-    # We can attach to the legacy name; PortManager resolves the correct proxy instance
-    request.match_info["port_name"] = port_name
+    # From here on, reuse the plain handler by passing port_name via request context
+    # (avoids mutating the read-only UrlMappingMatchInfo)
+    request["_fqpn_port"] = port_name
     return await handle_ws(request)
 
 
@@ -1818,96 +1796,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
             except Exception:
                 pass
 
-    def _render_index(
-        self,
-        ports: list[dict[str, Any]],
-        plugin_nav: Optional[list[Dict[str, Any]]] = None,
-        current_port: str = None,
-        user_permission: Optional[str] = None,
-    ) -> bytes:
-        """Render the landing page.
-
-        Tries Jinja2 template 'index.html.j2' when available; otherwise emits a
-        small HTML page listing ports and linking to the console view.
-        """
-        # Try template first
-        try:
-
-        # --- Event-driven meta push helpers ---
-            if self._jinja_env:
-                tmpl = self._jinja_env.get_template("index.html.j2")
-                base_path = self._effective_base_path(None)
-                html_text = tmpl.render(
-                    ports=ports,
-                    realm=self.realm,
-                    logo_url=self._get_logo_url(),
-                    title="OpenMux",
-                    adapter=self,
-                    plugin_nav=plugin_nav or [],
-                    base_path=base_path,
-                    current_port=current_port,
-                    user_permission=user_permission,
-                )
-                return html_text.encode("utf-8")
-        except Exception as e:
-            # Fall back to inline below
-            self.logger.debug(f"index template render failed: {e}")
-
-        # Inline minimal index
-        try:
-            if not self._jinja_env:
-                self.logger.debug("index: using inline fallback (templates disabled)")
-        except Exception:
-            pass
-        # Determine effective base path for building absolute links
-        try:
-            bp = self._effective_base_path(None) or ""
-        except Exception:
-            bp = ""
-
-        rows: list[str] = []
-        for p in ports:
-            name = html.escape(str(p.get("name", "?")))
-            desc = html.escape(str(p.get("description", "")))
-            clients = _port_clients_value(p)
-            extra = ""
-            if desc:
-                extra += f" — {desc}"
-            if clients:
-                extra += f" — {clients} clients"
-            rows.append(f'<li><a href="{bp}/console?port={name}">{name}</a>{extra}</li>')
-        rows_html = ''.join(rows) if rows else '<li><em>No ports</em></li>'
-        # build brand header
-        try:
-            _logo_url = self._get_logo_url()
-        except Exception:
-            _logo_url = None
-        brand_logo_html = (
-            f'<img class="logo-img" src="{html.escape(str(_logo_url))}" alt="logo">' if _logo_url else '<div class="logo">OM</div>'
-        )
-        body = f"""<!doctype html>
-<html>
-    <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>OpenMux</title>
-        <link rel="stylesheet" href="{bp}/static/web_console.css" />
-    </head>
-    <body>
-        <header class="site"><div class="brand">{brand_logo_html}<div class="title">OpenMux</div></div><div class="meta">Summary</div><div class="actions"><a class="btn" href="{bp}/status">Status</a><a class="btn" href="{bp}/console">Console</a><a class="btn" href="{bp}/logout">Logout</a></div></header>
-        <main>
-            <h1>OpenMux Web Console</h1>
-            <p>Pick a port to open a terminal:</p>
-            <ul>
-                {rows_html}
-            </ul>
-            <p>Or go directly to the console view and type a port name.</p>
-            <p><a class="btn" href="{bp}/console">Open Console</a></p>
-        </main>
-    
-"""
-        return body.encode("utf-8")
-
     def _render_console(
         self,
         plugin_nav: Optional[list[Dict[str, Any]]] = None,
@@ -2218,6 +2106,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
             except Exception:
                 continue
         rows_html = ''.join(rows) if rows else '<tr><td colspan="4"><em>No ports</em></td></tr>'
+        try:
+            bp = self._effective_base_path(None) or ""
+        except Exception:
+            bp = ""
         body = f"""
 <!doctype html>
 <html>
@@ -2225,10 +2117,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
     <meta charset=\"utf-8\" />
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
     <title>OpenMux Status</title>
-    <link rel=\"stylesheet\" href=\"/static/web_console.css\" />
+    <link rel=\"stylesheet\" href=\"{bp}/static/web_console.css\" />
   </head>
   <body>
-    <header class=\"site\"><div class=\"brand\">OpenMux</div><div class=\"page\">Status</div><div class=\"actions\"><a class=\"btn\" href=\"/\">Status</a><a class=\"btn\" href=\"/console\">Console</a><a class=\"btn\" href=\"/logout\">Logout</a></div></header>
+    <header class=\"site\"><div class=\"brand\">OpenMux</div><div class=\"page\">Status</div><div class=\"actions\"><a class=\"btn\" href=\"{bp}/\">Status</a><a class=\"btn\" href=\"{bp}/console\">Console</a><a class=\"btn\" href=\"{bp}/logout\">Logout</a></div></header>
     <main>
       <h2>Ports</h2>
       <table>
@@ -2431,7 +2323,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
             ls_seen = info.get("last_seen")
             if ls_seen is not None:
                 meta["last_seen"] = ls_seen
-            import json
             payload = "OMXCTRL " + json.dumps(meta, separators=(",", ":"))
             for cid in list(subs):
                 try:
@@ -3207,12 +3098,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         sid = request.cookies.get(self._session_cookie_name)
         if not sid:
             return web.Response(status=401, text="Unauthorized\n")
-        try:
-            import json
-
-            return web.Response(body=json.dumps({"csrf": sid}).encode("utf-8"), content_type="application/json")
-        except Exception:
-            return web.json_response({"csrf": sid})
+        return web.Response(body=json.dumps({"csrf": sid}).encode("utf-8"), content_type="application/json")
 
     def _check_csrf(self, request: web.Request) -> bool:
         """Verify CSRF header for non-GET/HEAD/OPTIONS requests.
