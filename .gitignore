@@ -108,3 +108,16 @@ debian/openmux/
 *.changes
 *.dsc
 *.tar.*
+
+# Certificates / Private / Public keys
+*.pem
+*.key
+*.crt
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+
+# Miscellaneous
+*.bak
+*.backup
