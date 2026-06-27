@@ -773,6 +773,59 @@ class OpenMuxServer:
         tcp_init_section = new_cfg.get("tcp_initiator_ports") or new_cfg.get("openmux_client_ports")
 
         adapters = list(getattr(self, "unified_adapters", []) or [])
+
+        # Bootstrap adapter types that have ports in the new config but no running instance.
+        # This happens when a port type is added to a server that was started without that section.
+        _factory = getattr(self, "unified_adapter_factory", None)
+        _bootstrap_map = [
+            ("serial", "serial_ports", serial_section),
+            ("loopback", "loopback_ports", loopback_section),
+            ("command", "command_ports", command_section),
+            ("tcp_initiator", "tcp_initiator_ports", tcp_init_section),
+        ]
+        for _type_key, _sec_key, _sec_val in _bootstrap_map:
+            if not _sec_val:
+                continue  # absent/empty: reconcile below handles removal
+            _running = False
+            for _a in adapters:
+                try:
+                    _at = _a.get_adapter_type() if hasattr(_a, "get_adapter_type") else getattr(_a, "adapter_type", "")
+                    if str(_at or "").lower() == _type_key:
+                        _running = True
+                        break
+                except Exception:
+                    pass
+            if _running or not _factory:
+                continue
+            try:
+                _plugin = _factory.registry.get_plugin(_sec_key)
+                if not _plugin:
+                    self.logger.warning(f"[reload-soft:{req_id}] No plugin registered for section '{_sec_key}'")
+                    continue
+                # Create adapter starting empty; reconcile below populates it
+                _new_insts = _factory._create_adapter_instances(_plugin, [])
+                for _na in _new_insts:
+                    if hasattr(_na, "main_port_manager"):
+                        _na.main_port_manager = self.port_manager
+                    if callable(getattr(_na, "set_auth_manager", None)):
+                        _na.set_auth_manager(self.auth_manager)
+                    if callable(getattr(_na, "set_console_manager", None)):
+                        _na.set_console_manager(self.console_manager)
+                    try:
+                        _ok = await _na.start()
+                    except Exception as _se:
+                        _ok = False
+                        self.logger.error(f"[reload-soft:{req_id}] {_type_key} adapter start error: {_se}", exc_info=True)
+                    if _ok:
+                        self.unified_adapters.append(_na)
+                        self.port_manager.set_unified_adapters(self.unified_adapters)
+                        adapters.append(_na)
+                        self.logger.info(f"[reload-soft:{req_id}] Bootstrapped new {_type_key} adapter; reconcile will populate ports")
+                    else:
+                        self.logger.error(f"[reload-soft:{req_id}] New {_type_key} adapter failed to start")
+            except Exception as _e:
+                self.logger.error(f"[reload-soft:{req_id}] Failed to bootstrap {_type_key} adapter: {_e}", exc_info=True)
+
         for a in adapters:
             try:
                 atype = None
@@ -781,34 +834,38 @@ class OpenMuxServer:
                 except Exception:
                     atype = getattr(a, "adapter_type", None)
                 key = (str(atype) if atype else "").lower()
-                # Serial
-                if key == "serial" and hasattr(a, "reconcile_ports") and serial_section is not None:
+                # Serial — absent section treated as empty list to remove ports when section is dropped
+                if key == "serial" and hasattr(a, "reconcile_ports"):
+                    effective = serial_section if serial_section is not None else []
                     try:
-                        res = await a.reconcile_ports(serial_section)
+                        res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("serial", res)
                     except Exception as e:
                         self.logger.error(f"[reload-soft:{req_id}] Serial reconcile error: {e}", exc_info=True)
                         summary["adapters"]["serial"] = {"error": str(e)}
                 # Loopback
-                if key == "loopback" and hasattr(a, "reconcile_ports") and loopback_section is not None:
+                if key == "loopback" and hasattr(a, "reconcile_ports"):
+                    effective = loopback_section if loopback_section is not None else []
                     try:
-                        res = await a.reconcile_ports(loopback_section)
+                        res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("loopback", res)
                     except Exception as e:
                         self.logger.error(f"[reload-soft:{req_id}] Loopback reconcile error: {e}", exc_info=True)
                         summary["adapters"]["loopback"] = {"error": str(e)}
                 # Command
-                if key == "command" and hasattr(a, "reconcile_ports") and command_section is not None:
+                if key == "command" and hasattr(a, "reconcile_ports"):
+                    effective = command_section if command_section is not None else []
                     try:
-                        res = await a.reconcile_ports(command_section)
+                        res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("command", res)
                     except Exception as e:
                         self.logger.error(f"[reload-soft:{req_id}] Command reconcile error: {e}", exc_info=True)
                         summary["adapters"]["command"] = {"error": str(e)}
                 # TCP initiator
-                if key == "tcp_initiator" and hasattr(a, "reconcile_ports") and tcp_init_section is not None:
+                if key == "tcp_initiator" and hasattr(a, "reconcile_ports"):
+                    effective = tcp_init_section if tcp_init_section is not None else []
                     try:
-                        res = await a.reconcile_ports(tcp_init_section)
+                        res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("tcp_initiator", res)
                     except Exception as e:
                         self.logger.error(f"[reload-soft:{req_id}] TCP initiator reconcile error: {e}", exc_info=True)

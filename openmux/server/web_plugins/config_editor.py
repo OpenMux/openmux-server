@@ -283,16 +283,11 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
 
 
 async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
-    """Perform a soft reload of configuration without restarting the server.
+    """Perform a soft reload by delegating to the server's reload_adapters_soft().
 
-    Steps:
-      - Require admin + CSRF
-      - Reload YAML from disk using ConfigManager.load_config()
-      - Update AuthManager live config
-      - Reconcile ports for adapters that support online updates (serial, loopback, command, tcp initiator)
-      - Do NOT restart connection endpoints (web console, client listener, muxcon). Those require full restart.
-
-    Returns a JSON summary of applied changes per adapter or an error JSON.
+    Mirrors _handle_reload_full which delegates to server.reload_adapters_full().
+    All reload logic (config load, auth update, bootstrap, reconcile) lives in
+    the server method so CLI and web paths share a single implementation.
     """
     adapter = request.app[ADAPTER_APP_KEY]
     req_id = uuid.uuid4().hex[:8]
@@ -301,9 +296,7 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
         adapter.logger.info(f"[reload-soft:{req_id}] request from {request.remote or '?'} user={username or '?'}")
     except Exception:
         pass
-    # AuthN/Z
     adapter._require_permission(request, ("admin",))
-    # Log presence of CSRF header to aid debugging (not the value)
     try:
         has_csrf = bool(request.headers.get("X-OMX-CSRF"))
         adapter.logger.debug(f"[reload-soft:{req_id}] CSRF header present={has_csrf}")
@@ -316,150 +309,29 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
             pass
         raise web.HTTPForbidden(text="CSRF")
 
-    # Resolve managers
-    cm = _find_config_manager(adapter)
-    if not cm:
-        try:
-            adapter.logger.error(f"[reload-soft:{req_id}] ConfigManager unavailable")
-        except Exception:
-            pass
-        return web.json_response({"error": True, "message": "ConfigManager unavailable"}, status=500)
-
-    # Best-effort access to the running server instance for auth/ports
     server = getattr(getattr(adapter, "console_manager", None), "server", None)
-    auth = getattr(adapter, "auth_manager", None)
-    port_mgr = getattr(adapter, "main_port_manager", None) or getattr(getattr(adapter, "console_manager", None), "port_manager", None)
-
-    summary: Dict[str, Any] = {"auth_updated": False, "adapters": {}}
-    try:
-        # Reload YAML from disk and validate
-        cfg_path = getattr(cm, "config_path", None)
-        adapter.logger.info(f"[reload-soft:{req_id}] Loading config from {cfg_path}")
-        start = time.time()
-        new_cfg = cm.load_config()
-        adapter.logger.info(f"[reload-soft:{req_id}] Config loaded OK in {time.time()-start:.3f}s")
-    except Exception as e:
+    if not server or not hasattr(server, "reload_adapters_soft"):
         try:
-            adapter.logger.exception(f"[reload-soft:{req_id}] Config load failed: {e}")
+            adapter.logger.error(f"[reload-soft:{req_id}] Server reload API unavailable (server={bool(server)})")
         except Exception:
             pass
-        return web.json_response({"error": True, "message": f"Config load failed: {e}"}, status=400)
-
-    # Update authentication live
+        return web.json_response({"error": True, "message": "Server reload API unavailable"}, status=500)
     try:
-        if auth and hasattr(auth, "update_config"):
-            adapter.logger.debug(f"[reload-soft:{req_id}] Updating AuthManager config")
-            await auth.update_config(new_cfg.get("authentication", {}))
-            summary["auth_updated"] = True
-            adapter.logger.info(f"[reload-soft:{req_id}] AuthManager updated")
-    except Exception as e:
-        # Non-fatal; continue with port reconciliation
-        try:
-            adapter.logger.error(f"[reload-soft:{req_id}] Auth update failed: {e}", exc_info=True)
-        except Exception:
-            pass
-
-    # Reconcile ports for adapters that support it
-    adapters = []
-    try:
-        if server and hasattr(server, "unified_adapters"):
-            adapters = list(getattr(server, "unified_adapters") or [])
-        elif port_mgr and hasattr(port_mgr, "unified_adapters"):
-            adapters = list(getattr(port_mgr, "unified_adapters") or [])
-        else:
-            adapters = []
-        adapter.logger.debug(f"[reload-soft:{req_id}] Found {len(adapters)} unified adapters for reconciliation")
+        ctx = {
+            "req_id": req_id,
+            "origin": "config-editor",
+            "remote": request.remote or "?",
+            "user": username or "?",
+            "web_adapter_name": getattr(adapter, "name", None) or "web_console",
+        }
+        summary = await server.reload_adapters_soft(context=ctx)
+        return web.json_response({"ok": True, "summary": summary})
     except Exception as e:
         try:
-            adapter.logger.error(f"[reload-soft:{req_id}] Adapter discovery failed: {e}", exc_info=True)
+            adapter.logger.error(f"[reload-soft:{req_id}] Soft reload failed: {e}", exc_info=True)
         except Exception:
             pass
-        adapters = []
-
-    # Pull sections from config
-    serial_section = new_cfg.get("serial_ports")
-    loopback_section = new_cfg.get("loopback_ports")
-    command_section = new_cfg.get("command_ports")
-    tcp_init_section = new_cfg.get("tcp_initiator_ports") or new_cfg.get("openmux_client_ports")
-    try:
-        def count_items(x):
-            if x is None:
-                return 0
-            if isinstance(x, dict):
-                # section may be {"serial_ports": [...]}
-                for v in x.values():
-                    if isinstance(v, list):
-                        return len(v)
-                return 0
-            if isinstance(x, list):
-                return len(x)
-            return 1
-        adapter.logger.info(
-            f"[reload-soft:{req_id}] sections: serial={count_items(serial_section)} loopback={count_items(loopback_section)} command={count_items(command_section)} tcp_initiator={count_items(tcp_init_section)}"
-        )
-    except Exception:
-        pass
-
-    for a in adapters or []:
-        try:
-            atype = None
-            try:
-                atype = a.get_adapter_type() if hasattr(a, "get_adapter_type") else getattr(a, "adapter_type", None)
-            except Exception:
-                atype = getattr(a, "adapter_type", None)
-            key = (str(atype) if atype else "").lower()
-            # Serial
-            if key == "serial" and hasattr(a, "reconcile_ports") and serial_section is not None:
-                try:
-                    adapter.logger.debug(f"[reload-soft:{req_id}] Reconciling serial ports")
-                    res = await a.reconcile_ports(serial_section)
-                    summary["adapters"].setdefault("serial", res)
-                except Exception as e:
-                    adapter.logger.error(f"[reload-soft:{req_id}] Serial reconcile error: {e}", exc_info=True)
-                    summary["adapters"]["serial"] = {"error": str(e)}
-            elif key == "serial" and serial_section is None:
-                adapter.logger.debug(f"[reload-soft:{req_id}] Skipping serial: no section in config")
-            # Loopback
-            if key == "loopback" and hasattr(a, "reconcile_ports") and loopback_section is not None:
-                try:
-                    adapter.logger.debug(f"[reload-soft:{req_id}] Reconciling loopback ports")
-                    res = await a.reconcile_ports(loopback_section)
-                    summary["adapters"].setdefault("loopback", res)
-                except Exception as e:
-                    adapter.logger.error(f"[reload-soft:{req_id}] Loopback reconcile error: {e}", exc_info=True)
-                    summary["adapters"]["loopback"] = {"error": str(e)}
-            elif key == "loopback" and loopback_section is None:
-                adapter.logger.debug(f"[reload-soft:{req_id}] Skipping loopback: no section in config")
-            # Command
-            if key == "command" and hasattr(a, "reconcile_ports") and command_section is not None:
-                try:
-                    adapter.logger.debug(f"[reload-soft:{req_id}] Reconciling command ports")
-                    res = await a.reconcile_ports(command_section)
-                    summary["adapters"].setdefault("command", res)
-                except Exception as e:
-                    adapter.logger.error(f"[reload-soft:{req_id}] Command reconcile error: {e}", exc_info=True)
-                    summary["adapters"]["command"] = {"error": str(e)}
-            elif key == "command" and command_section is None:
-                adapter.logger.debug(f"[reload-soft:{req_id}] Skipping command: no section in config")
-            # TCP initiator (client side ports)
-            if key == "tcp_initiator" and hasattr(a, "reconcile_ports") and tcp_init_section is not None:
-                try:
-                    adapter.logger.debug(f"[reload-soft:{req_id}] Reconciling tcp_initiator ports")
-                    res = await a.reconcile_ports(tcp_init_section)
-                    summary["adapters"].setdefault("tcp_initiator", res)
-                except Exception as e:
-                    adapter.logger.error(f"[reload-soft:{req_id}] TCP initiator reconcile error: {e}", exc_info=True)
-                    summary["adapters"]["tcp_initiator"] = {"error": str(e)}
-            elif key == "tcp_initiator" and tcp_init_section is None:
-                adapter.logger.debug(f"[reload-soft:{req_id}] Skipping tcp_initiator: no section in config")
-        except Exception:
-            # Continue with others
-            continue
-    try:
-        adapter.logger.info(f"[reload-soft:{req_id}] Completed with summary: {summary}")
-    except Exception:
-        pass
-    return web.json_response({"ok": True, "summary": summary})
+        return web.json_response({"error": True, "message": str(e)}, status=500)
 
 
 async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
