@@ -18,8 +18,8 @@
   </script>
   </head>
   <body class="login">
-  <form class="card" method="POST" action="{{ base_path }}/login" style="position: relative">
-      <button id="themeToggle" type="button" class="btn btn-icon" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; font-size: 16px; border-radius: 50%; background: transparent; border: none; color: var(--text-muted);" title="Toggle Theme">☀️</button>
+  <button id="themeToggle" type="button" class="btn btn-icon" style="position: fixed; top: 8px; right: 8px; width: 32px; height: 32px; font-size: 16px; border-radius: 50%; background: transparent; border: none; color: var(--text-muted);" title="Toggle Theme">☀️</button>
+  <form class="card" method="POST" action="{{ base_path }}/login">
       <div class="brand">
         {% if logo_url %}
           <img class="logo-img" src="{{ base_path }}{{ logo_url }}" alt="logo" />
@@ -39,7 +39,8 @@
       <h1>Sign in to {{ realm }}</h1>
       <input type="hidden" name="next" value="{{ next or '/' }}" />
       <input type="text" name="username" placeholder="Username" autocomplete="username" required />
-      <input type="password" name="password" placeholder="Password" autocomplete="current-password" required />
+      <input type="password" name="password" placeholder="Password" autocomplete="current-password" required
+             onkeydown="if(event.key==='Enter'){event.preventDefault();this.closest('form').requestSubmit();}" />
       <button class="btn" type="submit">Sign in</button>
       <div class="hint">After login you'll be redirected back.</div>
     </form>
