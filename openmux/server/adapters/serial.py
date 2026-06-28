@@ -119,6 +119,9 @@ class SerialPortWrapper:
         self.reconnect_delay = 5.0
         self.max_reconnect_attempts = 0  # 0 = infinite
         self.reconnect_attempts = 0
+        # Timestamp (monotonic) of the last "device does not exist" warning;
+        # used to rate-limit the message to at most once per hour.
+        self._last_missing_warn_ts: Optional[float] = None
 
     async def start(self) -> bool:
         """Start (or schedule) serial port connection management.
@@ -174,6 +177,8 @@ class SerialPortWrapper:
                 success = await self._connect()
                 if success:
                     self.reconnect_attempts = 0
+                    # Reset so a future disconnect+missing-device logs immediately
+                    self._last_missing_warn_ts = None
 
                     # Start reading data
                     if self.read_task and not self.read_task.done():
@@ -195,8 +200,9 @@ class SerialPortWrapper:
                     self.max_reconnect_attempts == 0 or self.reconnect_attempts < self.max_reconnect_attempts
                 ):
                     self.reconnect_attempts += 1
-                    self.logger.info(
-                        f"Attempting to reconnect to {self.config.device} " f"(attempt {self.reconnect_attempts})"
+                    self.logger.debug(
+                        f"Attempting to reconnect to {self.config.device} "
+                        f"(attempt {self.reconnect_attempts})"
                     )
                     await asyncio.sleep(self.reconnect_delay)
                 else:
@@ -218,7 +224,13 @@ class SerialPortWrapper:
         try:
             # Check if device exists
             if not os.path.exists(self.config.device):
-                self.logger.warning(f"Serial device {self.config.device} does not exist")
+                import time as _time
+                now = _time.monotonic()
+                if self._last_missing_warn_ts is None or (now - self._last_missing_warn_ts) >= 3600:
+                    self.logger.warning(f"Serial device {self.config.device} does not exist")
+                    self._last_missing_warn_ts = now
+                else:
+                    self.logger.debug(f"Serial device {self.config.device} still not found")
                 return False
 
             # Check device type on POSIX systems
