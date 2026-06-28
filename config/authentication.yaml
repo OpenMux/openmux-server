@@ -5,14 +5,16 @@ api_keys:
 - key: monitoring-key
   name: Monitoring
   permissions: read-only
-pam:
+external_auth:
   allow_root: false
   enabled: false
   groups:
     admin_group: openmux_admin
     read_group: openmux_read
     write_group: openmux_write
-  service_name: login
+  # helper: /usr/lib/openmux/openmux-pam-helper  # optional override
+  service: openmux
+  timeout: 10
 users:
 - permissions: admin
   password_hash: 5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8

@@ -4,6 +4,7 @@ Provides a lightweight credential + API key verification layer with:
 * Password hashing / comparison (SHA-256, constant-time compare)
 * Short‑term authentication result caching to reduce hashing cost
 * API key permission lookups
+* External authentication via a helper binary (e.g. openmux-pam-helper)
 * Helpers to hash passwords and generate random API keys
 """
 
@@ -42,27 +43,9 @@ class AuthManager:
         # Public key records: list of dicts with fields: username?, key_id, public_key, allowed_uses?
         # allowed_uses is a list of contexts this key may be used for, e.g., ["client"], ["muxcon"], ["client","muxcon"]
         self.public_keys = self._normalize_public_keys(config.get("public_keys", []))
-        # PAM configuration (optional)
-        pam_cfg = config.get("pam", {}) or {}
-        self._pam_enabled = bool(pam_cfg.get("enabled", False))
-        self._pam_service = str(pam_cfg.get("service_name", "login"))
-        # Policy controls
-        # allow_root: default False (root logins disabled unless explicitly allowed)
-        self._pam_allow_root = bool(pam_cfg.get("allow_root", False))
-        allowed_users_cfg = pam_cfg.get("allowed_users")
-        self._pam_allowed_users = set(allowed_users_cfg) if isinstance(allowed_users_cfg, list) else None
-        # Group to role mapping (configurable group names)
-        default_groups = {
-            "admin_group": "openmux_admin",
-            "write_group": "openmux_write",
-            "read_group": "openmux_read",
-        }
-        groups_cfg = pam_cfg.get("groups") or {}
-        self._pam_groups = {
-            "admin_group": str(groups_cfg.get("admin_group", default_groups["admin_group"])),
-            "write_group": str(groups_cfg.get("write_group", default_groups["write_group"])),
-            "read_group": str(groups_cfg.get("read_group", default_groups["read_group"])),
-        }
+        # External authentication via helper binary (config key: external_auth)
+        # Deprecated alias: pam (mapped automatically with a warning)
+        self._load_ext_auth_config(config)
         # Active pubkey challenges: (username, key_id) -> {nonce_raw, pubkey, expires_at}
         self._pk_challenges = {}
         # Active password HMAC challenges: username -> {nonce_raw, expires_at, pw_hex}
@@ -91,22 +74,11 @@ class AuthManager:
         self.users = new_config.get("users", [])  # noqa: Vulture (dynamic update)
         self.api_keys = new_config.get("api_keys", [])  # noqa: Vulture (dynamic update)
         self.public_keys = self._normalize_public_keys(new_config.get("public_keys", []))
-        # Update PAM config
-        pam_cfg = new_config.get("pam", {}) or {}
-        self._pam_enabled = bool(pam_cfg.get("enabled", False))
-        self._pam_service = str(pam_cfg.get("service_name", "login"))
-        # allow_root: default False (root logins disabled unless explicitly allowed)
-        self._pam_allow_root = bool(pam_cfg.get("allow_root", False))
-        allowed_users_cfg = pam_cfg.get("allowed_users")
-        self._pam_allowed_users = set(allowed_users_cfg) if isinstance(allowed_users_cfg, list) else None
-        groups_cfg = pam_cfg.get("groups") or {}
-        self._pam_groups = {
-            "admin_group": str(groups_cfg.get("admin_group", "openmux_admin")),
-            "write_group": str(groups_cfg.get("write_group", "openmux_write")),
-            "read_group": str(groups_cfg.get("read_group", "openmux_read")),
-        }
+        # Reload external auth config (supports both external_auth: and deprecated pam: key)
+        self._load_ext_auth_config(new_config)
         # Clear cache when config changes
         self.auth_cache = {}
+        self._ext_auth_groups_cache.clear()
         # Clear outstanding challenges (they reference old keys)
         self._pk_challenges.clear()
         self._pw_hmac_challenges.clear()
@@ -132,6 +104,53 @@ class AuthManager:
             self._failure_threshold = threshold
         if isinstance(base, int) and base > 0:
             self._base_lock_seconds = base
+
+    def _load_ext_auth_config(self, config: Dict[str, Any]) -> None:
+        """Populate external-auth fields from config.
+
+        Reads ``external_auth:`` first. If absent, falls back to the
+        deprecated ``pam:`` key and emits a one-time warning so operators
+        know to migrate their config.
+        """
+        ext_cfg = config.get("external_auth")
+        if ext_cfg is None:
+            # Deprecated alias: pam -> external_auth
+            pam_cfg = config.get("pam")
+            if pam_cfg:
+                self.logger.warning(
+                    "Config key 'pam' is deprecated; rename to 'external_auth'. "
+                    "Also rename 'service_name' to 'service'."
+                )
+                # Map old pam keys to new external_auth shape
+                ext_cfg = dict(pam_cfg)
+                if "service_name" in ext_cfg and "service" not in ext_cfg:
+                    ext_cfg["service"] = ext_cfg.pop("service_name")
+            else:
+                ext_cfg = {}
+
+        ext_cfg = ext_cfg or {}
+        self._ext_auth_enabled: bool = bool(ext_cfg.get("enabled", False))
+        self._ext_auth_service: str = str(ext_cfg.get("service", "openmux"))
+        # helper may be a string (path to execute) or a list (passed directly to subprocess)
+        self._ext_auth_helper = ext_cfg.get("helper")  # str | list | None
+        self._ext_auth_timeout: float = float(ext_cfg.get("timeout", 10))
+        self._ext_auth_allow_root: bool = bool(ext_cfg.get("allow_root", False))
+        allowed_users_cfg = ext_cfg.get("allowed_users")
+        self._ext_auth_allowed_users = set(allowed_users_cfg) if isinstance(allowed_users_cfg, list) else None
+        groups_cfg = ext_cfg.get("groups") or {}
+        self._ext_auth_groups: Dict[str, str] = {
+            "admin_group": str(groups_cfg.get("admin_group", "openmux_admin")),
+            "write_group": str(groups_cfg.get("write_group", "openmux_write")),
+            "read_group": str(groups_cfg.get("read_group", "openmux_read")),
+        }
+        # Fallback permission when a user authenticates but no group mapping resolves.
+        # Set to e.g. "read-write" to grant all external-auth users a default role.
+        raw_default = ext_cfg.get("default_permission")
+        self._ext_auth_default_permission: Optional[str] = str(raw_default) if raw_default else None
+        # Short-lived cache of groups returned by the helper JSON (keyed by username).
+        # Populated on successful auth; entries expire after 5 minutes (matching auth cache TTL).
+        if not hasattr(self, "_ext_auth_groups_cache"):
+            self._ext_auth_groups_cache: Dict[str, Any] = {}
 
     # =================== Password HMAC Challenge (Upgrade Path) ===================
     def _normalize_public_keys(self, pk_list):
@@ -487,9 +506,9 @@ class AuthManager:
                         result = True
                         break
 
-        # 2) PAM provider (optional) if not matched by local users
-        if not result and self._pam_enabled:
-            result = self._pam_authenticate(username, password)
+        # 2) External auth provider (optional) if not matched by local users
+        if not result and self._ext_auth_enabled:
+            result = self._external_authenticate(username, password)
 
         # Update cache (only cache successes to avoid silencing transient failures or locking out retries)
         if result:
@@ -539,89 +558,142 @@ class AuthManager:
                     # Fall through to default if static user matched
                     return "read-write"
 
-        # If PAM is enabled, map groups to permissions
-        if self._pam_enabled:
-            perms = self._pam_group_permissions(username)
+        # If external auth is enabled, map groups to permissions
+        if self._ext_auth_enabled:
+            perms = self._ext_auth_group_permissions(username)
             if perms:
                 return perms
 
         # Unknown user: if this is reached, the caller likely failed auth.
         return None
 
-    # =================== PAM Backend ===================
-    def _pam_authenticate(self, username: str, password: str) -> bool:
-        """Authenticate a user against the system PAM service.
-        
-        Applies policy controls: allow_root (default False) and optional allowed_users.
-        Returns False gracefully if PAM libraries are unavailable.
-        """
-        # Policy checks before invoking PAM
-        if (not getattr(self, "_pam_allow_root", False)) and username == "root":
-            self.logger.warning("PAM auth denied: root login disabled by policy")
-            return False
-        if self._pam_allowed_users is not None and username not in self._pam_allowed_users:
-            self.logger.warning("PAM auth denied: user '%s' not in allowed_users list", username)
-            return False
-        try:
-            # Try python-pam (module name: pam)
-            import pam  # type: ignore
-            import os
+    # =================== External Auth Backend ===================
+    def _external_authenticate(self, username: str, password: str) -> bool:
+        """Authenticate a user via the configured external auth helper.
 
-            p = pam.pam()
-            ok = bool(p.authenticate(username, password, service=self._pam_service))
+        Protocol (matches openmux-pam-helper)::
+
+            stdin line 1: username
+            stdin line 2: password
+
+        No arguments beyond the helper binary itself (and an optional leading
+        ``sudo`` when the helper path is configured as e.g.
+        ``sudo /usr/local/bin/openmux_pam_helper``).
+
+        Service name is passed as an optional first argument so the helper
+        can select the correct PAM service::
+
+            helper [<service>]
+            stdin line 1: username
+            stdin line 2: password
+
+        Exit code 0 = success.  Stdout JSON (``{"ok": true, ...}``) is
+        parsed to confirm the ``ok`` field; a missing or malformed JSON
+        object is treated as a failure.
+
+        Helper path is resolved in order:
+        1. ``external_auth.helper`` config value (supports ``sudo /path`` form)
+        2. ``openmux-pam-helper`` / ``openmux_pam_helper`` on PATH
+        3. ``/usr/local/bin/openmux_pam_helper``
+        """
+        import json as _json
+        import os
+        import shutil
+        import subprocess
+
+        # Policy checks
+        if not self._ext_auth_allow_root and username == "root":
+            self.logger.warning("External auth denied: root login disabled by policy")
+            return False
+        if self._ext_auth_allowed_users is not None and username not in self._ext_auth_allowed_users:
+            self.logger.warning("External auth denied: user '%s' not in allowed_users list", username)
+            return False
+
+        helper = self._ext_auth_helper
+
+        if isinstance(helper, list) and helper:
+            # List config e.g. ["sudo", "/usr/local/bin/openmux_pam_helper"]
+            cmd = list(helper)
+            # Binary for existence check: last absolute path in the list
+            binary = next((c for c in reversed(cmd) if os.path.isabs(c)), cmd[-1])
+        elif isinstance(helper, str) and helper.strip():
+            # String config: the string itself is the binary to execute
+            cmd = [helper.strip()]
+            binary = helper.strip()
+        else:
+            # Auto-resolve from PATH then well-known location
+            found = shutil.which("openmux-pam-helper") or shutil.which("openmux_pam_helper")
+            binary = found or "/usr/local/bin/openmux_pam_helper"
+            cmd = [binary]
+
+        # Append service name as optional argument
+        if self._ext_auth_service:
+            cmd.append(self._ext_auth_service)
+
+        if not os.path.isfile(binary) and not shutil.which(binary):
+            self.logger.error("External auth helper not found: %s", binary)
+            return False
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=f"{username}\n{password}\n".encode("utf-8"),
+                capture_output=True,
+                timeout=self._ext_auth_timeout,
+            )
+            ok = proc.returncode == 0
+            # Cross-check JSON ok field when present; also cache groups for permission lookup
+            if proc.stdout:
+                try:
+                    data = _json.loads(proc.stdout.decode("utf-8", errors="replace").strip())
+                    ok = ok and bool(data.get("ok", True))
+                    if ok and isinstance(data.get("groups"), list):
+                        self._ext_auth_groups_cache[username] = {
+                            "groups": data["groups"],
+                            "expires": time.time() + 300,
+                        }
+                except Exception:
+                    pass
             if not ok:
-                # Log reason if available (python-pam often provides .reason or .code)
-                reason = getattr(p, "reason", "Authentication failed")
-                code = getattr(p, "code", "?")
-
-                extra_hint = ""
-                if code == 7 and os.geteuid() != 0:
-                    extra_hint = " (Hint: Authenticating other users usually requires running as root)"
-
+                stderr_msg = proc.stderr.decode("utf-8", errors="replace").strip()
                 self.logger.warning(
-                    "PAM auth failed for user '%s' (service=%s): %s (code=%s)%s",
+                    "External auth failed for user '%s' (exit=%d%s)",
                     username,
-                    self._pam_service,
-                    reason,
-                    code,
-                    extra_hint,
+                    proc.returncode,
+                    f": {stderr_msg}" if stderr_msg else "",
                 )
+            else:
+                self.logger.debug("External auth succeeded for user '%s'", username)
             return ok
-        except Exception as e:  # pragma: no cover - environment-dependent
-            # PAM not available or error during auth; do not crash
-            self.logger.warning("PAM authentication unavailable or failed: %s", e)
+        except subprocess.TimeoutExpired:
+            self.logger.error(
+                "External auth helper timed out after %ss for user '%s'",
+                self._ext_auth_timeout,
+                username,
+            )
+            return False
+        except Exception as e:
+            self.logger.error("External auth helper error for user '%s': %s", username, e)
             return False
 
-    def _pam_group_permissions(self, username: str) -> Optional[str]:
-        """Determine permissions based on system group membership.
+    def _ext_auth_group_permissions(self, username: str) -> Optional[str]:
+        """Determine permissions based on group membership.
 
-        Mapping precedence: admin_group -> "admin"; write_group -> "read-write"; read_group -> "read-only".
-        Returns None if user not resolvable or no matching groups found.
+        Checks (in order):
+        1. Groups cached from the last helper JSON response for this user.
+        2. Unix system group membership (grp/pwd).
+        3. default_permission fallback if configured.
+
+        Mapping precedence: admin_group -> "admin"; write_group -> "read-write";
+        read_group -> "read-only". Returns None if no matching group found.
         """
-        try:
-            import grp
-            import pwd
+        import time as _time
 
-            # Resolve user's primary group name
-            try:
-                pw = pwd.getpwnam(username)
-                primary_gid = pw.pw_gid
-                primary_group = grp.getgrgid(primary_gid).gr_name if primary_gid is not None else None
-            except KeyError:
-                primary_group = None
+        admin_g = self._ext_auth_groups.get("admin_group")
+        write_g = self._ext_auth_groups.get("write_group")
+        read_g = self._ext_auth_groups.get("read_group")
 
-            # Collect all groups where user is a member
-            groups = set()
-            if primary_group:
-                groups.add(primary_group)
-            for g in grp.getgrall():
-                if username in (g.gr_mem or []):
-                    groups.add(g.gr_name)
-
-            admin_g = self._pam_groups.get("admin_group")
-            write_g = self._pam_groups.get("write_group")
-            read_g = self._pam_groups.get("read_group")
-
+        def _map_groups(groups: set) -> Optional[str]:
             if admin_g and admin_g in groups:
                 return "admin"
             if write_g and write_g in groups:
@@ -629,10 +701,41 @@ class AuthManager:
             if read_g and read_g in groups:
                 return "read-only"
             return None
-        except Exception as e:  # pragma: no cover - environment-dependent
-            self.logger.debug("PAM group lookup failed for '%s': %s", username, e)
-            return None
 
+        # 1. Groups from helper JSON (most authoritative for external users)
+        cached = self._ext_auth_groups_cache.get(username)
+        if cached and _time.time() < cached.get("expires", 0):
+            result = _map_groups(set(cached["groups"]))
+            if result:
+                return result
+
+        # 2. Unix group membership
+        try:
+            import grp
+            import pwd
+
+            try:
+                pw = pwd.getpwnam(username)
+                primary_gid = pw.pw_gid
+                primary_group = grp.getgrgid(primary_gid).gr_name if primary_gid is not None else None
+            except KeyError:
+                primary_group = None
+
+            groups: set = set()
+            if primary_group:
+                groups.add(primary_group)
+            for g in grp.getgrall():
+                if username in (g.gr_mem or []):
+                    groups.add(g.gr_name)
+
+            result = _map_groups(groups)
+            if result:
+                return result
+        except Exception as e:  # pragma: no cover - environment-dependent
+            self.logger.debug("Group lookup failed for '%s': %s", username, e)
+
+        # 3. Configured default for external-auth users
+        return self._ext_auth_default_permission
     def get_api_key_permissions(self, api_key: str) -> Optional[str]:
         """Return permissions associated with an API key.
 

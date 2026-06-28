@@ -704,6 +704,21 @@ async def handle_login(request: web.Request) -> web.Response:
             except Exception:
                 ok = False
         if ok:
+            # Verify the user has at least some permissions assigned.
+            # Authentication proves identity; a None permission means no access
+            # has been granted (e.g. external-auth user not in any mapped group).
+            try:
+                perms = adapter.auth_manager.get_user_permissions(username) if adapter.auth_manager else None
+            except Exception:
+                perms = None
+            if perms is None:
+                adapter.logger.warning(
+                    "Login denied for '%s': authenticated but no permissions assigned "
+                    "(check group membership or external_auth.default_permission)",
+                    username,
+                )
+                ok = False
+        if ok:
             # Create session
             sid = secrets.token_urlsafe(32)
             now = time.time()

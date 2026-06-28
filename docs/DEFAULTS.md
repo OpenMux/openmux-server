@@ -16,15 +16,18 @@ server
 - server.pidfile: logs/openmux.pid (env override: OPENMUX_PIDFILE)
 
 authentication
-- At least one of users, api_keys, public_keys, or pam must be provided.
-- PAM (Pluggable Authentication Modules):
-  - authentication.pam.enabled: false
-  - authentication.pam.service_name: login
-  - authentication.pam.groups.admin_group: openmux_admin
-  - authentication.pam.groups.write_group: openmux_write
-  - authentication.pam.groups.read_group: openmux_read
-  - authentication.pam.allow_root: false
-  - authentication.pam.allowed_users: unset (optional allowlist; if set, only listed users can log in)
+- At least one of users, api_keys, public_keys, or external_auth must be provided.
+- External authentication (helper binary — e.g. openmux-pam-helper):
+  - authentication.external_auth.enabled: false
+  - authentication.external_auth.helper: (empty — resolved from PATH or /usr/lib/openmux/openmux-pam-helper)
+  - authentication.external_auth.service: openmux
+  - authentication.external_auth.timeout: 10
+  - authentication.external_auth.groups.admin_group: openmux_admin
+  - authentication.external_auth.groups.write_group: openmux_write
+  - authentication.external_auth.groups.read_group: openmux_read
+  - authentication.external_auth.allow_root: false
+  - authentication.external_auth.allowed_users: unset (optional allowlist; if set, only listed users can log in)
+  Note: the deprecated `pam:` key is still accepted and mapped automatically with a warning.
 
 logging (runtime defaults from openmux/server/logging_manager.py)
 - logging.log_level: INFO (key name is log_level in code)

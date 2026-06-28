@@ -21,11 +21,6 @@ python3 -m pip install dist/openmux-*.whl
 
 # Or install from source (editable is fine for dev machines)
 python3 -m pip install -e .
-
-# Extras:
-#   web UI pieces and templates are already part of core; extras are optional
-#   PAM auth support requires python-pam and six
-python3 -m pip install -e ".[pam]"
 ```
 
 Run:
@@ -68,7 +63,7 @@ users:
 Notes:
 - Do not include a trailing newline in the hashed password input.
 - OpenMux currently expects SHA-256 hex specifically.
-- PAM authentication is separate and only applies when PAM is enabled.
+- External authentication is separate and only applies when `external_auth.enabled: true`.
 
 ---
 
@@ -79,9 +74,6 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -U pip setuptools wheel
 pip install -e .[dev]
-
-# Optional: PAM support
-pip install -e ".[pam]"
 
 # Run server
 python -m openmux.server.main -c config/loopback_test.yaml
@@ -165,9 +157,11 @@ sudo apt-get install -y \
   python3-aiohttp python3-jinja2 python3-websockets \
   python3-cryptography python3-serial python3-serial-asyncio \
   python3-yaml python3-six
+```
 
-# Optional (only if enabling PAM auth):
-sudo apt-get install -y python3-pam
+Note: external authentication is handled by the `openmux-pam-helper` setuid binary
+(see <https://github.com/OpenMux/openmux-pam-helper>); `python3-pam` is no longer
+required.
 ```
 
 ### Build the package
@@ -309,8 +303,6 @@ Example minimal config is provided at `config/loopback_test.yaml`.
 
 ## Troubleshooting
 
-- PAM errors like `ModuleNotFoundError: No module named 'six'`:
-  - Ensure `python3-six` is installed (or `pip install six` if using pip)
 - TLS autogen failure complaining about cryptography:
   - Install `python3-cryptography`
 - Control socket permission denied:
