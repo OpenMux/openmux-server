@@ -61,6 +61,10 @@ class TelnetListenerAdapter(BaseGenericAdapter):
 
     adapter_type = "telnet_listener"
 
+    def get_adapter_type(self) -> str:
+        """Return adapter type for security policy and factory lookup."""
+        return "telnet_listener"
+
     def __init__(self, name: str, config: Dict[str, Any]):
         super().__init__(name, config)
         self.logger = logging.getLogger(f"openmux.adapter.telnet_listener.{name}")

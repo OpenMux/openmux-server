@@ -84,7 +84,8 @@ class FakeUnifiedPort:
         self.description = description
         self.is_running = True
         self.max_read_write_users = 5
-        # Provide an existing data_queue to exercise reuse path
+        # data_queue remains on the port as a test-only staging buffer;
+        # the wrapper creates its own delivery queue (no longer aliased)
         self.data_queue = asyncio.Queue()
         # Optional state with .value used by status
         self.state = SimpleNamespace(value="active")
@@ -132,17 +133,17 @@ async def test_unified_wrapper_and_queueing():
     ok_b = await wrapper.write_data(b"def")
     assert ok_a is True and ok_b is True
 
-    # No clients -> send_data_from_unified_port should drop but return True
-    assert await pm.send_data_from_unified_port("u1", b"X") is True
+    # No clients -> send_data should drop but return True
+    assert await pm.send_data("u1", b"X") is True
     assert dq.empty()
 
     # Force enqueue even without clients
-    assert await pm.send_data_from_unified_port("u1", b"forced", require_clients=False) is True
+    assert await pm.send_data("u1", b"forced", require_clients=False) is True
     assert dq.get_nowait() == b"forced"
 
     # Add a client and enqueue data
     wrapper.connected_clients.append({"client_id": "c1", "mode": "read-only"})
-    assert await pm.send_data_from_unified_port("u1", b"Y") is True
+    assert await pm.send_data("u1", b"Y") is True
     # Read from the unified port's queue via the shared queue reference
     got = dq.get_nowait()
     assert got == b"Y"
@@ -292,17 +293,17 @@ async def test_force_enqueue_and_drop_oldest(monkeypatch):
     pm.ports["pbuf"] = port
 
     # Default behavior: no clients -> data only logged
-    assert await pm.send_data_from_unified_port("pbuf", b"A") is True
+    assert await pm.send_data("pbuf", b"A") is True
     assert port.data_queue.empty()
 
     # Force enqueue with zero clients
-    assert await pm.send_data_from_unified_port("pbuf", b"B", require_clients=False) is True
+    assert await pm.send_data("pbuf", b"B", require_clients=False) is True
     assert port.data_queue.get_nowait() == b"B"
 
     # Fill queue and ensure oldest entry is dropped when full
     await port.data_queue.put(b"1")
     await port.data_queue.put(b"2")
-    assert await pm.send_data_from_unified_port("pbuf", b"3", require_clients=False) is True
+    assert await pm.send_data("pbuf", b"3", require_clients=False) is True
     first = port.data_queue.get_nowait()
     second = port.data_queue.get_nowait()
     assert first == b"2" and second == b"3"
@@ -339,7 +340,7 @@ async def test_write_permissions_and_queuefull(monkeypatch):
     w.connected_clients.append({"client_id": "c", "mode": "read-only"})
     # Fill queue to trigger QueueFull on next send
     w.data_queue.put_nowait(b"A")
-    ok = await pm.send_data_from_unified_port("uQ", b"B")
+    ok = await pm.send_data("uQ", b"B")
     assert ok is False
 
 

@@ -71,18 +71,27 @@ async def test_loopback_write_data_round_trip():
     await lb.start()
 
     # Wire a minimal PortManager stub so the primary I/O path is exercised.
-    # Without PM the fallback no longer buffers (PM absence is an error per contract).
     class _StubPM:
-        async def send_data_from_unified_port(self, name: str, data: bytes) -> bool:
-            if lb.data_queue is not None:
-                lb.data_queue.put_nowait(data)
+        def __init__(self):
+            self.output_queue: asyncio.Queue = asyncio.Queue()
+
+        async def send_data(self, name: str, data: bytes, **kwargs) -> bool:
+            await self.output_queue.put(data)
             return True
 
-    adapter.main_port_manager = _StubPM()
+        async def read(self, timeout: float = 0.1) -> bytes:
+            try:
+                return await asyncio.wait_for(self.output_queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return b""
+
+    stub = _StubPM()
+    adapter.main_port_manager = stub
+    lb.data_callback = stub.send_data
 
     wrote = await lb.write_data(b"hello")
     assert wrote == 5
-    data = await lb.read_data(0.1)
+    data = await stub.read(0.1)
     assert data == b"hello"
 
 

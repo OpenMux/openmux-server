@@ -453,7 +453,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
 
     async def _handle_port_data(self, port_name: str, data: bytes) -> None:
         if hasattr(self, "main_port_manager") and self.main_port_manager:
-            await self.main_port_manager.send_data_from_unified_port(port_name, data)
+            await self.main_port_manager.send_data(port_name, data)
         else:
             self.logger.debug(f"No main port manager available, dropping {len(data)} bytes from port {port_name}")
 

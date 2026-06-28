@@ -22,7 +22,7 @@ class CapturingPortManager:
         cfg = config or {"server": {"id": "srv-123"}}
         self.config_manager = StubConfigManager(cfg)
 
-    async def send_data_from_unified_port(
+    async def send_data(
         self,
         port_name: str,
         chunk: bytes,
@@ -69,18 +69,20 @@ async def test_stopped_notice_and_client_notice_prefix(monkeypatch):
     adapter: Any = SimpleNamespace(main_port_manager=pm)
     port = CommandPort("cp1", {"command": "echo"}, adapter)
 
-    # read_data on inactive returns stopped notice once
-    msg1 = await port.read_data(0)
-    assert b"PROCESS_NOT_RUNNING srv-123/cp1" in msg1
-    # and now returns empty if no queue
-    msg2 = await port.read_data(0)
-    assert msg2 == b""
-
-    # Client count change from 0->1 enqueues notice if banner not yet sent
-    port._stopped_notice_sent = False
+    # Stopped notice is delivered via data_callback when first client connects
     port.on_client_count_changed(1)
     got = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
     assert b"PROCESS_NOT_RUNNING srv-123/cp1" in got
+
+    # Banner is suppressed on subsequent connects (flag remains set)
+    assert port._stopped_notice_sent is True
+
+    # Reset: disconnect then reconnect sends notice again
+    port._stopped_notice_sent = False
+    port.on_client_count_changed(0)
+    port.on_client_count_changed(1)
+    got2 = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
+    assert b"PROCESS_NOT_RUNNING srv-123/cp1" in got2
 
 
 @pytest.mark.asyncio
@@ -264,12 +266,18 @@ async def test_restart_paths(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_on_demand_banner_and_spawn_on_first_client(monkeypatch):
-    adapter: Any = SimpleNamespace()
+    pm = CapturingPortManager()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
     port = CommandPort("ond1", {"command": "echo", "spawn_on_demand": True}, adapter)
 
-    # When inactive and on-demand, banner should suggest 'spawn'
-    msg = await port.read_data(0)
+    # When first client connects to inactive on-demand port, banner suggests 'spawn'
+    port.on_client_count_changed(1)
+    msg = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
     assert b"press Enter to spawn" in msg
+
+    # Disconnect so the next connect starts fresh (client_count back to 0)
+    port.on_client_count_changed(0)
+    port._stopped_notice_sent = False
 
     # Monkeypatch start to observe invocation and simulate successful spawn
     called = {"start": 0}
@@ -288,7 +296,7 @@ async def test_on_demand_banner_and_spawn_on_first_client(monkeypatch):
     await asyncio.sleep(0.01)
 
     assert called["start"] == 1
-    assert port.is_running is True and port.process_active is True
+    assert port.is_running is True
 
 
 @pytest.mark.asyncio

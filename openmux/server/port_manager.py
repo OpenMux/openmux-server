@@ -204,12 +204,9 @@ class PortManager:
                 self.adapter_type = adapter_type
                 self.loopback = str(adapter_type).lower() == "loopback"
 
-                # Data queue: if underlying port already has one (loopback), reuse; else create
-                existing_q = getattr(unified_port, "data_queue", None)
-                if existing_q is not None:
-                    self.data_queue = existing_q
-                else:
-                    self.data_queue = asyncio.Queue(maxsize=100)
+                # Wrapper owns its own delivery queue; port.data_queue (if any)
+                # remains as a test-only staging buffer accessed via port.read_data().
+                self.data_queue = asyncio.Queue(maxsize=100)
                 # Surface adapter-specific buffering hints so the manager can honor them
                 self.always_buffer = bool(getattr(unified_port, "always_buffer", False))
                 self.drop_oldest_on_full = bool(getattr(unified_port, "drop_oldest_on_full", False))
@@ -948,7 +945,7 @@ class PortManager:
         self.logger.error(f"Port {port_name} not found for data handling")
         return False
 
-    async def send_data_from_unified_port(
+    async def send_data(
         self,
         port_name: str,
         data: bytes,
@@ -1026,6 +1023,13 @@ class PortManager:
             True if the port was registered; otherwise False.
         """
         try:
+            # Phase 1 migration: wire data_callback so the port routes outbound
+            # data through PM without holding a direct PM reference.
+            # Ports should call self.data_callback(port_name, data) instead of
+            # pm.send_data() directly.
+            if hasattr(unified_port, "data_callback"):
+                unified_port.data_callback = self.send_data
+
             # Create the unified port wrapper
             wrapper = self._create_unified_port_wrapper(unified_port, adapter)
 
@@ -1124,7 +1128,7 @@ class PortManager:
                 """Callback for federated port data - integrates with console manager"""
                 try:
                     self.logger.debug(f"🚀 FEDERATED CALLBACK: Received {len(data)} bytes for port {port_name}")
-                    ok = await self.send_data_from_unified_port(port_name, data, require_clients=False)
+                    ok = await self.send_data(port_name, data, require_clients=False)
                     if not ok and hasattr(remote_proxy, "data_queue"):
                         try:
                             remote_proxy.data_queue.put_nowait(data)

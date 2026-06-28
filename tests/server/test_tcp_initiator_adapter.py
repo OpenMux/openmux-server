@@ -270,7 +270,7 @@ async def test_adapter_handle_port_data_routes_to_port_manager():
     called: Dict[str, Any] = {}
 
     class PM:
-        async def send_data_from_unified_port(self, name: str, data: bytes) -> None:
+        async def send_data(self, name: str, data: bytes) -> None:
             called["args"] = (name, data)
 
     adapter.main_port_manager = PM()

@@ -9,19 +9,27 @@ from openmux.server.adapters.loopback import LoopbackAdapter, LoopbackPort
 class _PortManagerStub:
     """Minimal PortManager stub for unit tests.
 
-    Routes send_data_from_unified_port directly into the named port's data_queue,
-    mirroring what PortManager.handle_incoming_port_data does via the wrapper alias.
-    Keyed by a dict reference so it stays in sync when the adapter populates ports lazily.
+    Captures output delivered via send_data in output_queue.
+    Wires data_callback on all already-created ports at construction time.
     """
 
-    def __init__(self, ports: dict):
-        self._ports = ports
+    def __init__(self, ports: dict = None):
+        self._ports = ports or {}
+        self.output_queue: asyncio.Queue = asyncio.Queue()
+        for p in self._ports.values():
+            if hasattr(p, "data_callback"):
+                p.data_callback = self.send_data
 
-    async def send_data_from_unified_port(self, name: str, data: bytes) -> bool:
-        port = self._ports.get(name)
-        if port is not None and getattr(port, "data_queue", None) is not None:
-            port.data_queue.put_nowait(data)
+    async def send_data(self, name: str, data: bytes, **kwargs) -> bool:
+        await self.output_queue.put(data)
         return True
+
+    async def read(self, timeout: float = 0.1) -> bytes:
+        """Read next captured chunk, or b\"\" on timeout."""
+        try:
+            return await asyncio.wait_for(self.output_queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return b""
 
 
 @pytest.mark.asyncio
@@ -32,21 +40,11 @@ async def test_port_lifecycle_and_errors():
     # Not active errors
     with pytest.raises(RuntimeError):
         await port.write_data(b"x")
-    with pytest.raises(RuntimeError):
-        await port.read_data(0.01)
 
     # Start -> active
     ok = await port.start()
     assert ok is True
     assert port.state.name == "ACTIVE"
-    assert port.data_queue is not None
-
-    # Timeout returns empty bytes
-    got = await port.read_data(0.01)
-    assert got == b""
-    # Alias works
-    got_alias = await port.read(0.01)
-    assert got_alias == b""
 
     # Stop and subsequent operations should error
     await port.stop()
@@ -71,23 +69,24 @@ async def test_write_and_banners_cr_lf_variants():
     adapter = LoopbackAdapter("loopback", {"loopback_ports": []})
     port = LoopbackPort("lp2", {"buffer_size": 8}, adapter)
     await port.start()
-    adapter.main_port_manager = _PortManagerStub({"lp2": port})
+    stub = _PortManagerStub({"lp2": port})
+    adapter.main_port_manager = stub
 
     # Plain chunk without newline
     n = await port.write_data(b"abc")
     assert n == 3
-    assert await port.read_data(0.05) == b"abc"
-    assert await port.read_data(0.01) == b""  # nothing more
+    assert await stub.read(0.05) == b"abc"
+    assert await stub.read(0.01) == b""  # nothing more
 
     # LF newline emits banner
     await port.write_data(b"def\n")
-    assert await port.read_data(0.05) == b"def"
-    assert await port.read_data(0.05) == b"[ENTER]\r\n"
+    assert await stub.read(0.05) == b"def"
+    assert await stub.read(0.05) == b"[ENTER]\r\n"
 
     # CRLF newline emits banner
     await port.write_data(b"ghi\r\n")
-    assert await port.read_data(0.05) == b"ghi"
-    assert await port.read_data(0.05) == b"[ENTER]\r\n"
+    assert await stub.read(0.05) == b"ghi"
+    assert await stub.read(0.05) == b"[ENTER]\r\n"
 
 
 def test_sanitize_sequences_basic():
@@ -134,11 +133,12 @@ async def test_echo_delay_execution():
     adapter = LoopbackAdapter("loopback", {"loopback_ports": []})
     port = LoopbackPort("lp5", {"buffer_size": 8, "echo_delay": 0.01}, adapter)
     await port.start()
-    adapter.main_port_manager = _PortManagerStub({"lp5": port})
+    stub = _PortManagerStub({"lp5": port})
+    adapter.main_port_manager = stub
     await port.write_data(b"Z\n")
     # Should still echo correctly after delay
-    assert await port.read_data(0.1) == b"Z"
-    assert await port.read_data(0.1) == b"[ENTER]\r\n"
+    assert await stub.read(0.1) == b"Z"
+    assert await stub.read(0.1) == b"[ENTER]\r\n"
 
 
 def test_adapter_config_and_ports_enumeration():
@@ -157,9 +157,9 @@ def test_adapter_config_and_ports_enumeration():
 async def test_adapter_start_write_stop_and_missing_port():
     cfg = {"loopback_ports": [{"name": "c"}]}
     adapter = LoopbackAdapter("loop", cfg)
-    # Wire PM stub before start so ports dict is shared by reference;
-    # the stub routes data directly into each port's data_queue.
-    adapter.main_port_manager = _PortManagerStub(adapter.ports)
+    # Wire PM stub before start; LoopbackPort.__init__ picks it up via adapter.main_port_manager
+    stub = _PortManagerStub()
+    adapter.main_port_manager = stub
 
     # Start creates ports
     ok = await adapter.start()
@@ -169,10 +169,8 @@ async def test_adapter_start_write_stop_and_missing_port():
     # Write through adapter
     n = await adapter.write_to_port("c", b"Q\n")
     assert n == 2
-    # Read back from the port queue
-    port = adapter.ports["c"]
-    got1 = await port.read_data(0.1)
-    got2 = await port.read_data(0.1)
+    got1 = await stub.read(0.1)
+    got2 = await stub.read(0.1)
     assert got1 == b"Q" and got2 == b"[ENTER]\r\n"
 
     # Missing port write returns 0

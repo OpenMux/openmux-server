@@ -181,11 +181,11 @@ async def test_get_port_data_and_send_from_unified():
     assert data1 == b"X"
     assert await pm.get_port_data("pd") is None
 
-    # send_data_from_unified_port only enqueues when clients exist
-    assert await pm.send_data_from_unified_port("pd", b"Y") is True
+    # send_data only enqueues when clients exist
+    assert await pm.send_data("pd", b"Y") is True
     assert await pm.get_port_data("pd") is None
     w.connected_clients.append({"client_id": "c1", "mode": "read-only"})
-    assert await pm.send_data_from_unified_port("pd", b"Z") is True
+    assert await pm.send_data("pd", b"Z") is True
     assert await pm.get_port_data("pd") == b"Z"
 
 

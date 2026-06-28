@@ -61,41 +61,41 @@ class LoopbackPort:
         # Buffer to assemble incomplete ESC/CSI sequences across writes
         self._esc_buf = bytearray()
 
-        # Internal queue for data
-        self.data_queue = None
-
         # Client capacity hint used by wrappers/manager
         self.max_read_write_users = int(config.get("max_read_write_users", 5))
         # Unified interface placeholders
-        self.data_callback = None  # Set by adapter/manager if used
+        # data_callback is set by PortManager.register_unified_port() or wired here
+        # if the adapter already has a PM at construction time.
+        self.data_callback = None
+        _pm = getattr(getattr(self, "adapter", None), "main_port_manager", None)
+        if _pm and hasattr(_pm, "send_data"):
+            self.data_callback = _pm.send_data
         # Hints for port manager queue policy
         self.always_buffer = False
         self.drop_oldest_on_full = False
         self._queue_fallback_logged = False
 
-    def _port_manager(self):
-        """Return bound PortManager instance if adapter registered one."""
-        return getattr(self.adapter, "main_port_manager", None)
-
     async def _emit_data(self, payload: bytes) -> None:
-        """Send sanitized payload through the centralized port manager."""
+        """Send payload through data_callback.
+
+        data_callback is set either at construction time (when the adapter
+        already has a PM) or by PortManager.register_unified_port().
+        """
         if not payload:
             return
-        pm = self._port_manager()
-        if pm:
+        cb = self.data_callback
+        if cb:
             try:
-                ok = await pm.send_data_from_unified_port(self.name, payload)
-                if ok:
-                    return
+                await cb(self.name, payload)
             except Exception:
-                    self.logger.error(f"PortManager forwarding failed for {self.name}", exc_info=True)
-        # PortManager is the required data path; absence is an error, not a buffer opportunity.
-        if not self._queue_fallback_logged:
-            self.logger.error(
-                "Loopback port %s: PortManager missing or send failure; dropping data",
-                self.name,
-            )
-            self._queue_fallback_logged = True
+                self.logger.error("data_callback failed for %s", self.name, exc_info=True)
+        else:
+            if not self._queue_fallback_logged:
+                self.logger.error(
+                    "Loopback port %s: data_callback not set; dropping data",
+                    self.name,
+                )
+                self._queue_fallback_logged = True
 
     async def start(self) -> bool:
         """Initialize internal queues and mark port active.
@@ -105,13 +105,8 @@ class LoopbackPort:
         """
         try:
             self.state = PortState.CREATING
-
-            # Create the data queue
-            self.data_queue = asyncio.Queue(maxsize=self.buffer_size)
-
             self.state = PortState.ACTIVE
             self.is_connected = True
-
             self.logger.info(f"Loopback port {self.name} started successfully")
             return True
 
@@ -124,19 +119,8 @@ class LoopbackPort:
         """Tear down queue and mark port destroyed."""
         try:
             self.state = PortState.DESTROYING
-
-            # Clear the queue
-            if self.data_queue:
-                while not self.data_queue.empty():
-                    try:
-                        self.data_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                self.data_queue = None
-
             self.state = PortState.DESTROYED
             self.is_connected = False
-
             self.logger.info(f"Loopback port {self.name} stopped")
 
         except Exception as e:
@@ -151,7 +135,7 @@ class LoopbackPort:
         Returns:
             Number of input bytes processed.
         """
-        if self.state != PortState.ACTIVE or not self.data_queue:
+        if self.state != PortState.ACTIVE:
             raise RuntimeError(f"Loopback port {self.name} not active")
         if not data:
             return 0
@@ -179,26 +163,6 @@ class LoopbackPort:
 
         self.logger.debug(f"Loopback write: {len(data)} bytes")
         return len(data)
-
-    # Unified read API for tests and adapter helpers
-    async def read_data(self, timeout: float = 1.0) -> bytes:
-        """Read one chunk from the loopback queue.
-
-        Args:
-            timeout: Seconds to wait for data before timing out.
-
-        Returns:
-            Bytes from the data queue, or b"" on timeout.
-        """
-        if self.state != PortState.ACTIVE or not self.data_queue:
-            raise RuntimeError(f"Loopback port {self.name} not active")
-        try:
-            return await asyncio.wait_for(self.data_queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
-            return b""
-
-    async def read(self, timeout: float = 1.0) -> bytes:  # backward-compat alias used by some tests
-        return await self.read_data(timeout)
 
     def sanitize_data(self, data: bytes) -> bytes:
         """Sanitize control / escape sequences for safe echo.
@@ -486,14 +450,12 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Create and start a loopback port instance."""
         try:
             port = LoopbackPort(port_name, config, self)
-            # No intrinsic callback needed because LoopbackPort uses an internal queue.
-            # Unified routing is achieved via manager wrapper polling; if we later
-            # add push notifications, wire a callback to call
-            # self.main_port_manager.send_data_from_unified_port(port_name, data).
             if await port.start():
                 self.ports[port_name] = port
                 self.logger.info(f"Created loopback port: {port_name}")
                 # Register with PortManager so unified wrapper and routing are active
+                # (register_unified_port also sets port.data_callback; __init__ already
+                # wired it if main_port_manager was available at construction time)
                 try:
                     if hasattr(self, "main_port_manager") and self.main_port_manager:
                         await self.main_port_manager.register_unified_port(port_name, port, self)

@@ -128,15 +128,16 @@ class CommandPort:
         self._pty_reader_added = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.process: Optional[asyncio.subprocess.Process] = None
-        self._reader = None
         self._writer = None
         self.is_running = False
         self.process_active = False
         self.client_count = 0
-        self.data_queue: Optional[asyncio.Queue] = None
-        # Contract: port instance must expose data_callback for upstream routing
-        # Signature: Callable[[str, bytes], Awaitable|None]; adapter wires it if needed.
+        # data_callback is set by PortManager.register_unified_port() or wired here
+        # if the adapter already has a PM at construction time.
         self.data_callback = None
+        _pm = getattr(getattr(self, "adapter", None), "main_port_manager", None)
+        if _pm and hasattr(_pm, "send_data"):
+            self.data_callback = _pm.send_data
         self._read_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
         # Queue handling hints consumed by PortManager/legacy wrappers
@@ -151,10 +152,6 @@ class CommandPort:
         self.restart_count = 0
 
         self._stopped_notice_sent = False
-
-        if self.always_buffer:
-            self.data_queue = asyncio.Queue(maxsize=100)
-            self.logger.info(f"Pre-buffering enabled for command port {self.name} (always_buffer={self.always_buffer})")
 
         if not self.command:
             raise ValueError(f"Command port {name} requires 'command' configuration")
@@ -173,36 +170,6 @@ class CommandPort:
         except Exception:  # justification: transient write failure; upstream caller treats 0 as backpressure signal
             return 0
 
-    async def read_data(self, timeout: float = 0.0) -> bytes:
-        """Standardized read API to retrieve buffered process output.
-
-        Args:
-            timeout: Seconds to wait for data; 0 for non-blocking.
-
-        Returns:
-            bytes: Next available chunk or b"" on timeout/no data.
-        """
-        # Stopped notice logic mirrors CommandReader.read()
-        if (not self.process_active or self.state != PortState.ACTIVE) and not self._stopped_notice_sent:
-            self._stopped_notice_sent = True
-            hint = "spawn" if getattr(self, "spawn_on_demand", False) else "respawn"
-            return f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
-        if not self.data_queue:
-            return b""
-        try:
-            if timeout and timeout > 0:
-                return await asyncio.wait_for(self.data_queue.get(), timeout=timeout)
-            # Non-blocking path
-            return self.data_queue.get_nowait()
-        except asyncio.QueueEmpty:
-            return b""
-        except asyncio.TimeoutError:
-            return b""
-
-    def _port_manager(self):
-        """Return the bound PortManager instance if available."""
-        return getattr(self.adapter, "main_port_manager", None)
-
     async def _emit_output_chunk(
         self,
         chunk: bytes,
@@ -210,14 +177,14 @@ class CommandPort:
         require_clients: Optional[bool] = None,
         drop_oldest: bool = True,
     ) -> None:
-        """Forward process output through the centralized logging path."""
+        """Forward process output through data_callback set by PortManager."""
         if not chunk:
             return
-        pm = self._port_manager()
         require_clients_flag = (not self.always_buffer) if require_clients is None else require_clients
-        if pm:
+        cb = self.data_callback
+        if cb:
             try:
-                ok = await pm.send_data_from_unified_port(
+                ok = await cb(
                     self.name,
                     chunk,
                     require_clients=require_clients_flag,
@@ -226,16 +193,14 @@ class CommandPort:
                 if ok:
                     return
             except Exception:
-                self.logger.error(f"PortManager forwarding failed for {self.name}", exc_info=True)
-        # Fallback for early startup/tests when PortManager isn't wired
-        if not self._queue_fallback_logged:
-            self.logger.error(
-                "Command port %s falling back to local queue; PortManager missing or send failure",
-                self.name,
-            )
-            self._queue_fallback_logged = True
-        # PortManager is the required data path; absence is an error, not a buffer opportunity.
-        # Drop the chunk to avoid unbounded state accumulation.
+                self.logger.error(f"data_callback failed for {self.name}", exc_info=True)
+        else:
+            if not self._queue_fallback_logged:
+                self.logger.error(
+                    "Command port %s: data_callback not set; dropping data",
+                    self.name,
+                )
+                self._queue_fallback_logged = True
 
     def _schedule_notice_emit(self, payload: bytes) -> None:
         """Schedule emission of a notice chunk via the centralized path."""
@@ -268,8 +233,6 @@ class CommandPort:
         self.client_count = count
         self.logger.info(f"Client count changed for {self.name}: {old} -> {count}")
         if old == 0 and count > 0:
-            if self.data_queue is None:
-                self.data_queue = asyncio.Queue(maxsize=100)
             # Cancel any pending idle-stop since a client re-appeared
             try:
                 if self._idle_stop_task and not self._idle_stop_task.done():
@@ -481,7 +444,6 @@ class CommandPort:
                     )
 
             # Readers/Writers
-            self._reader = CommandReader(self)
             stdin_stream = None if self.use_pty else (self.process.stdin if self.process else None)
             self._writer = CommandWriter(stdin_stream, self)
 
@@ -914,10 +876,8 @@ class CommandPort:
         except Exception as e:
             self.logger.error(f"Error stopping command port {self.name}: {e}", exc_info=True)
         finally:
-            self._reader = None
             self._writer = None
             self.process = None
-            self.data_queue = None
             self.client_count = 0
             self.is_running = False
             self.process_active = False
@@ -1048,53 +1008,6 @@ class CommandPort:
                 pass
             i = k + len(end_seq)
         return bytes(out)
-
-
-class CommandReader:
-    """Buffered reader for a single command port.
-
-    Provides non-blocking retrieval of already buffered process output. It does
-    not itself perform any I/O reads from the underlying subprocess; that work
-    is done by the PTY readability callback or the pipe reader task in
-    ``CommandPort`` which enqueue data into ``data_queue``. This thin wrapper
-    normalizes the stopped-process notice injection semantics used elsewhere
-    in the system so the caller always receives a consistent status banner
-    before first read on a non-active process.
-
-    Args:
-        port: Parent ``CommandPort`` instance.
-    """
-
-    def __init__(self, port: CommandPort):
-        self.port = port
-        self.logger = port.logger
-
-    async def read(self) -> bytes:  # noqa: Vulture (signature trimmed; size was unused)
-        """Return the next buffered output chunk if available.
-
-        Non-blocking: performs a ``get_nowait`` on the internal queue. If the
-        underlying process is not currently active a one-time standardized
-        status banner is returned (and suppressed on subsequent reads)
-        indicating the process may be respawned by pressing Enter.
-
-        Returns:
-            bytes: Next available chunk of output, the stopped notice banner,
-            or ``b""`` if no data is ready.
-        """
-        if (not self.port.process_active or self.port.state != PortState.ACTIVE) and not self.port._stopped_notice_sent:
-            self.port._stopped_notice_sent = True
-            return f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self.port._stopped_prefix()} – press Enter to respawn]\r\n".encode()
-
-        if not self.port.data_queue:
-            return b""
-        try:
-            data = self.port.data_queue.get_nowait()
-            return data
-        except asyncio.QueueEmpty:
-            return b""
-        except Exception as e:
-            self.logger.error(f"Error reading from command {self.port.name}: {e}", exc_info=True)
-            return b""
 
 
 class CommandWriter:
@@ -1293,6 +1206,10 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         return "command"
 
+    def get_adapter_type(self) -> str:
+        """Return adapter type for security policy and factory lookup."""
+        return "command"
+
     def get_capabilities(self) -> Set[AdapterCapability]:
         """Return the capability set implemented by this adapter.
 
@@ -1382,9 +1299,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             if getattr(command_port, "spawn_on_demand", False):
                 # Do not spawn the process yet; mark as configured
                 self.ports[port_name] = command_port
-                # Ensure a queue exists so the wrapper will reuse it
-                if command_port.data_queue is None:
-                    command_port.data_queue = asyncio.Queue(maxsize=100)
                 # Register with the main PortManager so the port is discoverable immediately
                 try:
                     if self.main_port_manager:
@@ -1398,9 +1312,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             else:
                 if await command_port.start():
                     self.ports[port_name] = command_port
-                    # Ensure a queue exists so the wrapper will reuse it
-                    if command_port.data_queue is None:
-                        command_port.data_queue = asyncio.Queue(maxsize=100)
                     # Register with the main PortManager
                     try:
                         if self.main_port_manager:

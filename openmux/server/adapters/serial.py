@@ -79,8 +79,8 @@ class SerialPortWrapper:
 
     Encapsulates connection attempts, read loop, graceful shutdown, and
     optional infinite auto-reconnect with back-off style delay. Data read
-    from the underlying serial stream is pushed into an internal asyncio
-    queue for non-blocking retrieval by the adapter's data pump.
+    from the underlying serial stream is forwarded via data_callback, which
+    is set by PortManager.register_unified_port().
 
     Attributes:
         config: Immutable ``SerialPortConfig`` describing the port.
@@ -88,7 +88,7 @@ class SerialPortWrapper:
         description: Human friendly description string.
         max_read_write_users: Maximum concurrent read/write users allowed.
         is_connected: True while active connection is established.
-        data_queue: Queue of inbound data chunks (bytes).
+        data_callback: Callback set by PortManager; called with (port_name, data).
     """
 
     def __init__(self, config: SerialPortConfig, logger: logging.Logger, meta_notify: Optional[Callable[[str, Dict[str, Any]], None]] = None):
@@ -110,10 +110,10 @@ class SerialPortWrapper:
         self.reconnect_task: Optional[asyncio.Task] = None
 
         # Data handling
-        self.data_queue: asyncio.Queue = asyncio.Queue()
         self.read_task: Optional[asyncio.Task] = None
-        # Unified callback placeholder
+        # Callback set by PortManager.register_unified_port(); called as (port_name, data)
         self.data_callback: Optional[Callable[[str, bytes], Optional[Awaitable[None]]]] = None
+        self._callback_missing_logged = False
         # Reconnection settings
         self.auto_reconnect = True
         self.reconnect_delay = 5.0
@@ -325,7 +325,7 @@ class SerialPortWrapper:
                         self.logger.debug("Meta notify failed on empty read disconnect", exc_info=True)
                     break
 
-                # Forward via callback if present, else queue
+                # Forward data via callback (set by PortManager at registration)
                 if self.data_callback:
                     try:
                         cb = self.data_callback
@@ -335,7 +335,12 @@ class SerialPortWrapper:
                     except Exception:
                         self.logger.error("Serial read callback error", exc_info=True)
                 else:
-                    await self.data_queue.put(data)
+                    if not self._callback_missing_logged:
+                        self.logger.error(
+                            "Serial port %s: data_callback not set; dropping data",
+                            self.name,
+                        )
+                        self._callback_missing_logged = True
                 # Per-chunk data logs are very chatty; keep at debug level
                 self.logger.debug(
                     f"Read {len(data)} bytes from {self.config.device}: {data.decode('utf-8', errors='replace')}"
@@ -380,31 +385,6 @@ class SerialPortWrapper:
             self.logger.error(f"Error writing to {self.config.device}: {e}", exc_info=True)
             raise
 
-    async def get_data(self, timeout: float = 0.1) -> Optional[bytes]:
-        """Retrieve next queued data chunk (non-blocking with timeout).
-
-        Args:
-            timeout: Seconds to wait before returning ``None``.
-
-        Returns:
-            Optional[bytes]: Next payload or ``None`` if no data.
-        """
-        try:
-            return await asyncio.wait_for(self.data_queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
-            return None
-
-    def get_data_nowait(self) -> Optional[bytes]:
-        """Retrieve next queued data chunk without waiting.
-
-        Returns:
-            Optional[bytes]: Next payload or ``None`` if no data is available immediately.
-        """
-        try:
-            return self.data_queue.get_nowait()
-        except asyncio.QueueEmpty:
-            return None
-
     def get_status_snapshot(self) -> Dict[str, Any]:
         """Return static config details for port listings."""
         return {
@@ -435,7 +415,6 @@ class SerialAdapter(BaseGenericAdapter):
 
         self.serial_ports: Dict[str, SerialPortWrapper] = {}
         self.logger = logging.getLogger(f"openmux.adapter.serial.{name}")
-        self._data_task: Optional[asyncio.Task] = None
 
         # Parse port configurations
         self._parse_port_configs()
@@ -621,11 +600,6 @@ class SerialAdapter(BaseGenericAdapter):
 
         if success_count > 0:
             self.is_running = True
-
-            # Start the data handling loop as a background task
-            self._data_task = asyncio.create_task(self._handle_port_data())
-            self.logger.info(f"Started data handling loop for serial adapter {self.name}")
-
             self.logger.info(f"Serial adapter {self.name} started with {success_count}/{len(self.serial_ports)} ports")
             return True
         else:
@@ -638,14 +612,6 @@ class SerialAdapter(BaseGenericAdapter):
             return
 
         self.logger.info(f"Stopping serial adapter {self.name}")
-
-        # Cancel the data handling task
-        if self._data_task and not self._data_task.done():
-            self._data_task.cancel()
-            try:
-                await self._data_task
-            except asyncio.CancelledError:
-                pass
 
         for port_name, port_wrapper in self.serial_ports.items():
             try:
@@ -677,77 +643,9 @@ class SerialAdapter(BaseGenericAdapter):
             "reconnect_attempts": port_wrapper.reconnect_attempts,
         }
 
-    async def _handle_port_data(self) -> None:
-        """Background poller: forward any newly read data to clients."""
-        self.logger.info(f"Starting data handling loop for {len(self.serial_ports)} serial ports")
-        while self.is_running:
-            try:
-                # Check for data from all ports
-                # Snapshot to avoid 'dictionary changed size during iteration' during reconciles
-                for port_name, port_wrapper in list(self.serial_ports.items()):
-                    try:
-                        data = await port_wrapper.get_data(timeout=0.05)
-                        if data:
-                            # Optionally coalesce rapid successive chunks for this port
-                            if self._coalesce_reads:
-                                chunks: List[bytes] = [data]
-                                total = len(data)
-                                deadline = asyncio.get_running_loop().time() + max(self._coalesce_max_delay, 0.0)
-
-                                # Greedily drain immediately available data without waiting
-                                while total < self._coalesce_max_bytes:
-                                    more = port_wrapper.get_data_nowait()
-                                    if more is None:
-                                        break
-                                    chunks.append(more)
-                                    total += len(more)
-
-                                # If still under size limit and within time, wait briefly for stragglers
-                                while total < self._coalesce_max_bytes:
-                                    remaining = deadline - asyncio.get_running_loop().time()
-                                    if remaining <= 0:
-                                        break
-                                    # Cap per-await timeout to remaining window
-                                    more = await port_wrapper.get_data(timeout=max(min(remaining, 0.002), 0.0))
-                                    if more is None:
-                                        break
-                                    chunks.append(more)
-                                    total += len(more)
-
-                                data = b"".join(chunks)
-
-                            # Centralized logging is handled in PortManager.send_data_from_unified_port
-
-                            # Forward the (possibly coalesced) data
-                            self.logger.debug(
-                                f"Forwarding {len(data)} bytes from serial port {port_name} to clients: {data.decode('utf-8', errors='replace')}"
-                            )
-                            if self.main_port_manager:
-                                await self.main_port_manager.send_data_from_unified_port(port_name, data)
-                            else:
-                                self.logger.error(f"No port manager available to forward data from {port_name}")
-                        else:
-                            pass
-                    except Exception as e:
-                        self.logger.error(f"Error handling data from port {port_name}: {e}", exc_info=True)
-
-                # Small delay to prevent busy waiting
-                await asyncio.sleep(0.01)
-
-            except asyncio.CancelledError:
-                self.logger.info("Data handling loop cancelled")
-                break
-            except Exception as e:
-                self.logger.error(f"Error in data handling loop: {e}", exc_info=True)
-                await asyncio.sleep(0.1)
-
     async def run(self) -> None:
-        """Run data handling loop (legacy compatibility shim)."""
-        if not self.is_running:
-            return
-
-        # Start data handling
-        await self._handle_port_data()
+        """Legacy compatibility shim (no-op: data now flows via data_callback)."""
+        pass
 
     # Required abstract methods from BaseGenericAdapter
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
