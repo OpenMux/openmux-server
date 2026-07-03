@@ -984,7 +984,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
         raise web.HTTPBadRequest(text="Missing port name")
     port_name = html.unescape(port_name)
 
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
 
     client_id = f"ws:{id(ws)}"
@@ -1013,9 +1013,18 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
 
     attached = False
     meta_only = False
+
+    def _cleanup_ws() -> None:
+        """Remove this websocket from adapter tracking dicts on early exit."""
+        adapter._clients.pop(client_id, None)
+        adapter._ws_to_client.pop(ws, None)
+        if hasattr(adapter, "_client_meta"):
+            adapter._client_meta.pop(client_id, None)
+
     try:
         if not (adapter.console_manager and hasattr(adapter.console_manager, "connect_client_to_port")):
             await ws.close(code=1011, message=b"Console manager not available")
+            _cleanup_ws()
             return ws
         ok, mode = await adapter.console_manager.connect_client_to_port(client_id, port_name, username)
         if ok:
@@ -1031,9 +1040,11 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                     meta_only = True
                 else:
                     await ws.close(code=4003, message=b"Port attach failed")
+                    _cleanup_ws()
                     return ws
             except Exception:
                 await ws.close(code=4003, message=b"Port attach failed")
+                _cleanup_ws()
                 return ws
         try:
             if hasattr(adapter.console_manager, "register_client_channel"):
@@ -1075,6 +1086,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
             await ws.close(code=1011, message=b"Attach error")
         except Exception:
             pass
+        _cleanup_ws()
         return ws
 
     try:

@@ -167,7 +167,7 @@
     function hideCtrlMenu() { ctrlMenu.style.display = 'none'; }
     ctrlClose.addEventListener('click', hideCtrlMenu);
     ctrlReqRW.addEventListener('click', () => { try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'request_rw' })); } catch (_) {} });
-    ctrlReconnect.addEventListener('click', () => { try { abortSlowPaste('Reconnecting'); if (isConnected()) ws.close(1000, 'Client requested reconnect'); setTimeout(connectSelected, 50); } catch (_) {} });
+    ctrlReconnect.addEventListener('click', () => { try { abortSlowPaste('Reconnecting'); if (isConnected()) ws.close(1000, 'Client requested reconnect'); connectSelected(); } catch (_) {} });
     ctrlDisconnect.addEventListener('click', () => { try { abortSlowPaste('Disconnecting'); if (isConnected()) ws.close(1000, 'Client requested disconnect'); } catch (_) {} hideCtrlMenu(); });
     if (menuToggle) menuToggle.addEventListener('click', () => { if (ctrlMenu.style.display === 'none') showCtrlMenu(); else hideCtrlMenu(); });
 
@@ -464,7 +464,13 @@
     });
     function connectSelected() {
       const port = currentPort(); if (!port) { alert('Select a console'); return; }
-      if (isConnected()) { try { abortSlowPaste('Reconnecting'); ws.close(1000, 'Client requested reconnect'); } catch (_) {} }
+      if (isConnected()) {
+        // Close the existing connection first, then reconnect after a short delay
+        // so the server has time to process the close before the new connection arrives.
+        try { abortSlowPaste('Reconnecting'); ws.close(1000, 'Client requested reconnect'); } catch (_) {}
+        setTimeout(() => connectSelected(), 50);
+        return;
+      }
       const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
       const basePath = "{{ base_path }}";
       const meta = (ports || []).find(p => p.name === port) || {};
@@ -594,6 +600,12 @@
       };
     }
     connectBtn.addEventListener('click', () => { if (isConnected()) { try { abortSlowPaste('Disconnecting'); ws.close(1000, 'Client requested disconnect'); } catch (_) {} } else { connectSelected(); } updateButton(); });
+    // Explicitly close the WebSocket when navigating away so the server can
+    // clean up the session immediately rather than waiting for a TCP timeout.
+    // pagehide fires for both normal navigations and bfcache entry.
+    window.addEventListener('pagehide', () => {
+      try { if (ws && ws.readyState === WebSocket.OPEN) ws.close(1001, 'Page navigated away'); } catch (_) {}
+    });
     loadPorts().then(() => { const qpName = qs.get('console') || qs.get('port'); const qpAuto = truthyParam(qs.get('autoconnect')); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; const legacyAuto = !!qs.get('port') && !qs.has('autoconnect'); if (qpAuto || legacyAuto) { connectSelected(); } } updateButton(); if (qpName) updateSidebarHighlight(qpName); const didAuto = (qpName && (qpAuto || (!!qs.get('port') && !qs.has('autoconnect')))); if (!didAuto) showSplash(); });
 
     // Keyboard shortcut: Ctrl+] then 'r' to request read-write directly from Web UI
