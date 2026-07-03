@@ -198,7 +198,13 @@
       }
     }
     function closeRoMenu() { if (roMenu) roMenu.style.display = 'none'; }
-    if (roIndicator) roIndicator.addEventListener('click', (e) => { e.stopPropagation(); if (roMenu) roMenu.style.display = roMenu.style.display === 'none' ? 'block' : 'none'; });
+    if (roIndicator) roIndicator.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const opening = roMenu && roMenu.style.display === 'none';
+      if (roMenu) roMenu.style.display = opening ? 'block' : 'none';
+      // Refresh holder info from server whenever the dropdown is opened
+      if (opening) { try { ws && isConnected() && ws.send('OMXCTRL ' + JSON.stringify({ type: 'query_rw_holders' })); } catch (_) {} }
+    });
     document.addEventListener('click', () => closeRoMenu());
     const roMenuReqRW = document.getElementById('roMenuReqRW');
     const roMenuForceRW = document.getElementById('roMenuForceRW');
@@ -584,6 +590,10 @@
           try {
             const payload = ev.data.slice('OMXCTRL '.length);
             const msg = JSON.parse(payload);
+            if (msg && msg.type === 'rw_holders') {
+              updateRoMenuInfo(msg.holders);
+              return;
+            }
             if (msg && msg.type === 'client_mode') {
               clientMode = (msg.mode === 'read-write') ? 'read-write' : 'read-only';
               updateCtrlMenuButtons();

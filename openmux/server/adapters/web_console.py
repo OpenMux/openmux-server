@@ -1187,6 +1187,14 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 except Exception:
                                     pass
                                 continue  # handled control; do not forward
+                            if isinstance(req, dict) and req.get("type") == "query_rw_holders":
+                                try:
+                                    holders = _rw_holders_for_port(adapter, port_name)
+                                    resp = {"type": "rw_holders", "holders": holders}
+                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+                                except Exception:
+                                    pass
+                                continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "request_scrollback":
                                 try:
                                     scrollback = adapter.console_manager.port_manager.get_scrollback(port_name)
