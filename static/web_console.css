@@ -160,7 +160,7 @@ body.console .console-body { flex: 1 1 auto; display: flex; flex-direction: colu
 #term { flex: 1 1 auto; width: 100%; height: 100%; }
 
 /* Connection banner for prominent WS disconnect/alerts */
-.banner { position: absolute; top: 40px; left: 0; right: 0; padding: 10px 16px; display: none; z-index: 20; text-align: center; }
+.banner { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 12px 24px; display: none; z-index: 20; text-align: center; border-radius: 4px; white-space: nowrap; }
 .banner.error { background: var(--status-err-bg); color: var(--status-err-text); border-bottom: 1px solid var(--status-err-text); }
 .banner.warn { background: var(--status-warn-bg); color: var(--status-warn-text); border-bottom: 1px solid var(--status-warn-text); }
 

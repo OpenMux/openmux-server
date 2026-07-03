@@ -516,7 +516,7 @@
         if (wsDownTimer) { clearTimeout(wsDownTimer); wsDownTimer = null; }
         if (portDownTimer) { clearTimeout(portDownTimer); portDownTimer = null; }
         wsDownTimer = setTimeout(() => {
-          showBanner('WebSocket disconnected. Click Connect to retry.');
+          showBanner('WebSocket disconnected. Click Reconnect to retry.');
           wsDownTimer = null;
         }, 1000);
         fitTerminal();
