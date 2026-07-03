@@ -250,8 +250,14 @@ class ConsoleManager:
             mode = "read-only"
             self.logger.info(f"Granting read-only access to user {username} for port {port_name}")
 
-        # Add client to port
+        # Add client to port; if read-write is full, fall back to read-only
         success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
+        if not success and mode == "read-write":
+            mode = "read-only"
+            self.logger.info(
+                f"Read-write slot full for {username} on port {port_name}; falling back to read-only"
+            )
+            success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
 
         if success:
             # Map client to port
