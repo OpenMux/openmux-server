@@ -506,14 +506,14 @@ class SerialAdapter(BaseGenericAdapter):
                 value,
                 default,
             )
-            return max(1, int(default))
-        if resolved < 1:
+            return max(0, int(default))
+        if resolved < 0:
             self.logger.warning(
-                "Port %s has max_read_write_users=%s < 1; clamping to 1",
+                "Port %s has max_read_write_users=%s < 0; clamping to 0",
                 port_name or port_config.get("name") or "unknown",
                 resolved,
             )
-            return 1
+            return 0
         if legacy:
             self.logger.info(
                 "Port %s uses deprecated read_write_users; rename to max_read_write_users",

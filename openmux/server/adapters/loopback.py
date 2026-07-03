@@ -409,7 +409,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                     return False
                 if "max_read_write_users" in entry:
                     mru = entry["max_read_write_users"]
-                    if not isinstance(mru, int) or mru < 1:
+                    if not isinstance(mru, int) or mru < 0:
                         return False
             return True
         except Exception:  # justification: malformed config structure; simple False result suffices for validator contract
