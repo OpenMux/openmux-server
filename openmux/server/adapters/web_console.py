@@ -1125,7 +1125,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                             if isinstance(req, dict) and req.get("type") == "force_promote":
                                 ok = False
                                 try:
-                                    # Collect other read-write holders before promoting
+                                    # Collect other read-write holders before any changes
                                     pm = getattr(adapter.console_manager, "port_manager", None)
                                     port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
                                     other_rw_ids = []
@@ -1133,13 +1133,15 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                         for c in list(getattr(port_obj, "connected_clients", [])):
                                             if c.get("client_id") != client_id and c.get("mode") == "read-write":
                                                 other_rw_ids.append(c["client_id"])
+                                    # Demote others FIRST to free the slot, then promote self
+                                    for other_id in other_rw_ids:
+                                        try:
+                                            await adapter.console_manager.demote_client_to_read_only(other_id, port_name)
+                                        except Exception:
+                                            pass
                                     ok = await adapter.console_manager.promote_client_to_read_write(client_id, port_name)
                                     if ok:
                                         for other_id in other_rw_ids:
-                                            try:
-                                                await adapter.console_manager.demote_client_to_read_only(other_id, port_name)
-                                            except Exception:
-                                                pass
                                             try:
                                                 other_ws = adapter._clients.get(other_id)
                                                 if other_ws is not None:

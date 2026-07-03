@@ -730,6 +730,20 @@ class PortManager:
             client_id = getattr(client, "username", str(id(client)))
         port = self.ports[port_name]
 
+        # Enforce the read-write slot limit; skip check if client is already read-write
+        already_rw = any(
+            c["client_id"] == client_id and c.get("mode") == "read-write"
+            for c in port.connected_clients
+        )
+        if not already_rw:
+            current_rw = sum(1 for c in port.connected_clients if c.get("mode") == "read-write")
+            if current_rw >= port.max_read_write_users:
+                self.logger.warning(
+                    f"Cannot promote {client_id}: port {port_name} already at max read-write capacity "
+                    f"({current_rw}/{port.max_read_write_users})"
+                )
+                return False
+
         # Find client and promote
         for client_info in port.connected_clients:
             if client_info["client_id"] == client_id:
