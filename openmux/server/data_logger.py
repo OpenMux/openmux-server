@@ -275,7 +275,7 @@ class DataLogger:
     def _ensure_task(self) -> None:
         """Ensure the background writer task is running."""
         if self._task is None or self._task.done():
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             self._task = loop.create_task(self._writer_loop())
 
     def configure(self, enabled: Optional[bool] = None) -> None:
@@ -399,6 +399,17 @@ class DataLogger:
                 pass
         except Exception:
             self.logger.error("Error recording data event", exc_info=True)
+
+    def invalidate_port_cache(self, port_name: str) -> None:
+        """Invalidate cached direction filters for a port.
+
+        Must be called when a port is removed or re-registered so that
+        updated log_direction config is re-read on the next record call.
+
+        Args:
+            port_name: Logical port name whose cache entry to drop.
+        """
+        self._direction_cache.pop(port_name, None)
 
     def _direction_allowed(self, port_name: str, port_obj: Optional[Any], direction: str) -> bool:
         """Return whether the direction is allowed for the given port.

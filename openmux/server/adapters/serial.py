@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from ..data_logger import DataLogger
 from .base_adapter import AdapterCapability, BaseGenericAdapter
+from .lifecycle import PortState
 
 
 @dataclass
@@ -100,6 +101,11 @@ class SerialPortWrapper:
         # Best-effort callback into PortManager listeners via adapter
         self._meta_notify = meta_notify
 
+        # Lifecycle state (contract: PortState)
+        self.state = PortState.CONFIGURED
+        self.always_buffer: bool = False
+        self.drop_oldest_on_full: bool = False
+
         # Connection state
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
@@ -133,9 +139,11 @@ class SerialPortWrapper:
             return True
 
         self.logger.info(f"Starting serial port {self.config.name} on {self.config.device}")
+        self.state = PortState.CREATING
 
         # Start connection supervisor in background
         self.connection_task = asyncio.create_task(self._connect_loop())
+        self.state = PortState.ACTIVE
         return True
 
     async def stop(self) -> None:
@@ -144,6 +152,7 @@ class SerialPortWrapper:
         Idempotent; safe to call multiple times.
         """
         self.logger.info(f"Stopping serial port {self.config.name}")
+        self.state = PortState.DESTROYING
 
         # Stop auto-reconnection
         self.auto_reconnect = False
@@ -165,6 +174,7 @@ class SerialPortWrapper:
 
         # Close connection
         await self._disconnect()
+        self.state = PortState.DESTROYED
 
     async def _connect_loop(self) -> None:
         """Background supervisor implementing optional auto-reconnect.
@@ -383,9 +393,9 @@ class SerialPortWrapper:
             int: Number of bytes written.
 
         Raises:
-            RuntimeError: If port not connected.
+            RuntimeError: If port not in ACTIVE state.
         """
-        if not self.is_connected or not self.writer:
+        if self.state != PortState.ACTIVE or not self.is_connected or not self.writer:
             raise RuntimeError(f"Serial port {self.config.name} not connected")
 
         try:
@@ -785,6 +795,11 @@ class SerialAdapter(BaseGenericAdapter):
                 "dtr",
                 "rts",
                 "max_read_write_users",
+                "log_file",
+                "log_format",
+                "log_line_template",
+                "log_direction",
+                "log_directions",
             ]
             mat = {k: port_cfg.get(k) for k in keys}
             if mat.get("max_read_write_users") is None and "read_write_users" in port_cfg:
@@ -821,6 +836,15 @@ class SerialAdapter(BaseGenericAdapter):
                         desc = new_by_name[name].get("description")
                         if isinstance(desc, str) and desc and desc != getattr(spw, "description", None):
                             spw.description = desc
+                    except Exception:
+                        pass
+                # Hot-patch non-material attributes for unchanged ports
+                if spw is not None:
+                    try:
+                        for log_key in ("log_file", "log_format", "log_line_template"):
+                            new_val = new_by_name[name].get(log_key)
+                            if getattr(spw.config, log_key, None) != new_val:
+                                setattr(spw.config, log_key, new_val)
                     except Exception:
                         pass
                 unchanged.append(name)

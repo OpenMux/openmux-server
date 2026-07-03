@@ -1061,6 +1061,10 @@ class PortManager:
                 del self.ports[port_name]
                 self.logger.info(f"Unregistered unified port {port_name}")
                 try:
+                    DataLogger.get().invalidate_port_cache(port_name)
+                except Exception:
+                    pass
+                try:
                     self.notify_meta_updated(port_name, {"event": "port_unregistered"})
                 except Exception:
                     pass
