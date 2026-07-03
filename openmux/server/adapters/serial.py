@@ -54,6 +54,7 @@ class SerialPortConfig:
     log_file: Optional[str] = None  # Optional per-port data log file path
     log_format: Optional[str] = None  # 'line' or 'jsonl'
     log_line_template: Optional[str] = None  # For 'line' format
+    scrollback_size: int = 0  # bytes to retain for client-requested scrollback replay; 0 = disabled
 
     def __post_init__(self):
         """Validate configuration values after initialization.
@@ -105,6 +106,7 @@ class SerialPortWrapper:
         self.state = PortState.CONFIGURED
         self.always_buffer: bool = False
         self.drop_oldest_on_full: bool = False
+        self.scrollback_size: int = config.scrollback_size
 
         # Connection state
         self.reader: Optional[asyncio.StreamReader] = None
@@ -565,6 +567,7 @@ class SerialAdapter(BaseGenericAdapter):
                     log_file=port_config.get("log_file"),
                     log_format=port_config.get("log_format"),
                     log_line_template=port_config.get("log_line_template"),
+                    scrollback_size=int(port_config.get("scrollback_size", 0)),
                 )
 
                 # Create wrapper

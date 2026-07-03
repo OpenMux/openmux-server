@@ -97,6 +97,7 @@ class CommandPort:
         self.pty_force_raw = bool(config.get("pty_force_raw", False))
         # Optional: control how Enter/newlines are mapped for PTY input: none|cr|lf|crlf
         self.pty_enter_mode = config.get("pty_enter_mode", "none")
+        self.scrollback_size = int(config.get("scrollback_size", 0))  # bytes; 0 = disabled
 
         # Process lifecycle policy
         # spawn_mode may be one of: "shared_eager" (default), "shared_on_demand".

@@ -871,7 +871,8 @@
             flow_control: 'Hardware/software flow control (none/rtscts/dsrdtr/xonxoff).',
             dtr: 'Initial DTR line state.',
             rts: 'Initial RTS line state.',
-            max_read_write_users: 'Max concurrent read/write users for this port.'
+            max_read_write_users: 'Max concurrent read/write users for this port.',
+            scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.'
           },
           'loopback_ports': {
             name: 'Logical name for the software loopback port.',
@@ -889,7 +890,8 @@
             cwd: 'Working directory for the command.',
             max_read_write_users: 'Max concurrent users.',
             interactive: 'Allocate interactive TTY-like behavior.',
-            always_buffer: 'Buffer early output until first client connects.'
+            always_buffer: 'Buffer early output until first client connects.',
+            scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.'
           },
           'tcp_initiator_ports': {
             name: 'Logical name for this TCP initiator port.',
@@ -1070,7 +1072,8 @@
             {key:'flow_control', label:'Flow', type:'enum', enum:['none','rtscts','dsrdtr','xonxoff']},
             {key:'dtr', label:'DTR', type:'boolean'},
             {key:'rts', label:'RTS', type:'boolean'},
-            {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1}
+            {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
+            {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0}
           ])));
 
           tables['loopback_ports'] = buildTable('loopback_ports', annotateColumnsWithDefaults('loopback_ports', annotateColumnsWithHelp('loopback_ports', [
@@ -1090,7 +1093,8 @@
             {key:'cwd', label:'CWD', type:'string'},
             {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
             {key:'interactive', label:'Interactive', type:'boolean'},
-            {key:'always_buffer', label:'Always buffer', type:'boolean'}
+            {key:'always_buffer', label:'Always buffer', type:'boolean'},
+            {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0}
           ])));
 
           tables['tcp_initiator_ports'] = buildTable('tcp_initiator_ports', annotateColumnsWithDefaults('tcp_initiator_ports', annotateColumnsWithHelp('tcp_initiator_ports', [

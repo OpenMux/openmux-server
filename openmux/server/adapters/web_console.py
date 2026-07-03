@@ -1111,6 +1111,16 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 except Exception:
                                     pass
                                 continue  # handled control; do not forward
+                            if isinstance(req, dict) and req.get("type") == "request_scrollback":
+                                try:
+                                    scrollback = adapter.console_manager.port_manager.get_scrollback(port_name)
+                                    if scrollback:
+                                        await ws.send_bytes(scrollback)
+                                    resp = {"type": "scrollback_done", "bytes": len(scrollback)}
+                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+                                except Exception:
+                                    adapter.logger.debug(f"scrollback send error for {port_name}", exc_info=True)
+                                continue  # handled control; do not forward
                     except Exception:
                         # Fall through to data path if control parsing fails
                         pass

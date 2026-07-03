@@ -489,6 +489,10 @@
         }
         term.write(`[Connected to console: ${origin}::${port}${desc}]\r\n`);
         try { term.write('Use Ctrl+E to access control menu\r\n'); } catch (_) {}
+        // Request scrollback replay unless explicitly disabled with ?scrollback=0
+        if (qs.get('scrollback') !== '0') {
+          try { ws.send('OMXCTRL ' + JSON.stringify({ type: 'request_scrollback' })); } catch (_) {}
+        }
         currentConnectedPort = port;
         // Clear any pending banners when WS opens
         if (wsDownTimer) { clearTimeout(wsDownTimer); wsDownTimer = null; }

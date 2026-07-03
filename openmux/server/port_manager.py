@@ -210,6 +210,10 @@ class PortManager:
                 # Surface adapter-specific buffering hints so the manager can honor them
                 self.always_buffer = bool(getattr(unified_port, "always_buffer", False))
                 self.drop_oldest_on_full = bool(getattr(unified_port, "drop_oldest_on_full", False))
+                # Scrollback ring buffer: retains the last scrollback_size bytes for replay
+                # on client request.  0 = disabled.
+                self.scrollback_size = int(getattr(unified_port, "scrollback_size", 0))
+                self._scrollback = bytearray()
 
             def get_status(self):
                 """Return a status snapshot for this unified wrapper."""
@@ -245,7 +249,6 @@ class PortManager:
             def add_client(self, client: Any) -> None:
                 """Register a client and trigger the adapter hook if present."""
                 if client not in self.connected_clients:
-                    was_empty = len(self.connected_clients) == 0
                     self.connected_clients.append(client)
                     if hasattr(self.unified_port, "on_client_count_changed"):
                         try:
@@ -256,13 +259,6 @@ class PortManager:
                                 f"on_client_count_changed hook error (add_client) for unified port {self.name}",
                                 exc_info=True,
                             )
-                    # On first client, clear any buffered data to ensure empty start
-                    if was_empty:
-                        try:
-                            while True:
-                                self.data_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            pass
 
             def remove_client(self, client: Any) -> None:
                 """Unregister a client and trigger the adapter hook if present."""
@@ -895,6 +891,14 @@ class PortManager:
                 except Exception:
                     self.logger.debug(f"DataLogger record failed for {port_name}", exc_info=True)
 
+                # Append to scrollback ring buffer (always, regardless of clients)
+                scrollback_size = getattr(port, "scrollback_size", 0)
+                if scrollback_size > 0 and hasattr(port, "_scrollback"):
+                    port._scrollback.extend(data)
+                    excess = len(port._scrollback) - scrollback_size
+                    if excess > 0:
+                        del port._scrollback[:excess]
+
                 # Only enqueue when clients are connected (unless told otherwise)
                 if hasattr(port, "data_queue") and hasattr(port, "connected_clients"):
                     client_list = getattr(port, "connected_clients", []) or []
@@ -944,6 +948,21 @@ class PortManager:
                 return False
         self.logger.error(f"Port {port_name} not found for data handling")
         return False
+
+    def get_scrollback(self, port_name: str) -> bytes:
+        """Return the current scrollback buffer contents for a port.
+
+        Args:
+            port_name: Logical port name.
+
+        Returns:
+            Buffered bytes (up to scrollback_size), or empty bytes if the port
+            has no scrollback configured or is not found.
+        """
+        port = self.ports.get(port_name)
+        if port is not None and hasattr(port, "_scrollback") and port._scrollback:
+            return bytes(port._scrollback)
+        return b""
 
     async def send_data(
         self,
