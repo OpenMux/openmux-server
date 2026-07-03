@@ -23,6 +23,7 @@
   <div id="roIndicatorWrap" style="position:relative; display:none">
     <button id="roIndicator" class="ro-indicator" type="button" title="Read-only – click to change access">read-only ▾</button>
     <div id="roMenu" class="ro-menu" style="display:none">
+      <div id="roMenuInfo" class="ro-menu-info" style="display:none"></div>
       <button class="ro-menu-item" id="roMenuReqRW" type="button">Request read-write</button>
       <button class="ro-menu-item" id="roMenuForceRW" type="button">Force take read-write</button>
     </div>
@@ -184,6 +185,18 @@
     const roIndicator = document.getElementById('roIndicator');
     const roIndicatorWrap = document.getElementById('roIndicatorWrap');
     const roMenu = document.getElementById('roMenu');
+    const roMenuInfo = document.getElementById('roMenuInfo');
+    let lastRwHolders = [];
+    function updateRoMenuInfo(holders) {
+      lastRwHolders = Array.isArray(holders) ? holders : [];
+      if (!roMenuInfo) return;
+      if (lastRwHolders.length) {
+        roMenuInfo.textContent = 'Held by: ' + lastRwHolders.join(', ');
+        roMenuInfo.style.display = '';
+      } else {
+        roMenuInfo.style.display = 'none';
+      }
+    }
     function closeRoMenu() { if (roMenu) roMenu.style.display = 'none'; }
     if (roIndicator) roIndicator.addEventListener('click', (e) => { e.stopPropagation(); if (roMenu) roMenu.style.display = roMenu.style.display === 'none' ? 'block' : 'none'; });
     document.addEventListener('click', () => closeRoMenu());
@@ -574,8 +587,10 @@
             if (msg && msg.type === 'client_mode') {
               clientMode = (msg.mode === 'read-write') ? 'read-write' : 'read-only';
               updateCtrlMenuButtons();
+              if (Array.isArray(msg.rw_holders)) updateRoMenuInfo(msg.rw_holders);
               if (msg.ok === false && msg.reason !== 'demoted') {
-                try { term.write('\r\n[read-write request denied – another user holds it; use Force take if needed]\r\n'); } catch (_) {}
+                const who = (lastRwHolders.length ? ' (held by: ' + lastRwHolders.join(', ') + ')' : '');
+                try { term.write('\r\n[read-write request denied' + who + ' – use Force take if needed]\r\n'); } catch (_) {}
               }
               if (msg.reason === 'demoted') {
                 try { term.write('\r\n[Your read-write access was taken by another user]\r\n'); } catch (_) {}

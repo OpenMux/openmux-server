@@ -976,6 +976,28 @@ async def handle_readyz(request: web.Request) -> web.Response:
     return web.Response(status=503, text="not_ready:" + ",".join(reasons) + "\n", content_type="text/plain")
 
 
+def _rw_holders_for_port(adapter: Any, port_name: str) -> list:
+    """Return list of 'username@ip' strings for all read-write clients on a port."""
+    holders: list = []
+    try:
+        pm = getattr(getattr(adapter, "console_manager", None), "port_manager", None)
+        port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
+        if port_obj is not None:
+            for c in getattr(port_obj, "connected_clients", []):
+                if c.get("mode") == "read-write":
+                    cid = c.get("client_id", "")
+                    username = c.get("username", "unknown")
+                    ip = "unknown"
+                    try:
+                        ip = getattr(adapter, "_client_meta", {}).get(cid, {}).get("ip", "unknown")
+                    except Exception:
+                        pass
+                    holders.append(f"{username}@{ip}")
+    except Exception:
+        pass
+    return holders
+
+
 async def handle_ws(request: web.Request) -> web.StreamResponse:
     adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username") or "web"
@@ -1064,6 +1086,10 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                     "ok": True,
                     "mode": granted_mode,
                 }
+                if granted_mode == "read-only":
+                    holders = _rw_holders_for_port(adapter, port_name)
+                    if holders:
+                        payload["rw_holders"] = holders
                 await ws.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
             except Exception:
                 pass
@@ -1106,6 +1132,10 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                     ok = False
                                 # Reply with a client_mode control frame so UI can update
                                 resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
+                                if not ok:
+                                    holders = _rw_holders_for_port(adapter, port_name)
+                                    if holders:
+                                        resp["rw_holders"] = holders
                                 try:
                                     await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
