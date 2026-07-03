@@ -20,7 +20,13 @@
     <select id="portSelect" title="Select a port to connect"></select>
     <button class="btn" id="connect">Connect</button>
   </div>
-  <span id="roIndicator" class="ro-indicator" style="display:none">read-only</span>
+  <div id="roIndicatorWrap" style="position:relative; display:none">
+    <button id="roIndicator" class="ro-indicator" type="button" title="Read-only – click to change access">read-only ▾</button>
+    <div id="roMenu" class="ro-menu" style="display:none">
+      <button class="ro-menu-item" id="roMenuReqRW" type="button">Request read-write</button>
+      <button class="ro-menu-item" id="roMenuForceRW" type="button">Force take read-write</button>
+    </div>
+  </div>
   <button class="btn" id="menuToggle" type="button" title="Open control menu">Menu</button>
   <button class="btn" id="infoToggle" type="button" title="Show port info">Info</button>
   <button class="btn" id="logsButton" type="button" title="Open logs in new window">Show Logs</button>
@@ -176,12 +182,21 @@
     const ctrlReleaseRW = document.getElementById('ctrlReleaseRW');
     const ctrlForceTake = document.getElementById('ctrlForceTake');
     const roIndicator = document.getElementById('roIndicator');
+    const roIndicatorWrap = document.getElementById('roIndicatorWrap');
+    const roMenu = document.getElementById('roMenu');
+    function closeRoMenu() { if (roMenu) roMenu.style.display = 'none'; }
+    if (roIndicator) roIndicator.addEventListener('click', (e) => { e.stopPropagation(); if (roMenu) roMenu.style.display = roMenu.style.display === 'none' ? 'block' : 'none'; });
+    document.addEventListener('click', () => closeRoMenu());
+    const roMenuReqRW = document.getElementById('roMenuReqRW');
+    const roMenuForceRW = document.getElementById('roMenuForceRW');
+    if (roMenuReqRW) roMenuReqRW.addEventListener('click', () => { closeRoMenu(); try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'request_rw' })); } catch (_) {} });
+    if (roMenuForceRW) roMenuForceRW.addEventListener('click', () => { closeRoMenu(); try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'force_promote' })); } catch (_) {} });
     function updateCtrlMenuButtons() {
       const isRW = (clientMode === 'read-write');
       if (ctrlReqRW) ctrlReqRW.style.display = isRW ? 'none' : '';
       if (ctrlForceTake) ctrlForceTake.style.display = isRW ? 'none' : '';
       if (ctrlReleaseRW) ctrlReleaseRW.style.display = isRW ? '' : 'none';
-      if (roIndicator) roIndicator.style.display = isRW ? 'none' : '';
+      if (roIndicatorWrap) roIndicatorWrap.style.display = isRW ? 'none' : '';
       document.body.classList.toggle('mode-readonly', !isRW);
     }
     if (ctrlReleaseRW) ctrlReleaseRW.addEventListener('click', () => { try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'release_rw' })); } catch (_) {} });
@@ -523,7 +538,7 @@
         // Ensure any ongoing slow paste is stopped
         try { abortSlowPaste('Disconnected'); } catch (_) {}
         // Clear read-only indicator when disconnected
-        clientMode = 'read-only'; document.body.classList.remove('mode-readonly'); if (roIndicator) roIndicator.style.display = 'none';
+        clientMode = 'read-only'; document.body.classList.remove('mode-readonly'); if (roIndicatorWrap) roIndicatorWrap.style.display = 'none'; closeRoMenu();
         const meta = (ports || []).find(p => p.name === currentConnectedPort) || {};
         const desc = meta.description ? ` - ${meta.description}` : '';
         const origin = meta.origin_server_id ? String(meta.origin_server_id) : 'local';
