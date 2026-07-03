@@ -606,10 +606,15 @@
     connectBtn.addEventListener('click', () => { if (isConnected()) { try { abortSlowPaste('Disconnecting'); ws.close(1000, 'Client requested disconnect'); } catch (_) {} } else { connectSelected(); } updateButton(); });
     // Explicitly close the WebSocket when navigating away so the server can
     // clean up the session immediately rather than waiting for a TCP timeout.
-    // pagehide fires for both normal navigations and bfcache entry.
-    window.addEventListener('pagehide', () => {
-      try { if (ws && ws.readyState === WebSocket.OPEN) ws.close(1001, 'Page navigated away'); } catch (_) {}
-    });
+    // beforeunload fires while the page is still fully active, giving Chrome the
+    // best chance to actually transmit the CLOSE frame before tearing down the
+    // connection.  pagehide is kept as a secondary safety net (fires on bfcache
+    // entry and back/forward navigations where beforeunload may not fire).
+    function _closeWsOnExit() {
+      try { if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'Page navigated away'); } catch (_) {}
+    }
+    window.addEventListener('beforeunload', _closeWsOnExit);
+    window.addEventListener('pagehide', _closeWsOnExit);
     loadPorts().then(() => { const qpName = qs.get('console') || qs.get('port'); const qpAuto = truthyParam(qs.get('autoconnect')); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; const legacyAuto = !!qs.get('port') && !qs.has('autoconnect'); if (qpAuto || legacyAuto) { connectSelected(); } } updateButton(); if (qpName) updateSidebarHighlight(qpName); const didAuto = (qpName && (qpAuto || (!!qs.get('port') && !qs.has('autoconnect')))); if (!didAuto) showSplash(); });
 
     // Keyboard shortcut: Ctrl+] then 'r' to request read-write directly from Web UI
