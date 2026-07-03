@@ -192,10 +192,10 @@
       if (!roMenuInfo) return;
       if (lastRwHolders.length) {
         roMenuInfo.textContent = 'Held by: ' + lastRwHolders.join(', ');
-        roMenuInfo.style.display = '';
       } else {
-        roMenuInfo.style.display = 'none';
+        roMenuInfo.textContent = 'No current read-write holder';
       }
+      roMenuInfo.style.display = '';
     }
     function closeRoMenu() { if (roMenu) roMenu.style.display = 'none'; }
     if (roIndicator) roIndicator.addEventListener('click', (e) => {
