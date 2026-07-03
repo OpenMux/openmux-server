@@ -187,10 +187,14 @@
     const roMenu = document.getElementById('roMenu');
     const roMenuInfo = document.getElementById('roMenuInfo');
     let lastRwHolders = [];
-    function updateRoMenuInfo(holders) {
+    let lastMaxRwUsers = null;
+    function updateRoMenuInfo(holders, maxRwUsers) {
       lastRwHolders = Array.isArray(holders) ? holders : [];
+      if (maxRwUsers !== undefined) lastMaxRwUsers = maxRwUsers;
       if (!roMenuInfo) return;
-      if (lastRwHolders.length) {
+      if (lastMaxRwUsers === 0) {
+        roMenuInfo.textContent = 'Read-write is disabled on this port';
+      } else if (lastRwHolders.length) {
         roMenuInfo.textContent = 'Held by: ' + lastRwHolders.join(', ');
       } else {
         roMenuInfo.textContent = 'No current read-write holder';
@@ -591,16 +595,20 @@
             const payload = ev.data.slice('OMXCTRL '.length);
             const msg = JSON.parse(payload);
             if (msg && msg.type === 'rw_holders') {
-              updateRoMenuInfo(msg.holders);
+              updateRoMenuInfo(msg.holders, msg.max_rw_users);
               return;
             }
             if (msg && msg.type === 'client_mode') {
               clientMode = (msg.mode === 'read-write') ? 'read-write' : 'read-only';
               updateCtrlMenuButtons();
-              if (Array.isArray(msg.rw_holders)) updateRoMenuInfo(msg.rw_holders);
+              if (Array.isArray(msg.rw_holders) || msg.max_rw_users !== undefined) updateRoMenuInfo(msg.rw_holders || [], msg.max_rw_users);
               if (msg.ok === false && msg.reason !== 'demoted') {
-                const who = (lastRwHolders.length ? ' (held by: ' + lastRwHolders.join(', ') + ')' : '');
-                try { term.write('\r\n[read-write request denied' + who + ' – use Force take if needed]\r\n'); } catch (_) {}
+                if (msg.max_rw_users === 0) {
+                  try { term.write('\r\n[read-write is not available on this port – configured with 0 read-write users]\r\n'); } catch (_) {}
+                } else {
+                  const who = (lastRwHolders.length ? ' (held by: ' + lastRwHolders.join(', ') + ')' : '');
+                  try { term.write('\r\n[read-write request denied' + who + ' – use Force take if needed]\r\n'); } catch (_) {}
+                }
               }
               if (msg.reason === 'demoted') {
                 try { term.write('\r\n[Your read-write access was taken by another user]\r\n'); } catch (_) {}

@@ -998,6 +998,18 @@ def _rw_holders_for_port(adapter: Any, port_name: str) -> list:
     return holders
 
 
+def _max_rw_users_for_port(adapter: Any, port_name: str) -> Optional[int]:
+    """Return max_read_write_users for a port, or None if not determinable."""
+    try:
+        pm = getattr(getattr(adapter, "console_manager", None), "port_manager", None)
+        port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
+        if port_obj is not None:
+            return int(getattr(port_obj, "max_read_write_users", 1))
+    except Exception:
+        pass
+    return None
+
+
 async def handle_ws(request: web.Request) -> web.StreamResponse:
     adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username") or "web"
@@ -1090,6 +1102,9 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                     holders = _rw_holders_for_port(adapter, port_name)
                     if holders:
                         payload["rw_holders"] = holders
+                    max_rw = _max_rw_users_for_port(adapter, port_name)
+                    if max_rw is not None:
+                        payload["max_rw_users"] = max_rw
                 await ws.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
             except Exception:
                 pass
@@ -1136,6 +1151,9 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                     holders = _rw_holders_for_port(adapter, port_name)
                                     if holders:
                                         resp["rw_holders"] = holders
+                                    max_rw = _max_rw_users_for_port(adapter, port_name)
+                                    if max_rw is not None:
+                                        resp["max_rw_users"] = max_rw
                                 try:
                                     await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
@@ -1182,6 +1200,10 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 except Exception:
                                     ok = False
                                 resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
+                                if not ok:
+                                    max_rw = _max_rw_users_for_port(adapter, port_name)
+                                    if max_rw is not None:
+                                        resp["max_rw_users"] = max_rw
                                 try:
                                     await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
@@ -1191,6 +1213,9 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 try:
                                     holders = _rw_holders_for_port(adapter, port_name)
                                     resp = {"type": "rw_holders", "holders": holders}
+                                    max_rw = _max_rw_users_for_port(adapter, port_name)
+                                    if max_rw is not None:
+                                        resp["max_rw_users"] = max_rw
                                     await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
                                     pass
