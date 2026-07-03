@@ -537,10 +537,16 @@ class PortManager:
                     exc_info=True,
                 )
 
-            # Check if port has room for more clients
-            if len(port.connected_clients) >= port.max_read_write_users:
-                self.logger.warning(f"Port {port_name} is at maximum capacity")
-                return False
+            # Enforce read-write slot limit; read-only clients are always allowed through
+            if mode == "read-write":
+                current_rw = sum(
+                    1 for c in port.connected_clients if c.get("mode") == "read-write"
+                )
+                if current_rw >= port.max_read_write_users:
+                    self.logger.warning(
+                        f"Port {port_name} is at maximum read-write capacity ({current_rw}/{port.max_read_write_users})"
+                    )
+                    return False
 
             # Add client (the client object will be provided by the console manager)
             client_info = {
@@ -741,6 +747,41 @@ class PortManager:
                 except Exception:
                     self.logger.debug(
                         f"DataLogger lifecycle record failed for {port_name} (client_promoted)",
+                        exc_info=True,
+                    )
+                return True
+
+        return False
+
+    async def demote_client(self, port_name: str, client_id: str) -> bool:
+        """Demote a client's mode to read-only.
+
+        Args:
+            port_name: Port on which to demote the client.
+            client_id: Identifier of the client to demote.
+
+        Returns:
+            True if the client's mode was updated to read-only; otherwise False.
+        """
+        if port_name not in self.ports:
+            return False
+
+        port = self.ports[port_name]
+        for client_info in port.connected_clients:
+            if client_info["client_id"] == client_id:
+                client_info["mode"] = "read-only"
+                self.logger.info(f"Demoted client {client_id} to read-only mode on port {port_name}")
+                try:
+                    DataLogger.get().record_meta(
+                        port_name=port_name,
+                        event="client_demoted",
+                        client_id=str(client_id),
+                        meta={"mode": "read-only"},
+                        port_obj=port,
+                    )
+                except Exception:
+                    self.logger.debug(
+                        f"DataLogger lifecycle record failed for {port_name} (client_demoted)",
                         exc_info=True,
                     )
                 return True

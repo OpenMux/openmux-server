@@ -20,6 +20,7 @@
     <select id="portSelect" title="Select a port to connect"></select>
     <button class="btn" id="connect">Connect</button>
   </div>
+  <span id="roIndicator" class="ro-indicator" style="display:none">read-only</span>
   <button class="btn" id="menuToggle" type="button" title="Open control menu">Menu</button>
   <button class="btn" id="infoToggle" type="button" title="Show port info">Info</button>
   <button class="btn" id="logsButton" type="button" title="Open logs in new window">Show Logs</button>
@@ -40,6 +41,8 @@
     <div class="mini" style="margin-top:8px;">
       <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
         <button class="btn" id="ctrlReqRW" type="button">Request read-write access (r)</button>
+        <button class="btn" id="ctrlForceTake" type="button" style="display:none">Force take read-write</button>
+        <button class="btn" id="ctrlReleaseRW" type="button" style="display:none">Release read-write</button>
         <button class="btn" id="ctrlReconnect" type="button">Disconnect and reconnect (d)</button>
         <button class="btn" id="ctrlDisconnect" type="button">Disconnect (q)</button>
       </div>
@@ -170,6 +173,19 @@
     ctrlReconnect.addEventListener('click', () => { try { abortSlowPaste('Reconnecting'); if (isConnected()) ws.close(1000, 'Client requested reconnect'); connectSelected(); } catch (_) {} });
     ctrlDisconnect.addEventListener('click', () => { try { abortSlowPaste('Disconnecting'); if (isConnected()) ws.close(1000, 'Client requested disconnect'); } catch (_) {} hideCtrlMenu(); });
     if (menuToggle) menuToggle.addEventListener('click', () => { if (ctrlMenu.style.display === 'none') showCtrlMenu(); else hideCtrlMenu(); });
+    const ctrlReleaseRW = document.getElementById('ctrlReleaseRW');
+    const ctrlForceTake = document.getElementById('ctrlForceTake');
+    const roIndicator = document.getElementById('roIndicator');
+    function updateCtrlMenuButtons() {
+      const isRW = (clientMode === 'read-write');
+      if (ctrlReqRW) ctrlReqRW.style.display = isRW ? 'none' : '';
+      if (ctrlForceTake) ctrlForceTake.style.display = isRW ? 'none' : '';
+      if (ctrlReleaseRW) ctrlReleaseRW.style.display = isRW ? '' : 'none';
+      if (roIndicator) roIndicator.style.display = isRW ? 'none' : '';
+      document.body.classList.toggle('mode-readonly', !isRW);
+    }
+    if (ctrlReleaseRW) ctrlReleaseRW.addEventListener('click', () => { try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'release_rw' })); } catch (_) {} });
+    if (ctrlForceTake) ctrlForceTake.addEventListener('click', () => { try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'force_promote' })); } catch (_) {} });
 
     // Slow paste UI elements and state
     const slowPasteText = document.getElementById('slowPasteText');
@@ -506,6 +522,8 @@
       ws.onclose = (ev) => {
         // Ensure any ongoing slow paste is stopped
         try { abortSlowPaste('Disconnected'); } catch (_) {}
+        // Clear read-only indicator when disconnected
+        clientMode = 'read-only'; document.body.classList.remove('mode-readonly'); if (roIndicator) roIndicator.style.display = 'none';
         const meta = (ports || []).find(p => p.name === currentConnectedPort) || {};
         const desc = meta.description ? ` - ${meta.description}` : '';
         const origin = meta.origin_server_id ? String(meta.origin_server_id) : 'local';
@@ -540,6 +558,13 @@
             const msg = JSON.parse(payload);
             if (msg && msg.type === 'client_mode') {
               clientMode = (msg.mode === 'read-write') ? 'read-write' : 'read-only';
+              updateCtrlMenuButtons();
+              if (msg.ok === false && msg.reason !== 'demoted') {
+                try { term.write('\r\n[read-write request denied – another user holds it; use Force take if needed]\r\n'); } catch (_) {}
+              }
+              if (msg.reason === 'demoted') {
+                try { term.write('\r\n[Your read-write access was taken by another user]\r\n'); } catch (_) {}
+              }
               if (infoOverlay.style.display !== 'none') {
                 renderInfo(ports.find(x => x.name === currentPort()) || null);
               }

@@ -169,6 +169,8 @@ body.ws-down header.site { background: #2a1515; border-bottom-color: #6b2f2f; }
 /* status tag removed from header */
 body.port-down header.site { background: #2a2015; border-bottom-color: #6b5a2f; }
 /* status tag removed from header */
+body.mode-readonly header.site { background: #2a2200; border-bottom-color: #6b5a00; }
+.ro-indicator { display:inline-block; padding: 2px 8px; border-radius: 10px; background: #6b5a00; color: #f5d060; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
 
 /* --- Federation/Multipath hierarchical view --- */
 .peer-card { margin: 8px 0; }

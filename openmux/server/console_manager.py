@@ -312,6 +312,26 @@ class ConsoleManager:
 
         return success
 
+    async def demote_client_to_read_only(self, client_id: str, port_name: str) -> bool:
+        """Demote a client's access to read-only on a port.
+
+        Args:
+            client_id: Identifier of the client to demote.
+            port_name: Port on which to demote the client.
+
+        Returns:
+            bool: True if demotion succeeded.
+        """
+        if client_id not in self.client_port_map or self.client_port_map[client_id] != port_name:
+            return False
+
+        success = await self.port_manager.demote_client(port_name, client_id)
+
+        if success:
+            self.logger.info(f"Client {client_id} demoted to read-only on port {port_name}")
+
+        return success
+
     # Note: legacy connect_port/disconnect_port removed (unified adapters own lifecycle)
 
     async def write_to_port(self, port_name: str, data: bytes, client_id: str) -> bool:

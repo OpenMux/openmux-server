@@ -1111,6 +1111,50 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 except Exception:
                                     pass
                                 continue  # handled control; do not forward
+                            if isinstance(req, dict) and req.get("type") == "release_rw":
+                                try:
+                                    await adapter.console_manager.demote_client_to_read_only(client_id, port_name)
+                                except Exception:
+                                    pass
+                                resp = {"type": "client_mode", "ok": True, "mode": "read-only"}
+                                try:
+                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+                                except Exception:
+                                    pass
+                                continue  # handled control; do not forward
+                            if isinstance(req, dict) and req.get("type") == "force_promote":
+                                ok = False
+                                try:
+                                    # Collect other read-write holders before promoting
+                                    pm = getattr(adapter.console_manager, "port_manager", None)
+                                    port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
+                                    other_rw_ids = []
+                                    if port_obj is not None:
+                                        for c in list(getattr(port_obj, "connected_clients", [])):
+                                            if c.get("client_id") != client_id and c.get("mode") == "read-write":
+                                                other_rw_ids.append(c["client_id"])
+                                    ok = await adapter.console_manager.promote_client_to_read_write(client_id, port_name)
+                                    if ok:
+                                        for other_id in other_rw_ids:
+                                            try:
+                                                await adapter.console_manager.demote_client_to_read_only(other_id, port_name)
+                                            except Exception:
+                                                pass
+                                            try:
+                                                other_ws = adapter._clients.get(other_id)
+                                                if other_ws is not None:
+                                                    demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
+                                                    await other_ws.send_str("OMXCTRL " + json.dumps(demotion, separators=(",", ":")))
+                                            except Exception:
+                                                pass
+                                except Exception:
+                                    ok = False
+                                resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
+                                try:
+                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+                                except Exception:
+                                    pass
+                                continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "request_scrollback":
                                 try:
                                     scrollback = adapter.console_manager.port_manager.get_scrollback(port_name)
