@@ -718,9 +718,9 @@ class SerialAdapter(BaseGenericAdapter):
             return False
 
         try:
-            self.logger.info(f"Writing {len(data)} bytes to serial port {port_name}: {data.decode('utf-8', errors='replace')}")
+            self.logger.debug(f"Writing {len(data)} bytes to serial port {port_name}: {data.decode('utf-8', errors='replace')}")
             bytes_written = await port_wrapper.write_data(data)
-            self.logger.info(f"Successfully wrote {bytes_written} bytes to serial port {port_name}")
+            self.logger.debug(f"Successfully wrote {bytes_written} bytes to serial port {port_name}")
             return bytes_written > 0
         except Exception as e:
             self.logger.error(f"Failed to write to serial port {port_name}: {e}", exc_info=True)
