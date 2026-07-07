@@ -202,18 +202,28 @@ async def test_client_add_remove_promote_and_mode(monkeypatch):
 
     ok1 = await pm.add_client_to_port("pc", client_id="u1", username="alice", mode="read-only")
     assert ok1 is True
-    # capacity reached
-    ok2 = await pm.add_client_to_port("pc", client_id="u2", username="bob", mode="read-only")
+    # read-write client fills the single rw slot
+    ok_rw = await pm.add_client_to_port("pc", client_id="u_rw", username="rwuser", mode="read-write")
+    assert ok_rw is True
+    # another read-write is rejected (rw slot at capacity)
+    ok2 = await pm.add_client_to_port("pc", client_id="u2", username="bob", mode="read-write")
     assert ok2 is False
+    # read-only is still admitted regardless of rw capacity
+    ok_ro = await pm.add_client_to_port("pc", client_id="u_ro", username="carol", mode="read-only")
+    assert ok_ro is True
 
-    # promote
+    # promote u1 fails while the single rw slot is occupied
     class C:
         username = "u1"
 
+    assert await pm.promote_client("pc", C()) is False
+
+    # free the rw slot, then promote succeeds
+    assert await pm.remove_client_from_port("pc", "u_rw") is True
     assert await pm.promote_client("pc", C()) is True
     assert pm.get_client_mode("u1", "pc") == "read-write"
 
-    # remove
+    # remove u1
     assert await pm.remove_client_from_port("pc", "u1") is True
     assert pm.get_client_mode("u1", "pc") is None
 

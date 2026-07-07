@@ -46,23 +46,26 @@ async def test_unified_port_lifecycle_and_io(monkeypatch):
     pm.set_unified_adapters([adapter])
     assert await adapter.start() is True
 
-    # Add clients up to capacity and test capacity enforcement
+    # Add clients and verify read-only does not consume a rw slot
     ok1 = await pm.add_client_to_port("p1", client_id="c1", username="u1", mode="read-only")
     ok2 = await pm.add_client_to_port("p1", client_id="c2", username="u2", mode="read-write")
     assert ok1 is True and ok2 is True
-    # Third client exceeds max_read_write_users=2
+    # read-only clients do not count against max_read_write_users; always admitted
     ok3 = await pm.add_client_to_port("p1", client_id="c3", username="u3", mode="read-only")
-    assert ok3 is False
+    assert ok3 is True
 
-    # Promote a client to read-write
+    # Promote c1 to read-write (one rw slot still free; max_read_write_users=2)
     class Client:  # console compatibility path
         username = "c1"
 
     assert await pm.promote_client("p1", Client()) is True
     assert pm.get_client_mode("c1", "p1") == "read-write"
 
-    # Write should be allowed only for read-write client
-    # read-only client should be blocked
+    # Both rw slots now occupied; a new read-write client is rejected
+    ok4 = await pm.add_client_to_port("p1", client_id="c4", username="u4", mode="read-write")
+    assert ok4 is False
+
+    # Write should be allowed only for connected read-write clients
     blocked = await pm.write_to_port("p1", b"hello\n", client_id="c2X")
     assert blocked is False
     allowed = await pm.write_to_port("p1", b"hello\n", client_id="c1")
