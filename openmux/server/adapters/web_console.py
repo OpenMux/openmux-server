@@ -47,79 +47,7 @@ except Exception:  # pragma: no cover
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 
-# Default inline HTML is deprecated; we now render a Jinja2 template.
-# Keep a minimal fallback in case template rendering fails catastrophically.
-_HTML_FALLBACK = b"""<!doctype html>
-<html>
-  <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>OpenMux Web Console</title>
-                                <link rel=\"stylesheet\" href=\"%BASE%/static/xterm/css/xterm.css\" />
-                                <link rel=\"stylesheet\" href=\"%BASE%/static/web_console.css\" />
-  </head>
-  <body>
-        <header class=\"toolbar\">
-      Port: <input id=\"port\" placeholder=\"loopback1\"/>
-      <button id=\"connect\">Connect</button>
-      <span id=\"status\"></span>
-        </header>
-    <div id=\"term\"></div>
-                        <script src=\"%BASE%/static/xterm/lib/xterm.js\"></script>
-            <script>
-                const term = new Terminal({ convertEol: true, theme: { background: '#111111' } });
-                term.open(document.getElementById('term'));
-                const qs = new URLSearchParams(window.location.search);
-                const portInput = document.getElementById('port');
-                const statusEl = document.getElementById('status');
-                const defaultPort = qs.get('port') || 'loopback1';
-                portInput.value = defaultPort;
-                let ws;
-
-                // Send keystrokes to server; ensure single handler
-                term.onData((data) => { try { ws && ws.send(data); } catch (e) {} });
-
-                function connect() {
-                    const port = portInput.value.trim();
-                    if (!port) { alert('Enter a port name'); return; }
-                    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-                    const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
-                        const basePathDefault = '%BASE%';
-                        const m = document.querySelector('meta[name=\"omx-base-path\"]');
-                        const basePath = ((m && m.getAttribute('content')) || basePathDefault || '');
-                    const server = qs.get('server');
-                    const wsPath = server ? `/ws/${encodeURIComponent(server)}/${encodeURIComponent(port)}` : `/ws/${encodeURIComponent(port)}`;
-                    const url = `${proto}://${location.host}${basePath}${wsPath}`;
-                    ws = new WebSocket(url);
-                    ws.binaryType = 'arraybuffer';
-                    ws.onopen = () => { statusEl.textContent = `Connected to ${(server||'local')}::${port}`; term.focus(); };
-                    ws.onclose = () => { statusEl.textContent = 'Disconnected'; };
-                    ws.onerror = (e) => { statusEl.textContent = 'Error (see console)'; console.error(e); };
-                    ws.onmessage = (ev) => {
-                        if (ev.data instanceof ArrayBuffer) {
-                            const dec = new TextDecoder('utf-8');
-                            term.write(dec.decode(new Uint8Array(ev.data)));
-                        } else {
-                            term.write(String(ev.data));
-                        }
-                    };
-                }
-                document.getElementById('connect').onclick = connect;
-                // auto-connect on load
-                connect();
-            </script>
-  </body>
-  </html>"""
-
 _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-9;?]*[ -/]*[@-~]")
-
-def _fallback_with_base(raw: bytes, base_path: str) -> bytes:
-    try:
-        bp = base_path or ""
-        return raw.replace(b"%BASE%", bp.encode("utf-8"))
-    except Exception:
-        return raw
-
 
 _PORT_SORT_KEYS = {"name", "description", "device", "origin", "status", "clients"}
 
@@ -268,82 +196,6 @@ def _sanitize_log_line(line: str) -> str:
         return cleaned
     except Exception:
         return line.replace("\r", "")
-
-
-def _render_login_fallback(
-    adapter,
-    error: bool = False,
-    next_url: Optional[str] = None,
-    message: Optional[str] = None,
-) -> bytes:
-    """Module-level fallback login page renderer used when adapter method is unavailable.
-
-    This is base-path aware and will scope static links and form action to the
-    configured/effective base path when available.
-    """
-    try:
-        realm = html.escape(str(getattr(adapter, "realm", "OpenMux")))
-    except Exception:
-        realm = "OpenMux"
-
-    try:
-        msg_text = str(message) if message is not None else None
-    except Exception:
-        msg_text = message
-    if msg_text:
-        msg = f"<p style='color:#f66'>{html.escape(msg_text)}</p>"
-    elif error:
-        msg = "<p style='color:#f66'>Invalid username or password</p>"
-    else:
-        msg = ""
-
-    try:
-        nxt = html.escape(str(next_url or "/"))
-    except Exception:
-        nxt = "/"
-
-    # Logo abbreviation from realm (first two initials)
-    try:
-        parts = [p for p in realm.split() if p]
-        abbr = (parts[0][0] + (parts[1][0] if len(parts) > 1 else "")).upper()
-    except Exception:
-        abbr = "OM"
-
-    # Determine base path without request context (uses configured base_path)
-    try:
-        bp = str(getattr(adapter, "_effective_base_path", lambda _req=None: "")())
-    except Exception:
-        bp = ""
-
-    body = f"""<!doctype html>
-<html>
-  <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>{realm} - Login</title>
-    <link rel=\"stylesheet\" href=\"{bp}/static/web_console.css\" />
-  </head>
-  <body class=\"login\">
-    <form class=\"card\" method=\"POST\" action=\"{bp}/login\"> 
-      <div class=\"brand\"> 
-        <div class=\"logo\">{abbr}</div> 
-        <div> 
-          <div class=\"title\">{realm}</div> 
-          <div class=\"subtitle\">Web Console</div> 
-        </div> 
-      </div> 
-      {msg}
-      <h1>Sign in to {realm}</h1>
-      <input type=\"hidden\" name=\"next\" value=\"{nxt}\" />
-      <input type=\"text\" name=\"username\" placeholder=\"Username\" autocomplete=\"username\" required />
-      <input type=\"password\" name=\"password\" placeholder=\"Password\" autocomplete=\"current-password\" required />
-      <button class=\"btn\" type=\"submit\">Sign in</button>
-      <div class=\"hint\">After login you'll be redirected back.</div>
-    </form>
-  </body>
-</html>
-"""
-    return body.encode("utf-8")
 
 
 # --- aiohttp middleware & route handlers (module-level) ---
@@ -503,21 +355,10 @@ async def _render_status_page(
         status_payload["sort_dir"] = sort_dir
         status_payload["sort_query"] = preserved_query
         status_payload["status_path"] = request.rel_url.path or default_status_path
-        if hasattr(adapter, "_render_status"):
-            body = adapter._render_status(status_payload, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
-        else:
-            try:
-                bp = adapter._effective_base_path(request)
-            except Exception:
-                bp = ""
-            body = _fallback_with_base(_HTML_FALLBACK, bp)
+        body = adapter._render_status(status_payload, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
     except Exception as exc:
-        adapter.logger.error(f"Status page render failed, using fallback: {exc}")
-        try:
-            bp = adapter._effective_base_path(request)
-        except Exception:
-            bp = ""
-        body = _fallback_with_base(_HTML_FALLBACK, bp)
+        adapter.logger.error(f"Status page render failed: {exc}")
+        raise web.HTTPInternalServerError(text="Failed to render status page.\n")
     return web.Response(body=body, content_type="text/html")
 
 
@@ -563,21 +404,10 @@ async def handle_console(request: web.Request) -> web.Response:
         ports = adapter._get_ports_snapshot()
         current_port = request.query.get("port") or request.query.get("console")
 
-        if hasattr(adapter, "_render_console"):
-            body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
-        else:
-            try:
-                bp = adapter._effective_base_path(request)
-            except Exception:
-                bp = ""
-            body = _fallback_with_base(_HTML_FALLBACK, bp)
-    except Exception as re:
-        adapter.logger.error(f"Console template render failed, using fallback: {re}")
-        try:
-            bp = adapter._effective_base_path(request)
-        except Exception:
-            bp = ""
-        body = _fallback_with_base(_HTML_FALLBACK, bp)
+        body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
+    except Exception as exc:
+        adapter.logger.error(f"Console render failed: {exc}")
+        raise web.HTTPInternalServerError(text="Failed to render console page.\n")
     return web.Response(body=body, content_type="text/html")
 
 
@@ -688,10 +518,7 @@ async def handle_login(request: web.Request) -> web.Response:
         renderer = getattr(adapter, "_render_login", None)
 
         def _render_login_response(error: bool, message: Optional[str] = None) -> web.Response:
-            if callable(renderer):
-                body = renderer(error=error, next_url=safe_next, message=message)
-            else:
-                body = _render_login_fallback(adapter, error, safe_next, message)
+            body = renderer(error=error, next_url=safe_next, message=message)
             return web.Response(body=body, content_type="text/html")
 
         throttle_message = adapter._check_login_throttle(client_ip)
@@ -762,7 +589,7 @@ async def handle_login(request: web.Request) -> web.Response:
         pass
     next_q = request.rel_url.query.get("next") or "/"
     renderer = getattr(adapter, "_render_login", None)
-    body = renderer(error=False, next_url=next_q) if callable(renderer) else _render_login_fallback(adapter, False, next_q)
+    body = renderer(error=False, next_url=next_q)
     return web.Response(body=body, content_type="text/html")
 
 
@@ -1877,11 +1704,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
     # --- Template and HTML rendering helpers ---
     def _prepare_templates(self) -> None:
-        """Initialize template environment and ensure default directories.
+        """Initialize the Jinja2 template environment and ensure default directories.
 
-        This method is tolerant to missing jinja2 or templates; in that case
-        we simply keep ``self._jinja_env`` as None and rely on inline HTML
-        generators for the minimal UI.
+        Jinja2 and a valid template_dir are required. If either is unavailable,
+        ``self._jinja_env`` is set to None and an error is logged at startup.
         """
         # Default directories if not provided
         try:
@@ -1931,14 +1757,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
             else:
                 self._jinja_env = None
                 try:
-                    self.logger.info("WebConsole templates disabled (template_dir missing); using inline UI")
+                    self.logger.error("WebConsole templates disabled: template_dir missing or not a directory: %s", tdir)
                 except Exception:
                     pass
         except Exception:
             # jinja2 not installed or couldn't initialize
             self._jinja_env = None
             try:
-                self.logger.info("WebConsole templates unavailable (jinja2 not installed); using inline UI")
+                self.logger.error("WebConsole templates unavailable: jinja2 is not installed")
             except Exception:
                 pass
 
@@ -1949,11 +1775,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         current_port: str = None,
         user_permission: Optional[str] = None,
     ) -> bytes:
-        """Render the xterm-based console page.
-
-        Tries Jinja2 'console.html.j2'; otherwise uses the built-in fallback
-        HTML that embeds xterm.js and connects to /ws/{port}.
-        """
+        """Render the xterm-based console page using the Jinja2 'console.html.j2' template."""
         asset_error = getattr(self, "_asset_error", None)
         if asset_error:
             return self._render_console_error(
@@ -1963,34 +1785,19 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 current_port=current_port,
                 user_permission=user_permission,
             )
-        try:
-            if self._jinja_env:
-                tmpl = self._jinja_env.get_template("console.html.j2")
-                base_path = self._effective_base_path(None)
-                html_text = tmpl.render(
-                    realm=self.realm,
-                    logo_url=self._get_logo_url(),
-                    title="OpenMux Console",
-                    base_path=base_path,
-                    plugin_nav=plugin_nav,
-                    ports=ports or [],
-                    current_port=current_port,
-                    user_permission=user_permission,
-                )
-                return html_text.encode("utf-8")
-        except Exception as e:
-            self.logger.debug(f"console template render failed: {e}")
-        # Reuse the richer inline fallback defined at top of module
-        try:
-            if not self._jinja_env:
-                self.logger.debug("console: using inline fallback (templates disabled)")
-        except Exception:
-            pass
-        try:
-            bp = self._effective_base_path(None) or ""
-        except Exception:
-            bp = ""
-        return _fallback_with_base(_HTML_FALLBACK, bp)
+        tmpl = self._jinja_env.get_template("console.html.j2")
+        base_path = self._effective_base_path(None)
+        html_text = tmpl.render(
+            realm=self.realm,
+            logo_url=self._get_logo_url(),
+            title="OpenMux Console",
+            base_path=base_path,
+            plugin_nav=plugin_nav,
+            ports=ports or [],
+            current_port=current_port,
+            user_permission=user_permission,
+        )
+        return html_text.encode("utf-8")
 
     def _render_console_error(
         self,
@@ -2001,59 +1808,20 @@ class WebConsoleAdapter(BaseGenericAdapter):
         user_permission: Optional[str] = None,
     ) -> bytes:
         """Render a friendly error page when console assets are missing."""
-        try:
-            if self._jinja_env:
-                tmpl = self._jinja_env.get_template("console_error.html.j2")
-                base_path = self._effective_base_path(None)
-                html_text = tmpl.render(
-                    realm=self.realm,
-                    logo_url=self._get_logo_url(),
-                    title="OpenMux Console",
-                    base_path=base_path,
-                    plugin_nav=plugin_nav or [],
-                    ports=ports or [],
-                    current_port=current_port,
-                    user_permission=user_permission,
-                    error_message=message,
-                )
-                return html_text.encode("utf-8")
-        except Exception as e:
-            self.logger.debug(f"console error template render failed: {e}")
-        try:
-            bp = self._effective_base_path(None) or ""
-        except Exception:
-            bp = ""
-        try:
-            brand_logo = self._get_logo_url()
-        except Exception:
-            brand_logo = None
-        if brand_logo:
-            brand_html = f'<img class="logo-img" src="{html.escape(str(brand_logo))}" alt="logo">'
-        else:
-            brand_html = '<div class="logo">OM</div>'
-        safe_message = html.escape(message or "Console unavailable.")
-        body = f"""
-<!doctype html>
-<html>
-    <head>
-        <meta charset=\"utf-8\" />
-        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-        <title>OpenMux Console</title>
-        <link rel=\"stylesheet\" href=\"{bp}/static/web_console.css\" />
-    </head>
-    <body>
-        <header class=\"site\"><div class=\"brand\">{brand_html}<div class=\"title\">OpenMux</div></div><div class=\"page\">Console</div><div class=\"actions\"><a class=\"btn\" href=\"{bp}/\">Status</a><a class=\"btn\" href=\"{bp}/logout\">Logout</a></div></header>
-        <main>
-            <h1>Console Unavailable</h1>
-            <div class=\"card warning\">
-                <p>{safe_message}</p>
-                <p>Install the missing files and reload this page once they are available.</p>
-            </div>
-        </main>
-    </body>
-</html>
-"""
-        return body.encode("utf-8")
+        tmpl = self._jinja_env.get_template("console_error.html.j2")
+        base_path = self._effective_base_path(None)
+        html_text = tmpl.render(
+            realm=self.realm,
+            logo_url=self._get_logo_url(),
+            title="OpenMux Console",
+            base_path=base_path,
+            plugin_nav=plugin_nav or [],
+            ports=ports or [],
+            current_port=current_port,
+            user_permission=user_permission,
+            error_message=message,
+        )
+        return html_text.encode("utf-8")
 
     def _render_logs(
         self,
@@ -2069,62 +1837,25 @@ class WebConsoleAdapter(BaseGenericAdapter):
         tail: int = 200,
     ) -> bytes:
         """Render the per-port log viewer page."""
-
-        try:
-            if self._jinja_env:
-                tmpl = self._jinja_env.get_template("logs.html.j2")
-                base_path = self._effective_base_path(None)
-                html_text = tmpl.render(
-                    realm=self.realm,
-                    logo_url=self._get_logo_url(),
-                    title="OpenMux Logs",
-                    base_path=base_path,
-                    plugin_nav=plugin_nav,
-                    ports=ports or [],
-                    current_port=current_port,
-                    user_permission=user_permission,
-                    log_lines=log_lines or [],
-                    log_error=log_error,
-                    log_path=log_path,
-                    log_size=log_size,
-                    log_mtime=log_mtime,
-                    tail=tail,
-                )
-                return html_text.encode("utf-8")
-        except Exception as e:
-            self.logger.debug(f"logs template render failed: {e}")
-
-        # Fallback minimal view if templates are unavailable
-        try:
-            lines = "<br/>".join(html.escape(line) for line in (log_lines or [])) or "<em>No log lines</em>"
-        except Exception:
-            lines = "<em>No log lines</em>"
-        msg = html.escape(log_error) if log_error else ""
-        msg_block = f"<p class='muted'>{msg}</p>" if msg else ""
-        try:
-            bp = self._effective_base_path(None) or ""
-        except Exception:
-            bp = ""
-        body = f"""
-<!doctype html>
-<html>
-  <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>OpenMux Logs</title>
-    <link rel=\"stylesheet\" href=\"{bp}/static/web_console.css\" />
-  </head>
-  <body>
-    <header class=\"site\"><div class=\"brand\">OpenMux</div><div class=\"page\">Logs</div><div class=\"actions\"><a class=\"btn\" href=\"{bp}/\">Status</a><a class=\"btn\" href=\"{bp}/console\">Console</a></div></header>
-    <main>
-      <h1>Port Logs</h1>
-    {msg_block}
-      <div class=\"card\" style=\"overflow:auto;\"><pre>{lines}</pre></div>
-    </main>
-  </body>
-</html>
-"""
-        return body.encode("utf-8")
+        tmpl = self._jinja_env.get_template("logs.html.j2")
+        base_path = self._effective_base_path(None)
+        html_text = tmpl.render(
+            realm=self.realm,
+            logo_url=self._get_logo_url(),
+            title="OpenMux Logs",
+            base_path=base_path,
+            plugin_nav=plugin_nav,
+            ports=ports or [],
+            current_port=current_port,
+            user_permission=user_permission,
+            log_lines=log_lines or [],
+            log_error=log_error,
+            log_path=log_path,
+            log_size=log_size,
+            log_mtime=log_mtime,
+            tail=tail,
+        )
+        return html_text.encode("utf-8")
 
     def _render_status(
         self,
@@ -2142,144 +1873,94 @@ class WebConsoleAdapter(BaseGenericAdapter):
         - multipath (dict)
         - web_clients (list)
 
-        Tries Jinja2 'status.html.j2'; otherwise emits a simple HTML fallback.
+        Renders using the Jinja2 'status.html.j2' template.
         """
-        try:
-            if self._jinja_env:
-                tmpl = self._jinja_env.get_template("status.html.j2")
-                # Compute a few top-level metrics for cards
-                ports = data.get("ports", []) or []
-                sidebar_ports = data.get("sidebar_ports") or ports
-                total_ports = len(ports)
-                connected_ports = sum(1 for p in ports if p.get("connected") or p.get("is_running"))
-                fed = data.get("federation") or {}
-                fed_tot = (fed.get("totals") or {}) if isinstance(fed, dict) else {}
-                mpath = data.get("multipath") or {}
-                m_tot = (mpath.get("totals") or {}) if isinstance(mpath, dict) else {}
-                # Build quick index for template lookups
-                conn_index = {
-                    c.get("connection_id"): c
-                    for c in (fed.get("connections") or [])
-                    if isinstance(c, dict) and c.get("connection_id") is not None
-                }
-                # Build rport_map primarily from connections[].ports_registered
-                # Helper: add ports into map with de-dup by name
-                def _add_ports(target: Dict[str, list], key: str, ports_list: list) -> None:
-                    if not key or not isinstance(ports_list, list):
-                        return
-                    bucket = target.setdefault(str(key), [])
-                    seen = {rp.get("name") for rp in bucket if isinstance(rp, dict)}
-                    for rp in ports_list:
-                        if not isinstance(rp, dict):
-                            continue
-                        nm = rp.get("name")
-                        if not nm or nm in seen:
-                            continue
-                        bucket.append(rp)
-                        seen.add(nm)
+        tmpl = self._jinja_env.get_template("status.html.j2")
+        # Compute a few top-level metrics for cards
+        ports = data.get("ports", []) or []
+        sidebar_ports = data.get("sidebar_ports") or ports
+        total_ports = len(ports)
+        connected_ports = sum(1 for p in ports if p.get("connected") or p.get("is_running"))
+        fed = data.get("federation") or {}
+        fed_tot = (fed.get("totals") or {}) if isinstance(fed, dict) else {}
+        mpath = data.get("multipath") or {}
+        m_tot = (mpath.get("totals") or {}) if isinstance(mpath, dict) else {}
+        # Build quick index for template lookups
+        conn_index = {
+            c.get("connection_id"): c
+            for c in (fed.get("connections") or [])
+            if isinstance(c, dict) and c.get("connection_id") is not None
+        }
+        # Build rport_map primarily from connections[].ports_registered
+        # Helper: add ports into map with de-dup by name
+        def _add_ports(target: Dict[str, list], key: str, ports_list: list) -> None:
+            if not key or not isinstance(ports_list, list):
+                return
+            bucket = target.setdefault(str(key), [])
+            seen = {rp.get("name") for rp in bucket if isinstance(rp, dict)}
+            for rp in ports_list:
+                if not isinstance(rp, dict):
+                    continue
+                nm = rp.get("name")
+                if not nm or nm in seen:
+                    continue
+                bucket.append(rp)
+                seen.add(nm)
 
-                rport_map: Dict[str, list] = {}
-                conns = (fed.get("connections") or []) if isinstance(fed, dict) else []
-                groups = (mpath.get("groups") or []) if isinstance(mpath, dict) else []
-                # Prefer the connection's own mpath_group key for grouping
-                for c in conns:
-                    if not isinstance(c, dict):
-                        continue
-                    gk = c.get("mpath_group") or f"_single:{c.get('connection_id')}"
-                    plist = c.get("ports_registered") or []
-                    if plist:
-                        _add_ports(rport_map, str(gk), plist)
-                # No fallback: require explicit mapping via connections[].ports_registered
-                # Extract convenience vars
-                hb_interval = None
-                peers_cfg = []
-                try:
-                    hb_interval = fed.get("heartbeat_interval_sec")
-                    peers_cfg = fed.get("peers_configured") or []
-                except Exception:
-                    pass
-                base_path = self._effective_base_path(None)
-                sort_key = data.get("sort_key") or "name"
-                sort_dir = data.get("sort_dir") or "asc"
-                sort_query = data.get("sort_query") or ""
-                status_path = data.get("status_path") or "/"
-                html_text = tmpl.render(
-                    data=data,
-                    ports=ports,
-                    sidebar_ports=sidebar_ports,
-                    ports_by_name={p.get("name"): p for p in ports if isinstance(p, dict) and p.get("name")},
-                    total_ports=total_ports,
-                    connected_ports=connected_ports,
-                    federation=fed,
-                    multipath=mpath,
-                    realm=self.realm,
-                    logo_url=self._get_logo_url(),
-                    title="OpenMux Status",
-                    fed_totals=fed_tot,
-                    mpath_totals=m_tot,
-                    conn_index=conn_index,
-                    rport_map=rport_map,
-                    hb_interval=hb_interval,
-                    peers_cfg=peers_cfg,
-                    adapter=self,
-                    plugin_nav=plugin_nav or [],
-                    base_path=base_path,
-                    current_port=current_port,
-                    user_permission=user_permission,
-                    sort_key=sort_key,
-                    sort_dir=sort_dir,
-                    sort_query=sort_query,
-                    status_path=status_path,
-                )
-                return html_text.encode("utf-8")
-        except Exception as e:
-            self.logger.debug(f"status template render failed: {e}")
-        # Inline minimal status view fallback
-        try:
-            ports = data.get("ports", []) or []
-        except Exception:
-            ports = []
-        def esc(x: Any) -> str:
-            return html.escape(str(x))
-        rows = []
-        for p in ports:
-            try:
-                name = esc(p.get("name", ""))
-                adapter = esc(p.get("adapter") or p.get("adapter_type") or "")
-                desc = esc(p.get("description", ""))
-                clients = esc(_port_clients_value(p))
-                rows.append(f"<tr><td>{name}</td><td>{adapter}</td><td>{desc}</td><td>{clients}</td></tr>")
-            except Exception:
+        rport_map: Dict[str, list] = {}
+        conns = (fed.get("connections") or []) if isinstance(fed, dict) else []
+        groups = (mpath.get("groups") or []) if isinstance(mpath, dict) else []
+        # Prefer the connection's own mpath_group key for grouping
+        for c in conns:
+            if not isinstance(c, dict):
                 continue
-        rows_html = ''.join(rows) if rows else '<tr><td colspan="4"><em>No ports</em></td></tr>'
+            gk = c.get("mpath_group") or f"_single:{c.get('connection_id')}"
+            plist = c.get("ports_registered") or []
+            if plist:
+                _add_ports(rport_map, str(gk), plist)
+        # No fallback: require explicit mapping via connections[].ports_registered
+        # Extract convenience vars
+        hb_interval = None
+        peers_cfg = []
         try:
-            bp = self._effective_base_path(None) or ""
+            hb_interval = fed.get("heartbeat_interval_sec")
+            peers_cfg = fed.get("peers_configured") or []
         except Exception:
-            bp = ""
-        body = f"""
-<!doctype html>
-<html>
-  <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>OpenMux Status</title>
-    <link rel=\"stylesheet\" href=\"{bp}/static/web_console.css\" />
-  </head>
-  <body>
-    <header class=\"site\"><div class=\"brand\">OpenMux</div><div class=\"page\">Status</div><div class=\"actions\"><a class=\"btn\" href=\"{bp}/\">Status</a><a class=\"btn\" href=\"{bp}/console\">Console</a><a class=\"btn\" href=\"{bp}/logout\">Logout</a></div></header>
-    <main>
-      <h2>Ports</h2>
-      <table>
-        <thead><tr><th>Name</th><th>Adapter</th><th>Description</th><th>Clients</th></tr></thead>
-        <tbody>
-          {rows_html}
-        </tbody>
-      </table>
-    </main>
-  </body>
-</html>
-"""
-        return body.encode("utf-8")
+            pass
+        base_path = self._effective_base_path(None)
+        sort_key = data.get("sort_key") or "name"
+        sort_dir = data.get("sort_dir") or "asc"
+        sort_query = data.get("sort_query") or ""
+        status_path = data.get("status_path") or "/"
+        html_text = tmpl.render(
+            data=data,
+            ports=ports,
+            sidebar_ports=sidebar_ports,
+            ports_by_name={p.get("name"): p for p in ports if isinstance(p, dict) and p.get("name")},
+            total_ports=total_ports,
+            connected_ports=connected_ports,
+            federation=fed,
+            multipath=mpath,
+            realm=self.realm,
+            logo_url=self._get_logo_url(),
+            title="OpenMux Status",
+            fed_totals=fed_tot,
+            mpath_totals=m_tot,
+            conn_index=conn_index,
+            rport_map=rport_map,
+            hb_interval=hb_interval,
+            peers_cfg=peers_cfg,
+            adapter=self,
+            plugin_nav=plugin_nav or [],
+            base_path=base_path,
+            current_port=current_port,
+            user_permission=user_permission,
+            sort_key=sort_key,
+            sort_dir=sort_dir,
+            sort_query=sort_query,
+            status_path=status_path,
+        )
+        return html_text.encode("utf-8")
 
     def _build_status_adapter_snapshot(self) -> Dict[str, Any]:
         """Produce a status summary similar to WebStatus /api/status."""
@@ -3160,76 +2841,18 @@ class WebConsoleAdapter(BaseGenericAdapter):
         next_url: Optional[str] = None,
         message: Optional[str] = None,
     ) -> bytes:
-        """Render a simple login form, with optional Jinja2 template support.
-
-        Template name: 'login.html.j2' with variables: error (bool), next (str), realm (str)
-        """
-        # Template path
-        try:
-            if self._jinja_env:
-                tmpl = self._jinja_env.get_template("login.html.j2")
-                base_path = self._effective_base_path(None)
-                html_text = tmpl.render(
-                    error=bool(error),
-                    next=next_url or "/",
-                    realm=self.realm,
-                    logo_url=self._get_logo_url(),
-                    base_path=base_path,
-                    message=message,
-                )
-                return html_text.encode("utf-8")
-        except Exception as e:
-            self.logger.debug(f"login template render failed: {e}")
-
-        # Inline fallback
-        try:
-            msg_text = str(message) if message is not None else None
-        except Exception:
-            msg_text = message
-        if msg_text:
-            msg = f"<p style='color:#f66'>{html.escape(msg_text)}</p>"
-        elif error:
-            msg = "<p style='color:#f66'>Invalid username or password</p>"
-        else:
-            msg = ""
-        nxt = html.escape(str(next_url or "/"))
-        # Compute logo abbreviation from realm (first two initials)
-        try:
-            parts = [p for p in str(self.realm).split() if p]
-            abbr = (parts[0][0] + (parts[1][0] if len(parts) > 1 else "")).upper()
-        except Exception:
-            abbr = "OM"
-        # Prefer real logo image if present
-        logo_url = None
-        try:
-            logo_url = self._get_logo_url()
-        except Exception:
-            logo_url = None
-        brand_logo_html = (
-            f'<img class="logo-img" src="{html.escape(str(logo_url))}" alt="logo">' if logo_url else f'<div class="logo">{abbr}</div>'
+        """Render the login form using the Jinja2 'login.html.j2' template."""
+        tmpl = self._jinja_env.get_template("login.html.j2")
+        base_path = self._effective_base_path(None)
+        html_text = tmpl.render(
+            error=bool(error),
+            next=next_url or "/",
+            realm=self.realm,
+            logo_url=self._get_logo_url(),
+            base_path=base_path,
+            message=message,
         )
-        bp = self._effective_base_path(None)
-        body = f"""
-<!doctype html>
-<html>
-    <head>
-        <meta charset=\"utf-8\" />
-        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-        <title>{html.escape(self.realm)} Login</title>
-        <link rel=\"stylesheet\" href=\"{bp}/static/web_console.css\" />
-    </head>
-    <body class=\"login\">\n        <form class=\"card\" method=\"POST\" action=\"{bp}/login\">\n            <div class=\"brand\">\n                {brand_logo_html}\n                <div>\n                    <div class=\"title\">{html.escape(self.realm)}</div>\n                    <div class=\"subtitle\">Web Console</div>\n                </div>\n            </div>\n            {msg}
-            <h1>Sign in to {html.escape(self.realm)}</h1>
-            <input type=\"hidden\" name=\"next\" value=\"{nxt}\" />
-            <input type=\"text\" name=\"username\" placeholder=\"Username\" autocomplete=\"username\" required />
-            <input type=\"password\" name=\"password\" placeholder=\"Password\" autocomplete=\"current-password\" required />
-            <button class=\"btn\" type=\"submit\">Sign in</button>
-            <div class=\"hint\">After login you'll be redirected back.</div>
-        </form>
-    </body>
-</html>
-"""
-        return body.encode("utf-8")
+        return html_text.encode("utf-8")
 
     # --- CSRF & RBAC helpers for plugins/APIs ---
     async def _handle_api_csrf(self, request: web.Request) -> web.Response:
