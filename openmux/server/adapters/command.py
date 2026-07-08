@@ -1428,11 +1428,19 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         common = sorted(old_names & new_names)
 
         def _material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-            # description is non-material; command, env, shell, cwd changes are material
-            c = dict(cfg)
-            c.pop("name", None)
-            c.pop("description", None)
-            return c
+            # Apply the same defaults as CommandPort.__init__ so comparison is apples-to-apples
+            _interactive = bool(cfg.get("interactive", False))
+            return {
+                "command": cfg.get("command", ""),
+                "shell": bool(cfg.get("shell", False)),
+                "cwd": cfg.get("cwd"),
+                "env": cfg.get("env"),
+                "auto_restart": bool(cfg.get("auto_restart", False)),
+                "max_read_write_users": cfg.get("max_read_write_users", 1),
+                "interactive": _interactive,
+                "always_buffer": bool(cfg.get("always_buffer", _interactive)),
+                "scrollback_size": int(cfg.get("scrollback_size", 0)),
+            }
 
         updated: List[str] = []  # type: ignore[name-defined]
         unchanged: List[str] = []  # type: ignore[name-defined]
@@ -1447,12 +1455,21 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                         "cwd": getattr(port, "cwd", None),
                         "env": getattr(port, "env", None),
                         "auto_restart": getattr(port, "auto_restart", None),
-                        "batch_bytes": getattr(port, "batch_bytes", None),
-                        "batch_timeout_ms": getattr(port, "batch_timeout_ms", None),
+                        "max_read_write_users": getattr(port, "max_read_write_users", None),
+                        "interactive": getattr(port, "interactive", None),
+                        "always_buffer": getattr(port, "always_buffer", None),
+                        "scrollback_size": getattr(port, "scrollback_size", None),
                     }
                 except Exception:
                     old_cfg = {}
-            if old_cfg == _material_cfg(new_by_name[n]):
+            _new_mat = _material_cfg(new_by_name[n])
+            _untracked = set(_new_mat.keys()) - set(old_cfg.keys())
+            if _untracked:
+                self.logger.error(
+                    f"[BUG] reconcile_ports: _material_cfg has keys not tracked in old_cfg: "
+                    f"{sorted(_untracked)} — add them to old_cfg to ensure changes are detected."
+                )
+            if old_cfg == _new_mat:
                 # Update description in-place if provided
                 try:
                     desc = new_by_name[n].get("description")

@@ -608,11 +608,13 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         common = sorted(old_names & new_names)
 
         def _material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-            # All fields except 'name' and 'description' are material
-            out = dict(cfg)
-            out.pop("name", None)
-            out.pop("description", None)
-            return out
+            # Apply the same defaults as LoopbackPort.__init__ so comparison is apples-to-apples
+            return {
+                "echo_delay": cfg.get("echo_delay", 0.0),
+                "buffer_size": cfg.get("buffer_size", 1024),
+                "sanitize_control": bool(cfg.get("sanitize_control", True)),
+                "max_read_write_users": int(cfg.get("max_read_write_users", 5)),
+            }
 
         updated: List[str] = []
         unchanged: List[str] = []
@@ -628,7 +630,14 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                 }
             except Exception:
                 old_cfg = {}
-            if old_cfg == _material_cfg(new_by_name[n]):
+            _new_mat = _material_cfg(new_by_name[n])
+            _untracked = set(_new_mat.keys()) - set(old_cfg.keys())
+            if _untracked:
+                self.logger.error(
+                    f"[BUG] reconcile_ports: _material_cfg has keys not tracked in old_cfg: "
+                    f"{sorted(_untracked)} — add them to old_cfg to ensure changes are detected."
+                )
+            if old_cfg == _new_mat:
                 # Optionally update description in-place
                 try:
                     new_desc = new_by_name[n].get("description")

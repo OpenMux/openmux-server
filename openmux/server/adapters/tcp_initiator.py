@@ -493,10 +493,19 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         common = sorted(old_names & new_names)
 
         def _material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-            c = dict(cfg)
-            for k in ("name", "description"):
-                c.pop(k, None)
-            return c
+            # Apply the same defaults as TcpInitiatorPort.__init__ so comparison is apples-to-apples
+            return {
+                "host": cfg.get("host", ""),
+                "port": cfg.get("port", 0),
+                "use_tls": bool(cfg.get("use_tls", False)),
+                "ssl_verify": cfg.get("ssl_verify", True),
+                "timeout": cfg.get("timeout", 10.0),
+                "auto_reconnect": cfg.get("auto_reconnect", True),
+                "reconnect_delay": cfg.get("reconnect_delay", 5.0),
+                "enable_batching": cfg.get("enable_batching", True),
+                "batch_size": cfg.get("batch_size", 1024),
+                "batch_timeout": cfg.get("batch_timeout", 0.015),
+            }
 
         updated: List[str] = []
         unchanged: List[str] = []
@@ -509,12 +518,25 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                         "host": getattr(port, "host", None),
                         "port": getattr(port, "port", None),
                         "use_tls": getattr(port, "use_tls", None),
+                        "ssl_verify": getattr(port, "ssl_verify", None),
                         "timeout": getattr(port, "timeout", None),
                         "auto_reconnect": getattr(port, "auto_reconnect", None),
+                        "reconnect_delay": getattr(port, "reconnect_delay", None),
+                        # Note: these fields are stored under private names in TcpInitiatorPort
+                        "enable_batching": getattr(port, "_batching_enabled", None),
+                        "batch_size": getattr(port, "_batch_size", None),
+                        "batch_timeout": getattr(port, "_batch_timeout", None),
                     }
                 except Exception:
                     old_cfg = {}
-            if old_cfg == _material_cfg(new_by_name[n]):
+            _new_mat = _material_cfg(new_by_name[n])
+            _untracked = set(_new_mat.keys()) - set(old_cfg.keys())
+            if _untracked:
+                self.logger.error(
+                    f"[BUG] reconcile_ports: _material_cfg has keys not tracked in old_cfg: "
+                    f"{sorted(_untracked)} — add them to old_cfg to ensure changes are detected."
+                )
+            if old_cfg == _new_mat:
                 try:
                     desc = new_by_name[n].get("description")
                     if isinstance(desc, str) and desc:

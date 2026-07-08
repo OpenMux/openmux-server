@@ -787,27 +787,30 @@ class SerialAdapter(BaseGenericAdapter):
 
         # Determine which common ports have materially changed (require recreate)
         def _material_config(port_cfg: Dict[str, Any]) -> Dict[str, Any]:
-            keys = [
-                "device",
-                "baudrate",
-                "bytesize",
-                "parity",
-                "stopbits",
-                "timeout",
-                "flow_control",
-                "dtr",
-                "rts",
-                "max_read_write_users",
-                "log_file",
-                "log_format",
-                "log_line_template",
-                "log_direction",
-                "log_directions",
-            ]
-            mat = {k: port_cfg.get(k) for k in keys}
-            if mat.get("max_read_write_users") is None and "read_write_users" in port_cfg:
-                mat["max_read_write_users"] = port_cfg.get("read_write_users")
-            return mat
+            # Apply the same defaults as SerialPortConfig so comparison is apples-to-apples
+            mru = port_cfg.get("max_read_write_users")
+            if mru is None and "read_write_users" in port_cfg:
+                mru = port_cfg.get("read_write_users")
+            if mru is None:
+                mru = 1
+            return {
+                "device": port_cfg.get("device"),
+                "baudrate": port_cfg.get("baudrate", 9600),
+                "bytesize": port_cfg.get("bytesize", 8),
+                "parity": port_cfg.get("parity", "N"),
+                "stopbits": port_cfg.get("stopbits", 1),
+                "timeout": port_cfg.get("timeout", 1.0),
+                "flow_control": port_cfg.get("flow_control", "none"),
+                "dtr": port_cfg.get("dtr", True),
+                "rts": port_cfg.get("rts", True),
+                "max_read_write_users": mru,
+                "log_file": port_cfg.get("log_file"),
+                "log_format": port_cfg.get("log_format"),
+                "log_line_template": port_cfg.get("log_line_template"),
+                "log_direction": port_cfg.get("log_direction"),
+                "log_directions": port_cfg.get("log_directions"),
+                "scrollback_size": port_cfg.get("scrollback_size", 0),
+            }
 
         updated: list[str] = []
         unchanged: list[str] = []
@@ -828,26 +831,29 @@ class SerialAdapter(BaseGenericAdapter):
                     "dtr": spw.config.dtr,
                     "rts": spw.config.rts,
                     "max_read_write_users": spw.config.max_read_write_users,
+                    "log_file": getattr(spw.config, "log_file", None),
+                    "log_format": getattr(spw.config, "log_format", None),
+                    "log_line_template": getattr(spw.config, "log_line_template", None),
+                    "log_direction": getattr(spw.config, "log_direction", None),
+                    "log_directions": getattr(spw.config, "log_directions", None),
+                    "scrollback_size": getattr(spw.config, "scrollback_size", None),
                 }
             except Exception:
                 old_cfg = {}
             new_cfg = _material_config(new_by_name[name])
+            _untracked = set(new_cfg.keys()) - set(old_cfg.keys())
+            if _untracked:
+                self.logger.error(
+                    f"[BUG] reconcile_ports: _material_config has keys not tracked in old_cfg: "
+                    f"{sorted(_untracked)} — add them to old_cfg to ensure changes are detected."
+                )
             if old_cfg == new_cfg:
-                # Optionally update non-material attributes like description/logging without restart
+                # Optionally update description in-place without restart
                 if spw is not None:
                     try:
                         desc = new_by_name[name].get("description")
                         if isinstance(desc, str) and desc and desc != getattr(spw, "description", None):
                             spw.description = desc
-                    except Exception:
-                        pass
-                # Hot-patch non-material attributes for unchanged ports
-                if spw is not None:
-                    try:
-                        for log_key in ("log_file", "log_format", "log_line_template"):
-                            new_val = new_by_name[name].get(log_key)
-                            if getattr(spw.config, log_key, None) != new_val:
-                                setattr(spw.config, log_key, new_val)
                     except Exception:
                         pass
                 unchanged.append(name)
