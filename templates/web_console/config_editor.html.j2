@@ -905,7 +905,8 @@
             reconnect_delay: 'Seconds to wait before the next reconnect attempt.',
             enable_batching: 'Buffer small writes briefly before sending to reduce syscall overhead.',
             batch_size: 'Maximum bytes to accumulate before flushing a batch.',
-            batch_timeout: 'Maximum time to wait before flushing a batch (seconds).'
+            batch_timeout: 'Maximum time to wait before flushing a batch (seconds).',
+            enabled: 'Temporarily disable this port without deleting it.'
           },
           'telnet_listener': {
             name: 'Listener identifier used in logs and client banners.',
@@ -978,7 +979,7 @@
           'serial_ports': { baudrate: 115200, bytesize: 8, parity: 'N', stopbits: 1 },
           'loopback_ports': { max_read_write_users: 5, echo_delay: 0.0, buffer_size: 1024, sanitize_control: true },
           'command_ports': { max_read_write_users: 1, shell: false },
-          'tcp_initiator_ports': { use_tls: false, ssl_verify: true, timeout: 10.0, auto_reconnect: true, reconnect_delay: 5.0, enable_batching: true, batch_size: 1024, batch_timeout: 0.015 },
+          'tcp_initiator_ports': { enabled: true, use_tls: false, ssl_verify: true, timeout: 10.0, auto_reconnect: true, reconnect_delay: 5.0, enable_batching: true, batch_size: 1024, batch_timeout: 0.015 },
           'telnet_listener': { bind_host: '0.0.0.0', read_only: false, enabled: true },
           // Default-safe: TLS on by default for muxcon listeners
           'muxcon.listeners': { use_tls: true, require_client_cert: false, tls_autogen: true },
@@ -1100,6 +1101,7 @@
           tables['tcp_initiator_ports'] = buildTable('tcp_initiator_ports', annotateColumnsWithDefaults('tcp_initiator_ports', annotateColumnsWithHelp('tcp_initiator_ports', [
             {key:'name', label:'Name', type:'string', required:true},
             {key:'description', label:'Description', type:'string'},
+            {key:'enabled', label:'Enabled', type:'boolean'},
             {key:'host', label:'Host', type:'string', required:true},
             {key:'port', label:'Port', type:'integer', min:1, max:65535, required:true},
             {key:'use_tls', label:'Use TLS', type:'boolean'},

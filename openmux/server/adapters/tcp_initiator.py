@@ -63,6 +63,7 @@ class TcpInitiatorPort:
         self.timeout = config.get("timeout", 10.0)
         self.auto_reconnect = config.get("auto_reconnect", True)
         self.reconnect_delay = config.get("reconnect_delay", 5.0)
+        self.enabled = bool(config.get("enabled", True))
 
         # Connection state
         self.reader: Optional[asyncio.StreamReader] = None
@@ -93,6 +94,10 @@ class TcpInitiatorPort:
 
     async def start(self) -> bool:
         """Start the TCP initiator port (non-blocking)."""
+        if not self.enabled:
+            self.logger.info(f"TCP initiator port {self.name} is disabled, skipping connection")
+            self.state = PortState.ACTIVE
+            return True
         self.logger.info(f"Starting TCP initiator port {self.name} (will connect in background)")
         self.state = PortState.CREATING
         self.reconnect_task = asyncio.create_task(self._connection_manager())
@@ -505,6 +510,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 "enable_batching": cfg.get("enable_batching", True),
                 "batch_size": cfg.get("batch_size", 1024),
                 "batch_timeout": cfg.get("batch_timeout", 0.015),
+                "enabled": bool(cfg.get("enabled", True)),
             }
 
         updated: List[str] = []
@@ -526,6 +532,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                         "enable_batching": getattr(port, "_batching_enabled", None),
                         "batch_size": getattr(port, "_batch_size", None),
                         "batch_timeout": getattr(port, "_batch_timeout", None),
+                        "enabled": getattr(port, "enabled", True),
                     }
                 except Exception:
                     old_cfg = {}
