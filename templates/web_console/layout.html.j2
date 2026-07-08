@@ -48,17 +48,9 @@
             </div>
             <div class="nav-sub" id="console-ports" style="display:none">
               {% if nav_ports %}
-                {% for p in nav_ports[:24] %}
+                {% for p in nav_ports %}
                   <a class="nav-sub-item {% if current_port == p.name %}active{% endif %}" href="{{ base_path }}/console?port={{ p.name }}">{{ p.name }}</a>
                 {% endfor %}
-                {% if nav_ports|length > 24 %}
-                  <div id="nav-more-ports" style="display:none">
-                    {% for p in nav_ports[24:] %}
-                      <a class="nav-sub-item {% if current_port == p.name %}active{% endif %}" href="{{ base_path }}/console?port={{ p.name }}">{{ p.name }}</a>
-                    {% endfor %}
-                  </div>
-                  <button class="nav-more" onclick="toggleMorePorts(event)">...</button>
-                {% endif %}
               {% else %}
                  <div class="nav-sub-empty">No ports</div>
               {% endif %}
@@ -181,15 +173,6 @@
             }
         };
         
-        window.toggleMorePorts = function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            const el = document.getElementById('nav-more-ports');
-            const btn = e.target;
-            el.style.display = 'block';
-            btn.style.display = 'none';
-        };
-
         // Restore console menu state
         if (localStorage.getItem('omx_console_expanded')) {
              const el = document.getElementById('console-ports');
