@@ -1377,6 +1377,35 @@
 
   async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/plugins/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); if('writable_sections' in j || 'writable_enforced' in j){ setWritableMetadata(j.writable_sections||[], j.writable_enforced); } markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
   async function validateOnly(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Validation failed'); return; } try{ const r=await fetch(withBase('/plugins/config-editor/validate'),{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Validation OK'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Validation failed'); } }catch(e){ setStatus(false,String(e)); } }
+  async function refreshSidebarPorts() {
+    try {
+      // Small delay to let the server finish port reconciliation before querying
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const r = await fetch(withBase('/api/ports'), {credentials: 'same-origin'});
+      if (!r.ok) return;
+      const j = await r.json();
+      const ports = j.ports || [];
+      const container = document.getElementById('console-ports');
+      if (!container) return;
+      // Replace existing port links with the updated list
+      container.querySelectorAll('a.nav-sub-item, .nav-sub-empty').forEach(el => el.remove());
+      if (ports.length > 0) {
+        ports.forEach(p => {
+          const a = document.createElement('a');
+          a.className = 'nav-sub-item';
+          a.href = `${BASE_PATH}/console?port=${encodeURIComponent(p.name)}`;
+          a.textContent = p.name;
+          container.appendChild(a);
+        });
+      } else {
+        const empty = document.createElement('div');
+        empty.className = 'nav-sub-empty';
+        empty.textContent = 'No ports';
+        container.appendChild(empty);
+      }
+    } catch (_e) {}
+  }
+
   async function saveConfig(){
     let payload;
     try{ payload=buildConfig(); }
@@ -1388,6 +1417,9 @@
       if(r.ok && j.ok){
         markClean();
         setStatus(true,'Saved; running soft reload…');
+        // Refresh the sidebar immediately after a successful save — the config is on disk
+        // regardless of whether the soft reload completes successfully.
+        refreshSidebarPorts();
         const reloadOutcome = await requestReload('soft');
         setReloadStatus(reloadOutcome.ok, reloadOutcome.payload);
         if(reloadOutcome.ok){
