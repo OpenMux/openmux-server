@@ -199,6 +199,12 @@ def _sanitize_log_line(line: str) -> str:
 
 
 # --- aiohttp middleware & route handlers (module-level) ---
+
+def _get_adapter(request: web.Request) -> "WebConsoleAdapter":
+    """Return the WebConsoleAdapter stored in the aiohttp app, narrowing from BaseGenericAdapter."""
+    return request.app[ADAPTER_APP_KEY]  # type: ignore[return-value]
+
+
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     """Hybrid auth: accept Basic Auth for programmatic clients, else require session login.
@@ -206,9 +212,10 @@ async def auth_middleware(request: web.Request, handler):
     Public paths: /healthz, /livez, /readyz, /login, /static/*
     If not authenticated, redirect to /login?next=<original>.
     """
-    adapter = request.app.get(ADAPTER_APP_KEY)
-    if adapter is None:
+    _raw = request.app.get(ADAPTER_APP_KEY)
+    if _raw is None:
         return web.Response(status=500, text="Adapter not initialized\n")
+    adapter: "WebConsoleAdapter" = _raw  # type: ignore[assignment]
 
     path = request.path or "/"
     # Support base-path mounting: honor both absolute and base-prefixed public paths
@@ -329,7 +336,7 @@ async def auth_middleware(request: web.Request, handler):
 
 async def _render_status_page(
     request: web.Request,
-    adapter,
+    adapter: "WebConsoleAdapter",
     *,
     preloaded_ports: Optional[list] = None,
     default_status_path: str = "/",
@@ -363,7 +370,7 @@ async def _render_status_page(
 
 
 async def handle_index(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     try:
         q = request.query_string or ""
         lq = q.lower()
@@ -380,7 +387,7 @@ async def handle_index(request: web.Request) -> web.Response:
 
 
 async def handle_console(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     try:
         if getattr(adapter, "_asset_error", None):
             try:
@@ -412,7 +419,7 @@ async def handle_console(request: web.Request) -> web.Response:
 
 
 async def handle_logs(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     try:
         username = request.get("username")
         try:
@@ -492,13 +499,13 @@ async def handle_logs(request: web.Request) -> web.Response:
 
 
 async def handle_status(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     return await _render_status_page(request, adapter, default_status_path="/status")
 
 
 async def handle_login(request: web.Request) -> web.Response:
     """Render login page (GET) or process login (POST)."""
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     if request.method == "POST":
         try:
             data = await request.post()
@@ -515,10 +522,8 @@ async def handle_login(request: web.Request) -> web.Response:
             client_ip = adapter._get_client_ip(request) if hasattr(adapter, "_get_client_ip") else None
         except Exception:
             client_ip = None
-        renderer = getattr(adapter, "_render_login", None)
-
         def _render_login_response(error: bool, message: Optional[str] = None) -> web.Response:
-            body = renderer(error=error, next_url=safe_next, message=message)
+            body = adapter._render_login(error=error, next_url=safe_next, message=message)
             return web.Response(body=body, content_type="text/html")
 
         throttle_message = adapter._check_login_throttle(client_ip)
@@ -588,13 +593,12 @@ async def handle_login(request: web.Request) -> web.Response:
     except Exception:
         pass
     next_q = request.rel_url.query.get("next") or "/"
-    renderer = getattr(adapter, "_render_login", None)
-    body = renderer(error=False, next_url=next_q)
+    body = adapter._render_login(error=False, next_url=next_q)
     return web.Response(body=body, content_type="text/html")
 
 
 async def handle_logout(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     # Remove session and expire cookie
     try:
         sid = request.cookies.get(adapter._session_cookie_name)
@@ -619,7 +623,7 @@ async def handle_logout(request: web.Request) -> web.Response:
 
 
 async def handle_api_ports(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     try:
         ports = adapter._get_ports_snapshot()
         payload = json.dumps({"ports": ports}).encode("utf-8")
@@ -638,7 +642,7 @@ async def handle_api_reload(request: web.Request) -> web.Response:
       - command_ports
       - tcp_initiator_ports
     """
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     # Require auth and permission
     username = request.get("username")
     if not username:
@@ -730,7 +734,7 @@ async def handle_api_reload(request: web.Request) -> web.Response:
                     clients = list(getattr(pobj, "connected_clients", []) or []) if pobj is not None else []
                     for c in clients:
                         cid = c.get("client_id") if isinstance(c, dict) else None
-                        if cid and hasattr(adapter.console_manager, "disconnect_client_from_port"):
+                        if cid and adapter.console_manager is not None and hasattr(adapter.console_manager, "disconnect_client_from_port"):
                             await adapter.console_manager.disconnect_client_from_port(cid, pname)
                 except Exception:
                     pass
@@ -759,7 +763,7 @@ async def handle_api_reload(request: web.Request) -> web.Response:
 
 
 async def handle_healthz(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     if not adapter.enable_probes:
         raise web.HTTPNotFound()
     if adapter.probes_include_details:
@@ -769,7 +773,7 @@ async def handle_healthz(request: web.Request) -> web.Response:
 
 
 async def handle_livez(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     if not adapter.enable_probes:
         raise web.HTTPNotFound()
     if adapter.probes_include_details:
@@ -779,7 +783,7 @@ async def handle_livez(request: web.Request) -> web.Response:
 
 
 async def handle_readyz(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     if not adapter.enable_probes:
         raise web.HTTPNotFound()
     ready = True
@@ -838,7 +842,7 @@ def _max_rw_users_for_port(adapter: Any, port_name: str) -> Optional[int]:
 
 
 async def handle_ws(request: web.Request) -> web.StreamResponse:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     username = request.get("username") or "web"
     port_name = request.get("_fqpn_port") or request.match_info.get("port_name")
     if not port_name:
@@ -1128,7 +1132,7 @@ async def handle_ws_fqpn(request: web.Request) -> web.StreamResponse:
     This allows selecting among duplicate port names coming from different origins.
     If no exact match exists, a 404 is returned.
     """
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = _get_adapter(request)
     username = request.get("username") or "web"
     server_id = request.match_info.get("server_id")
     port_name = request.match_info.get("port_name")
@@ -1771,8 +1775,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
     def _render_console(
         self,
         plugin_nav: Optional[list[Dict[str, Any]]] = None,
-        ports: list = None,
-        current_port: str = None,
+        ports: Optional[list] = None,
+        current_port: Optional[str] = None,
         user_permission: Optional[str] = None,
     ) -> bytes:
         """Render the xterm-based console page using the Jinja2 'console.html.j2' template."""
@@ -1785,6 +1789,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 current_port=current_port,
                 user_permission=user_permission,
             )
+        assert self._jinja_env is not None
         tmpl = self._jinja_env.get_template("console.html.j2")
         base_path = self._effective_base_path(None)
         html_text = tmpl.render(
@@ -1808,6 +1813,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         user_permission: Optional[str] = None,
     ) -> bytes:
         """Render a friendly error page when console assets are missing."""
+        assert self._jinja_env is not None
         tmpl = self._jinja_env.get_template("console_error.html.j2")
         base_path = self._effective_base_path(None)
         html_text = tmpl.render(
@@ -1837,6 +1843,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         tail: int = 200,
     ) -> bytes:
         """Render the per-port log viewer page."""
+        assert self._jinja_env is not None
         tmpl = self._jinja_env.get_template("logs.html.j2")
         base_path = self._effective_base_path(None)
         html_text = tmpl.render(
@@ -1861,7 +1868,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self,
         data: Dict[str, Any],
         plugin_nav: Optional[list[Dict[str, Any]]] = None,
-        current_port: str = None,
+        current_port: Optional[str] = None,
         user_permission: Optional[str] = None,
     ) -> bytes:
         """Render a comprehensive status page (server-side aggregated).
@@ -1875,6 +1882,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
         Renders using the Jinja2 'status.html.j2' template.
         """
+        assert self._jinja_env is not None
         tmpl = self._jinja_env.get_template("status.html.j2")
         # Compute a few top-level metrics for cards
         ports = data.get("ports", []) or []
@@ -2842,6 +2850,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         message: Optional[str] = None,
     ) -> bytes:
         """Render the login form using the Jinja2 'login.html.j2' template."""
+        assert self._jinja_env is not None
         tmpl = self._jinja_env.get_template("login.html.j2")
         base_path = self._effective_base_path(None)
         html_text = tmpl.render(
