@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Union, Callable
 import inspect
 
 from openmux.server.data_logger import DataLogger
+from openmux.server.port_utils import natural_sort_key
 class PortManager:
     """Manages ports across legacy and unified adapters."""
 
@@ -489,7 +490,7 @@ class PortManager:
 
         # Ensure a stable, user-friendly order across all consumers
         try:
-            port_list.sort(key=lambda p: str((p or {}).get("name", "")).lower())
+            port_list.sort(key=lambda p: natural_sort_key(str((p or {}).get("name", ""))))
         except Exception:
             pass
         return port_list

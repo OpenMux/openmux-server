@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from typing import Callable
 
 from aiohttp import web
-from openmux.server.port_utils import safe_get_port
+from openmux.server.port_utils import safe_get_port, natural_sort_key
 from openmux.server.web_plugins import ADAPTER_APP_KEY
 from openmux.server.data_logger import DataLogger
 import secrets
@@ -209,19 +209,19 @@ def _sort_ports_list(ports: List[Dict[str, Any]], sort_key: str, descending: boo
         return ports
 
     def _key(port: Dict[str, Any]):
-        name = str(port.get("name", "")).lower()
+        name_key = natural_sort_key(str(port.get("name", "")))
         if sort_key == "description":
-            return ((port.get("description") or "").lower(), name)
+            return ((port.get("description") or "").lower(), name_key)
         if sort_key == "device":
-            return (_port_device_value(port), name)
+            return (_port_device_value(port), name_key)
         if sort_key == "origin":
             origin = port.get("origin_server_id") or ("remote" if port.get("remote") else "local")
-            return (str(origin).lower(), name)
+            return (str(origin).lower(), name_key)
         if sort_key == "status":
-            return (_port_status_value(port), name)
+            return (_port_status_value(port), name_key)
         if sort_key == "clients":
-            return (_port_clients_value(port), name)
-        return (name,)
+            return (_port_clients_value(port), name_key)
+        return (name_key,)
 
     try:
         return sorted(ports, key=_key, reverse=descending)
@@ -3574,9 +3574,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 # Source of truth for listings is PortManager.ports above.
             except Exception:
                 ports = []
-        # Ensure a stable, user-friendly order: sort alphabetically by port name (case-insensitive)
+        # Ensure a stable, user-friendly order: natural sort by port name
         try:
-            ports.sort(key=lambda p: str((p or {}).get("name", "")).lower())
+            ports.sort(key=lambda p: natural_sort_key(str((p or {}).get("name", ""))))
         except Exception:
             pass
         return ports

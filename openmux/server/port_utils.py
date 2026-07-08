@@ -5,7 +5,27 @@ Provides a safe, canonical way to resolve a single port by name using the
 PortManager API without leaking exceptions into callers.
 """
 
+import re
 from typing import Any, Optional
+
+
+def natural_sort_key(s: str) -> list:
+    """Return a sort key that orders embedded numbers numerically.
+
+    Splits the string into alternating text/number segments so that
+    comparisons like 'loopback2' < 'loopback10' work correctly.
+
+    Examples:
+        'loopback10' -> ['loopback', 10, '']
+        'ttyUSB2'    -> ['ttyusb', 2, '']
+        'SHELL'      -> ['shell']
+        'rack1slot2' -> ['rack', 1, 'slot', 2, '']
+    """
+    segments = re.split(r"(\d+)", s)
+    # re.split with a capturing group produces alternating text/digit parts:
+    #   "loopback10" -> ["loopback", "10", ""]
+    # Convert digit parts to int so "2" < "10" (numeric) instead of "2" > "10" (lexicographic).
+    return [int(part) if part.isdigit() else part.lower() for part in segments]
 
 
 def safe_get_port(port_manager: Any, port_name: Any) -> Optional[Any]:
