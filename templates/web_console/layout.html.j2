@@ -35,49 +35,16 @@
             </div>
           </div>
         </div>
-        <nav class="sidebar-nav">
+        <!-- Pinned top: System Status + any non-config-editor plugin links -->
+        <div class="sidebar-static">
           <a class="nav-item {% if active_page == 'status' %}active{% endif %}" href="{{ base_path }}/">
             <span class="icon">🏠</span> System Status
           </a>
-          <div class="nav-group">
-            <div class="nav-item-row">
-              <a class="nav-item {% if active_page == 'console' %}active{% endif %}" href="{{ base_path }}/console">
-                <span class="icon">💻</span> Console
-              </a>
-              <button class="nav-expand" id="console-expand-btn" onclick="toggleConsolePorts(event)" title="Show ports">+</button>
-            </div>
-            <div class="nav-sub" id="console-ports" style="display:none">
-              {% if nav_ports %}
-                {% for p in nav_ports %}
-                  <a class="nav-sub-item {% if current_port == p.name %}active{% endif %}" href="{{ base_path }}/console?port={{ p.name }}">{{ p.name }}</a>
-                {% endfor %}
-              {% else %}
-                 <div class="nav-sub-empty">No ports</div>
-              {% endif %}
-            </div>
-          </div>
           {% if plugin_nav and plugin_nav|length > 0 %}
             {% for item in plugin_nav %}
               {% set required = item.require %}
               {% if not required or required == user_permission %}
-                {% if item.path == '/plugins/config-editor' %}
-                   <div class="nav-group">
-                      <div class="nav-item-row">
-                          <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="#" onclick="toggleConfigMenu(event)" id="nav-config-parent">
-                              <span class="icon">⚙️</span> {{ item.title }}
-                          </a>
-                          <button class="nav-expand" id="config-expand-btn" onclick="toggleConfigMenu(event)">+</button>
-                      </div>
-                      <div class="nav-sub" id="config-menu" style="display:none">
-                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=ports" id="nav-config-ports">Ports</a>
-                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=listeners" id="nav-config-listeners">Listeners</a>
-                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=muxcon" id="nav-config-muxcon">Muxcon</a>
-                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=auth" id="nav-config-auth">Authentication</a>
-                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=setup" id="nav-config-setup">Setup</a>
-                          <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=reload" id="nav-config-reload">Reload</a>
-                      </div>
-                   </div>
-                {% else %}
+                {% if item.path != '/plugins/config-editor' %}
                   <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="{{ base_path }}{{ item.path }}">
                     <span class="icon">🔌</span> {{ item.title }}
                   </a>
@@ -85,7 +52,53 @@
               {% endif %}
             {% endfor %}
           {% endif %}
-        </nav>
+        </div>
+        <!-- Console: fills remaining space; port list scrolls within -->
+        <div class="sidebar-console-area">
+          <div class="nav-item-row">
+            <a class="nav-item {% if active_page == 'console' %}active{% endif %}" href="{{ base_path }}/console">
+              <span class="icon">💻</span> Console
+            </a>
+            <button class="nav-expand" id="console-expand-btn" onclick="toggleConsolePorts(event)" title="Show ports">+</button>
+          </div>
+          <div class="nav-sub" id="console-ports" style="display:none">
+            {% if nav_ports %}
+              {% for p in nav_ports %}
+                <a class="nav-sub-item {% if current_port == p.name %}active{% endif %}" href="{{ base_path }}/console?port={{ p.name }}">{{ p.name }}</a>
+              {% endfor %}
+            {% else %}
+              <div class="nav-sub-empty">No ports</div>
+            {% endif %}
+          </div>
+        </div>
+        <!-- Config editor: pinned above footer, admin-only, expands upward -->
+        {% if plugin_nav and plugin_nav|length > 0 %}
+          {% for item in plugin_nav %}
+            {% if item.path == '/plugins/config-editor' %}
+              {% set required = item.require %}
+              {% if not required or required == user_permission %}
+                <div class="sidebar-config-area">
+                  <div class="nav-group">
+                    <div class="nav-item-row">
+                      <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="#" onclick="toggleConfigMenu(event)" id="nav-config-parent">
+                        <span class="icon">⚙️</span> {{ item.title }}
+                      </a>
+                      <button class="nav-expand" id="config-expand-btn" onclick="toggleConfigMenu(event)">+</button>
+                    </div>
+                    <div class="nav-sub" id="config-menu" style="display:none">
+                      <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=ports" id="nav-config-ports">Ports</a>
+                      <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=listeners" id="nav-config-listeners">Listeners</a>
+                      <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=muxcon" id="nav-config-muxcon">Muxcon</a>
+                      <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=auth" id="nav-config-auth">Authentication</a>
+                      <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=setup" id="nav-config-setup">Setup</a>
+                      <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=reload" id="nav-config-reload">Reload</a>
+                    </div>
+                  </div>
+                </div>
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
         <div class="sidebar-footer">
           <button class="nav-item" id="themeToggle" title="Toggle Theme" style="width:100%; background:none; border:none; cursor:pointer; text-align:left; font:inherit; margin-bottom: 4px;">
             <span class="icon" id="themeIcon">☀️</span> <span id="themeText">Light Mode</span>
