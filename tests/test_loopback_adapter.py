@@ -195,3 +195,85 @@ async def test_create_ports_from_config_failure(monkeypatch):
     monkeypatch.setattr(adapter, "create_port", boom)
     ok = await adapter._create_loopback_ports_from_config()
     assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_adapter_reconcile_ports_unchanged(monkeypatch):
+    """Port whose config matches running defaults is not restarted on reconcile."""
+    adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "a"}]})
+
+    # Seed 'a' with the same values the port would have after being created with no
+    # explicit fields — these must match _material_cfg defaults exactly.
+    class PortObj:
+        echo_delay = 0.0
+        buffer_size = 1024
+        sanitize_control = True
+        max_read_write_users = 5
+
+    adapter.ports["a"] = PortObj()  # type: ignore[assignment]
+
+    destroyed: list = []
+    created: list = []
+
+    async def fake_destroy(name: str) -> None:
+        destroyed.append(name)
+
+    async def fake_create(name: str, cfg: dict) -> None:
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    # Description change is non-material — 'a' must stay unchanged
+    summary = await adapter.reconcile_ports([{"name": "a", "description": "new desc"}])
+    assert summary["unchanged"] == ["a"]
+    assert summary["updated"] == []
+    assert destroyed == []
+    assert created == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
+    """Add, remove, and material-change (buffer_size) are all detected correctly."""
+    adapter = LoopbackAdapter("loop", {"loopback_ports": []})
+
+    class PortA:
+        echo_delay = 0.0
+        buffer_size = 1024
+        sanitize_control = True
+        max_read_write_users = 5
+
+    class PortB:
+        echo_delay = 0.0
+        buffer_size = 512  # will be changed to 2048
+        sanitize_control = True
+        max_read_write_users = 5
+
+    adapter.ports["a"] = PortA()  # type: ignore[assignment]
+    adapter.ports["b"] = PortB()  # type: ignore[assignment]
+
+    destroyed: list = []
+    created: list = []
+
+    async def fake_destroy(name: str) -> None:
+        destroyed.append(name)
+        adapter.ports.pop(name, None)
+
+    async def fake_create(name: str, cfg: dict) -> None:
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    summary = await adapter.reconcile_ports([
+        {"name": "a"},                       # unchanged (defaults)
+        {"name": "b", "buffer_size": 2048},  # updated (was 512)
+        {"name": "c"},                       # added
+    ])
+    assert summary["unchanged"] == ["a"]
+    assert summary["updated"] == ["b"]
+    assert summary["added"] == ["c"]
+    assert summary["removed"] == []
+    assert "b" in destroyed
+    assert "b" in created  # destroyed then recreated
+    assert "c" in created

@@ -430,3 +430,85 @@ async def test_spawn_mode_shared_on_demand_equivalent(monkeypatch):
     port.on_client_count_changed(1)
     await asyncio.sleep(0.01)
     assert started["called"] == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_reconcile_ports_unchanged(monkeypatch):
+    """Port whose config matches running defaults is not restarted on reconcile."""
+    adapter = CommandAdapter("cmd", {"command_ports": [{"name": "a", "command": "echo hi"}]})
+
+    # Seed 'a' with the values CommandPort.__init__ would assign for this config
+    class PortObj:
+        command = "echo hi"
+        shell = False
+        cwd = None
+        env = None
+        auto_restart = False
+        max_read_write_users = 1
+        interactive = False
+        always_buffer = False
+        scrollback_size = 0
+
+    adapter.ports["a"] = PortObj()  # type: ignore[assignment]
+
+    destroyed: list = []
+    created: list = []
+
+    async def fake_destroy(name: str) -> None:
+        destroyed.append(name)
+
+    async def fake_create(name: str, cfg: dict) -> None:
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    # Description change is non-material — 'a' must stay unchanged
+    summary = await adapter.reconcile_ports([{"name": "a", "command": "echo hi", "description": "new"}])
+    assert summary["unchanged"] == ["a"]
+    assert summary["updated"] == []
+    assert destroyed == []
+    assert created == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
+    """Add, remove, and material-change (command) are all detected correctly."""
+    adapter = CommandAdapter("cmd", {"command_ports": []})
+
+    class PortA:
+        command = "echo a"; shell = False; cwd = None; env = None; auto_restart = False
+        max_read_write_users = 1; interactive = False; always_buffer = False; scrollback_size = 0
+
+    class PortB:
+        command = "echo b"; shell = False; cwd = None; env = None; auto_restart = False
+        max_read_write_users = 1; interactive = False; always_buffer = False; scrollback_size = 0
+
+    adapter.ports["a"] = PortA()  # type: ignore[assignment]
+    adapter.ports["b"] = PortB()  # type: ignore[assignment]
+
+    destroyed: list = []
+    created: list = []
+
+    async def fake_destroy(name: str) -> None:
+        destroyed.append(name)
+        adapter.ports.pop(name, None)
+
+    async def fake_create(name: str, cfg: dict) -> None:
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    summary = await adapter.reconcile_ports([
+        {"name": "a", "command": "echo a"},      # unchanged
+        {"name": "b", "command": "echo b_new"},  # updated (command changed)
+        {"name": "c", "command": "echo c"},      # added
+    ])
+    assert summary["unchanged"] == ["a"]
+    assert summary["updated"] == ["b"]
+    assert summary["added"] == ["c"]
+    assert summary["removed"] == []
+    assert "b" in destroyed
+    assert "b" in created  # destroyed then recreated
+    assert "c" in created

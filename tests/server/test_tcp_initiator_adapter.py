@@ -281,13 +281,19 @@ async def test_adapter_handle_port_data_routes_to_port_manager():
 @pytest.mark.asyncio
 async def test_adapter_reconcile_ports(monkeypatch):
     adapter = TcpInitiatorAdapter("ti", {"tcp_initiator_ports": [{"name": "a", "host": "h1", "port": 1}]})
-    # Seed existing port 'a' with materialized config
+    # Seed existing port 'a' with materialized config (all fields tracked by old_cfg)
     class PortObj:
         host = "h1"
         port = 1
         use_tls = False
+        ssl_verify = True
         timeout = 10.0
         auto_reconnect = True
+        reconnect_delay = 5.0
+        # stored under private names in TcpInitiatorPort
+        _batching_enabled = True
+        _batch_size = 1024
+        _batch_timeout = 0.015
 
     adapter.ports["a"] = PortObj()  # type: ignore[assignment]
 
