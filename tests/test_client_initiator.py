@@ -384,9 +384,9 @@ class TestOpenMuxClientAdapter:
     # The equivalent behavior is covered by connection tests above.
 
     def test_adapter_type_property(self, adapter_config):
-        """Test adapter_type property."""
+        """Test adapter_type identifier."""
         adapter = self._create_adapter("om_client", [adapter_config])
-        assert adapter.adapter_type == "openmux_client"
+        assert adapter.get_adapter_type() == "openmux_client"
 
     def test_string_representation(self, adapter_config):
         """Test string representation of adapter."""

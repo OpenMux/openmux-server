@@ -677,9 +677,9 @@ async def handle_api_reload(request: web.Request) -> web.Response:
     def find_adapter(kind: str):
         for a in unified_adapters:
             try:
-                at = a.get_adapter_type() if hasattr(a, "get_adapter_type") else getattr(a, "adapter_type", None)
+                at = a.get_adapter_type()
             except Exception:
-                at = getattr(a, "adapter_type", None)
+                at = None
             if isinstance(at, str) and at.lower() == kind:
                 return a
         return None
@@ -1175,9 +1175,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
         enable_probes: true (bool)  # register /healthz, /livez, /readyz endpoints
         probes_include_details: false (bool)  # when true, probes return JSON with version/uptime/clients
     """
-
-    # Expose adapter type for registry indexing (supports unified adapters list)
-    adapter_type = "WebConsole"
 
     def __init__(self, name: str, config: Dict[str, Any]):
         super().__init__(name, config)
@@ -1999,8 +1996,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             unified = getattr(pm, "unified_adapters", []) if pm else []
             for ad in unified or []:
                 try:
-                    atype_fn = getattr(ad, "get_adapter_type", None)
-                    atype = atype_fn() if callable(atype_fn) else getattr(ad, "adapter_type", "")
+                    atype = ad.get_adapter_type()
                     if str(atype).lower() == "muxcon":
                         return ad
                 except Exception:
@@ -2820,8 +2816,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 mgr = cm.client_to_manager.get(client_id)
                 if mgr is not None:
                     # If it looks like the TCP server adapter, try to get address
-                    atype = getattr(mgr, "get_adapter_type", None)
-                    atype = atype() if callable(atype) else getattr(mgr, "adapter_type", None)
+                    atype_fn = getattr(mgr, "get_adapter_type", None)
+                    atype = atype_fn() if callable(atype_fn) else None
                     if str(atype).lower() in ("client_listener", "tcp", "tcp_server"):
                         try:
                             # TcpServerAdapter maintains clients dict with sessions having .address

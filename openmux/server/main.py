@@ -198,11 +198,7 @@ class OpenMuxServer:
                     try:
                         success = await adapter.start()
                         if success:
-                            adapter_type = getattr(
-                                adapter,
-                                "adapter_type",
-                                adapter.__class__.__name__,
-                            )
+                            adapter_type = adapter.get_adapter_type()
                             self.logger.info(f"Started unified adapter: {adapter.name} ({adapter_type})")
                         else:
                             self.logger.error(f"Failed to start unified adapter: {adapter.name}")
@@ -562,7 +558,7 @@ class OpenMuxServer:
             for adapter in connection_unified_adapters:
                 status_info = adapter.get_status_info()
                 status = "🟢 Running" if adapter.is_running else "🔴 Stopped"
-                adapter_type = str(status_info.get("type", getattr(adapter, "adapter_type", adapter.__class__.__name__)))
+                adapter_type = str(status_info.get("type", adapter.get_adapter_type()))
                 details = status_info.get("details", {}) or {}
 
                 # Build per-line endpoints for readability
@@ -697,10 +693,7 @@ class OpenMuxServer:
             adapters = getattr(self, "unified_adapters", []) or []
             for a in adapters:
                 atype = None
-                try:
-                    atype = a.get_adapter_type() if hasattr(a, "get_adapter_type") else getattr(a, "adapter_type", None)
-                except Exception:
-                    atype = getattr(a, "adapter_type", None)
+                atype = a.get_adapter_type()
                 key = (atype or a.__class__.__name__).lower() if isinstance(atype, str) else str(atype)
                 if not key:
                     continue
@@ -789,7 +782,7 @@ class OpenMuxServer:
             _running = False
             for _a in adapters:
                 try:
-                    _at = _a.get_adapter_type() if hasattr(_a, "get_adapter_type") else getattr(_a, "adapter_type", "")
+                    _at = _a.get_adapter_type()
                     if str(_at or "").lower() == _type_key:
                         _running = True
                         break
@@ -828,11 +821,7 @@ class OpenMuxServer:
 
         for a in adapters:
             try:
-                atype = None
-                try:
-                    atype = a.get_adapter_type() if hasattr(a, "get_adapter_type") else getattr(a, "adapter_type", None)
-                except Exception:
-                    atype = getattr(a, "adapter_type", None)
+                atype = a.get_adapter_type()
                 key = (str(atype) if atype else "").lower()
                 # Serial — absent section treated as empty list to remove ports when section is dropped
                 if key == "serial" and hasattr(a, "reconcile_ports"):
@@ -892,7 +881,7 @@ class OpenMuxServer:
         # Stop all unified adapters
         for adapter in self.unified_adapters:
             try:
-                adapter_type = getattr(adapter, "adapter_type", adapter.__class__.__name__)
+                adapter_type = adapter.get_adapter_type()
                 self.logger.info(f"Stopping unified adapter {adapter.name} ({adapter_type})...")
                 await adapter.stop()
                 self.logger.info(f"Stopped unified adapter {adapter.name}")
@@ -946,7 +935,7 @@ class OpenMuxServer:
             try:
                 targets = []
                 for a in old:
-                    atype = getattr(a, "adapter_type", a.__class__.__name__)
+                    atype = a.get_adapter_type()
                     targets.append(f"{getattr(a, 'name', '?')}({atype})")
                     self.logger.debug(f"[reload-full:{req_id}] Stop target: {getattr(a, 'name', '?')} ({atype})")
                 self.logger.info(
@@ -957,7 +946,7 @@ class OpenMuxServer:
             for adapter in old:
                 try:
                     aname = getattr(adapter, "name", "?")
-                    atype = getattr(adapter, "adapter_type", adapter.__class__.__name__)
+                    atype = adapter.get_adapter_type()
                     # Avoid self-stop deadlock: if the reload was triggered from the web console itself,
                     # defer stopping that web console instance until after we return the HTTP response.
                     atype_l = str(atype).lower()
@@ -1024,11 +1013,11 @@ class OpenMuxServer:
                 try:
                     self.logger.info(f"[reload-full:{req_id}] Created {len(self.unified_adapters)} unified adapters")
                     for a in self.unified_adapters:
-                        atype = getattr(a, "adapter_type", a.__class__.__name__)
+                        atype = a.get_adapter_type()
                         summary["created_adapters"].append({"name": getattr(a, "name", "?"), "type": atype})
                         self.logger.debug(f"[reload-full:{req_id}] Created: {getattr(a, 'name', '?')} ({atype})")
                         try:
-                            if str(getattr(a, "adapter_type", "")).lower() in ("webconsole", "web_console", "web-console"):
+                            if atype.lower() in ("webconsole", "web_console", "web-console"):
                                 deferred_new_wc = a
                         except Exception:
                             pass
@@ -1062,7 +1051,7 @@ class OpenMuxServer:
                     if callable(set_console):
                         set_console(self.console_manager)
                     try:
-                        atype = getattr(adapter, "adapter_type", adapter.__class__.__name__)
+                        atype = adapter.get_adapter_type()
                         self.logger.debug(f"[reload-full:{req_id}] Wired dependencies for {getattr(adapter, 'name', '?')} ({atype})")
                     except Exception:
                         pass
@@ -1078,7 +1067,7 @@ class OpenMuxServer:
             for adapter in self.unified_adapters:
                 try:
                     aname = getattr(adapter, "name", "?")
-                    atype = getattr(adapter, "adapter_type", adapter.__class__.__name__)
+                    atype = adapter.get_adapter_type()
                     # If we deferred stopping the current WebConsole, also defer starting the new WebConsole
                     if deferred_old_wc is not None and adapter is deferred_new_wc:
                         summary["web_console_restart_deferred"] = True

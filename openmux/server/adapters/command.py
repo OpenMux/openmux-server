@@ -1186,15 +1186,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         self.security_policy = None
         self._privilege_policy: Optional[CommandPrivilegePolicy] = None
 
-    @property
-    def adapter_type(self) -> str:
-        """Return stable adapter type identifier.
-
-        Returns:
-            str: The adapter type key used in configuration and status APIs.
-        """
-        return "command"
-
     def get_adapter_type(self) -> str:
         """Return adapter type for security policy and factory lookup."""
         return "command"

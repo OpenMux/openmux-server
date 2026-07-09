@@ -295,8 +295,8 @@ class OpenMuxClientAdapter(BaseGenericAdapter):
         }
 
     def get_adapter_type(self) -> str:
-        """Return human-friendly adapter type string."""
-        return "OpenMux Client"
+        """Return adapter type identifier."""
+        return "openmux_client"
 
     @classmethod
     def validate_config(cls, config: Dict[str, Any]) -> bool:
@@ -405,15 +405,6 @@ class OpenMuxClientAdapter(BaseGenericAdapter):
                 continue
             result[name] = dict(item)
         return result
-
-    @property
-    def adapter_type(self) -> str:
-        """Internal adapter type identifier.
-
-        Returns:
-            String key used in status outputs and internal routing.
-        """
-        return "openmux_client"
 
     async def start(self) -> bool:
         """Start adapter by creating all configured client ports.

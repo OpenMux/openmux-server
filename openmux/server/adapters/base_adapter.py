@@ -60,6 +60,18 @@ class BaseGenericAdapter(ABC):
         # Reference to the unified/global port manager; provided after construction.
         self.main_port_manager: Optional[Any] = None
 
+    def get_adapter_type(self) -> str:
+        """Return adapter type identifier.
+
+        Override in subclasses with a stable string key used for configuration
+        lookup and status reporting. Falls back to the ``adapter_type`` attribute
+        when present (supports legacy class-attribute style and test mocks).
+        """
+        at = getattr(self, "adapter_type", None)
+        if isinstance(at, str) and at:
+            return at
+        return self.__class__.__name__
+
     @abstractmethod
     def get_capabilities(self) -> Set[AdapterCapability]:
         """Return supported adapter capabilities.
@@ -362,7 +374,7 @@ class BaseGenericAdapter(ABC):
             ports: human summary (if port_manager attached) else "n/a"
             details: adapter-specific structure placeholder
         """
-        adapter_type = getattr(self, "get_adapter_type", lambda: self.__class__.__name__)()
+        adapter_type = self.get_adapter_type()
         port_count = 0
         pending_connect = 0
         if self.port_manager and hasattr(self.port_manager, "active_ports"):

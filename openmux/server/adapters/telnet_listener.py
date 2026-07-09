@@ -59,8 +59,6 @@ class TelnetSession:
 class TelnetListenerAdapter(BaseGenericAdapter):
     """Adapter exposing OpenMux ports via raw TCP/Telnet sockets."""
 
-    adapter_type = "telnet_listener"
-
     def get_adapter_type(self) -> str:
         """Return adapter type for security policy and factory lookup."""
         return "telnet_listener"

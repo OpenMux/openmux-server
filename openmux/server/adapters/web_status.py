@@ -354,8 +354,7 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             muxcon = None
             if self.main_port_manager and hasattr(self.main_port_manager, "unified_adapters"):
                 for ad in self.main_port_manager.unified_adapters:
-                    atype = getattr(ad, "get_adapter_type", None)
-                    at = atype() if callable(atype) else getattr(ad, "adapter_type", "")
+                    at = ad.get_adapter_type()
                     if str(at).lower() == "muxcon":
                         muxcon = ad
                         break
@@ -638,8 +637,7 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             if self.main_port_manager and hasattr(self.main_port_manager, "unified_adapters"):
                 for ad in getattr(self.main_port_manager, "unified_adapters", []) or []:
                     try:
-                        atype_fn = getattr(ad, "get_adapter_type", None)
-                        atype = atype_fn() if callable(atype_fn) else getattr(ad, "adapter_type", "")
+                        atype = ad.get_adapter_type()
                         if str(atype).lower() == "muxcon":
                             muxcon = ad
                             break
@@ -909,8 +907,7 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
         if self.main_port_manager and hasattr(self.main_port_manager, "unified_adapters"):
             for ad in getattr(self.main_port_manager, "unified_adapters", []) or []:
                 try:
-                    atype_fn = getattr(ad, "get_adapter_type", None)
-                    atype = atype_fn() if callable(atype_fn) else getattr(ad, "adapter_type", "")
+                    atype = ad.get_adapter_type()
                     if str(atype).lower() == "muxcon":
                         muxcon = ad
                         break

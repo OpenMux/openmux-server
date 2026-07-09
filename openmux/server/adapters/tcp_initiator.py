@@ -373,12 +373,8 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 result[item["name"]] = dict(item)
         return result
 
-    @property
-    def adapter_type(self) -> str:
-        return "tcp_initiator"
-
     def get_adapter_type(self) -> str:
-        """Return adapter type identifier for legacy factory compatibility."""
+        """Return adapter type identifier."""
         return "tcp_initiator"
 
     async def start(self) -> bool:

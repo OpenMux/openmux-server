@@ -195,8 +195,7 @@ class PortManager:
                 self.adapter = adapter
                 self.logger = logging.getLogger(f"openmux.server.port_manager.unified_wrapper.{self.name}")
 
-                _get_type = getattr(adapter, "get_adapter_type", None)
-                adapter_type = _get_type() if callable(_get_type) else getattr(adapter, "adapter_type", "unknown")
+                adapter_type = adapter.get_adapter_type()
 
                 self.description = getattr(unified_port, "description", f"Unified {adapter_type} port")
                 self.is_running = getattr(unified_port, "is_running", True)
