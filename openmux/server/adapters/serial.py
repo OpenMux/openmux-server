@@ -702,29 +702,29 @@ class SerialAdapter(BaseGenericAdapter):
         """Return human-friendly adapter type string."""
         return "Serial"
 
-    async def write_to_port(self, port_name: str, data: bytes) -> bool:
+    async def write_to_port(self, port_name: str, data: bytes) -> int:
         """Write bytes to a specific serial port.
 
         Returns:
-            bool: True if write succeeded; False otherwise.
+            Number of bytes written (0 if port missing, not connected, or write failed).
         """
         if port_name not in self.serial_ports:
             self.logger.warning(f"Port {port_name} not found in serial ports")
-            return False
+            return 0
 
         port_wrapper = self.serial_ports[port_name]
         if not port_wrapper.is_connected:
             self.logger.warning(f"Port {port_name} is not connected")
-            return False
+            return 0
 
         try:
             self.logger.debug(f"Writing {len(data)} bytes to serial port {port_name}: {data.decode('utf-8', errors='replace')}")
             bytes_written = await port_wrapper.write_data(data)
             self.logger.debug(f"Successfully wrote {bytes_written} bytes to serial port {port_name}")
-            return bytes_written > 0
+            return bytes_written
         except Exception as e:
             self.logger.error(f"Failed to write to serial port {port_name}: {e}", exc_info=True)
-            return False
+            return 0
 
     def get_status_info(self) -> Dict[str, Any]:
         """Return structured adapter status snapshot."""
