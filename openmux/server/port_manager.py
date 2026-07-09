@@ -207,6 +207,7 @@ class PortManager:
                 # Wrapper owns its own delivery queue; port.data_queue (if any)
                 # remains as a test-only staging buffer accessed via port.read_data().
                 self.data_queue = asyncio.Queue(maxsize=100)
+                self.client_queues: Dict[str, asyncio.Queue] = {}
                 # Surface adapter-specific buffering hints so the manager can honor them
                 self.always_buffer = bool(getattr(unified_port, "always_buffer", False))
                 # Scrollback ring buffer: retains the last scrollback_size bytes for replay
@@ -263,6 +264,9 @@ class PortManager:
                 """Unregister a client and trigger the adapter hook if present."""
                 if client in self.connected_clients:
                     self.connected_clients.remove(client)
+                    client_id = client.get("client_id") if isinstance(client, dict) else None
+                    if client_id:
+                        self.client_queues.pop(client_id, None)
                     if hasattr(self.unified_port, "on_client_count_changed"):
                         try:
                             self.unified_port.on_client_count_changed(len(self.connected_clients))
@@ -555,6 +559,8 @@ class PortManager:
                 "connected_at": time.time(),
             }
             port.connected_clients.append(client_info)
+            if hasattr(port, "client_queues"):
+                port.client_queues[client_id] = asyncio.Queue(maxsize=100)
 
             self.logger.info(f"Added client {username} ({client_id}) to port {port_name} in {mode} mode")
             # Lifecycle event: client connected
@@ -612,6 +618,8 @@ class PortManager:
             for i, client in enumerate(port.connected_clients):
                 if client["client_id"] == client_id:
                     port.connected_clients.pop(i)
+                    if hasattr(port, "client_queues"):
+                        port.client_queues.pop(client_id, None)
                     self.logger.debug(f"Removed client {client_id} from port {port_name}")
                     # Lifecycle event: client disconnected
                     try:
@@ -979,7 +987,25 @@ class PortManager:
                     if excess > 0:
                         del port._scrollback[:excess]
 
-                # Only enqueue when clients are connected (unless told otherwise)
+                # Fan out to per-client delivery queues (console/telnet clients)
+                if hasattr(port, "client_queues") and port.client_queues:
+                    for cid, q in list(port.client_queues.items()):
+                        try:
+                            q.put_nowait(data)
+                        except asyncio.QueueFull:
+                            try:
+                                q.get_nowait()
+                                q.put_nowait(data)
+                                self.logger.debug(
+                                    f"Queue full for {port_name}:{cid}; dropped oldest chunk"
+                                )
+                            except Exception:
+                                self.logger.warning(
+                                    f"Data queue contention for {port_name}:{cid}; dropping data",
+                                    exc_info=True,
+                                )
+
+                # Maintain shared queue for muxcon/federation consumers (backward compat)
                 if hasattr(port, "data_queue") and hasattr(port, "connected_clients"):
                     client_list = getattr(port, "connected_clients", []) or []
                     always_buffer = bool(getattr(port, "always_buffer", False))

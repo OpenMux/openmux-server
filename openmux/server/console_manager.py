@@ -33,7 +33,7 @@ class ConsoleManager:
         self.auth_manager = auth_manager
         self.logger = logging.getLogger("openmux.console")
         self.client_port_map = {}  # Maps client_id to port_name
-        self.data_forwarding_tasks = {}  # Tasks for forwarding data from port to clients (one task per port)
+        self.data_forwarding_tasks = {}  # Tasks for forwarding data to clients (keyed by client_id, one task per client)
         self.console_clients = {}  # Maps port_name to list of connected clients
         # Back-compat single manager (deprecated by client_managers)
         self.client_manager = None  # Will be set by the client manager
@@ -263,8 +263,8 @@ class ConsoleManager:
             # Map client to port
             self.client_port_map[client_id] = port_name
 
-            # Start or ensure data forwarding task for this port (not per client)
-            self._ensure_port_data_forwarding(port_name)
+            # Start per-client data forwarding task
+            self._ensure_client_forwarding_task(port_name, client_id)
 
             self.logger.info(f"Client {username} ({client_id}) connected to port {port_name} in {mode} mode")
 
@@ -287,8 +287,8 @@ class ConsoleManager:
         # Remove client from port
         await self.port_manager.remove_client_from_port(port_name, client_id)
 
-        # Check if this was the last client on the port, and stop forwarding if so
-        self._check_and_stop_port_forwarding(port_name)
+        # Cancel this client's forwarding task
+        self._stop_client_forwarding_task(client_id)
 
         # Remove from map
         del self.client_port_map[client_id]
@@ -353,41 +353,43 @@ class ConsoleManager:
         """
         return await self.port_manager.write_to_port(port_name, data, client_id)
 
-    def _ensure_port_data_forwarding(self, port_name: str):
-        """Ensure there's a data forwarding task for this port.
-
-        Restarts the task to avoid stale client references.
+    def _ensure_client_forwarding_task(self, port_name: str, client_id: str):
+        """Create (or recreate) a per-client data forwarding task.
 
         Args:
-            port_name: Port to (re)establish data forwarding for.
+            port_name: Port the client is connected to.
+            client_id: Client whose dedicated task should be (re)started.
         """
-        # Always stop and recreate the task if it exists
-        # This ensures we don't have stale client references
-        if port_name in self.data_forwarding_tasks:
-            old_task = self.data_forwarding_tasks[port_name]
+        if client_id in self.data_forwarding_tasks:
+            old_task = self.data_forwarding_tasks[client_id]
             if not old_task.done() and not old_task.cancelled():
-                self.logger.info(f"Stopping existing data forwarding task for port {port_name} to create fresh one")
                 old_task.cancel()
-            del self.data_forwarding_tasks[port_name]
+            del self.data_forwarding_tasks[client_id]
+        task = asyncio.create_task(self._forward_data_to_client(port_name, client_id))
+        self.data_forwarding_tasks[client_id] = task
+        self.logger.info(f"Created forwarding task for {port_name} → {client_id}")
 
-        # Create new task for this port
-        self.logger.info(f"Creating data forwarding task for port {port_name}")
-        task = asyncio.create_task(self._forward_data_to_port_clients(port_name))
-        self.data_forwarding_tasks[port_name] = task
-        self.logger.info(f"Data forwarding task created for port {port_name}")
+    def _stop_client_forwarding_task(self, client_id: str):
+        """Cancel the forwarding task for a specific client.
+
+        Args:
+            client_id: Client whose task should be cancelled.
+        """
+        if client_id in self.data_forwarding_tasks:
+            task = self.data_forwarding_tasks[client_id]
+            task.cancel()
+            del self.data_forwarding_tasks[client_id]
+            self.logger.info(f"Stopped forwarding task for client {client_id}")
 
     def _stop_port_data_forwarding(self, port_name: str):
-        """Stop data forwarding task for a port.
+        """Cancel all client forwarding tasks associated with a port.
 
         Args:
-            port_name: Port whose forwarding task should be stopped.
+            port_name: Port whose client tasks should all be stopped.
         """
-        if port_name in self.data_forwarding_tasks:
-            task = self.data_forwarding_tasks[port_name]
-            self.logger.info(f"Stopping data forwarding task for port {port_name}")
-            task.cancel()
-            del self.data_forwarding_tasks[port_name]
-            self.logger.info(f"Data forwarding task for port {port_name} cancelled and removed")
+        client_ids = [cid for cid, p in self.client_port_map.items() if p == port_name]
+        for client_id in client_ids:
+            self._stop_client_forwarding_task(client_id)
 
     def _check_and_stop_port_forwarding(self, port_name: str):
         """Stop port forwarding if no clients are connected to the port.
@@ -395,11 +397,8 @@ class ConsoleManager:
         Args:
             port_name: Port to check for active clients.
         """
-        # Check if any clients are still connected to this port
-        clients_on_port = [client_id for client_id, port in self.client_port_map.items() if port == port_name]
-
+        clients_on_port = [cid for cid, p in self.client_port_map.items() if p == port_name]
         if not clients_on_port:
-            # No clients left on this port, stop the forwarding task
             self._stop_port_data_forwarding(port_name)
 
     def _log_loopback_debug_info(self, port_name: str, port_count: int, data: Optional[bytes] = None):
@@ -505,83 +504,55 @@ class ConsoleManager:
                 pass
         return success
 
-    async def _forward_data_to_port_clients(self, port_name: str):
-        """Forward data from a port to all currently connected clients.
+    async def _forward_data_to_client(self, port_name: str, client_id: str):
+        """Forward data from a port to a single client via its dedicated queue.
 
         Args:
-            port_name: Port whose data is broadcast to its clients.
+            port_name: Source port name.
+            client_id: Target client identifier.
         """
         try:
-            port_count = 0
-            self.logger.info(f"Starting data forwarding for port {port_name}")
+            self.logger.info(f"Starting data forwarding for {port_name} \u2192 {client_id}")
 
+            # Capture the queue reference once; task is recreated on reconnect.
+            port_wrapper = self.port_manager.get_port(port_name)
+            if port_wrapper is None or not hasattr(port_wrapper, "client_queues"):
+                self.logger.error(
+                    f"Port {port_name} has no client_queues; forwarding for {client_id} cannot start"
+                )
+                return
+            q = port_wrapper.client_queues.get(client_id)
+            if q is None:
+                self.logger.error(f"No delivery queue for {client_id} on {port_name}")
+                return
+
+            chunk_count = 0
             while True:
                 try:
-                    # Block until data is available — no polling sleep needed.
-                    # CancelledError propagates naturally when the task is stopped.
-                    data = await self.port_manager.get_port_data_async(port_name)
+                    data = await q.get()
+                    chunk_count += 1
 
-                    if data is None:
-                        # Port no longer registered; exit cleanly.
-                        self.logger.warning(f"Port {port_name} unavailable, stopping data forwarding")
-                        break
+                    self._log_loopback_debug_info(port_name, chunk_count, data)
+                    self._log_forwarded_data_details(port_name, client_id, data)
 
-                    port_count += 1
-                    self._log_loopback_debug_info(port_name, port_count, data)
-
-                    # Get a fresh client list now that we have data to send.
-                    try:
-                        port_wrapper = self.port_manager.get_port(port_name)
-                        if port_wrapper and hasattr(port_wrapper, "connected_clients"):
-                            clients_on_port = [c["client_id"] for c in port_wrapper.connected_clients]
-                        else:
-                            clients_on_port = [cid for cid, p in self.client_port_map.items() if p == port_name]
-                    except Exception as e:
-                        self.logger.warning(f"Error getting client list for {port_name}: {e}", exc_info=True)
-                        clients_on_port = [cid for cid, p in self.client_port_map.items() if p == port_name]
-
-                    if not clients_on_port:
-                        self.logger.debug(f"No clients on port {port_name}; discarding dequeued chunk")
-                        continue
-
-                    if "loopback" in port_name:
-                        hex_data = " ".join(f"{b:02x}" for b in data)
-                        ascii_data = "".join(chr(b) if 32 <= b <= 126 else "." for b in data)
-                        self.logger.debug(
-                            f"PORT->CLIENTS BROADCAST: port={port_name}, "
-                            f"len={len(data)} bytes, hex={hex_data}, ascii='{ascii_data}'"
-                        )
-
-                    success_count = 0
-                    for client_id in clients_on_port:
-                        try:
-                            success = await self._send_data_to_client(client_id, port_name, data)
-                            if success:
-                                success_count += 1
-                            else:
-                                self.logger.warning(f"Failed to send data to client {client_id}")
-                        except Exception as e:
-                            self.logger.warning(f"Error sending data to client {client_id}: {e}", exc_info=True)
-
-                    if success_count > 0:
-                        self.logger.debug(
-                            f"Broadcasted data to {success_count}/{len(clients_on_port)} clients on port {port_name}"
-                        )
+                    success = await self._send_data_to_client(client_id, port_name, data)
+                    if not success:
+                        self.logger.warning(f"Failed to send data to client {client_id} on {port_name}")
                     else:
-                        self.logger.warning(f"Failed to broadcast data to any clients on port {port_name}")
+                        self.logger.debug(f"Forwarded {len(data)} bytes from {port_name} to {client_id}")
 
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    self.logger.error(f"Error in data forwarding loop for port {port_name}: {e}", exc_info=True)
+                    self.logger.error(
+                        f"Error forwarding data to {client_id} on {port_name}: {e}", exc_info=True
+                    )
                     await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
-            # Task was cancelled
-            self.logger.info(f"Data forwarding task for port {port_name} was cancelled")
-            pass
+            self.logger.info(f"Data forwarding for {port_name} \u2192 {client_id} was cancelled")
         except Exception as e:
-            self.logger.error(f"Error forwarding data to clients on port {port_name}: {e}", exc_info=True)
+            self.logger.error(f"Unexpected error in forwarding task for {client_id}: {e}", exc_info=True)
 
     def register_client_manager(self, client_manager):
         """Register the client manager for callbacks.
