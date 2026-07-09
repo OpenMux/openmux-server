@@ -904,6 +904,37 @@ class PortManager:
 
         return None
 
+    async def get_port_data_async(self, port_name: str) -> Optional[bytes]:
+        """Block until one data chunk is available for the named port.
+
+        Unlike :meth:`get_port_data`, this coroutine suspends the caller until
+        data arrives, eliminating the need for a polling sleep in the forwarding
+        loop.  ``asyncio.CancelledError`` propagates normally so callers can be
+        cancelled cleanly.
+
+        Args:
+            port_name: Port to read from.
+
+        Returns:
+            The next bytes chunk, or ``None`` if the port is not found.
+        """
+        if port_name not in self.ports:
+            self._ensure_unified_wrapper(port_name)
+
+        if port_name in self.ports:
+            port = self.ports[port_name]
+            try:
+                data = await port.data_queue.get()
+                self.logger.debug(f"READ FROM PORT: port={port_name} bytes={len(data)}")
+                return data
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.logger.error(f"Error getting data from port {port_name}: {e}", exc_info=True)
+                return None
+
+        return None
+
     def handle_incoming_port_data(
         self,
         port_name: str,

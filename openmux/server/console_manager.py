@@ -512,96 +512,68 @@ class ConsoleManager:
             port_name: Port whose data is broadcast to its clients.
         """
         try:
-            port_count = 0  # Counter for debugging
+            port_count = 0
             self.logger.info(f"Starting data forwarding for port {port_name}")
 
             while True:
-                # Get current clients directly from the port manager (more reliable)
                 try:
-                    # Get clients from the actual port wrapper instead of our map
-                    port_wrapper = None
-                    try:
-                        port_wrapper = self.port_manager.get_port(port_name)
-                    except Exception:
-                        port_wrapper = None
-                    if port_wrapper and hasattr(port_wrapper, "connected_clients"):
-                        clients_on_port = [client["client_id"] for client in port_wrapper.connected_clients]
-                    else:
-                        clients_on_port = [client_id for client_id, port in self.client_port_map.items() if port == port_name]
+                    # Block until data is available — no polling sleep needed.
+                    # CancelledError propagates naturally when the task is stopped.
+                    data = await self.port_manager.get_port_data_async(port_name)
 
-                    # This debug logging is to help diagnose issues with stale client references, but is very verbose
-                    # self.logger.debug(
-                    #    f"Data forwarding loop: found {len(clients_on_port)} clients on {port_name}: {clients_on_port}"
-                    # )
-
-                except Exception as e:
-                    self.logger.warning(f"Error getting client list for {port_name}: {e}", exc_info=True)
-                    # Fallback to our client map
-                    clients_on_port = [client_id for client_id, port in self.client_port_map.items() if port == port_name]
-
-                if not clients_on_port:
-                    # No clients left on this port, stop the task
-                    self.logger.debug(f"No clients left on port {port_name}, stopping data forwarding")
-                    break
-
-                try:
-                    # Get data from port (now blocks until data available)
-                    self._log_loopback_debug_info(port_name, port_count)
-                    data = await self.port_manager.get_port_data(port_name)
+                    if data is None:
+                        # Port no longer registered; exit cleanly.
+                        self.logger.warning(f"Port {port_name} unavailable, stopping data forwarding")
+                        break
 
                     port_count += 1
                     self._log_loopback_debug_info(port_name, port_count, data)
 
-                    if data:
-                        # Enhanced debugging for loopback ports
-                        if "loopback" in port_name:
-                            hex_data = " ".join(f"{b:02x}" for b in data)
-                            ascii_data = "".join(chr(b) if 32 <= b <= 126 else "." for b in data)
-                            self.logger.debug(
-                                f"PORT->CLIENTS BROADCAST: port={port_name}, "
-                                f"len={len(data)} bytes, hex={hex_data}, ascii='{ascii_data}'"
-                            )
-
-                        # Broadcast to all clients on this port via the client manager
-                        # Always get fresh client list to avoid stale references
-                        if clients_on_port:
-                            # Instead of using console manager's client mapping, send to all current clients
-                            success_count = 0
-                            # Resolve port object once for logger filename resolution
-                            port_obj = None
-                            try:
-                                port_obj = self.port_manager.get_port(port_name)
-                            except Exception as e:
-                                self.logger.exception(f"Failed to resolve port object for {port_name}: {e}")
-                                port_obj = None
-
-                            for client_id in clients_on_port:
-                                try:
-                                    success = await self._send_data_to_client(client_id, port_name, data)
-                                    if success:
-                                        success_count += 1
-                                    else:
-                                        self.logger.warning(f"Failed to send data to client {client_id}")
-                                except Exception as e:
-                                    self.logger.warning(f"Error sending data to client {client_id}: {e}", exc_info=True)
-
-                            if success_count > 0:
-                                self.logger.debug(
-                                    f"Broadcasted data to {success_count}/{len(clients_on_port)} clients on port {port_name}"
-                                )
-                            else:
-                                self.logger.warning(f"Failed to broadcast data to any clients on port {port_name}")
+                    # Get a fresh client list now that we have data to send.
+                    try:
+                        port_wrapper = self.port_manager.get_port(port_name)
+                        if port_wrapper and hasattr(port_wrapper, "connected_clients"):
+                            clients_on_port = [c["client_id"] for c in port_wrapper.connected_clients]
                         else:
-                            self.logger.warning(f"No clients to broadcast to on port {port_name}")
+                            clients_on_port = [cid for cid, p in self.client_port_map.items() if p == port_name]
+                    except Exception as e:
+                        self.logger.warning(f"Error getting client list for {port_name}: {e}", exc_info=True)
+                        clients_on_port = [cid for cid, p in self.client_port_map.items() if p == port_name]
+
+                    if not clients_on_port:
+                        self.logger.debug(f"No clients on port {port_name}; discarding dequeued chunk")
+                        continue
+
+                    if "loopback" in port_name:
+                        hex_data = " ".join(f"{b:02x}" for b in data)
+                        ascii_data = "".join(chr(b) if 32 <= b <= 126 else "." for b in data)
+                        self.logger.debug(
+                            f"PORT->CLIENTS BROADCAST: port={port_name}, "
+                            f"len={len(data)} bytes, hex={hex_data}, ascii='{ascii_data}'"
+                        )
+
+                    success_count = 0
+                    for client_id in clients_on_port:
+                        try:
+                            success = await self._send_data_to_client(client_id, port_name, data)
+                            if success:
+                                success_count += 1
+                            else:
+                                self.logger.warning(f"Failed to send data to client {client_id}")
+                        except Exception as e:
+                            self.logger.warning(f"Error sending data to client {client_id}: {e}", exc_info=True)
+
+                    if success_count > 0:
+                        self.logger.debug(
+                            f"Broadcasted data to {success_count}/{len(clients_on_port)} clients on port {port_name}"
+                        )
                     else:
-                        # No data available - small delay to prevent busy polling
-                        await asyncio.sleep(0.1)
+                        self.logger.warning(f"Failed to broadcast data to any clients on port {port_name}")
 
-                    # No need for complex backoff - get_port_data now handles waiting
-
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     self.logger.error(f"Error in data forwarding loop for port {port_name}: {e}", exc_info=True)
-                    # On error, wait before retrying
                     await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
