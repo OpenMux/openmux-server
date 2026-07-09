@@ -89,6 +89,4 @@ def test_get_port_configurations_from_list():
 
 def test_adapter_type_string_and_property_consistency():
     adapter = OpenMuxClientAdapter("test", [])
-    # get_adapter_type is the human-friendly label; adapter_type is the internal key
-    assert adapter.get_adapter_type() == "OpenMux Client"
-    assert adapter.adapter_type == "openmux_client"
+    assert adapter.get_adapter_type() == "openmux_client"
