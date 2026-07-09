@@ -290,7 +290,6 @@ async def test_force_enqueue_and_drop_oldest(monkeypatch):
             self.connected_clients: List[Dict[str, Any]] = []
             self.max_read_write_users = 1
             self.always_buffer = False
-            self.drop_oldest_on_full = True
 
     port = DummyPort()
     pm.ports["pbuf"] = port
@@ -341,10 +340,11 @@ async def test_write_permissions_and_queuefull(monkeypatch):
     # Replace queue with size=1 and add a client to enable queuing
     w.data_queue = asyncio.Queue(maxsize=1)
     w.connected_clients.append({"client_id": "c", "mode": "read-only"})
-    # Fill queue to trigger QueueFull on next send
+    # Fill queue and trigger drop-oldest on next send
     w.data_queue.put_nowait(b"A")
     ok = await pm.send_data("uQ", b"B")
-    assert ok is False
+    assert ok is True
+    assert w.data_queue.get_nowait() == b"B"
 
 
 @pytest.mark.asyncio

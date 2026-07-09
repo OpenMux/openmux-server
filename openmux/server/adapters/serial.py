@@ -105,7 +105,6 @@ class SerialPortWrapper:
         # Lifecycle state (contract: PortState)
         self.state = PortState.CONFIGURED
         self.always_buffer: bool = False
-        self.drop_oldest_on_full: bool = False
         self.scrollback_size: int = config.scrollback_size
 
         # Connection state

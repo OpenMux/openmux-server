@@ -72,7 +72,6 @@ class LoopbackPort:
             self.data_callback = _pm.send_data
         # Hints for port manager queue policy
         self.always_buffer = False
-        self.drop_oldest_on_full = False
         self._queue_fallback_logged = False
 
     async def _emit_data(self, payload: bytes) -> None:

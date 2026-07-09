@@ -141,8 +141,6 @@ class CommandPort:
             self.data_callback = _pm.send_data
         self._read_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
-        # Queue handling hints consumed by PortManager/legacy wrappers
-        self.drop_oldest_on_full = True
         self._queue_fallback_logged = False
 
         # Restart config
@@ -176,7 +174,6 @@ class CommandPort:
         chunk: bytes,
         *,
         require_clients: Optional[bool] = None,
-        drop_oldest: bool = True,
     ) -> None:
         """Forward process output through data_callback set by PortManager."""
         if not chunk:
@@ -189,7 +186,6 @@ class CommandPort:
                     self.name,
                     chunk,
                     require_clients=require_clients_flag,
-                    drop_oldest=drop_oldest,
                 )
                 if ok:
                     return

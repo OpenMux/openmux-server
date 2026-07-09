@@ -134,8 +134,9 @@ async def test_handle_incoming_enqueue_semantics(monkeypatch):
     w2.connected_clients.append({"client_id": "c1", "mode": "read-only"})
     pm.ports["p2"] = w2
     assert pm.handle_incoming_port_data("p2", b"B") is True
-    # now full
-    assert pm.handle_incoming_port_data("p2", b"C") is False
+    # now full: oldest is evicted, new data enqueued, returns True
+    assert pm.handle_incoming_port_data("p2", b"C") is True
+    assert w2.data_queue.get_nowait() == b"C"
 
 
 @pytest.mark.asyncio

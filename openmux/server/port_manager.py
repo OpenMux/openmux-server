@@ -209,7 +209,6 @@ class PortManager:
                 self.data_queue = asyncio.Queue(maxsize=100)
                 # Surface adapter-specific buffering hints so the manager can honor them
                 self.always_buffer = bool(getattr(unified_port, "always_buffer", False))
-                self.drop_oldest_on_full = bool(getattr(unified_port, "drop_oldest_on_full", False))
                 # Scrollback ring buffer: retains the last scrollback_size bytes for replay
                 # on client request.  0 = disabled.
                 self.scrollback_size = int(getattr(unified_port, "scrollback_size", 0))
@@ -911,7 +910,6 @@ class PortManager:
         data: bytes,
         *,
         require_clients: Optional[bool] = None,
-        drop_oldest: Optional[bool] = None,
     ) -> bool:
         """Synchronous handler: log and optionally enqueue incoming port data.
 
@@ -922,10 +920,6 @@ class PortManager:
                 least one client is connected. When False the queue is used even
                 with zero clients. When None, adapter-level hints (e.g.
                 ``always_buffer``) control the behavior.
-            drop_oldest: When True the oldest queued item is dropped on
-                overflow. When False (default) a full queue drops the new data.
-                When None, adapter-level preferences (``drop_oldest_on_full``)
-                are applied.
 
         Returns:
             True if accepted/logged; False on queue or unexpected errors.
@@ -968,32 +962,23 @@ class PortManager:
                         should_enqueue = True
 
                     if should_enqueue and port.data_queue is not None:
-                        drop_oldest_flag = (
-                            bool(getattr(port, "drop_oldest_on_full", False))
-                            if drop_oldest is None
-                            else bool(drop_oldest)
-                        )
                         try:
                             port.data_queue.put_nowait(data)
                             self.logger.debug(
                                 f"Queued {len(data)} bytes for port {port_name} to {len(client_list)} clients"
                             )
                         except asyncio.QueueFull:
-                            if drop_oldest_flag:
-                                try:
-                                    port.data_queue.get_nowait()
-                                    port.data_queue.put_nowait(data)
-                                    self.logger.debug(
-                                        f"Queue full for {port_name}; dropped oldest chunk to enqueue {len(data)} bytes"
-                                    )
-                                except Exception:
-                                    self.logger.warning(
-                                        f"Data queue contention for port {port_name}; dropping data after retry",
-                                        exc_info=True,
-                                    )
-                                    return False
-                            else:
-                                self.logger.warning(f"Data queue full for port {port_name}, dropping data")
+                            try:
+                                port.data_queue.get_nowait()
+                                port.data_queue.put_nowait(data)
+                                self.logger.debug(
+                                    f"Queue full for {port_name}; dropped oldest chunk to enqueue {len(data)} bytes"
+                                )
+                            except Exception:
+                                self.logger.warning(
+                                    f"Data queue contention for port {port_name}; dropping data after retry",
+                                    exc_info=True,
+                                )
                                 return False
                     else:
                         self.logger.debug(f"No clients connected to port {port_name}; logged and not queued")
@@ -1025,7 +1010,6 @@ class PortManager:
         data: bytes,
         *,
         require_clients: Optional[bool] = None,
-        drop_oldest: Optional[bool] = None,
     ) -> bool:
         """Centralized enqueue/log for incoming port data (legacy or unified).
 
@@ -1035,12 +1019,7 @@ class PortManager:
         Args:
             port_name: Port name.
             data: Bytes from the adapter/port.
-
-        Args:
-            port_name: Port name.
-            data: Bytes from the adapter/port.
             require_clients: See :meth:`handle_incoming_port_data`.
-            drop_oldest: See :meth:`handle_incoming_port_data`.
 
         Returns:
             True if logged/accepted (even if not enqueued due to no clients);
@@ -1050,7 +1029,6 @@ class PortManager:
             port_name,
             data,
             require_clients=require_clients,
-            drop_oldest=drop_oldest,
         )
 
     def get_client_mode(self, client_id: str, port_name: str) -> Optional[str]:

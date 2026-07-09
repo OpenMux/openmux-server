@@ -28,7 +28,6 @@ class CapturingPortManager:
         chunk: bytes,
         *,
         require_clients: bool = True,
-        drop_oldest: bool = True,
     ) -> bool:
         await self.output_queue.put(chunk)
         return True
