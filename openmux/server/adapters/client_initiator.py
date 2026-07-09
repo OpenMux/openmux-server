@@ -371,10 +371,10 @@ class OpenMuxClientAdapter(BaseGenericAdapter):
         port = self.ports.get(port_name)
         if port:
             try:
-                await port.stop()
-                del self.ports[port_name]
                 if hasattr(self, "main_port_manager") and self.main_port_manager:
                     await self.main_port_manager.unregister_unified_port(port_name)
+                await port.stop()
+                del self.ports[port_name]
                 self.logger.info(f"OpenMux client port {port_name} destroyed")
             except Exception as e:
                 self.logger.error(f"Error destroying OpenMux client port {port_name}: {e}", exc_info=True)

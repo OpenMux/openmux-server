@@ -348,10 +348,10 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         tcp_port = self.ports.get(port_name)
         if tcp_port:
             try:
-                await tcp_port.stop()
-                del self.ports[port_name]
                 if hasattr(self, "main_port_manager") and self.main_port_manager:
                     await self.main_port_manager.unregister_unified_port(port_name)
+                await tcp_port.stop()
+                del self.ports[port_name]
                 self.logger.info(f"TCP initiator port {port_name} destroyed")
             except Exception as e:
                 self.logger.error(f"Error destroying TCP initiator port {port_name}: {e}", exc_info=True)

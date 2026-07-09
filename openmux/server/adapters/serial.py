@@ -687,6 +687,11 @@ class SerialAdapter(BaseGenericAdapter):
         """Destroy a managed port instance if present."""
         if port_name in self.serial_ports:
             port_wrapper = self.serial_ports[port_name]
+            if self.main_port_manager:
+                try:
+                    await self.main_port_manager.unregister_unified_port(port_name)
+                except Exception:
+                    self.logger.warning(f"Failed to unregister unified port {port_name}")
             await port_wrapper.stop()
             del self.serial_ports[port_name]
 
