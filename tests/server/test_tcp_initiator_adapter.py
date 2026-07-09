@@ -254,10 +254,6 @@ async def test_adapter_create_start_stop_and_write(monkeypatch):
     # Status queries
     si = adapter.get_status_info()
     assert si["type"] == "TCPInitiator"
-    ps = await adapter.get_port_status("p1")
-    assert ps["name"] == "p1"
-    assert (await adapter.get_port_status("nope")).get("error")
-    assert sorted(await adapter.list_ports()) == ["p1"]
 
     # Stop
     await adapter.stop()

@@ -438,23 +438,6 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             },
         }
 
-    async def get_port_status(self, port_name: str) -> Dict[str, Any]:
-        tcp_port = self.ports.get(port_name)
-        if not tcp_port:
-            return {"error": f"Port {port_name} not found"}
-        return {
-            "name": port_name,
-            "adapter_type": self.adapter_type,
-            "connected": tcp_port.is_connected,
-            "host": tcp_port.host,
-            "port": tcp_port.port,
-            "use_tls": tcp_port.use_tls,
-            "auto_reconnect": tcp_port.auto_reconnect,
-        }
-
-    async def list_ports(self) -> List[str]:
-        return list(self.ports.keys())
-
     async def _handle_port_data(self, port_name: str, data: bytes) -> None:
         if hasattr(self, "main_port_manager") and self.main_port_manager:
             await self.main_port_manager.send_data(port_name, data)

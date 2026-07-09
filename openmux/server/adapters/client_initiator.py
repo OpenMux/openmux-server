@@ -473,33 +473,6 @@ class OpenMuxClientAdapter(BaseGenericAdapter):
         bytes_written = await port.write_data(data)
         return bytes_written
 
-    async def get_port_status(self, port_name: str) -> Dict[str, Any]:
-        """Return status snapshot for a single port.
-
-        Args:
-            port_name: Port to inspect.
-
-        Returns:
-            Mapping with connection and configuration fields.
-        """
-        port = self.ports.get(port_name)
-        if not port:
-            return {"error": f"Port {port_name} not found"}
-        return {
-            "name": port_name,
-            "adapter_type": self.adapter_type,
-            "connected": port.is_connected,
-            "host": port.host,
-            "port": port.port,
-            "remote_port": port.remote_port,
-            "use_tls": port.use_tls,
-            "auto_reconnect": port.auto_reconnect,
-        }
-
-    async def list_ports(self) -> list:
-        """Return list of configured port names."""
-        return list(self.ports.keys())
-
     async def _handle_port_data(self, port_name: str, data: bytes) -> None:
         """Forward inbound data from remote server to port manager.
 

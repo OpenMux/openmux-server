@@ -213,12 +213,6 @@ async def test_adapter_config_status_create_destroy_write(monkeypatch):
     n = await adapter.write_to_port("p", b"x")
     assert n == 0
 
-    # Status and list
-    st = await adapter.get_port_status("p")
-    assert st["name"] == "p" and st["adapter"] == adapter.adapter_type
-    lst = await adapter.list_ports()
-    assert isinstance(lst, list) and lst[0]["name"] == "p"
-
     # Destroy and stop
     await adapter.destroy_port("p")
     assert "p" not in adapter.ports

@@ -1360,31 +1360,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception as e:
             self.logger.error(f"Error stopping command adapter {self.name}: {e}", exc_info=True)
 
-    async def get_port_status(self, port_name: str) -> Dict[str, Any]:
-        """Return detailed status for a single command port.
-
-        Args:
-            port_name: Port identifier.
-
-        Returns:
-            Dict[str, Any]: Status mapping (contains 'error' if missing).
-        """
-        if port_name not in self.ports:
-            return {"error": f"Port {port_name} not found"}
-        port = self.ports[port_name]
-        return {
-            "name": port_name,
-            "state": port.state.value,
-            "is_running": port.is_running,
-            "command": port.command,
-            "description": port.description,
-            "adapter": self.adapter_type,
-            "adapter_instance": self.name,
-            "auto_restart": port.auto_restart,
-            "restart_count": port.restart_count,
-            "max_restarts": port.max_restarts,
-        }
-
     # --- Live configuration reconciliation ---
     async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
         """Incrementally reconcile command ports.
@@ -1497,14 +1472,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             f"Command adapter {self.name} reconcile: +{len(added)} ~{len(updated)} -{len(removed)} unchanged={len(unchanged)}"
         )
         return summary
-
-    async def list_ports(self) -> List[Dict[str, Any]]:
-        """List status dictionaries for all managed ports.
-
-        Returns:
-            List[Dict[str, Any]]: Per-port status mappings.
-        """
-        return [await self.get_port_status(name) for name in self.ports.keys()]
 
     async def write_to_port(self, port_name: str, data: bytes) -> int:
         """Write bytes to a specific command port.

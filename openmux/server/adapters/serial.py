@@ -648,26 +648,6 @@ class SerialAdapter(BaseGenericAdapter):
         self.is_running = False
         self.logger.info(f"Serial adapter {self.name} stopped")
 
-    async def get_port_status(self, port_name: str) -> Dict[str, Any]:
-        """Return structured status snapshot for a specific port."""
-        if port_name not in self.serial_ports:
-            return {"error": f"Port {port_name} not found"}
-
-        port_wrapper = self.serial_ports[port_name]
-        return {
-            "name": port_name,
-            "device": port_wrapper.config.device,
-            "connected": port_wrapper.is_connected,
-            "baudrate": port_wrapper.config.baudrate,
-            "config": {
-                "bytesize": port_wrapper.config.bytesize,
-                "parity": port_wrapper.config.parity,
-                "stopbits": port_wrapper.config.stopbits,
-                "flow_control": port_wrapper.config.flow_control,
-            },
-            "reconnect_attempts": port_wrapper.reconnect_attempts,
-        }
-
     async def run(self) -> None:
         """Legacy compatibility shim (no-op: data now flows via data_callback)."""
         pass
