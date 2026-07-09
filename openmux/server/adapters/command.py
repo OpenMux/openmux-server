@@ -819,11 +819,7 @@ class CommandPort:
             self._idle_stop_task = None
 
             if self._monitor_task:
-                try:
-                    self._monitor_task.cancel()
-                    await self._monitor_task
-                except Exception:  # justification: monitor task cancellation error is non-critical during shutdown
-                    pass
+                self._monitor_task.cancel()
                 self._monitor_task = None
             if self._pty_master_fd is not None and self._loop and self._pty_reader_added:
                 try:
@@ -843,18 +839,10 @@ class CommandPort:
             except Exception:
                 pass
             if self._output_flush_task:
-                try:
-                    self._output_flush_task.cancel()
-                    await self._output_flush_task
-                except Exception:
-                    pass
+                self._output_flush_task.cancel()
                 self._output_flush_task = None
             if self._read_task:
                 self._read_task.cancel()
-                try:
-                    await self._read_task
-                except Exception:  # justification: awaiting cancelled read task may raise; safe to ignore
-                    pass
                 self._read_task = None
             if self._writer and self.process and self.process.stdin:
                 try:
