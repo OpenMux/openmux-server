@@ -447,12 +447,11 @@ class OpenMuxClientAdapter(BaseGenericAdapter):
     async def stop(self) -> None:
         """Stop adapter and all managed client ports."""
         self.logger.info(f"Stopping OpenMux client adapter {self.name} with {len(self.ports)} ports")
-        for port_name, port in list(self.ports.items()):
+        for port_name in list(self.ports.keys()):
             try:
-                await port.stop()
+                await self.destroy_port(port_name)
             except Exception as e:
                 self.logger.error(f"Error stopping OpenMux client port {port_name}: {e}", exc_info=True)
-        self.ports.clear()
         self.is_running = False
         self.logger.info(f"OpenMux client adapter {self.name} stopped")
 

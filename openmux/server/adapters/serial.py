@@ -638,9 +638,9 @@ class SerialAdapter(BaseGenericAdapter):
 
         self.logger.info(f"Stopping serial adapter {self.name}")
 
-        for port_name, port_wrapper in self.serial_ports.items():
+        for port_name in list(self.serial_ports.keys()):
             try:
-                await port_wrapper.stop()
+                await self.destroy_port(port_name)
                 self.logger.info(f"Stopped serial port {port_name}")
             except Exception as e:
                 self.logger.error(f"Error stopping serial port {port_name}: {e}", exc_info=True)
