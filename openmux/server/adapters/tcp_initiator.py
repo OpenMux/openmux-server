@@ -86,6 +86,10 @@ class TcpInitiatorPort:
         # Data callback: callable(port_name: str, data: bytes) -> Optional[Awaitable]
         self.data_callback: Optional[Callable[[str, bytes], Any]] = None
 
+        # Timestamp (monotonic) of the last connection-failure warning;
+        # used to rate-limit the message to at most once per hour.
+        self._last_failed_warn_ts: Optional[float] = None
+
         # Validate required configuration
         if not self.host:
             raise ValueError(f"TCP initiator port {self.name} requires 'host' configuration")
@@ -128,7 +132,7 @@ class TcpInitiatorPort:
         if self.is_connected:
             return True
         try:
-            self.logger.info(f"Connecting to {self.host}:{self.port} (TLS: {self.use_tls})")
+            self._log_connect_attempt(f"Connecting to {self.host}:{self.port} (TLS: {self.use_tls})")
             ssl_context = None
             if self.use_tls:
                 ssl_context = ssl.create_default_context()
@@ -141,17 +145,38 @@ class TcpInitiatorPort:
             )
             self.is_connected = True
             self.logger.info(f"Successfully connected to {self.host}:{self.port}")
+            # Reset so the next disconnect logs immediately
+            self._last_failed_warn_ts = None
             self.read_task = asyncio.create_task(self._read_loop())
             return True
         except asyncio.TimeoutError:
-            self.logger.warning(f"Connection timeout to {self.host}:{self.port} (after {self.timeout}s)")
+            self._log_connect_failure(f"Connection timeout to {self.host}:{self.port} (after {self.timeout}s)")
             return False
         except ConnectionRefusedError as e:
-            self.logger.warning(f"Connection refused to {self.host}:{self.port}: {e}")
+            self._log_connect_failure(f"Connection refused to {self.host}:{self.port}: {e}")
             return False
         except Exception as e:
-            self.logger.warning(f"Connection failed to {self.host}:{self.port}: {e}", exc_info=True)
+            self._log_connect_failure(f"Connection failed to {self.host}:{self.port}: {e}")
             return False
+
+    def _log_connect_attempt(self, message: str) -> None:
+        """Log a connection-attempt message at INFO first time, DEBUG while in known-bad state."""
+        import time as _time
+        now = _time.monotonic()
+        if self._last_failed_warn_ts is None or (now - self._last_failed_warn_ts) >= 3600:
+            self.logger.info(message)
+        else:
+            self.logger.debug(message)
+
+    def _log_connect_failure(self, message: str) -> None:
+        """Log a connection-failure message, rate-limited to once per hour."""
+        import time as _time
+        now = _time.monotonic()
+        if self._last_failed_warn_ts is None or (now - self._last_failed_warn_ts) >= 3600:
+            self.logger.warning(message)
+            self._last_failed_warn_ts = now
+        else:
+            self.logger.debug(message)
 
     async def _disconnect(self) -> None:
         """Close the active TCP connection and reset stream state."""
@@ -207,7 +232,7 @@ class TcpInitiatorPort:
             while True:
                 await asyncio.sleep(1.0)
                 if not self.is_connected and self.auto_reconnect:
-                    self.logger.info(f"Attempting to reconnect to {self.host}:{self.port}")
+                    self._log_connect_attempt(f"Attempting to reconnect to {self.host}:{self.port}")
                     success = await self._connect()
                     if not success:
                         await asyncio.sleep(self.reconnect_delay)
