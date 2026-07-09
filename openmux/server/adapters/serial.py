@@ -521,6 +521,17 @@ class SerialAdapter(BaseGenericAdapter):
             )
         return resolved
 
+    def _make_notifier(self) -> Callable[[str, Dict[str, Any]], None]:
+        """Return a meta-notify callback bound to this adapter's port manager."""
+        def _notif(pname: str, payload: Dict[str, Any], _self=self) -> None:
+            try:
+                mpm = getattr(_self, "main_port_manager", None)
+                if mpm and hasattr(mpm, "notify_meta_updated"):
+                    mpm.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return _notif
+
     def _parse_port_configs(self) -> None:
         """Parse configuration and build ``SerialPortWrapper`` objects.
 
@@ -571,18 +582,7 @@ class SerialAdapter(BaseGenericAdapter):
                 )
 
                 # Create wrapper
-                notifier = None
-                try:
-                    def _notif(pname: str, payload: Dict[str, Any], _self=self):
-                        try:
-                            mpm = getattr(_self, "main_port_manager", None)
-                            if mpm and hasattr(mpm, "notify_meta_updated"):
-                                mpm.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
-                    notifier = _notif
-                except Exception:
-                    notifier = None
+                notifier = self._make_notifier()
                 port_wrapper = SerialPortWrapper(serial_config, self.logger, meta_notify=notifier)
                 self.serial_ports[serial_config.name] = port_wrapper
 
@@ -699,18 +699,7 @@ class SerialAdapter(BaseGenericAdapter):
                 log_line_template=config.get("log_line_template"),
                 scrollback_size=int(config.get("scrollback_size", 0)),
             )
-            notifier = None
-            try:
-                def _notif(pname: str, payload: Dict[str, Any], _self=self):
-                    try:
-                        mpm = getattr(_self, "main_port_manager", None)
-                        if mpm and hasattr(mpm, "notify_meta_updated"):
-                            mpm.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
-                notifier = _notif
-            except Exception:
-                notifier = None
+            notifier = self._make_notifier()
             wrapper = SerialPortWrapper(serial_cfg, self.logger, meta_notify=notifier)
             self.serial_ports[serial_cfg.name] = wrapper
             await wrapper.start()
