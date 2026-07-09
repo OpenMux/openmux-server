@@ -613,6 +613,10 @@
               if (msg.reason === 'demoted') {
                 try { term.write('\r\n[Your read-write access was taken by another user]\r\n'); } catch (_) {}
               }
+              if (clientMode === 'read-write' && msg.ok !== false && msg.reason !== 'demoted') {
+                hideCtrlMenu();
+                try { term.focus(); } catch (_) {}
+              }
               if (infoOverlay.style.display !== 'none') {
                 renderInfo(ports.find(x => x.name === currentPort()) || null);
               }
