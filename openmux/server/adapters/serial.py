@@ -674,14 +674,52 @@ class SerialAdapter(BaseGenericAdapter):
 
     # Required abstract methods from BaseGenericAdapter
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
-        """Dynamic creation placeholder (not yet implemented).
+        """Create and start a serial port from a config dict.
 
         Returns:
-            None: Dynamic addition currently unsupported.
+            SerialPortWrapper on success, None on failure.
         """
-        # For now, serial ports are only created at startup
-        # This could be extended for dynamic port creation
-        return None
+        try:
+            max_rw = self._resolve_max_rw_users(config, port_name=port_name)
+            serial_cfg = SerialPortConfig(
+                name=port_name,
+                description=config.get("description", f"Serial port {port_name}"),
+                device=config["device"],
+                baudrate=config.get("baudrate", 9600),
+                bytesize=config.get("bytesize", 8),
+                parity=config.get("parity", "N"),
+                stopbits=config.get("stopbits", 1),
+                timeout=config.get("timeout", 1.0),
+                flow_control=config.get("flow_control", "none"),
+                dtr=config.get("dtr", True),
+                rts=config.get("rts", True),
+                max_read_write_users=max_rw,
+                log_file=config.get("log_file"),
+                log_format=config.get("log_format"),
+                log_line_template=config.get("log_line_template"),
+                scrollback_size=int(config.get("scrollback_size", 0)),
+            )
+            notifier = None
+            try:
+                def _notif(pname: str, payload: Dict[str, Any], _self=self):
+                    try:
+                        mpm = getattr(_self, "main_port_manager", None)
+                        if mpm and hasattr(mpm, "notify_meta_updated"):
+                            mpm.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                notifier = _notif
+            except Exception:
+                notifier = None
+            wrapper = SerialPortWrapper(serial_cfg, self.logger, meta_notify=notifier)
+            self.serial_ports[serial_cfg.name] = wrapper
+            await wrapper.start()
+            if self.main_port_manager:
+                await self.main_port_manager.register_unified_port(serial_cfg.name, wrapper, self)
+            return wrapper
+        except Exception as e:
+            self.logger.error(f"Failed to create serial port {port_name}: {e}", exc_info=True)
+            return None
 
     async def destroy_port(self, port_name: str) -> None:
         """Destroy a managed port instance if present."""
@@ -866,77 +904,21 @@ class SerialAdapter(BaseGenericAdapter):
                 updated.append(name)
 
         # Apply removals and updates (stop/unregister existing)
-        async def _remove_port(name: str) -> None:
-            try:
-                spw = self.serial_ports.get(name)
-                if not spw:
-                    return
-                # Unregister from main port manager first to stop broadcasts
-                if self.main_port_manager:
-                    try:
-                        await self.main_port_manager.unregister_unified_port(name)
-                    except Exception:
-                        self.logger.warning(f"Failed to unregister unified port {name}")
-                # Stop runtime wrapper
-                try:
-                    await spw.stop()
-                except Exception as e:
-                    self.logger.error(f"Error stopping serial port {name}: {e}", exc_info=True)
-                # Remove from local map
-                self.serial_ports.pop(name, None)
-            except Exception as e:
-                self.logger.error(f"Removal failure for {name}: {e}", exc_info=True)
-
         for name in removed + updated:
-            await _remove_port(name)
+            try:
+                await self.destroy_port(name)
+            except Exception as e:
+                self.logger.error(f"Failed to destroy serial port {name}: {e}", exc_info=True)
 
         # Apply additions and re-creations
-        async def _add_port_from_config(pcfg: Dict[str, Any]) -> None:
+        for name in added + updated:
+            cfg = new_by_name.get(name)
+            if not cfg:
+                continue
             try:
-                max_rw = self._resolve_max_rw_users(pcfg, port_name=pcfg.get("name"))
-                # Build validated dataclass; will raise on invalid values
-                serial_cfg = SerialPortConfig(
-                    name=pcfg["name"],
-                    description=pcfg.get("description", f"Serial port {pcfg['name']}"),
-                    device=pcfg["device"],
-                    baudrate=pcfg.get("baudrate", 9600),
-                    bytesize=pcfg.get("bytesize", 8),
-                    parity=pcfg.get("parity", "N"),
-                    stopbits=pcfg.get("stopbits", 1),
-                    timeout=pcfg.get("timeout", 1.0),
-                    flow_control=pcfg.get("flow_control", "none"),
-                    dtr=pcfg.get("dtr", True),
-                    rts=pcfg.get("rts", True),
-                    max_read_write_users=max_rw,
-                    log_file=pcfg.get("log_file"),
-                    log_format=pcfg.get("log_format"),
-                    log_line_template=pcfg.get("log_line_template"),
-                    scrollback_size=int(pcfg.get("scrollback_size", 0)),
-                )
-                notifier = None
-                try:
-                    def _notif(pname: str, payload: Dict[str, Any], _self=self):
-                        try:
-                            mpm2 = getattr(_self, "main_port_manager", None)
-                            if mpm2 and hasattr(mpm2, "notify_meta_updated"):
-                                mpm2.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
-                    notifier = _notif
-                except Exception:
-                    notifier = None
-                wrapper = SerialPortWrapper(serial_cfg, self.logger, meta_notify=notifier)
-                self.serial_ports[serial_cfg.name] = wrapper
-                await wrapper.start()
-                if self.main_port_manager:
-                    await self.main_port_manager.register_unified_port(serial_cfg.name, wrapper, self)
+                await self.create_port(name, cfg)
             except Exception as e:
-                self.logger.error(f"Failed to (re)create serial port {pcfg.get('name','?')}: {e}", exc_info=True)
-
-        for name in added:
-            await _add_port_from_config(new_by_name[name])
-        for name in updated:
-            await _add_port_from_config(new_by_name[name])
+                self.logger.error(f"Failed to create serial port {name}: {e}", exc_info=True)
 
         # Update adapter's config snapshot to reflect new state
         try:
