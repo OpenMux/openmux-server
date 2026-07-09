@@ -906,6 +906,7 @@ class SerialAdapter(BaseGenericAdapter):
                     log_file=pcfg.get("log_file"),
                     log_format=pcfg.get("log_format"),
                     log_line_template=pcfg.get("log_line_template"),
+                    scrollback_size=int(pcfg.get("scrollback_size", 0)),
                 )
                 notifier = None
                 try:
