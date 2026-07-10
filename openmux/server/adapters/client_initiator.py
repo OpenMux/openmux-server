@@ -77,6 +77,7 @@ class OpenMuxClientPort:
         self.is_connected: bool = False
         self.monitor_task: Optional[asyncio.Task] = None
         self.read_task: Optional[asyncio.Task] = None
+        self._last_failed_warn_ts: Optional[float] = None
 
         # Data callback injected by adapter -> port manager
         self.data_callback: Optional[Callable[[str, bytes], Awaitable[None]]] = None
@@ -125,7 +126,26 @@ class OpenMuxClientPort:
 
         await self._disconnect()
 
-    async def _connect(self, log_connect_info: bool = True) -> bool:
+    def _log_connect_attempt(self, message: str) -> None:
+        """Log a connection-attempt message at INFO on first try, DEBUG while in a known-bad state."""
+        import time as _time
+        now = _time.monotonic()
+        if self._last_failed_warn_ts is None or (now - self._last_failed_warn_ts) >= 3600:
+            self.logger.info(message)
+        else:
+            self.logger.debug(message)
+
+    def _log_connect_failure(self, message: str, exc_info: bool = False) -> None:
+        """Log a connection-failure at WARNING the first time, then silently at DEBUG for 1 hour."""
+        import time as _time
+        now = _time.monotonic()
+        if self._last_failed_warn_ts is None or (now - self._last_failed_warn_ts) >= 3600:
+            self.logger.warning(message, exc_info=exc_info)
+            self._last_failed_warn_ts = now
+        else:
+            self.logger.debug(message)
+
+    async def _connect(self) -> bool:
         """Establish TCP connection, authenticate, and select remote port.
 
         Returns:
@@ -135,8 +155,7 @@ class OpenMuxClientPort:
             return True
 
         try:
-            if log_connect_info:
-                self.logger.info(f"Connecting to OpenMux {self.host}:{self.port} (TLS: {self.use_tls})")
+            self._log_connect_attempt(f"Connecting to OpenMux {self.host}:{self.port} (TLS: {self.use_tls})")
 
             # Use production adapter abstraction instead of deprecated ServerConnection
             from openmux.client.adapters import TcpClientAdapter
@@ -146,7 +165,7 @@ class OpenMuxClientPort:
             # Connect with timeout and validate result before proceeding to auth
             connect_ok = await asyncio.wait_for(self.conn.connect(), timeout=self.timeout)
             if not connect_ok:
-                self.logger.warning(f"Connection failed to {self.host}:{self.port} (no TCP session or missing banner)")
+                self._log_connect_failure(f"Connection failed to {self.host}:{self.port} (no TCP session or missing banner)")
                 return False
 
             # Authenticate (only after a confirmed TCP connection + banner)
@@ -155,7 +174,7 @@ class OpenMuxClientPort:
             else:
                 ok = await self.conn.authenticate_with_password(self.username or "", self.password or "")
             if not ok:
-                self.logger.error(
+                self._log_connect_failure(
                     f"Authentication failed against {self.host}:{self.port} using "
                     f"{'api_key' if self.api_key else 'username/password'}"
                 )
@@ -165,21 +184,22 @@ class OpenMuxClientPort:
             # Connect to remote port
             ok = await self.conn.connect_to_port(self.remote_port)
             if not ok:
-                self.logger.error(f"Failed to connect to remote port '{self.remote_port}'")
+                self._log_connect_failure(f"Failed to connect to remote port '{self.remote_port}'")
                 await self._disconnect()
                 return False
 
             self.is_connected = True
+            self._last_failed_warn_ts = None  # reset so next disconnect logs immediately
             # Start read loop
             self.read_task = asyncio.create_task(self._read_loop())
             self.logger.info(f"Connected to OpenMux {self.host}:{self.port} remote_port='{self.remote_port}'")
             return True
 
         except asyncio.TimeoutError:
-            self.logger.warning(f"Connection timeout to {self.host}:{self.port} (after {self.timeout}s)")
+            self._log_connect_failure(f"Connection timeout to {self.host}:{self.port} (after {self.timeout}s)")
             return False
         except Exception as e:
-            self.logger.warning(f"Connection failed to {self.host}:{self.port}: {e}", exc_info=True)
+            self._log_connect_failure(f"Connection failed to {self.host}:{self.port}: {e}", exc_info=True)
             return False
 
     async def _disconnect(self) -> None:
@@ -232,13 +252,12 @@ class OpenMuxClientPort:
         delay. Suppresses cancellation cleanly.
         """
         try:
-            await self._connect(log_connect_info=True)
+            await self._connect()
             if self.auto_reconnect:
                 while True:
                     await asyncio.sleep(1.0)
                     if not self.is_connected:
-                        self.logger.info(f"Attempting to reconnect to {self.host}:{self.port}")
-                        ok = await self._connect(log_connect_info=False)
+                        ok = await self._connect()
                         if not ok:
                             await asyncio.sleep(self.reconnect_delay)
         except asyncio.CancelledError:
