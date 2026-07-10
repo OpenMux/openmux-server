@@ -159,6 +159,66 @@ properties:
         max_read_write_users: { type: integer, minimum: 1, default: 1 }
         interactive: { type: boolean }
         always_buffer: { type: boolean }
+  tcp_initiator_ports:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [name, host, port]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        host: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        use_tls: { type: boolean, default: false }
+        ssl_verify: { type: boolean, default: true }
+        timeout: { type: number, minimum: 0, default: 10.0 }
+        auto_reconnect: { type: boolean, default: true }
+        reconnect_delay: { type: number, minimum: 0, default: 5.0 }
+        enable_batching: { type: boolean }
+        batch_size: { type: integer, minimum: 1, default: 1024 }
+        batch_timeout: { type: number, minimum: 0, default: 0.015 }
+        enabled: { type: boolean, default: true }
+        connect_on_demand: { type: boolean, default: false }
+        disconnect_when_idle: { type: boolean, default: false }
+        idle_disconnect_delay: { type: number, minimum: 0, default: 30.0 }
+        protocol:
+          type: object
+          additionalProperties: false
+          properties:
+            type:
+              type: string
+              enum: [plain, conserver, openmux]
+              default: plain
+            telnet_negotiation:
+              type: string
+              enum: [none, strip]
+              default: none
+            console_name: { type: string }
+            username: { type: string }
+            password: { type: string }
+            remote_port: { type: string }
+            api_key: { type: string }
+  openmux_client_ports:
+    type: array
+    description: "Deprecated. Use tcp_initiator_ports with protocol: {type: openmux} instead."
+    items:
+      type: object
+      additionalProperties: false
+      required: [name, host, port, remote_port]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        host: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        remote_port: { type: string }
+        use_tls: { type: boolean, default: false }
+        timeout: { type: number, minimum: 0, default: 10.0 }
+        auto_reconnect: { type: boolean, default: true }
+        reconnect_delay: { type: number, minimum: 0, default: 5.0 }
+        api_key: { type: string }
+        username: { type: string }
+        password: { type: string }
   muxcon:
     type: object
     additionalProperties: false
@@ -267,6 +327,8 @@ anyOf:
   - required: [serial_ports]
   - required: [loopback_ports]
   - required: [command_ports]
+  - required: [tcp_initiator_ports]
+  - required: [openmux_client_ports]
   - required: [muxcon]
   - required: [web_console]
   - required: [web_status]

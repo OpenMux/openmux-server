@@ -203,7 +203,8 @@ class PluginRegistry:
             ("web_console", "WebConsoleAdapter", "Web Console", "web_console"),
             ("muxcon", "UnifiedMuxConAdapter", "MuxCon Federation", "muxcon"),
             ("web_status", "WebStatusAdapter", "Web Status", "web_status"),
-            ("client_initiator", "OpenMuxClientAdapter", "OpenMux Client", "openmux_client_ports"),
+            # openmux_client_ports is a compat alias handled by TcpInitiatorAdapter
+            ("tcp_initiator", "TcpInitiatorAdapter", "OpenMux Client (compat)", "openmux_client_ports"),
         ]
 
         for mod, cls, disp, section in built_ins:

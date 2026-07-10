@@ -111,7 +111,7 @@ class SecurityPolicy:
         "openmux.server.adapters.telnet_listener",
         "openmux.server.adapters.muxcon",
         "openmux.server.adapters.web_status",
-        "openmux.server.adapters.client_initiator",
+        "openmux.server.adapters.tcp_initiator",
     }
     DEFAULT_ALLOWED_ADAPTER_TYPES = {
         "loopback",
