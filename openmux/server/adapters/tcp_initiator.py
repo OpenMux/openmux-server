@@ -232,7 +232,6 @@ class TcpInitiatorPort:
             while True:
                 await asyncio.sleep(1.0)
                 if not self.is_connected and self.auto_reconnect:
-                    self._log_connect_attempt(f"Attempting to reconnect to {self.host}:{self.port}")
                     success = await self._connect()
                     if not success:
                         await asyncio.sleep(self.reconnect_delay)
@@ -242,7 +241,6 @@ class TcpInitiatorPort:
     async def _connection_manager(self) -> None:
         """Drive initial connect attempt then (optionally) monitor reconnects."""
         try:
-            self.logger.info(f"Attempting initial connection to {self.host}:{self.port}")
             await self._connect()
             if self.auto_reconnect:
                 await self._monitor_connection()
