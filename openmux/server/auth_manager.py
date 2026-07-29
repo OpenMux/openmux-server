@@ -539,8 +539,9 @@ class AuthManager:
 
         Precedence:
             1. Explicit "permissions" field (static users)
-            2. PAM group mapping if PAM enabled (admin > write > read)
-            3. Default -> "read-write"
+            2. API key entry matched by name (identity used for AUTH:KEY logins)
+            3. PAM group mapping if PAM enabled (admin > write > read)
+            4. Default -> "read-write"
 
         Args:
             username: Account identifier.
@@ -557,6 +558,12 @@ class AuthManager:
                         return user["permissions"]
                     # Fall through to default if static user matched
                     return "read-write"
+
+        # API key identities authenticate with the key's configured name as username
+        if "api_keys" in self.config:
+            for key_entry in self.config["api_keys"]:
+                if key_entry.get("name") == username:
+                    return key_entry.get("permissions", "read-only")
 
         # If external auth is enabled, map groups to permissions
         if self._ext_auth_enabled:
@@ -752,6 +759,25 @@ class AuthManager:
         for key_entry in self.config["api_keys"]:
             if key_entry["key"] == api_key:
                 return key_entry.get("permissions", "read-only")
+
+        return None
+
+    def get_api_key_name(self, api_key: str) -> Optional[str]:
+        """Return the configured display name for an API key, used as its username.
+
+        Args:
+            api_key: API key token.
+
+        Returns:
+            str | None: The key's "name" field (or the key itself if unset), or
+            None if the key is not configured.
+        """
+        if "api_keys" not in self.config:
+            return None
+
+        for key_entry in self.config["api_keys"]:
+            if key_entry["key"] == api_key:
+                return key_entry.get("name") or api_key
 
         return None
 

@@ -417,6 +417,15 @@ class TcpServerAdapter(BaseGenericAdapter):
                         return True
                     await client.send_line("AUTH:FAILED:Authentication failed")
                     return False
+            elif auth_line.startswith("AUTH:KEY:"):
+                # API key auth: AUTH:KEY:<api_key>
+                api_key = auth_line[len("AUTH:KEY:") :]
+                if api_key and hasattr(self.auth_manager, "authenticate_key") and self.auth_manager.authenticate_key(api_key):
+                    client.username = self.auth_manager.get_api_key_name(api_key) or "api-user"
+                    client.is_authenticated = True
+                    return True
+                await client.send_line("AUTH:FAILED:Authentication failed")
+                return False
             elif auth_line.startswith("AUTH:USER:"):
                 # Plaintext password auth deprecated
                 parts = auth_line.split(":")
