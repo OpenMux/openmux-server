@@ -820,7 +820,9 @@ def _rw_holders_for_port(adapter: Any, port_name: str) -> list:
                     username = c.get("username", "unknown")
                     ip = "unknown"
                     try:
-                        ip = getattr(adapter, "_client_meta", {}).get(cid, {}).get("ip", "unknown")
+                        resolver = getattr(adapter, "_resolve_client_meta", None)
+                        meta = resolver(cid) if callable(resolver) else {}
+                        ip = meta.get("ip") or "unknown"
                     except Exception:
                         pass
                     holders.append(f"{username}@{ip}")
@@ -1021,10 +1023,18 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                     ok = await adapter.console_manager.promote_client_to_read_write(client_id, port_name)
                                     if ok:
                                         for other_id in other_rw_ids:
+                                            demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
+                                            delivered = False
+                                            try:
+                                                delivered = await adapter.console_manager.send_control_frame_to_client(other_id, demotion)
+                                            except Exception:
+                                                delivered = False
+                                            if delivered:
+                                                continue
+                                            # Cross-adapter routing unavailable; fall back to same-adapter delivery
                                             try:
                                                 other_ws = adapter._clients.get(other_id)
                                                 if other_ws is not None:
-                                                    demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
                                                     await other_ws.send_str("OMXCTRL " + json.dumps(demotion, separators=(",", ":")))
                                             except Exception:
                                                 pass
@@ -3303,6 +3313,29 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 getattr(ws, "closed", None),
                 getattr(ws, "close_code", None),
             )
+            return False
+
+    async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
+        """Deliver an access-mode control frame to a locally connected WebSocket client.
+
+        Called by `ConsoleManager.send_control_frame_to_client` to notify a
+        client of a mode change (e.g. a force-take demotion) regardless of
+        which adapter initiated the change.
+
+        Args:
+            client_id: Target client identifier.
+            payload: JSON-serializable control message.
+
+        Returns:
+            bool: True if the frame was sent over the client's WebSocket.
+        """
+        ws = self._clients.get(client_id)
+        if ws is None:
+            return False
+        try:
+            await ws.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
+            return True
+        except Exception:
             return False
 
     def get_status_info(self) -> Dict[str, Any]:

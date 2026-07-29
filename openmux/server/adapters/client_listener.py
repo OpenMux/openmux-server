@@ -23,6 +23,12 @@ from openmux.server.port_utils import safe_get_port
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 
+# Out-of-band control frame marker for raw TCP/character-mode clients. Mirrors the
+# web_console adapter's "OMXCTRL " text-frame convention, but is prefixed with a
+# NUL byte so it cannot be confused with ordinary terminal keystrokes forwarded to
+# a port. A control frame is a single line: b"\x00OMXCTRL " + json + b"\n".
+CTRL_MARKER = b"\x00OMXCTRL "
+
 
 class TcpServerAdapter(BaseGenericAdapter):
     """Server-side adapter handling multiple OpenMux TCP clients.
@@ -543,14 +549,183 @@ class TcpServerAdapter(BaseGenericAdapter):
         if not client.connected_port:
             return
 
+        if await self._handle_control_frame(client, data):
+            return
+
         if self.console_manager and hasattr(self.console_manager, "port_manager"):
             try:
-                await self.console_manager.port_manager.write_to_port(client.connected_port, data, client.client_id)
-                self.logger.debug(
-                    f"Forwarded chunk {len(data)}B to port {client.connected_port} for client {client.client_id}"
-                )
+                ok = await self.console_manager.port_manager.write_to_port(client.connected_port, data, client.client_id)
+                if ok:
+                    client._write_blocked_notified = False
+                    self.logger.debug(
+                        f"Forwarded chunk {len(data)}B to port {client.connected_port} for client {client.client_id}"
+                    )
+                elif not client._write_blocked_notified:
+                    client._write_blocked_notified = True
+                    try:
+                        await client.send_raw_data(b"\r\n[Write blocked: console is in read-only mode]\r\n")
+                    except Exception:
+                        pass
             except Exception as e:
                 self.logger.error(f"Error writing chunk to port {client.connected_port}: {e}", exc_info=True)
+
+    async def _handle_control_frame(self, client: "ClientSession", data: bytes) -> bool:
+        """Detect and process an out-of-band access-mode control frame.
+
+        Lets a character-mode client request read-write promotion, voluntary
+        release, or a forced takeover without a dedicated command phase (the
+        raw TCP protocol has none once a port is attached). Mirrors the
+        web_console adapter's "OMXCTRL " control frames so behavior is the
+        same across both consoles.
+
+        Args:
+            client: Attached client session.
+            data: Raw chunk read from the client socket.
+
+        Returns:
+            True if `data` was a recognized control frame and was fully
+            handled (must not be forwarded to the port); False otherwise.
+        """
+        if not data.startswith(CTRL_MARKER):
+            return False
+
+        port_name = client.connected_port
+        try:
+            line = data[len(CTRL_MARKER):].split(b"\n", 1)[0]
+            req = json.loads(line.decode("utf-8", errors="ignore"))
+        except Exception:
+            return True  # Malformed control frame; swallow rather than leak to the port
+        if not isinstance(req, dict):
+            return True
+
+        req_type = req.get("type")
+        resp: Dict[str, Any] = {"type": "client_mode"}
+        try:
+            if req_type in ("request_rw", "promote"):
+                ok = await self.console_manager.promote_client_to_read_write(client.client_id, port_name)
+                resp["ok"] = bool(ok)
+                resp["mode"] = "read-write" if ok else "read-only"
+                if not ok:
+                    holders = self._rw_holders_for_port(port_name)
+                    if holders:
+                        resp["rw_holders"] = holders
+                    max_rw = self._max_rw_users_for_port(port_name)
+                    if max_rw is not None:
+                        resp["max_rw_users"] = max_rw
+            elif req_type == "release_rw":
+                await self.console_manager.demote_client_to_read_only(client.client_id, port_name)
+                resp["ok"] = True
+                resp["mode"] = "read-only"
+            elif req_type == "force_promote":
+                other_ids = [
+                    c["client_id"]
+                    for c in self._connected_clients_for_port(port_name)
+                    if c.get("client_id") != client.client_id and c.get("mode") == "read-write"
+                ]
+                for other_id in other_ids:
+                    try:
+                        await self.console_manager.demote_client_to_read_only(other_id, port_name)
+                    except Exception:
+                        pass
+                ok = await self.console_manager.promote_client_to_read_write(client.client_id, port_name)
+                resp["ok"] = bool(ok)
+                resp["mode"] = "read-write" if ok else "read-only"
+                if ok:
+                    demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
+                    for other_id in other_ids:
+                        delivered = False
+                        try:
+                            delivered = await self.console_manager.send_control_frame_to_client(other_id, demotion)
+                        except Exception:
+                            delivered = False
+                        if delivered:
+                            continue
+                        # Cross-adapter routing unavailable; fall back to same-adapter delivery
+                        other_client = self.clients.get(other_id)
+                        if other_client is not None:
+                            try:
+                                await other_client.send_raw_data(CTRL_MARKER + json.dumps(demotion, separators=(",", ":")).encode("utf-8") + b"\n")
+                                other_client.mode = "read-only"
+                            except Exception:
+                                pass
+                else:
+                    max_rw = self._max_rw_users_for_port(port_name)
+                    if max_rw is not None:
+                        resp["max_rw_users"] = max_rw
+            elif req_type == "query_rw_holders":
+                resp = {"type": "rw_holders", "holders": self._rw_holders_for_port(port_name)}
+                max_rw = self._max_rw_users_for_port(port_name)
+                if max_rw is not None:
+                    resp["max_rw_users"] = max_rw
+            else:
+                return True  # Unknown control type; swallow to avoid leaking to the port
+        except Exception as e:
+            self.logger.error(f"Error handling control frame '{req_type}' for client {client.client_id}: {e}", exc_info=True)
+            resp = {"type": "client_mode", "ok": False, "mode": client.mode or "read-only"}
+
+        if resp.get("type") == "client_mode":
+            client.mode = resp.get("mode")
+
+        try:
+            await client.send_raw_data(CTRL_MARKER + json.dumps(resp, separators=(",", ":")).encode("utf-8") + b"\n")
+        except Exception:
+            pass
+        return True
+
+    def _connected_clients_for_port(self, port_name: Optional[str]) -> List[Dict[str, Any]]:
+        """Return the raw connected-client records for a port, or an empty list."""
+        try:
+            pm = getattr(self.console_manager, "port_manager", None)
+            port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
+            if port_obj is not None:
+                return list(getattr(port_obj, "connected_clients", []))
+        except Exception:
+            pass
+        return []
+
+    def _rw_holders_for_port(self, port_name: Optional[str]) -> List[str]:
+        """Return 'username@ip' strings for all read-write clients on a port."""
+        holders: List[str] = []
+        for c in self._connected_clients_for_port(port_name):
+            if c.get("mode") != "read-write":
+                continue
+            cid = c.get("client_id", "")
+            username = c.get("username", "unknown")
+            holders.append(f"{username}@{self._resolve_client_ip(cid)}")
+        return holders
+
+    def _resolve_client_ip(self, client_id: str) -> str:
+        """Resolve a client's source IP, including clients owned by other adapters.
+
+        Falls back to the owning adapter's own resolver (e.g. the web console's
+        websocket client metadata) when the client is not one of ours.
+        """
+        session = self.clients.get(client_id)
+        if session is not None and getattr(session, "address", None):
+            return session.address
+        try:
+            mgr = self.console_manager.client_to_manager.get(client_id)
+        except Exception:
+            mgr = None
+        resolver = getattr(mgr, "_resolve_client_meta", None)
+        if callable(resolver):
+            try:
+                meta = resolver(client_id) or {}
+                return meta.get("ip") or "unknown"
+            except Exception:
+                pass
+        return "unknown"
+
+    def _max_rw_users_for_port(self, port_name: Optional[str]) -> Optional[int]:
+        """Return max_read_write_users for a port, or None if not determinable."""
+        try:
+            pm = getattr(self.console_manager, "port_manager", None)
+            port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
+            if port_obj is not None:
+                return int(getattr(port_obj, "max_read_write_users", 1))
+        except Exception:
+            pass
+        return None
 
     async def process_client_command(self, client: "ClientSession", command: str):
         """Parse and execute a client command.
@@ -662,6 +837,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                     except Exception as e:
                         self.logger.error(f"Error determining client mode: {e}", exc_info=True)
 
+                    client.mode = "read-write" if access_mode == "READ_WRITE" else "read-only"
                     await client.send_line(f"CONNECTED:{port_name}:{access_mode}")
                     # If the target port is a federated proxy and currently down,
                     # immediately inform the client so they understand why no data flows yet.
@@ -921,6 +1097,31 @@ class TcpServerAdapter(BaseGenericAdapter):
             self.logger.error(f"Failed to send data to client {client_id}: {e}", exc_info=True)
             return False
 
+    async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
+        """Deliver an access-mode control frame to a locally connected TCP client.
+
+        Called by `ConsoleManager.send_control_frame_to_client` to notify a
+        client of a mode change (e.g. a force-take demotion) regardless of
+        which adapter initiated the change.
+
+        Args:
+            client_id: Target client identifier.
+            payload: JSON-serializable control message.
+
+        Returns:
+            bool: True if the frame was written to the client's socket.
+        """
+        client = self.clients.get(client_id)
+        if client is None:
+            return False
+        try:
+            await client.send_raw_data(CTRL_MARKER + json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
+            if payload.get("type") == "client_mode":
+                client.mode = payload.get("mode")
+            return True
+        except Exception:
+            return False
+
     # Port management methods (required by BaseGenericAdapter)
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
         """No-op for server (does not create ports)."""
@@ -990,6 +1191,10 @@ class ClientSession:
         self.username: Optional[str] = None
         self.is_authenticated = False
         self.connected_port: Optional[str] = None
+        # Access mode granted for the currently attached port ("read-only"|"read-write")
+        self.mode: Optional[str] = None
+        # Set once a blocked write has been reported, to avoid repeating the notice per keystroke
+        self._write_blocked_notified: bool = False
 
     async def receive_char(self) -> Optional[bytes]:
         """Receive exactly one byte (unless disconnected).

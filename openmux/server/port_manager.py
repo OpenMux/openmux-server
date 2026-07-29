@@ -838,9 +838,9 @@ class PortManager:
                 client_mode = "federation"
             else:
                 for client in getattr(port, "connected_clients", []):
-                    if client.get("client_id") == client_id and client.get("mode") == "read-write":
-                        client_has_write = True
+                    if client.get("client_id") == client_id:
                         client_mode = client.get("mode")
+                        client_has_write = client_mode == "read-write"
                         break
 
             if not client_has_write:

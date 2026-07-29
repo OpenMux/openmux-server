@@ -436,14 +436,10 @@ class ConsoleManager:
 
         hex_data = " ".join(f"{b:02x}" for b in data)
         ascii_data = "".join(chr(b) if 32 <= b <= 126 else "." for b in data)
-        self.logger.info(
+        self.logger.debug(
             f"PORT->CLIENT FORWARD: port={port_name}, client={client_id}, "
             f"len={len(data)} bytes, hex={hex_data}, ascii='{ascii_data}'"
         )
-
-        # Special logging for enter key
-        if b"\r" in data or b"\n" in data:
-            self.logger.info(f"ENTER KEY IN FORWARDED DATA: port={port_name}, client={client_id}")
 
     async def _send_data_to_client(self, client_id: str, port_name: str, data: bytes) -> bool:
         """Send data to a client through the registered client manager.
@@ -600,6 +596,29 @@ class ConsoleManager:
                 del self.client_to_manager[client_id]
         except Exception:
             pass
+
+    async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
+        """Deliver an access-mode control frame to a client via its owning adapter.
+
+        Routes through the adapter registered for `client_id` (TCP, telnet, or
+        web console), regardless of which adapter originated the request, so
+        e.g. a CLI force-take can notify a web console client and vice versa.
+
+        Args:
+            client_id: Target client identifier.
+            payload: JSON-serializable control message (e.g. a demotion notice).
+
+        Returns:
+            bool: True if the owning adapter accepted and sent the frame.
+        """
+        mgr = self.client_to_manager.get(client_id)
+        if mgr is None or not hasattr(mgr, "send_control_frame_to_client"):
+            return False
+        try:
+            return bool(await mgr.send_control_frame_to_client(client_id, payload))
+        except Exception:
+            self.logger.debug(f"send_control_frame_to_client failed for {client_id}", exc_info=True)
+            return False
 
     def get_client_mode(self, client_id: str, port_name: str) -> Optional[str]:
         """Return access mode for a client on a specific port.
