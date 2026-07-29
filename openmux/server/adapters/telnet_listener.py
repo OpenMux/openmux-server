@@ -152,39 +152,130 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             if not spec.enabled:
                 self.logger.info("Telnet listener '%s' disabled via configuration", spec.name)
                 continue
-            try:
-                async def _connection_entry(reader, writer, listener_spec=spec):
-                    await self._handle_connection(listener_spec, reader, writer)
-
-                server = await asyncio.start_server(
-                    _connection_entry,
-                    spec.bind_host,
-                    spec.bind_port,
-                )
-                self.servers[spec.name] = server
-                self.logger.info(
-                    "Telnet listener '%s' bound to %s", spec.name, self._format_sockname(server.sockets)
-                )
-                try:
-                    sock = server.sockets[0]
-                    if sock:
-                        sockname = sock.getsockname()
-                        spec.effective_host = sockname[0]
-                        spec.effective_port = sockname[1]
-                except Exception:
-                    pass
-            except Exception as exc:
-                self.logger.error(
-                    "Failed to start telnet listener '%s' on %s:%s: %s",
-                    spec.name,
-                    spec.bind_host,
-                    spec.bind_port,
-                    exc,
-                    exc_info=True,
-                )
+            if not await self._start_single_listener(spec):
                 success = False
         self.is_running = success
         return success
+
+    async def _start_single_listener(self, spec: ListenerConfig) -> bool:
+        """Bind a single listener's server socket. Returns True on success."""
+        try:
+            async def _connection_entry(reader, writer, listener_spec=spec):
+                await self._handle_connection(listener_spec, reader, writer)
+
+            server = await asyncio.start_server(
+                _connection_entry,
+                spec.bind_host,
+                spec.bind_port,
+            )
+            self.servers[spec.name] = server
+            self.logger.info(
+                "Telnet listener '%s' bound to %s", spec.name, self._format_sockname(server.sockets)
+            )
+            try:
+                sock = server.sockets[0]
+                if sock:
+                    sockname = sock.getsockname()
+                    spec.effective_host = sockname[0]
+                    spec.effective_port = sockname[1]
+            except Exception:
+                pass
+            return True
+        except Exception as exc:
+            self.logger.error(
+                "Failed to start telnet listener '%s' on %s:%s: %s",
+                spec.name,
+                spec.bind_host,
+                spec.bind_port,
+                exc,
+                exc_info=True,
+            )
+            return False
+
+    async def _stop_single_listener(self, name: str) -> None:
+        """Close one listener's server and disconnect only its sessions."""
+        for client_id in [cid for cid, s in list(self.sessions.items()) if s.listener.name == name]:
+            await self._disconnect_session(client_id, reason="listener removed")
+        server = self.servers.pop(name, None)
+        if server is not None:
+            try:
+                server.close()
+                await server.wait_closed()
+                self.logger.info("Telnet listener '%s' stopped", name)
+            except Exception:
+                self.logger.warning("Error stopping telnet listener '%s'", name, exc_info=True)
+
+    async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
+        """Incrementally reconcile telnet listeners without disturbing unrelated sessions.
+
+        Args:
+            new_config: Dict with key 'telnet_listener' as list, or direct list.
+
+        Returns:
+            Summary dict: {added, removed, updated, unchanged}.
+        """
+        if isinstance(new_config, dict) and isinstance(new_config.get("telnet_listener"), list):
+            items = list(new_config["telnet_listener"])
+        elif isinstance(new_config, list):
+            items = list(new_config)
+        else:
+            items = []
+
+        new_by_name: Dict[str, Dict[str, Any]] = {}
+        for entry in items:
+            if isinstance(entry, dict) and entry.get("name"):
+                new_by_name[str(entry["name"])] = entry
+
+        old_by_name = {spec.name: spec for spec in self.listeners}
+        old_names = set(old_by_name.keys())
+        new_names = set(new_by_name.keys())
+        removed = sorted(old_names - new_names)
+        added = sorted(new_names - old_names)
+        common = sorted(old_names & new_names)
+
+        def _material_cfg(spec: ListenerConfig) -> Dict[str, Any]:
+            return {
+                "bind_host": spec.bind_host,
+                "bind_port": spec.bind_port,
+                "target": spec.target,
+                "read_only": spec.read_only,
+                "acl_raw": list(spec.acl_raw),
+                "enabled": spec.enabled,
+            }
+
+        updated: List[str] = []
+        unchanged: List[str] = []
+        for name in common:
+            new_spec = self._build_listener(new_by_name[name])
+            if new_spec is None:
+                continue
+            if _material_cfg(old_by_name[name]) == _material_cfg(new_spec):
+                unchanged.append(name)
+            else:
+                updated.append(name)
+
+        for name in removed + updated:
+            await self._stop_single_listener(name)
+
+        specs_by_name = {spec.name: spec for spec in self.listeners if spec.name not in (removed + updated)}
+        for name in added + updated:
+            spec = self._build_listener(new_by_name[name])
+            if spec is None:
+                continue
+            specs_by_name[name] = spec
+            if spec.enabled:
+                await self._start_single_listener(spec)
+            else:
+                self.logger.info("Telnet listener '%s' disabled via configuration", spec.name)
+
+        self.listeners = [specs_by_name[n] for n in sorted(specs_by_name.keys())]
+        self.is_running = True
+
+        summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
+        self.logger.info(
+            f"Telnet listener adapter {self.name} reconcile: +{len(added)} ~{len(updated)} -{len(removed)} unchanged={len(unchanged)}"
+        )
+        return summary
 
     async def stop(self) -> None:
         self.is_running = False

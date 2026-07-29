@@ -178,7 +178,7 @@
       <div class="field">
         <label>Soft reload</label>
         <button class="btn" id="softReloadBtn" type="button">Soft Reload</button>
-        <span class="help">Reloads YAML, updates authentication (users/API keys/PAM/public keys), and reconciles Serial/Loopback/Command/TCP-initiator ports without restarting listeners.</span>
+        <span class="help">Reloads YAML, updates authentication (users/API keys/PAM/public keys), and reconciles Serial/Loopback/Command/TCP-initiator/Telnet-listener ports without restarting listeners.</span>
       </div>
       <div class="field">
         <label>Full reload</label>
@@ -193,7 +193,7 @@
     <div class="section-header"><span class="title">Guidance</span> <span class="desc">When to use what</span></div>
     <div class="section">
       <ul style="margin:0 0 0 18px; padding:0;">
-        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/PAM), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator ports.</li>
+        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/PAM), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports.</li>
         <li>Use <b>Full Reload</b> for: Client listener enable/host/port changes, muxcon listeners/initiators, TLS enable/certs/TOFU settings, and other adapter-wide options.</li>
         <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>
       </ul>
