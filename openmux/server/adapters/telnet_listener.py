@@ -14,9 +14,10 @@ import logging
 import socket
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
+from .protocols.plain import TelnetIacStripper
 
 
 AclEntry = Union[
@@ -25,6 +26,18 @@ AclEntry = Union[
     ipaddress.IPv4Network,
     ipaddress.IPv6Network,
 ]
+
+# Sentinel 'target' value that puts a listener into interactive port-menu mode.
+_MENU_TARGET = "*"
+
+# Auth/menu phase tuning (only applies before a port is attached; the
+# post-attach data pump has no timeout so connected sessions stay open).
+_AUTH_LOGIN_MAX_ATTEMPTS = 3
+_AUTH_PORT_MAX_ATTEMPTS = 5
+_AUTH_IDLE_TIMEOUT = 60.0
+_AUTH_LINE_MAX_LEN = 256
+_IAC_WILL_ECHO = bytes([255, 251, 1])  # IAC WILL ECHO
+_IAC_WONT_ECHO = bytes([255, 252, 1])  # IAC WONT ECHO
 
 
 @dataclass
@@ -36,6 +49,7 @@ class ListenerConfig:
     read_only: bool = False
     acl_raw: List[str] = field(default_factory=list)
     enabled: bool = True
+    require_auth: bool = False
     compiled_acl: List[AclEntry] = field(default_factory=list)
     effective_host: Optional[str] = None
     effective_port: Optional[int] = None
@@ -50,6 +64,7 @@ class TelnetSession:
     port_name: str
     read_only: bool
     remote_host: str
+    username: str = ""
     port_mode: str = "read-only"
     bytes_in: int = 0
     bytes_out: int = 0
@@ -76,6 +91,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         self.servers: Dict[str, asyncio.AbstractServer] = {}
         self.sessions: Dict[str, TelnetSession] = {}
         self.console_manager = None
+        self.auth_manager = None
 
     # ------------------------------------------------------------------
     # Adapter contract
@@ -121,6 +137,8 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             if "read_only" in entry and not isinstance(entry.get("read_only"), bool):
                 return False
             if "enabled" in entry and not isinstance(entry.get("enabled"), bool):
+                return False
+            if "require_auth" in entry and not isinstance(entry.get("require_auth"), bool):
                 return False
             if "acl" in entry:
                 acl = entry.get("acl")
@@ -241,6 +259,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 "read_only": spec.read_only,
                 "acl_raw": list(spec.acl_raw),
                 "enabled": spec.enabled,
+                "require_auth": spec.require_auth,
             }
 
         updated: List[str] = []
@@ -312,6 +331,10 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         except Exception:
             self.logger.warning("Failed to register telnet adapter as client manager", exc_info=True)
 
+    def set_auth_manager(self, auth_manager):
+        """Wire the shared AuthManager for listeners with require_auth enabled."""
+        self.auth_manager = auth_manager
+
     async def send_data_to_client(self, client_id: str, data: bytes) -> bool:
         session = self.sessions.get(client_id)
         if not session:
@@ -342,10 +365,10 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         if not self.main_port_manager:
             await self._send_and_close(writer, b"Server unavailable\r\n")
             return
-        port_name = await self._resolve_target(listener.target)
-        if not port_name:
-            await self._send_and_close(writer, f"Port {listener.target} unavailable\r\n".encode())
-            return
+        resolved = await self._resolve_session_target(listener, reader, writer, peer_ip)
+        if resolved is None:
+            return  # Auth/menu phase already sent an error and closed the connection.
+        username, port_name = resolved
         client_id = f"telnet:{listener.name}:{uuid.uuid4()}"
         session = TelnetSession(
             client_id=client_id,
@@ -355,6 +378,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             port_name=port_name,
             read_only=listener.read_only,
             remote_host=peer_ip,
+            username=username,
         )
         attach_ok = await self._attach_session(session)
         if not attach_ok:
@@ -400,15 +424,222 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 )
                 break
 
+    # ------------------------------------------------------------------
+    # Authentication and multi-port menu (auth/menu phase only; the pump
+    # above has no timeout, so once a port is attached sessions stay open
+    # indefinitely).
+
+    async def _resolve_session_target(
+        self,
+        listener: ListenerConfig,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        peer_ip: str,
+    ) -> Optional[Tuple[str, str]]:
+        """Run the login prompt (if required) and resolve the target port.
+
+        Returns (username, port_name) on success, or None if the connection
+        was already closed (auth failure, bad selection, or client quit).
+        """
+        username = f"telnet_{listener.name}"
+        embedded_descriptor: Optional[str] = None
+
+        if listener.require_auth:
+            auth_result = await self._run_login(listener, reader, writer, peer_ip)
+            if auth_result is None:
+                return None
+            username, embedded_descriptor = auth_result
+
+        if embedded_descriptor and listener.target == _MENU_TARGET:
+            port_name = await self._resolve_target(embedded_descriptor)
+            if not port_name:
+                await self._send_and_close(writer, f"Port {embedded_descriptor} unavailable\r\n".encode())
+                return None
+            return username, port_name
+
+        if listener.target == _MENU_TARGET:
+            port_name = await self._run_port_menu(writer, reader)
+            if not port_name:
+                return None
+            return username, port_name
+
+        port_name = await self._resolve_target(listener.target)
+        if not port_name:
+            await self._send_and_close(writer, f"Port {listener.target} unavailable\r\n".encode())
+            return None
+        return username, port_name
+
+    @staticmethod
+    def _parse_login(line: str) -> Tuple[str, Optional[str]]:
+        """Split a login line into (username, embedded_port_descriptor).
+
+        Supports ``<username>+<port>`` and ``<username>:<port>``. A single
+        ``:`` is treated as the delimiter only when it is not part of a
+        ``::`` run, so composed targets like ``alice:myserver::prod-serial0``
+        still resolve correctly (the ``::`` is left intact in the descriptor).
+        """
+        line = line.strip()
+        plus_idx = line.find("+")
+        if plus_idx != -1:
+            return line[:plus_idx].strip(), line[plus_idx + 1 :].strip()
+
+        idx = 0
+        while True:
+            colon_idx = line.find(":", idx)
+            if colon_idx == -1:
+                break
+            if line[colon_idx : colon_idx + 2] == "::":
+                idx = colon_idx + 2
+                continue
+            return line[:colon_idx].strip(), line[colon_idx + 1 :].strip()
+
+        return line, None
+
+    async def _read_auth_line(
+        self,
+        reader: asyncio.StreamReader,
+        stripper: TelnetIacStripper,
+        max_len: int = _AUTH_LINE_MAX_LEN,
+        timeout: float = _AUTH_IDLE_TIMEOUT,
+    ) -> Optional[str]:
+        """Read one line from the client during the auth/menu phase.
+
+        Strips telnet IAC negotiation bytes so a real telnet client's
+        automatic option replies don't corrupt the buffered line.
+        """
+        buf = bytearray()
+        while True:
+            try:
+                chunk = await asyncio.wait_for(reader.read(256), timeout=timeout)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                return None
+            if not chunk:
+                return None
+            buf.extend(stripper.strip(chunk))
+            nl = buf.find(b"\n")
+            if nl != -1:
+                line = bytes(buf[:nl]).decode("utf-8", errors="ignore").rstrip("\r")
+                return line
+            if len(buf) > max_len:
+                return None
+
+    async def _run_login(
+        self,
+        listener: ListenerConfig,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        peer_ip: str,
+    ) -> Optional[Tuple[str, Optional[str]]]:
+        """Prompt for username/password. Returns (username, embedded_port) or None."""
+        if not self.auth_manager:
+            self.logger.error(
+                "Telnet listener '%s' has require_auth set but no auth manager is configured", listener.name
+            )
+            await self._send_and_close(writer, b"Server misconfigured: authentication unavailable\r\n")
+            return None
+
+        stripper = TelnetIacStripper()
+        for _ in range(_AUTH_LOGIN_MAX_ATTEMPTS):
+            writer.write(b"login: ")
+            await writer.drain()
+            login_line = await self._read_auth_line(reader, stripper)
+            if login_line is None:
+                await self._close_quiet(writer)
+                return None
+            username, embedded_descriptor = self._parse_login(login_line)
+            if not username:
+                continue
+
+            if self.auth_manager.is_user_locked(username, peer_ip):
+                await self._send_and_close(writer, b"Login incorrect\r\n")
+                return None
+
+            writer.write(_IAC_WILL_ECHO + b"Password: ")
+            await writer.drain()
+            password = await self._read_auth_line(reader, stripper)
+            writer.write(_IAC_WONT_ECHO + b"\r\n")
+            await writer.drain()
+            if password is None:
+                await self._close_quiet(writer)
+                return None
+
+            if self.auth_manager.authenticate_user(username, password):
+                if hasattr(self.auth_manager, "clear_auth_failures"):
+                    self.auth_manager.clear_auth_failures(username, peer_ip)
+                return username, embedded_descriptor
+
+            if hasattr(self.auth_manager, "register_auth_failure"):
+                self.auth_manager.register_auth_failure(username, peer_ip)
+            writer.write(b"Login incorrect\r\n")
+            await writer.drain()
+
+        await self._close_quiet(writer)
+        return None
+
+    async def _run_port_menu(self, writer: asyncio.StreamWriter, reader: asyncio.StreamReader) -> Optional[str]:
+        """Print the port list, prompt for a selection, and resolve it.
+
+        Returns the resolved port name, or None if the client quit, gave up
+        after too many bad attempts, or disconnected.
+        """
+        stripper = TelnetIacStripper()
+        await self._send_port_list(writer)
+        for _ in range(_AUTH_PORT_MAX_ATTEMPTS):
+            writer.write(b"Port: ")
+            await writer.drain()
+            choice = await self._read_auth_line(reader, stripper)
+            if choice is None:
+                await self._close_quiet(writer)
+                return None
+            choice = choice.strip()
+            if not choice or choice in ("?", "list"):
+                await self._send_port_list(writer)
+                continue
+            if choice in ("quit", "exit"):
+                await self._close_quiet(writer)
+                return None
+            port_name = await self._resolve_target(choice)
+            if port_name:
+                return port_name
+            writer.write(f"Unknown port: {choice}\r\n".encode())
+            await writer.drain()
+
+        await self._close_quiet(writer)
+        return None
+
+    async def _send_port_list(self, writer: asyncio.StreamWriter) -> None:
+        entries: List[Dict[str, Any]] = []
+        try:
+            getter = getattr(self.main_port_manager, "get_port_list_with_federation", None)
+            if getter:
+                entries = await asyncio.wait_for(getter(), timeout=1.0)
+        except Exception:
+            entries = []
+        lines = [b"Available ports:\r\n"]
+        for entry in entries or []:
+            name = entry.get("name", "?")
+            origin = entry.get("origin_server_id")
+            status = entry.get("status", "")
+            label = f"{origin}::{name}" if origin else name
+            lines.append(f"  {label}  {status}\r\n".encode())
+        writer.write(b"".join(lines))
+        await writer.drain()
+
+    async def _close_quiet(self, writer: asyncio.StreamWriter) -> None:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
     async def _attach_session(self, session: TelnetSession) -> bool:
         if not self.console_manager:
             return False
-        username = f"telnet_{session.listener.name}"
         try:
             ok, mode = await self.console_manager.connect_client_to_port(
                 session.client_id,
                 session.port_name,
-                username,
+                session.username,
             )
         except Exception as exc:
             self.logger.error("Console manager attach failed for %s: %s", session.client_id, exc)
@@ -477,11 +708,18 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 read_only=bool(entry.get("read_only", False)),
                 acl_raw=[str(a).strip() for a in entry.get("acl", []) if str(a).strip()],
                 enabled=bool(entry.get("enabled", True)),
+                require_auth=bool(entry.get("require_auth", False)),
             )
             if not spec.name:
                 return None
             if not spec.target:
                 return None
+            if spec.target == _MENU_TARGET and not spec.require_auth:
+                self.logger.warning(
+                    "Telnet listener '%s' uses menu mode (target: '*') without require_auth; "
+                    "any client can browse and attach to any port",
+                    spec.name,
+                )
             compiled: List[AclEntry] = []
             for rule in spec.acl_raw:
                 try:

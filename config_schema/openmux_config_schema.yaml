@@ -109,6 +109,7 @@ properties:
         target: { type: string }
         read_only: { type: boolean, default: false }
         enabled: { type: boolean, default: true }
+        require_auth: { type: boolean, default: false }
         acl:
           type: array
           items: { type: string }

@@ -19,6 +19,62 @@ _DONT = 0xFE
 _OPTION_CMDS = {_WILL, _WONT, _DO, _DONT}
 
 
+class TelnetIacStripper:
+    """Stateful telnet IAC command stripper, reusable across handlers.
+
+    Mapping:
+    * ``IAC IAC``                 → emit literal ``0xFF``
+    * ``IAC WILL/WONT/DO/DONT X`` → discard 3 bytes
+    * ``IAC SB … IAC SE``         → discard entire subnegotiation
+    * ``IAC <other>``             → discard 2 bytes
+
+    Maintains parser state across calls so that sequences split across
+    multiple ``read()`` chunks are handled correctly.
+    """
+
+    def __init__(self) -> None:
+        # States: "data" | "iac" | "iac_option" | "subneg" | "subneg_iac"
+        self._iac_state = "data"
+
+    def strip(self, data: bytes) -> bytes:
+        """Remove telnet IAC command sequences from *data*."""
+        out = bytearray()
+        for b in data:
+            if self._iac_state == "data":
+                if b == _IAC:
+                    self._iac_state = "iac"
+                else:
+                    out.append(b)
+
+            elif self._iac_state == "iac":
+                if b == _IAC:
+                    out.append(_IAC)          # IAC IAC → literal 0xFF
+                    self._iac_state = "data"
+                elif b == _SB:
+                    self._iac_state = "subneg"
+                elif b in _OPTION_CMDS:
+                    self._iac_state = "iac_option"  # consume one more byte
+                else:
+                    self._iac_state = "data"  # single-byte command, consumed
+
+            elif self._iac_state == "iac_option":
+                # Option byte after WILL/WONT/DO/DONT — discard
+                self._iac_state = "data"
+
+            elif self._iac_state == "subneg":
+                if b == _IAC:
+                    self._iac_state = "subneg_iac"
+                # else: subneg payload byte, discard
+
+            elif self._iac_state == "subneg_iac":
+                if b == _SE:
+                    self._iac_state = "data"  # end of subnegotiation
+                else:
+                    self._iac_state = "subneg"  # IAC within subneg data
+
+        return bytes(out)
+
+
 class PlainHandler(TcpProtocolHandler):
     """Raw TCP handler with optional telnet negotiation stripping.
 
@@ -35,10 +91,7 @@ class PlainHandler(TcpProtocolHandler):
     def __init__(self, config: dict) -> None:
         prot = config.get("protocol", {})
         self._telnet_negotiation: str = prot.get("telnet_negotiation", "none")
-
-        # Stateful parser for multi-chunk telnet command stripping
-        # States: "data" | "iac" | "iac_option" | "subneg" | "subneg_iac"
-        self._iac_state = "data"
+        self._iac_stripper = TelnetIacStripper()
 
     @classmethod
     def validate_config(cls, config: dict) -> List[str]:
@@ -76,52 +129,4 @@ class PlainHandler(TcpProtocolHandler):
         """Pass data through, stripping telnet IAC sequences when configured."""
         if self._telnet_negotiation != "strip":
             return data
-        return self._strip_telnet(data)
-
-    def _strip_telnet(self, data: bytes) -> bytes:
-        """Remove telnet IAC command sequences from *data*.
-
-        Maintains parser state across calls so that sequences split across
-        multiple ``read()`` chunks are handled correctly.
-
-        Mapping:
-        * ``IAC IAC``                 → emit literal ``0xFF``
-        * ``IAC WILL/WONT/DO/DONT X`` → discard 3 bytes
-        * ``IAC SB … IAC SE``         → discard entire subnegotiation
-        * ``IAC <other>``             → discard 2 bytes
-        """
-        out = bytearray()
-        for b in data:
-            if self._iac_state == "data":
-                if b == _IAC:
-                    self._iac_state = "iac"
-                else:
-                    out.append(b)
-
-            elif self._iac_state == "iac":
-                if b == _IAC:
-                    out.append(_IAC)          # IAC IAC → literal 0xFF
-                    self._iac_state = "data"
-                elif b == _SB:
-                    self._iac_state = "subneg"
-                elif b in _OPTION_CMDS:
-                    self._iac_state = "iac_option"  # consume one more byte
-                else:
-                    self._iac_state = "data"  # single-byte command, consumed
-
-            elif self._iac_state == "iac_option":
-                # Option byte after WILL/WONT/DO/DONT — discard
-                self._iac_state = "data"
-
-            elif self._iac_state == "subneg":
-                if b == _IAC:
-                    self._iac_state = "subneg_iac"
-                # else: subneg payload byte, discard
-
-            elif self._iac_state == "subneg_iac":
-                if b == _SE:
-                    self._iac_state = "data"  # end of subnegotiation
-                else:
-                    self._iac_state = "subneg"  # IAC within subneg data
-
-        return bytes(out)
+        return self._iac_stripper.strip(data)

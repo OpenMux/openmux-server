@@ -46,10 +46,11 @@ client_listener (TCP console) (runtime defaults from openmux/server/adapters/cli
 telnet_listener (per-listener entry; upcoming adapter defaults)
 - bind_host: 0.0.0.0 (bind all interfaces unless overridden)
 - bind_port: required (no implicit default)
-- target: required (no implicit default)
+- target: required (no implicit default); use `'*'` for a port-selection menu
 - read_only: false
+- require_auth: false (opt in for a login/password prompt and the `<user>+<port>`/`<user>:<port>` shortcut)
 - acl: empty / missing list means allow all sources
-- authentication: not performed (listener relies solely on ACL + network trust)
+- authentication: not performed unless `require_auth: true` (listener otherwise relies solely on ACL + network trust)
 
 serial_ports (per-port) (schema defaults, plus adapter runtime behavior)
 - baudrate: 9600
