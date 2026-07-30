@@ -41,7 +41,6 @@ Every port instance **must** expose the following attributes:
 | `is_connected` | `bool` | `True` when the underlying resource (device, socket, process) is ready for I/O. Ports without a physical resource (e.g. loopback) should be `True` while `ACTIVE`. |
 | `data_callback` | `Callable \| None` | Set by `PortManager.register_unified_port()` to `pm.send_data`. The port must call `await self.data_callback(self.name, data)` for all outbound data. Initialized to `None`; absent PM is an error (see below). |
 | `always_buffer` | `bool` | When `True`, PM enqueues data even when no clients are connected. Defaults to `False`. |
-| `drop_oldest_on_full` | `bool` | When `True`, PM evicts the oldest item when the delivery queue is full. Defaults to `False`. |
 | `max_read_write_users` | `int` | Maximum number of simultaneous read-write clients. Used by PM for access control. |
 
 > **Note:** Ports do **not** own or allocate a `data_queue`. The `UnifiedPortWrapper` created by PM owns the delivery queue. Any `data_queue` attribute on a port is a test-only staging buffer and is not part of this contract.
