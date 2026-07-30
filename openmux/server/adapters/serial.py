@@ -536,8 +536,9 @@ class SerialAdapter(BaseGenericAdapter):
     def _parse_port_configs(self) -> None:
         """Parse configuration and build ``SerialPortWrapper`` objects.
 
-        Raises:
-            ValueError: If no ports configured.
+        An empty or missing port list is legitimate (bootstrap path, test
+        setup) and is left for ``start()`` to warn about; ports are created
+        dynamically afterward via ``reconcile_ports``.
         """
         # Handle factory-wrapped config format
         ports_config = []
@@ -551,9 +552,6 @@ class SerialAdapter(BaseGenericAdapter):
             # Check if config itself is the ports list
             if isinstance(self.config, list):
                 ports_config = self.config
-
-        if not ports_config:
-            raise ValueError(f"Serial adapter {self.name} has no ports configured")
 
         for port_config in ports_config:
             if not isinstance(port_config, dict):
@@ -606,6 +604,11 @@ class SerialAdapter(BaseGenericAdapter):
             return True
 
         self.logger.info(f"Starting serial adapter {self.name}")
+
+        if not self.serial_ports:
+            self.logger.warning(f"No ports configured for serial adapter {self.name}")
+            self.is_running = True
+            return True
 
         success_count = 0
         for port_name, port_wrapper in self.serial_ports.items():

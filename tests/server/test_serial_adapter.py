@@ -41,17 +41,28 @@ def _make_spw(**config_overrides) -> SimpleNamespace:
 
 
 def _make_adapter() -> SerialAdapter:
-    """Return a SerialAdapter with one seed port so __init__ validates successfully."""
-    return SerialAdapter("serial_ports", {
-        "serial_ports": [{"name": "_seed", "device": "/dev/null"}],
-    })
+    """Return a SerialAdapter constructed with no ports (empty list is legitimate)."""
+    return SerialAdapter("serial_ports", {"serial_ports": []})
+
+
+def test_construct_with_empty_port_list():
+    """Constructing with no ports must not raise, matching other adapters."""
+    adapter = SerialAdapter("serial_ports", {"serial_ports": []})
+    assert adapter.serial_ports == {}
+
+
+@pytest.mark.asyncio
+async def test_start_with_empty_port_list_succeeds():
+    """Starting with no ports configured must succeed (warns, doesn't fail)."""
+    adapter = SerialAdapter("serial_ports", {"serial_ports": []})
+    assert await adapter.start() is True
+    assert adapter.is_running is True
 
 
 @pytest.mark.asyncio
 async def test_reconcile_ports_unchanged():
     """Port whose config matches running defaults is not restarted on reconcile."""
     adapter = _make_adapter()
-    adapter.serial_ports.clear()
     adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0", baudrate=9600)  # type: ignore
 
     # YAML with same material values — only description differs (non-material)
@@ -67,7 +78,6 @@ async def test_reconcile_ports_unchanged():
 async def test_reconcile_ports_optional_fields_default():
     """Port with only required fields in YAML matches a running port using all defaults."""
     adapter = _make_adapter()
-    adapter.serial_ports.clear()
     # Running port has all defaults (timeout=1.0, dtr=True, flow_control="none", …)
     adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0", baudrate=115200)  # type: ignore
 
