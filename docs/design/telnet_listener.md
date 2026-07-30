@@ -14,7 +14,8 @@ Provide a lightweight listener that exposes selected OpenMux ports over simple T
 - **Authentication**: Access control relies on the network ACL plus the optional read-only flag. A listener can also set `require_auth: true` to prompt for an OpenMux username and password (via `AuthManager`) before it attaches a session.
 - **Port Menu**: A listener with `target: '*'` does not attach to a fixed port. Instead, it prints a port list and prompts `Port: ` so the user can pick a target. Pair `target: '*'` with `require_auth: true`.
 - **Embedded Login**: When `require_auth` is set, the `login:` prompt accepts `<username>+<port>` or `<username>:<port>` (a literal `+` always wins over `:`; a doubled `::` is treated as part of the target, not a delimiter). On a fixed-target listener the embedded port is ignored, because the target is fixed. On a `target: '*'` listener, a valid embedded port skips the port menu and attaches directly.
-- **Read-Only Toggle**: Each listener may declare `read_only: true` to forward data from the OpenMux port to the Telnet client while ignoring client input.
+- **Read-Only Toggle**: Each listener may declare `read_only: true` to forward data from the OpenMux port to the Telnet client while ignoring client input. On attach, a read-only session (config-forced, or granted read-only because no read-write slot was free) gets a one-time in-band warning: `[WARNING: console is in read-only mode]`.
+- **Control Menu (Ctrl+E,c)**: Any session can press Ctrl+E then `c` to open an in-band control menu, matching the CLI client's own escape sequence. Commands: `a` request read-write, `f` force-take read-write (demotes other holders), `s` release read-write (switch to read-only), `w` show who holds read-write, `i` show session info, `v` show server version, `e` change this session's escape sequence, `.` disconnect, `?` show the menu. On a `read_only: true` listener, `a` and `f` are rejected with a clear message; `w`/`i`/`v`/`?` still work. A force-take on another adapter type (TCP CLI, web console) also notifies this session with `[Your read-write access was taken by another user]`.
 - **Minimal Telnet Handling**: Treat the socket as raw TCP. Do not emit Telnet negotiations; echoed data is controlled by the underlying port.
 - **Failure Messaging**: On ACL failure, missing target, or ambiguity, send a short banner (e.g., `Port console1 unavailable`) and close the socket.
 - **Config Editor Integration**: `telnet_listener` is a first-class section that can be modified in the Config Editor UI, subject to `config_editor.writable_sections`.
@@ -102,7 +103,6 @@ telnet_listener:
 
 ## Future Extensions
 - Global ACL defaults inherited by listeners unless overridden.
-- SSH listener support with the same auth/menu/embedded-login model (planned as a separate adapter).
 - Idle timeout and rate limiting per listener.
 - Metrics export via web_status or Prometheus adapters.
 
@@ -112,4 +112,4 @@ telnet_listener:
 - Evaluate IPv6 binding needs (include in first pass if quick, otherwise document as a limitation).
 
 ---
-*Last updated: 2025-11-24*
+*Last updated: 2026-07-30*

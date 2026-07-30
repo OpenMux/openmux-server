@@ -41,7 +41,7 @@ class AuthManager:
         self.users = config.get("users", [])  # noqa: Vulture (accessed dynamically)
         self.api_keys = config.get("api_keys", [])  # noqa: Vulture (accessed dynamically)
         # Public key records: list of dicts with fields: username?, key_id, public_key, allowed_uses?
-        # allowed_uses is a list of contexts this key may be used for, e.g., ["client"], ["muxcon"], ["client","muxcon"]
+        # allowed_uses is a list of contexts this key may be used for, e.g., ["client"], ["muxcon"], ["ssh"], ["client","muxcon"]
         self.public_keys = self._normalize_public_keys(config.get("public_keys", []))
         # External authentication via helper binary (config key: external_auth)
         # Deprecated alias: pam (mapped automatically with a warning)
@@ -347,6 +347,26 @@ class AuthManager:
         """
         result: Dict[str, Ed25519PublicKey] = {}
         for rec in self.get_public_keys_for_use(use):
+            try:
+                kid = rec.get("key_id")
+                pub = self._load_ed25519_public_key(rec)
+                if kid and pub:
+                    result[str(kid)] = pub
+            except Exception:
+                continue
+        return result
+
+    def get_ed25519_pubkeys_for_user_and_use(self, username: str, use: str) -> Dict[str, Ed25519PublicKey]:
+        """Return mapping key_id -> Ed25519PublicKey for one user, filtered by use.
+
+        Same as `get_ed25519_pubkeys_for_use` but additionally restricted to
+        records whose `username` field matches. Used by SSH public-key auth,
+        where the client claims a username before presenting a key.
+        """
+        result: Dict[str, Ed25519PublicKey] = {}
+        for rec in self.get_public_keys_for_use(use):
+            if rec.get("username") != username:
+                continue
             try:
                 kid = rec.get("key_id")
                 pub = self._load_ed25519_public_key(rec)

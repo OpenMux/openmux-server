@@ -200,6 +200,7 @@ class PluginRegistry:
             # Connection / federation / client facing adapters
             ("client_listener", "TcpServerAdapter", "Client Listener", "client_listener"),
             ("telnet_listener", "TelnetListenerAdapter", "Telnet Listener", "telnet_listener"),
+            ("ssh_listener", "SshListenerAdapter", "SSH Listener", "ssh_listener"),
             ("web_console", "WebConsoleAdapter", "Web Console", "web_console"),
             ("muxcon", "UnifiedMuxConAdapter", "MuxCon Federation", "muxcon"),
             ("web_status", "WebStatusAdapter", "Web Status", "web_status"),

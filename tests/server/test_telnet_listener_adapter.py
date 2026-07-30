@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
 from openmux.server.adapters.protocols.plain import TelnetIacStripper
-from openmux.server.adapters.telnet_listener import ListenerConfig, TelnetListenerAdapter
+from openmux.server.adapters.telnet_listener import ListenerConfig, TelnetListenerAdapter, TelnetSession
 
 
 class FakeReader:
@@ -335,3 +335,43 @@ def test_telnet_iac_stripper_basic():
     stripper = TelnetIacStripper()
     data = bytes([255, 251, 1]) + b"hello" + bytes([255, 255]) + b"world"
     assert stripper.strip(data) == b"hello" + bytes([255]) + b"world"
+
+
+# ---------------------------------------------------------------------------
+# _forward_payload read-only re-announcement (matches CLI/web_console behavior)
+
+
+def make_session(read_only: bool = True) -> TelnetSession:
+    listener = ListenerConfig(name="t1", bind_host="0.0.0.0", bind_port=2323, target="loopback1", read_only=read_only)
+    return TelnetSession(
+        client_id="c1",
+        listener=listener,
+        reader=FakeReader(),
+        writer=FakeWriter(),
+        port_name="loopback1",
+        read_only=read_only,
+        remote_host="127.0.0.1",
+        port_mode="read-only",
+    )
+
+
+@pytest.mark.asyncio
+async def test_forward_payload_readonly_reannounces_on_enter():
+    adapter = make_adapter(["loopback1"])
+    session = make_session()
+
+    ok = await adapter._forward_payload(session, b"hello\n")
+
+    assert ok is True
+    assert b"[WARNING: console is in read-only mode]" in session.writer.buffer
+
+
+@pytest.mark.asyncio
+async def test_forward_payload_readonly_silent_without_enter():
+    adapter = make_adapter(["loopback1"])
+    session = make_session()
+
+    ok = await adapter._forward_payload(session, b"hello")
+
+    assert ok is True
+    assert session.writer.buffer == b""

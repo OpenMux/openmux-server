@@ -1005,41 +1005,21 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "force_promote":
                                 ok = False
+                                undelivered: list = []
                                 try:
-                                    # Collect other read-write holders before any changes
-                                    pm = getattr(adapter.console_manager, "port_manager", None)
-                                    port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
-                                    other_rw_ids = []
-                                    if port_obj is not None:
-                                        for c in list(getattr(port_obj, "connected_clients", [])):
-                                            if c.get("client_id") != client_id and c.get("mode") == "read-write":
-                                                other_rw_ids.append(c["client_id"])
-                                    # Demote others FIRST to free the slot, then promote self
-                                    for other_id in other_rw_ids:
-                                        try:
-                                            await adapter.console_manager.demote_client_to_read_only(other_id, port_name)
-                                        except Exception:
-                                            pass
-                                    ok = await adapter.console_manager.promote_client_to_read_write(client_id, port_name)
-                                    if ok:
-                                        for other_id in other_rw_ids:
-                                            demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
-                                            delivered = False
-                                            try:
-                                                delivered = await adapter.console_manager.send_control_frame_to_client(other_id, demotion)
-                                            except Exception:
-                                                delivered = False
-                                            if delivered:
-                                                continue
-                                            # Cross-adapter routing unavailable; fall back to same-adapter delivery
-                                            try:
-                                                other_ws = adapter._clients.get(other_id)
-                                                if other_ws is not None:
-                                                    await other_ws.send_str("OMXCTRL " + json.dumps(demotion, separators=(",", ":")))
-                                            except Exception:
-                                                pass
+                                    ok, undelivered = await adapter.console_manager.force_promote_client(client_id, port_name)
                                 except Exception:
                                     ok = False
+                                if ok:
+                                    demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
+                                    for other_id in undelivered:
+                                        # Cross-adapter routing unavailable; fall back to same-adapter delivery
+                                        try:
+                                            other_ws = adapter._clients.get(other_id)
+                                            if other_ws is not None:
+                                                await other_ws.send_str("OMXCTRL " + json.dumps(demotion, separators=(",", ":")))
+                                        except Exception:
+                                            pass
                                 resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
                                 if not ok:
                                     max_rw = _max_rw_users_for_port(adapter, port_name)

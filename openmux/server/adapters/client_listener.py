@@ -626,29 +626,12 @@ class TcpServerAdapter(BaseGenericAdapter):
                 resp["ok"] = True
                 resp["mode"] = "read-only"
             elif req_type == "force_promote":
-                other_ids = [
-                    c["client_id"]
-                    for c in self._connected_clients_for_port(port_name)
-                    if c.get("client_id") != client.client_id and c.get("mode") == "read-write"
-                ]
-                for other_id in other_ids:
-                    try:
-                        await self.console_manager.demote_client_to_read_only(other_id, port_name)
-                    except Exception:
-                        pass
-                ok = await self.console_manager.promote_client_to_read_write(client.client_id, port_name)
+                ok, undelivered = await self.console_manager.force_promote_client(client.client_id, port_name)
                 resp["ok"] = bool(ok)
                 resp["mode"] = "read-write" if ok else "read-only"
                 if ok:
                     demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
-                    for other_id in other_ids:
-                        delivered = False
-                        try:
-                            delivered = await self.console_manager.send_control_frame_to_client(other_id, demotion)
-                        except Exception:
-                            delivered = False
-                        if delivered:
-                            continue
+                    for other_id in undelivered:
                         # Cross-adapter routing unavailable; fall back to same-adapter delivery
                         other_client = self.clients.get(other_id)
                         if other_client is not None:

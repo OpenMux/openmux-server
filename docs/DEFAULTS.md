@@ -51,6 +51,19 @@ telnet_listener (per-listener entry; upcoming adapter defaults)
 - require_auth: false (opt in for a login/password prompt and the `<user>+<port>`/`<user>:<port>` shortcut)
 - acl: empty / missing list means allow all sources
 - authentication: not performed unless `require_auth: true` (listener otherwise relies solely on ACL + network trust)
+- control menu escape sequence: Ctrl+E then `c` (per-session; changeable at runtime with the `e` command, not persisted)
+
+ssh_listener (per-listener entry)
+- bind_host: 0.0.0.0 (bind all interfaces unless overridden)
+- bind_port: required (no implicit default)
+- target: required (no implicit default); use `'*'` for a port-selection menu
+- read_only: false
+- require_auth: true (opposite default from telnet_listener; disable explicitly for anonymous access)
+- acl: empty / missing list means allow all sources
+- authentication: password (AuthManager) or Ed25519 public key (AuthManager.public_keys records with `"ssh"` in allowed_uses) unless `require_auth: false`
+- host key: auto-generated Ed25519 key shared by all entries, persisted at `~/.openmux/ssh_listener/ssh_host_key`
+- session model: interactive shell only; `exec`/subsystem requests (including SFTP) are rejected
+- control menu escape sequence: Ctrl+E then `c` (per-session; changeable at runtime with the `e` command, not persisted)
 
 serial_ports (per-port) (schema defaults, plus adapter runtime behavior)
 - baudrate: 9600

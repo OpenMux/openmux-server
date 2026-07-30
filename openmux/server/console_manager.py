@@ -620,6 +620,79 @@ class ConsoleManager:
             self.logger.debug(f"send_control_frame_to_client failed for {client_id}", exc_info=True)
             return False
 
+    async def force_promote_client(self, client_id: str, port_name: str) -> Tuple[bool, List[str]]:
+        """Demote existing read-write holders on a port, then promote a client.
+
+        Shared by every adapter (TCP, web console, telnet, SSH) so the
+        demote-others/promote-self/cross-notify sequence lives in one place.
+
+        Args:
+            client_id: Client requesting the forced takeover.
+            port_name: Port on which to force the takeover.
+
+        Returns:
+            Tuple[bool, List[str]]: (success, ids of demoted clients that
+            could NOT be cross-notified, for the caller's own same-adapter
+            fallback delivery).
+        """
+        other_ids = [c["client_id"] for c in self._read_write_holders(port_name) if c["client_id"] != client_id]
+        for other_id in other_ids:
+            try:
+                await self.demote_client_to_read_only(other_id, port_name)
+            except Exception:
+                pass
+
+        ok = await self.promote_client_to_read_write(client_id, port_name)
+        undelivered: List[str] = []
+        if ok:
+            demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
+            for other_id in other_ids:
+                try:
+                    delivered = await self.send_control_frame_to_client(other_id, demotion)
+                except Exception:
+                    delivered = False
+                if not delivered:
+                    undelivered.append(other_id)
+        return ok, undelivered
+
+    def _read_write_holders(self, port_name: str) -> List[Dict[str, Any]]:
+        """Return the raw connected-client records currently in read-write mode."""
+        try:
+            port = self.port_manager.ports.get(port_name) if hasattr(self.port_manager, "ports") else None
+        except Exception:
+            port = None
+        if port is None:
+            return []
+        return [c for c in getattr(port, "connected_clients", []) if c.get("mode") == "read-write"]
+
+    def get_rw_holders_display(self, port_name: str) -> List[str]:
+        """Return 'username@ip' strings for all read-write clients on a port.
+
+        Resolves IPs across adapter types via each owning adapter's
+        `_resolve_client_meta`, so e.g. a telnet client can see that a web
+        console user currently holds read-write access.
+        """
+        holders: List[str] = []
+        for c in self._read_write_holders(port_name):
+            cid = c.get("client_id", "")
+            username = c.get("username", "unknown")
+            holders.append(f"{username}@{self._resolve_client_ip(cid)}")
+        return holders
+
+    def _resolve_client_ip(self, client_id: str) -> str:
+        """Resolve a client's source IP via its owning adapter's `_resolve_client_meta`."""
+        mgr = self.client_to_manager.get(client_id)
+        resolver = getattr(mgr, "_resolve_client_meta", None)
+        if callable(resolver):
+            try:
+                meta = resolver(client_id) or {}
+                ip = meta.get("ip")
+                if ip:
+                    return str(ip)
+            except Exception:
+                pass
+        return "unknown"
+
     def get_client_mode(self, client_id: str, port_name: str) -> Optional[str]:
         """Return access mode for a client on a specific port.
 
