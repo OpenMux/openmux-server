@@ -54,6 +54,8 @@ class SerialPortConfig:
     log_file: Optional[str] = None  # Optional per-port data log file path
     log_format: Optional[str] = None  # 'line' or 'jsonl'
     log_line_template: Optional[str] = None  # For 'line' format
+    log_direction: Optional[str] = None  # Direction filter for data logging: 'in' or 'out'
+    log_directions: Optional[List[str]] = None  # Direction filter for data logging: ['in', 'out']
     scrollback_size: int = 0  # bytes to retain for client-requested scrollback replay; 0 = disabled
 
     def __post_init__(self):
@@ -577,6 +579,8 @@ class SerialAdapter(BaseGenericAdapter):
                     log_file=port_config.get("log_file"),
                     log_format=port_config.get("log_format"),
                     log_line_template=port_config.get("log_line_template"),
+                    log_direction=port_config.get("log_direction"),
+                    log_directions=port_config.get("log_directions"),
                     scrollback_size=int(port_config.get("scrollback_size", 0)),
                 )
 
@@ -676,6 +680,8 @@ class SerialAdapter(BaseGenericAdapter):
                 log_file=config.get("log_file"),
                 log_format=config.get("log_format"),
                 log_line_template=config.get("log_line_template"),
+                log_direction=config.get("log_direction"),
+                log_directions=config.get("log_directions"),
                 scrollback_size=int(config.get("scrollback_size", 0)),
             )
             notifier = self._make_notifier()
