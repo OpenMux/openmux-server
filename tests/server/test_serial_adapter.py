@@ -123,3 +123,34 @@ async def test_reconcile_ports_add_remove():
     assert summary["removed"] == ["b"]
     assert summary["added"] == ["c"]
     assert summary["updated"] == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_uses_overridable_destroy_and_create(monkeypatch):
+    """destroy_port/create_port must be regular methods, patchable like other adapters."""
+    adapter = _make_adapter()
+    adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0")  # type: ignore
+    adapter.serial_ports["b"] = _make_spw(device="/dev/ttyUSB1")  # type: ignore
+
+    destroyed: list[str] = []
+    created: list[tuple] = []
+
+    async def fake_destroy_port(self, port_name):
+        destroyed.append(port_name)
+
+    async def fake_create_port(self, port_name, cfg):
+        created.append((port_name, cfg))
+
+    monkeypatch.setattr(SerialAdapter, "destroy_port", fake_destroy_port)
+    monkeypatch.setattr(SerialAdapter, "create_port", fake_create_port)
+
+    summary = await adapter.reconcile_ports({"serial_ports": [
+        {"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200},  # changed -> destroy+create
+        {"name": "c", "device": "/dev/ttyUSB2"},  # added -> create only
+    ]})
+
+    assert summary["updated"] == ["a"]
+    assert summary["removed"] == ["b"]
+    assert summary["added"] == ["c"]
+    assert set(destroyed) == {"a", "b"}
+    assert {name for name, _ in created} == {"a", "c"}
