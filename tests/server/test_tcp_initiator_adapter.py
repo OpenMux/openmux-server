@@ -39,8 +39,15 @@ class FakeWriter:
         await asyncio.sleep(0)
 
 
-@pytest.mark.asyncio
-async def test_port_init_requires_host_and_port():
+class KeepAliveReader:
+    """Fake reader that blocks on read indefinitely (connection stays open until task is cancelled)."""
+
+    async def read(self, n: int) -> bytes:
+        await asyncio.sleep(100)
+        return b""  # never reached in normal tests
+
+
+
     adapter = TcpInitiatorAdapter("ti", {})
     with pytest.raises(ValueError):
         TcpInitiatorPort("p1", {"port": 123}, adapter)  # missing host
@@ -290,6 +297,8 @@ async def test_adapter_reconcile_ports(monkeypatch):
         _batching_enabled = True
         _batch_size = 1024
         _batch_timeout = 0.015
+        enabled = True
+        config: dict = {}
 
     adapter.ports["a"] = PortObj()  # type: ignore[assignment]
 
@@ -320,3 +329,152 @@ async def test_adapter_reconcile_ports(monkeypatch):
     assert summary["unchanged"] == ["a"]
     assert created == ["b"]
     assert destroyed == []
+
+
+# ─── connect_on_demand tests ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_connect_on_demand_does_not_connect_on_start(monkeypatch):
+    """Port with connect_on_demand=True should stay disconnected after start."""
+    connected: List[str] = []
+
+    async def fake_open(host, port, ssl=None):
+        connected.append(host)
+        return FakeReader(), FakeWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+
+    adapter = TcpInitiatorAdapter("ti", {})
+    port = TcpInitiatorPort(
+        "p", {"host": "h", "port": 1, "connect_on_demand": True}, adapter
+    )
+    await port.start()
+    await asyncio.sleep(0.02)
+    assert port.is_connected is False
+    assert connected == []
+    await port.stop()
+
+
+@pytest.mark.asyncio
+async def test_connect_on_demand_connects_when_user_arrives(monkeypatch):
+    """First user arriving should trigger the outbound connection."""
+    async def fake_open(host, port, ssl=None):
+        return KeepAliveReader(), FakeWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+
+    adapter = TcpInitiatorAdapter("ti", {})
+    port = TcpInitiatorPort(
+        "p", {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": False},
+        adapter,
+    )
+    await port.start()
+    assert port.is_connected is False
+
+    port.on_client_count_changed(1)
+    for _ in range(30):
+        if port.is_connected:
+            break
+        await asyncio.sleep(0.01)
+
+    assert port.is_connected is True
+    await port.stop()
+
+
+@pytest.mark.asyncio
+async def test_connect_on_demand_no_reconnect_without_users(monkeypatch):
+    """After a disconnect with no users present, the monitor should not reconnect."""
+    connect_count = {"n": 0}
+
+    async def fake_open(host, port, ssl=None):
+        connect_count["n"] += 1
+        return FakeReader([b""]), FakeWriter()  # immediate EOF → disconnect
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+
+    adapter = TcpInitiatorAdapter("ti", {})
+    port = TcpInitiatorPort(
+        "p",
+        {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": True,
+         "reconnect_delay": 0.0},
+        adapter,
+    )
+    await port.start()
+    port.on_client_count_changed(0)  # no users
+
+    # Trigger a connection attempt directly to simulate connection manager running
+    # with zero active clients — monitor should stop after the first failed/closed attempt
+    port._active_clients = 0
+    port.on_client_count_changed(0)
+    await asyncio.sleep(0.05)
+    # Should not have connected since no users
+    assert connect_count["n"] == 0
+    await port.stop()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_when_idle_disconnects_after_delay(monkeypatch):
+    """Port should disconnect after idle_disconnect_delay once last user leaves."""
+    async def fake_open(host, port, ssl=None):
+        return KeepAliveReader(), FakeWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+
+    adapter = TcpInitiatorAdapter("ti", {})
+    port = TcpInitiatorPort(
+        "p",
+        {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": False,
+         "disconnect_when_idle": True, "idle_disconnect_delay": 0.05},
+        adapter,
+    )
+    await port.start()
+
+    port.on_client_count_changed(1)
+    for _ in range(30):
+        if port.is_connected:
+            break
+        await asyncio.sleep(0.01)
+    assert port.is_connected is True
+
+    # Last user leaves
+    port.on_client_count_changed(0)
+    # Should still be connected immediately after
+    assert port.is_connected is True
+
+    # After idle_disconnect_delay (0.05s), should disconnect
+    await asyncio.sleep(0.15)
+    assert port.is_connected is False
+    await port.stop()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_when_idle_cancelled_by_new_user(monkeypatch):
+    """Idle-disconnect timer should be cancelled when a new user arrives."""
+    async def fake_open(host, port, ssl=None):
+        return KeepAliveReader(), FakeWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+
+    adapter = TcpInitiatorAdapter("ti", {})
+    port = TcpInitiatorPort(
+        "p",
+        {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": False,
+         "disconnect_when_idle": True, "idle_disconnect_delay": 0.1},
+        adapter,
+    )
+    await port.start()
+    port.on_client_count_changed(1)
+    for _ in range(30):
+        if port.is_connected:
+            break
+        await asyncio.sleep(0.01)
+    assert port.is_connected is True
+
+    port.on_client_count_changed(0)  # start idle timer
+    await asyncio.sleep(0.02)        # well before 0.1s delay
+    port.on_client_count_changed(1)  # new user arrives — cancels timer
+    await asyncio.sleep(0.15)        # past original idle delay
+
+    # Should still be connected because timer was cancelled
+    assert port.is_connected is True
+    await port.stop()

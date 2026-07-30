@@ -14,7 +14,6 @@ adapters:
     - openmux.server.adapters.web_console
     - openmux.server.adapters.muxcon
     - openmux.server.adapters.web_status
-    - openmux.server.adapters.client_initiator
     - openmux.server.adapters.telnet_listener
   allowed_adapter_types:
     - loopback

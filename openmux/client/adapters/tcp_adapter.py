@@ -24,9 +24,13 @@ import ssl
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from .base_adapter import BaseClientAdapter
+from .rw_control import format_control_response
 
 if TYPE_CHECKING:
     from asyncio import StreamReader, StreamWriter
+
+# Out-of-band control frame marker; must match openmux.server.adapters.client_listener.CTRL_MARKER
+CTRL_MARKER = b"\x00OMXCTRL "
 
 
 class TcpClientAdapter(BaseClientAdapter):
@@ -332,6 +336,42 @@ class TcpClientAdapter(BaseClientAdapter):
             self.is_connected = False
             return False
 
+    async def _send_control_frame(self, payload: Dict[str, Any]) -> bool:
+        """Send an out-of-band access-mode control frame to the server.
+
+        Args:
+            payload: JSON-serializable control request (e.g. `{"type": "request_rw"}`).
+
+        Returns:
+            bool: True if the frame was written; False if not connected or on error.
+        """
+        if not self.is_connected or not self.writer:
+            return False
+        try:
+            frame = CTRL_MARKER + json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+            self.writer.write(frame)
+            await self.writer.drain()
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to send control frame: {e}", exc_info=True)
+            return False
+
+    async def request_read_write(self) -> bool:
+        """Ask the server to promote this client to read-write."""
+        return await self._send_control_frame({"type": "request_rw"})
+
+    async def release_read_write(self) -> bool:
+        """Ask the server to voluntarily demote this client to read-only."""
+        return await self._send_control_frame({"type": "release_rw"})
+
+    async def force_read_write(self) -> bool:
+        """Ask the server to demote other read-write holders and promote this client."""
+        return await self._send_control_frame({"type": "force_promote"})
+
+    async def query_rw_holders(self) -> bool:
+        """Ask the server for the current read-write holder(s) of the attached port."""
+        return await self._send_control_frame({"type": "query_rw_holders"})
+
     async def read_data(self, timeout: Optional[float] = None) -> Optional[Union[str, bytes]]:
         """Read a chunk of bytes from the active port stream.
 
@@ -362,6 +402,8 @@ class TcpClientAdapter(BaseClientAdapter):
                 self.is_connected = False
                 self.is_authenticated = False
                 return None  # Caller interprets as closed
+            if data.startswith(CTRL_MARKER):
+                return self._process_control_frame(data)
             return data
 
         except asyncio.TimeoutError:
@@ -370,6 +412,30 @@ class TcpClientAdapter(BaseClientAdapter):
             self.logger.debug(f"Failed to read data: {e}", exc_info=True)
             self.is_connected = False
             return b""
+
+    def _process_control_frame(self, data: bytes) -> bytes:
+        """Parse an inbound access-mode control frame and format a status message.
+
+        Args:
+            data: Raw chunk starting with `CTRL_MARKER`.
+
+        Returns:
+            bytes: Human-readable status text to display, or `b""` if nothing
+            needs to be shown. Any bytes following the control frame's
+            terminating newline within the same read are not recovered; this
+            is an accepted tradeoff given control frames are small, distinct
+            writes (mirrors similar substring-based framing elsewhere in the
+            client, e.g. the shutdown-message detection).
+        """
+        try:
+            line = data[len(CTRL_MARKER):].split(b"\n", 1)[0]
+            payload = json.loads(line.decode("utf-8", errors="ignore"))
+        except Exception:
+            return b""
+        if not isinstance(payload, dict):
+            return b""
+        _msg_type, message = format_control_response(self, payload)
+        return message.encode("utf-8") if message else b""
 
     async def close(self):
         """Gracefully terminate the TCP session and release resources.
@@ -630,6 +696,7 @@ class TcpClientAdapter(BaseClientAdapter):
                 connected_port = parts[1]
                 mode = parts[2] if len(parts) > 2 else "READ_ONLY"
                 self.current_port = connected_port
+                self.access_mode = "read-write" if mode == "READ_WRITE" else "read-only"
                 self.logger.debug(f"Connected to port {connected_port} in {mode} mode")
                 return True
 

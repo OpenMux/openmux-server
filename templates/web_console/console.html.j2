@@ -443,7 +443,15 @@
     infoToggle.addEventListener('click', () => { const visible = infoOverlay.style.display !== 'none'; if (visible) closeInfo(); else openInfo(); });
     infoClose.addEventListener('click', () => closeInfo());
 
-    term.onData((data) => { try { ws && ws.send(data); } catch (e) {} });
+    term.onData((data) => {
+      if (clientMode !== 'read-write') {
+        if (data.includes('\r')) {
+          try { term.write('\r\n[WARNING: console is in read-only mode]\r\n'); } catch (_) {}
+        }
+        return;
+      }
+      try { ws && ws.send(data); } catch (e) {}
+    });
     function isConnected() { return ws && ws.readyState === WebSocket.OPEN; }
     function currentPort() { return (selectEl.value || '').trim(); }
     function openLogsWindow() {

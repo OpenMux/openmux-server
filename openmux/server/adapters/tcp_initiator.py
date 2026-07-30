@@ -30,6 +30,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortLifecycleEvent, PortState
+from .protocols import get_handler
+from .protocols.base import TcpProtocolHandler
 
 
 class TcpInitiatorPort:
@@ -65,18 +67,30 @@ class TcpInitiatorPort:
         self.reconnect_delay = config.get("reconnect_delay", 5.0)
         self.enabled = bool(config.get("enabled", True))
 
+        # Connect-on-demand: stay disconnected until a user actively opens the port
+        self.connect_on_demand: bool = bool(config.get("connect_on_demand", False))
+        self.disconnect_when_idle: bool = bool(config.get("disconnect_when_idle", False))
+        self.idle_disconnect_delay: float = float(config.get("idle_disconnect_delay", 30.0))
+        self._active_clients: int = 0
+        self._idle_disconnect_task: Optional[asyncio.Task] = None
+        protocol_cfg = config.get("protocol", {})
+        protocol_type: str = (protocol_cfg.get("type", "") or "plain").lower()
+        self._protocol_handler: TcpProtocolHandler = get_handler(protocol_type, config)
+
         # Connection state
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
 
         # Batching buffer for outgoing data
+        # Default batching ON for plain, OFF for protocols that have their own framing
+        _default_batching = protocol_type == "plain"
         self._write_buffer = bytearray()
         self._write_buffer_lock = asyncio.Lock()
         self._flush_task = None
         self._flush_event = asyncio.Event()
         self._batch_size = config.get("batch_size", 1024)  # bytes
         self._batch_timeout = config.get("batch_timeout", 0.015)  # seconds (5ms)
-        self._batching_enabled = config.get("enable_batching", True)
+        self._batching_enabled = config.get("enable_batching", _default_batching)
 
         # Connection state
         self.is_connected = False
@@ -102,6 +116,10 @@ class TcpInitiatorPort:
             self.logger.info(f"TCP initiator port {self.name} is disabled, skipping connection")
             self.state = PortState.ACTIVE
             return True
+        if self.connect_on_demand:
+            self.logger.info(f"TCP initiator port {self.name} is connect-on-demand, waiting for users")
+            self.state = PortState.ACTIVE
+            return True
         self.logger.info(f"Starting TCP initiator port {self.name} (will connect in background)")
         self.state = PortState.CREATING
         self.reconnect_task = asyncio.create_task(self._connection_manager())
@@ -111,6 +129,13 @@ class TcpInitiatorPort:
     async def stop(self) -> None:
         """Stop the TCP initiator port and cancel background tasks."""
         self.logger.info(f"Stopping TCP initiator port {self.name}")
+        if self._idle_disconnect_task and not self._idle_disconnect_task.done():
+            self._idle_disconnect_task.cancel()
+            try:
+                await self._idle_disconnect_task
+            except asyncio.CancelledError:
+                pass
+            self._idle_disconnect_task = None
         if self.reconnect_task:
             self.reconnect_task.cancel()
             try:
@@ -128,20 +153,17 @@ class TcpInitiatorPort:
         await self._disconnect()
 
     async def _connect(self) -> bool:
-        """Establish the outbound TCP (optionally TLS) connection."""
+        """Establish the outbound connection via the configured protocol handler."""
         if self.is_connected:
             return True
         try:
-            self._log_connect_attempt(f"Connecting to {self.host}:{self.port} (TLS: {self.use_tls})")
-            ssl_context = None
-            if self.use_tls:
-                ssl_context = ssl.create_default_context()
-                if not self.ssl_verify:
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_NONE
-            self.reader, self.writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port, ssl=ssl_context),
-                timeout=self.timeout,
+            self._log_connect_attempt(
+                f"Connecting to {self.host}:{self.port} "
+                f"(protocol: {self.config.get('protocol', {}).get('type', 'plain')}, "
+                f"TLS: {self.use_tls})"
+            )
+            self.reader, self.writer = await self._protocol_handler.establish(
+                self.host, self.port, self.config
             )
             self.is_connected = True
             self.logger.info(f"Successfully connected to {self.host}:{self.port}")
@@ -154,6 +176,9 @@ class TcpInitiatorPort:
             return False
         except ConnectionRefusedError as e:
             self._log_connect_failure(f"Connection refused to {self.host}:{self.port}: {e}")
+            return False
+        except ConnectionError as e:
+            self._log_connect_failure(f"Protocol handshake failed for {self.host}:{self.port}: {e}")
             return False
         except Exception as e:
             self._log_connect_failure(f"Connection failed to {self.host}:{self.port}: {e}")
@@ -205,7 +230,9 @@ class TcpInitiatorPort:
                         self.logger.info(f"Connection to {self.host}:{self.port} closed by remote")
                         self.is_connected = False
                         break
-                    await self._handle_received_data(data)
+                    decoded = self._protocol_handler.decode(data)
+                    if decoded:
+                        await self._handle_received_data(decoded)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -232,6 +259,9 @@ class TcpInitiatorPort:
             while True:
                 await asyncio.sleep(1.0)
                 if not self.is_connected and self.auto_reconnect:
+                    if self.connect_on_demand and self._active_clients == 0:
+                        # No users present — stop reconnecting; on_client_count_changed will restart
+                        break
                     success = await self._connect()
                     if not success:
                         await asyncio.sleep(self.reconnect_delay)
@@ -249,6 +279,53 @@ class TcpInitiatorPort:
         except Exception as e:
             self.logger.error(f"Connection manager error for {self.name}: {e}", exc_info=True)
 
+    def on_client_count_changed(self, count: int) -> None:
+        """Called by the port manager when the number of connected clients changes.
+
+        When ``connect_on_demand`` is enabled, the first arriving user triggers
+        the outbound connection; the last departing user may schedule an idle
+        disconnect if ``disconnect_when_idle`` is also set.
+        """
+        self._active_clients = count
+        if not self.connect_on_demand:
+            return
+
+        # Cancel any pending idle-disconnect timer whenever client count changes
+        if self._idle_disconnect_task and not self._idle_disconnect_task.done():
+            self._idle_disconnect_task.cancel()
+            self._idle_disconnect_task = None
+
+        if count > 0:
+            # Trigger connection if not already running
+            if not self.is_connected and (
+                self.reconnect_task is None or self.reconnect_task.done()
+            ):
+                self.logger.info(f"Port {self.name}: user connected, starting on-demand connection")
+                self.reconnect_task = asyncio.create_task(self._connection_manager())
+        else:
+            # Last user left
+            if self.disconnect_when_idle and self.is_connected:
+                self._idle_disconnect_task = asyncio.create_task(self._idle_disconnect())
+
+    async def _idle_disconnect(self) -> None:
+        """Disconnect after ``idle_disconnect_delay`` seconds with no active users."""
+        try:
+            await asyncio.sleep(self.idle_disconnect_delay)
+            if self._active_clients == 0:
+                self.logger.info(
+                    f"Port {self.name}: disconnecting after {self.idle_disconnect_delay}s idle"
+                )
+                if self.reconnect_task and not self.reconnect_task.done():
+                    self.reconnect_task.cancel()
+                    try:
+                        await self.reconnect_task
+                    except asyncio.CancelledError:
+                        pass
+                    self.reconnect_task = None
+                await self._disconnect()
+        except asyncio.CancelledError:
+            pass
+
     async def write_data(self, data: bytes) -> int:
         """Write data to the remote endpoint (optionally batched)."""
         if not self.is_connected or not self.writer:
@@ -256,7 +333,7 @@ class TcpInitiatorPort:
             return 0
         if not self._batching_enabled:
             try:
-                self.writer.write(data)
+                self.writer.write(self._protocol_handler.encode(data))
                 await self.writer.drain()
                 return len(data)
             except Exception as e:
@@ -293,7 +370,7 @@ class TcpInitiatorPort:
                     self.is_connected = False
                     break
                 start = time.perf_counter()
-                self.writer.write(to_send)
+                self.writer.write(self._protocol_handler.encode(to_send))
                 await self.writer.drain()
                 elapsed = time.perf_counter() - start
                 self.logger.info(
@@ -331,12 +408,21 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         """Validate adapter configuration structure.
 
         Supports two forms:
-        1. Dict containing key ``tcp_initiator_ports`` with list of port dicts (preferred).
-        2. Top-level list of port dicts (legacy style) OR legacy key ``client_initiator_ports`` (deprecated).
+        1. Dict containing key ``tcp_initiator_ports`` or ``openmux_client_ports`` (compat alias)
+           with list of port dicts.
+        2. Top-level list of port dicts (legacy style) or legacy key ``client_initiator_ports``.
         """
+        from .protocols import PROTOCOL_HANDLERS
+
         cfg = config.get("tcp_initiator_ports", config)
+        is_openmux_compat = False
+        if cfg is config:
+            cfg = config.get("openmux_client_ports", config)
+            if cfg is not config:
+                is_openmux_compat = True
         if cfg is config:
             cfg = config.get("client_initiator_ports", config)
+            # client_initiator_ports is a legacy plain-TCP alias, not openmux
         if not isinstance(cfg, list):
             return False
         for item in cfg:
@@ -348,6 +434,20 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 return False
             if not item.get("port"):
                 return False
+            # For compat sections (openmux_client_ports), inject protocol sub-key
+            # before delegating to the handler's validate_config
+            validate_item = (
+                cls._inject_openmux_protocol(item)
+                if is_openmux_compat and "protocol" not in item
+                else item
+            )
+            prot = validate_item.get("protocol", {})
+            ptype = (prot.get("type", "") or "plain").lower()
+            handler_cls = PROTOCOL_HANDLERS.get(ptype)
+            if handler_cls is not None:
+                problems = handler_cls.validate_config(validate_item)
+                if problems:
+                    return False
         return True
 
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
@@ -384,6 +484,9 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         items: List[Dict[str, Any]]
         if isinstance(root, dict) and isinstance(root.get("tcp_initiator_ports"), list):
             items = root["tcp_initiator_ports"]
+        elif isinstance(root, dict) and isinstance(root.get("openmux_client_ports"), list):
+            # Compat alias: inject protocol sub-key so TcpInitiatorPort uses OpenMuxHandler
+            items = [self._inject_openmux_protocol(i) for i in root["openmux_client_ports"]]
         elif isinstance(root, dict) and isinstance(root.get("client_initiator_ports"), list):  # legacy
             items = root["client_initiator_ports"]
         elif isinstance(root, list):
@@ -395,6 +498,25 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             if isinstance(item, dict) and item.get("name"):
                 result[item["name"]] = dict(item)
         return result
+
+    @staticmethod
+    def _inject_openmux_protocol(item: Dict[str, Any]) -> Dict[str, Any]:
+        """Translate a legacy openmux_client_ports entry to tcp_initiator format.
+
+        Lifts ``remote_port``, ``api_key``, ``username``, ``password`` into a
+        ``protocol:`` sub-key so the unified handler can pick them up.
+        """
+        if "protocol" in item:
+            return item  # already in new format
+        merged = dict(item)
+        merged["protocol"] = {
+            "type": "openmux",
+            "remote_port": item.get("remote_port", ""),
+            "api_key": item.get("api_key", ""),
+            "username": item.get("username", ""),
+            "password": item.get("password", ""),
+        }
+        return merged
 
     def get_adapter_type(self) -> str:
         """Return adapter type identifier."""
@@ -478,6 +600,8 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         if isinstance(new_config, dict):
             if isinstance(new_config.get("tcp_initiator_ports"), list):
                 items = list(new_config["tcp_initiator_ports"])  # shallow copy
+            elif isinstance(new_config.get("openmux_client_ports"), list):
+                items = [self._inject_openmux_protocol(i) for i in new_config["openmux_client_ports"]]
             elif isinstance(new_config.get("client_initiator_ports"), list):
                 items = list(new_config["client_initiator_ports"])  # legacy
             else:
@@ -500,6 +624,9 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
 
         def _material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
             # Apply the same defaults as TcpInitiatorPort.__init__ so comparison is apples-to-apples
+            protocol_cfg = cfg.get("protocol", {})
+            protocol_type = (protocol_cfg.get("type", "") or "plain").lower()
+            _default_batching = protocol_type == "plain"
             return {
                 "host": cfg.get("host", ""),
                 "port": cfg.get("port", 0),
@@ -508,10 +635,14 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 "timeout": cfg.get("timeout", 10.0),
                 "auto_reconnect": cfg.get("auto_reconnect", True),
                 "reconnect_delay": cfg.get("reconnect_delay", 5.0),
-                "enable_batching": cfg.get("enable_batching", True),
+                "enable_batching": cfg.get("enable_batching", _default_batching),
                 "batch_size": cfg.get("batch_size", 1024),
                 "batch_timeout": cfg.get("batch_timeout", 0.015),
                 "enabled": bool(cfg.get("enabled", True)),
+                "connect_on_demand": bool(cfg.get("connect_on_demand", False)),
+                "disconnect_when_idle": bool(cfg.get("disconnect_when_idle", False)),
+                "idle_disconnect_delay": float(cfg.get("idle_disconnect_delay", 30.0)),
+                "protocol": protocol_cfg,
             }
 
         updated: List[str] = []
@@ -534,6 +665,10 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                         "batch_size": getattr(port, "_batch_size", None),
                         "batch_timeout": getattr(port, "_batch_timeout", None),
                         "enabled": getattr(port, "enabled", True),
+                        "connect_on_demand": getattr(port, "connect_on_demand", False),
+                        "disconnect_when_idle": getattr(port, "disconnect_when_idle", False),
+                        "idle_disconnect_delay": getattr(port, "idle_disconnect_delay", 30.0),
+                        "protocol": getattr(port, "config", {}).get("protocol", {}),
                     }
                 except Exception:
                     old_cfg = {}

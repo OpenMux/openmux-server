@@ -3,7 +3,6 @@ import types
 
 import pytest
 
-from openmux.server.adapters.client_initiator import OpenMuxClientPort
 from openmux.server.adapters.command import CommandPort
 from openmux.server.adapters.lifecycle import PortState
 from openmux.server.adapters.loopback import LoopbackPort
@@ -33,33 +32,24 @@ async def test_tcp_initiator_write_data_returns_len(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_openmux_client_write_data_returns_len(monkeypatch):
-    # Minimal fake underlying connection
-    class _FakeConn:
-        async def connect(self):
-            return True
+async def test_openmux_write_data_returns_len(monkeypatch):
+    """TcpInitiatorPort with openmux protocol writes via writer and returns byte count."""
+    cfg = {
+        "host": "h", "port": 1, "enable_batching": False,
+        "protocol": {"type": "openmux", "remote_port": "r", "api_key": "k"},
+    }
+    port = TcpInitiatorPort("p", cfg, adapter=types.SimpleNamespace())  # type: ignore[arg-type]
+    port.is_connected = True
 
-        async def authenticate_with_key(self, key):
-            return True
-
-        async def connect_to_port(self, name):
-            return True
-
-        async def send_data(self, data):
-            return True
-
-        async def read_data(self):
-            await asyncio.sleep(0.01)
-            return b""
-
-        async def close(self):
+    class _Writer:
+        def __init__(self):
+            self.buf = bytearray()
+        def write(self, d):
+            self.buf.extend(d)
+        async def drain(self):
             return
 
-    adapter_ns = types.SimpleNamespace()
-    port = OpenMuxClientPort("p", {"host": "h", "port": 1, "remote_port": "r", "api_key": "k"}, adapter=adapter_ns)  # type: ignore[arg-type]
-    # Inject fake connection and mark connected
-    port.conn = _FakeConn()  # type: ignore[assignment]
-    port.is_connected = True
+    port.writer = _Writer()  # type: ignore[assignment]
     wrote = await port.write_data(b"xyz")
     assert wrote == 3
 

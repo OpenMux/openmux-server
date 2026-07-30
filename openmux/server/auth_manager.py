@@ -41,7 +41,7 @@ class AuthManager:
         self.users = config.get("users", [])  # noqa: Vulture (accessed dynamically)
         self.api_keys = config.get("api_keys", [])  # noqa: Vulture (accessed dynamically)
         # Public key records: list of dicts with fields: username?, key_id, public_key, allowed_uses?
-        # allowed_uses is a list of contexts this key may be used for, e.g., ["client"], ["muxcon"], ["client","muxcon"]
+        # allowed_uses is a list of contexts this key may be used for, e.g., ["client"], ["muxcon"], ["ssh"], ["client","muxcon"]
         self.public_keys = self._normalize_public_keys(config.get("public_keys", []))
         # External authentication via helper binary (config key: external_auth)
         # Deprecated alias: pam (mapped automatically with a warning)
@@ -356,6 +356,26 @@ class AuthManager:
                 continue
         return result
 
+    def get_ed25519_pubkeys_for_user_and_use(self, username: str, use: str) -> Dict[str, Ed25519PublicKey]:
+        """Return mapping key_id -> Ed25519PublicKey for one user, filtered by use.
+
+        Same as `get_ed25519_pubkeys_for_use` but additionally restricted to
+        records whose `username` field matches. Used by SSH public-key auth,
+        where the client claims a username before presenting a key.
+        """
+        result: Dict[str, Ed25519PublicKey] = {}
+        for rec in self.get_public_keys_for_use(use):
+            if rec.get("username") != username:
+                continue
+            try:
+                kid = rec.get("key_id")
+                pub = self._load_ed25519_public_key(rec)
+                if kid and pub:
+                    result[str(kid)] = pub
+            except Exception:
+                continue
+        return result
+
     def _load_ed25519_public_key(self, record: Dict[str, Any]) -> Optional[Ed25519PublicKey]:
         """Parse the record's public_key field into an Ed25519PublicKey.
 
@@ -539,8 +559,9 @@ class AuthManager:
 
         Precedence:
             1. Explicit "permissions" field (static users)
-            2. PAM group mapping if PAM enabled (admin > write > read)
-            3. Default -> "read-write"
+            2. API key entry matched by name (identity used for AUTH:KEY logins)
+            3. PAM group mapping if PAM enabled (admin > write > read)
+            4. Default -> "read-write"
 
         Args:
             username: Account identifier.
@@ -557,6 +578,12 @@ class AuthManager:
                         return user["permissions"]
                     # Fall through to default if static user matched
                     return "read-write"
+
+        # API key identities authenticate with the key's configured name as username
+        if "api_keys" in self.config:
+            for key_entry in self.config["api_keys"]:
+                if key_entry.get("name") == username:
+                    return key_entry.get("permissions", "read-only")
 
         # If external auth is enabled, map groups to permissions
         if self._ext_auth_enabled:
@@ -752,6 +779,25 @@ class AuthManager:
         for key_entry in self.config["api_keys"]:
             if key_entry["key"] == api_key:
                 return key_entry.get("permissions", "read-only")
+
+        return None
+
+    def get_api_key_name(self, api_key: str) -> Optional[str]:
+        """Return the configured display name for an API key, used as its username.
+
+        Args:
+            api_key: API key token.
+
+        Returns:
+            str | None: The key's "name" field (or the key itself if unset), or
+            None if the key is not configured.
+        """
+        if "api_keys" not in self.config:
+            return None
+
+        for key_entry in self.config["api_keys"]:
+            if key_entry["key"] == api_key:
+                return key_entry.get("name") or api_key
 
         return None
 

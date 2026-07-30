@@ -27,6 +27,7 @@ import json
 from typing import Any, Dict, List, Optional, Union
 
 from .base_adapter import BaseClientAdapter
+from .rw_control import format_control_response
 
 
 class WebSocketClientAdapter(BaseClientAdapter):
@@ -223,6 +224,40 @@ class WebSocketClientAdapter(BaseClientAdapter):
             self.is_connected = False
             return False
 
+    async def _send_control_frame(self, payload: Dict[str, Any]) -> bool:
+        """Send an out-of-band access-mode control frame to the server.
+
+        Args:
+            payload: JSON-serializable control request (e.g. `{"type": "request_rw"}`).
+
+        Returns:
+            bool: True if the frame was sent; False if not connected or on error.
+        """
+        if not self.is_connected or not self.websocket:
+            return False
+        try:
+            await self.websocket.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to send control frame: {e}", exc_info=True)
+            return False
+
+    async def request_read_write(self) -> bool:
+        """Ask the server to promote this client to read-write."""
+        return await self._send_control_frame({"type": "request_rw"})
+
+    async def release_read_write(self) -> bool:
+        """Ask the server to voluntarily demote this client to read-only."""
+        return await self._send_control_frame({"type": "release_rw"})
+
+    async def force_read_write(self) -> bool:
+        """Ask the server to demote other read-write holders and promote this client."""
+        return await self._send_control_frame({"type": "force_promote"})
+
+    async def query_rw_holders(self) -> bool:
+        """Ask the server for the current read-write holder(s) of the attached port."""
+        return await self._send_control_frame({"type": "query_rw_holders"})
+
     async def read_data(self, timeout: Optional[float] = None) -> Optional[Union[str, bytes]]:
         if not self.is_connected or not self.websocket:
             return None
@@ -240,6 +275,9 @@ class WebSocketClientAdapter(BaseClientAdapter):
                     try:
                         payload = data[len("OMXCTRL "):]
                         info = json.loads(payload)
+                        if isinstance(info, dict) and info.get("type") in ("client_mode", "rw_holders"):
+                            _msg_type, message = format_control_response(self, info)
+                            return message or b""
                         if isinstance(info, dict) and info.get("type") == "meta":
                             connected = bool(info.get("connected", False))
                             # First meta after connect: show notice if down

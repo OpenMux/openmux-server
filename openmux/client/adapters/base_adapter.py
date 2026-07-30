@@ -42,6 +42,13 @@ class BaseClientAdapter(ABC):
         self.is_authenticated = False
         self.username = None
 
+        # Access-mode state for the currently attached port, kept in sync by
+        # adapters that support out-of-band mode control frames. `None` means
+        # the adapter does not know (or does not support) the granted mode.
+        self.access_mode: Optional[str] = None
+        self.rw_holders: list = []
+        self.max_rw_users: Optional[int] = None
+
         # Protocol-specific attributes (to be set by subclasses)
         self.protocol_version = None
         self.session_id = None
@@ -137,6 +144,47 @@ class BaseClientAdapter(ABC):
     async def close(self):
         """Terminate the connection and release resources."""
         pass
+
+    # Access-mode control (read-only/read-write). Base implementations are
+    # no-ops so adapters that don't support the underlying control channel
+    # degrade gracefully instead of raising. Concrete adapters that support
+    # out-of-band mode control frames (TCP, WebSocket) should override these.
+    async def request_read_write(self) -> bool:
+        """Ask the server to promote this client to read-write.
+
+        Returns:
+            bool: True if the request was sent; the actual grant/denial is
+            reported asynchronously via `read_data()` and reflected in
+            `access_mode`. False if unsupported or the request could not be sent.
+        """
+        return False
+
+    async def release_read_write(self) -> bool:
+        """Ask the server to voluntarily demote this client to read-only.
+
+        Returns:
+            bool: True if the request was sent; False if unsupported or the
+            request could not be sent.
+        """
+        return False
+
+    async def force_read_write(self) -> bool:
+        """Ask the server to demote other read-write holders and promote this client.
+
+        Returns:
+            bool: True if the request was sent; False if unsupported or the
+            request could not be sent.
+        """
+        return False
+
+    async def query_rw_holders(self) -> bool:
+        """Ask the server for the current read-write holder(s) of the attached port.
+
+        Returns:
+            bool: True if the request was sent; False if unsupported or the
+            request could not be sent.
+        """
+        return False
 
     # Common utility methods
     def get_connection_info(self) -> Dict[str, Any]:

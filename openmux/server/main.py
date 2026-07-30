@@ -726,7 +726,8 @@ class OpenMuxServer:
 
         - Reload YAML from disk using ConfigManager
         - Update AuthManager configuration live
-        - Reconcile ports for adapters that support online updates (serial, loopback, command, tcp initiator)
+        - Reconcile ports for adapters that support online updates (serial, loopback, command,
+          tcp initiator, telnet listener)
         - Do NOT restart connection endpoints (web console, client listener, muxcon)
 
         Returns a summary dict mirroring the web plugin for consistency.
@@ -764,6 +765,8 @@ class OpenMuxServer:
         loopback_section = new_cfg.get("loopback_ports")
         command_section = new_cfg.get("command_ports")
         tcp_init_section = new_cfg.get("tcp_initiator_ports") or new_cfg.get("openmux_client_ports")
+        telnet_section = new_cfg.get("telnet_listener")
+        ssh_section = new_cfg.get("ssh_listener")
 
         adapters = list(getattr(self, "unified_adapters", []) or [])
 
@@ -775,6 +778,8 @@ class OpenMuxServer:
             ("loopback", "loopback_ports", loopback_section),
             ("command", "command_ports", command_section),
             ("tcp_initiator", "tcp_initiator_ports", tcp_init_section),
+            ("telnet_listener", "telnet_listener", telnet_section),
+            ("ssh_listener", "ssh_listener", ssh_section),
         ]
         for _type_key, _sec_key, _sec_val in _bootstrap_map:
             if not _sec_val:
@@ -859,6 +864,24 @@ class OpenMuxServer:
                     except Exception as e:
                         self.logger.error(f"[reload-soft:{req_id}] TCP initiator reconcile error: {e}", exc_info=True)
                         summary["adapters"]["tcp_initiator"] = {"error": str(e)}
+                # Telnet listener
+                if key == "telnet_listener" and hasattr(a, "reconcile_ports"):
+                    effective = telnet_section if telnet_section is not None else []
+                    try:
+                        res = await a.reconcile_ports(effective)
+                        summary["adapters"].setdefault("telnet_listener", res)
+                    except Exception as e:
+                        self.logger.error(f"[reload-soft:{req_id}] Telnet listener reconcile error: {e}", exc_info=True)
+                        summary["adapters"]["telnet_listener"] = {"error": str(e)}
+                # SSH listener
+                if key == "ssh_listener" and hasattr(a, "reconcile_ports"):
+                    effective = ssh_section if ssh_section is not None else []
+                    try:
+                        res = await a.reconcile_ports(effective)
+                        summary["adapters"].setdefault("ssh_listener", res)
+                    except Exception as e:
+                        self.logger.error(f"[reload-soft:{req_id}] SSH listener reconcile error: {e}", exc_info=True)
+                        summary["adapters"]["ssh_listener"] = {"error": str(e)}
             except Exception:
                 continue
 

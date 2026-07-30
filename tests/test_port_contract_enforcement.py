@@ -11,7 +11,7 @@ from openmux.server.adapters.lifecycle import PortState
 IGNORE_CLASS_NAMES = {"DynamicPortManager", "PortLifecycleEvent", "PortState", "BaseGenericAdapter"}
 
 # Adapters we consider in scope (avoid pulling extremely large/legacy ones unless loaded)
-ADAPTER_MODULE_NAME_FILTERS = ("loopback", "serial", "command", "tcp_initiator", "client_initiator", "muxcon")
+ADAPTER_MODULE_NAME_FILTERS = ("loopback", "serial", "command", "tcp_initiator", "muxcon")
 
 
 def iter_adapter_modules():

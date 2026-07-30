@@ -152,3 +152,28 @@ def test_get_public_keys_for_use_filters():
     assert all("client" in r.get("allowed_uses", []) for r in recs)
     # ed25519 map for client should be empty due to invalid/disabled
     assert am.get_ed25519_pubkeys_for_use("client") == {}
+
+
+def test_get_ed25519_pubkeys_for_user_and_use_filters_by_username():
+    priv_alice = Ed25519PrivateKey.generate()
+    priv_bob = Ed25519PrivateKey.generate()
+    ssh_alice = priv_alice.public_key().public_bytes(
+        encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH
+    ).decode()
+    ssh_bob = priv_bob.public_key().public_bytes(
+        encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH
+    ).decode()
+    cfg = {
+        "public_keys": [
+            {"username": "alice", "key_id": "a1", "public_key": ssh_alice, "allowed_uses": ["ssh"]},
+            {"username": "bob", "key_id": "b1", "public_key": ssh_bob, "allowed_uses": ["ssh"]},
+            # Same username, different use: should not appear in the "ssh" lookup
+            {"username": "alice", "key_id": "a2", "public_key": ssh_bob, "allowed_uses": ["client"]},
+        ]
+    }
+    am = AuthManager(cfg)
+    alice_keys = am.get_ed25519_pubkeys_for_user_and_use("alice", "ssh")
+    assert set(alice_keys.keys()) == {"a1"}
+    bob_keys = am.get_ed25519_pubkeys_for_user_and_use("bob", "ssh")
+    assert set(bob_keys.keys()) == {"b1"}
+    assert am.get_ed25519_pubkeys_for_user_and_use("carol", "ssh") == {}
