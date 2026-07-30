@@ -94,6 +94,104 @@ def _detect_modified_sections(current: Optional[Dict[str, Any]], new_cfg: Dict[s
     return modified
 
 
+# Sentinel sent to the browser instead of a real secret. The Config Editor UI
+# never receives stored password hashes, API keys, or plaintext passwords.
+_SECRET_MASK = "********"
+
+# Port-like list sections whose items carry plaintext initiator credentials,
+# either at the top level (legacy) or nested under "protocol".
+_PORT_SECRET_SECTIONS = ("tcp_initiator_ports", "openmux_client_ports", "client_initiator_ports")
+_PORT_SECRET_FIELDS = ("password", "api_key")
+
+
+def _mask_fields(obj: Any, fields: Tuple[str, ...]) -> None:
+    if not isinstance(obj, dict):
+        return
+    for field in fields:
+        if obj.get(field):
+            obj[field] = _SECRET_MASK
+
+
+def _mask_config_secrets(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a deep copy of config with secret fields replaced by a mask.
+
+    Covers auth.yaml user password hashes and API keys, plus the plaintext
+    passwords/API keys used by tcp_initiator (and legacy openmux_client)
+    ports to authenticate to remote servers. `_restore_masked_secrets`
+    reverses this when the mask is submitted back unchanged.
+    """
+    import copy
+
+    masked = copy.deepcopy(config)
+
+    auth = masked.get("authentication")
+    if isinstance(auth, dict):
+        for user in auth.get("users") or []:
+            _mask_fields(user, ("password_hash",))
+        for api_key in auth.get("api_keys") or []:
+            _mask_fields(api_key, ("key",))
+
+    for section in _PORT_SECRET_SECTIONS:
+        for item in masked.get(section) or []:
+            if not isinstance(item, dict):
+                continue
+            _mask_fields(item, _PORT_SECRET_FIELDS)
+            _mask_fields(item.get("protocol"), _PORT_SECRET_FIELDS)
+
+    return masked
+
+
+def _find_by_field(rows: Any, field: str, value: Any) -> Optional[Dict[str, Any]]:
+    for row in rows or []:
+        if isinstance(row, dict) and row.get(field) == value:
+            return row
+    return None
+
+
+def _restore_fields(obj: Any, source: Optional[Dict[str, Any]], fields: Tuple[str, ...]) -> None:
+    """Replace masked fields in `obj` with the matching value from `source`.
+
+    If `source` is None (no matching stored row), masked fields are cleared.
+    """
+    if not isinstance(obj, dict):
+        return
+    for field in fields:
+        if obj.get(field) == _SECRET_MASK:
+            obj[field] = source.get(field, "") if source else ""
+
+
+def _restore_masked_secrets(payload: Dict[str, Any], current: Dict[str, Any]) -> None:
+    """Replace unchanged secret-mask sentinels in `payload` with stored values.
+
+    Mutates `payload` in place. Entries that carry the mask but have no
+    matching row in the current config (for example a brand-new user) are
+    cleared instead, so required-field validation catches a missing secret
+    rather than persisting the literal mask string.
+    """
+    current = current or {}
+    auth_cur = current.get("authentication") if isinstance(current.get("authentication"), dict) else {}
+    auth_new = payload.get("authentication")
+    if isinstance(auth_new, dict):
+        for user in auth_new.get("users") or []:
+            if isinstance(user, dict):
+                match = _find_by_field(auth_cur.get("users"), "username", user.get("username"))
+                _restore_fields(user, match, ("password_hash",))
+        for api_key in auth_new.get("api_keys") or []:
+            if isinstance(api_key, dict):
+                match = _find_by_field(auth_cur.get("api_keys"), "name", api_key.get("name"))
+                _restore_fields(api_key, match, ("key",))
+
+    for section in _PORT_SECRET_SECTIONS:
+        cur_items = current.get(section)
+        for item in payload.get(section) or []:
+            if not isinstance(item, dict):
+                continue
+            match = _find_by_field(cur_items, "name", item.get("name"))
+            _restore_fields(item, match, _PORT_SECRET_FIELDS)
+            match_protocol = match.get("protocol") if isinstance(match, dict) else None
+            _restore_fields(item.get("protocol"), match_protocol, _PORT_SECRET_FIELDS)
+
+
 def _enforce_writable_sections(cm: ConfigManager, payload: Dict[str, Any]) -> Set[str]:
     try:
         policy = cm.get_security_policy()
@@ -175,7 +273,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
     return web.Response(
         body=json.dumps(
             {
-                "config": config,
+                "config": _mask_config_secrets(config),
                 "writable_sections": writable_sections,
                 "writable_enforced": writable_enforced,
             }
@@ -185,7 +283,11 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
 
 
 async def _handle_data(request: web.Request) -> web.StreamResponse:
-    """Return current effective config as JSON for the editor UI."""
+    """Return current effective config as JSON for the editor UI.
+
+    Secret fields (password hashes, API keys, plaintext initiator passwords)
+    are replaced with a mask; the real values never reach the browser.
+    """
     adapter = request.app[ADAPTER_APP_KEY]
     username = request.get("username")
     if not username:
@@ -203,7 +305,7 @@ async def _handle_data(request: web.Request) -> web.StreamResponse:
     return web.Response(
         body=json.dumps(
             {
-                "config": config,
+                "config": _mask_config_secrets(config),
                 "writable_sections": writable_sections,
                 "writable_enforced": writable_enforced,
             }
@@ -235,6 +337,11 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
         if not cm:
             adapter.logger.error("ConfigManager unavailable for apply()")
             return web.json_response({"error": True, "message": "ConfigManager unavailable"}, status=500)
+
+        # The UI only ever sees masked secrets; restore the stored values for
+        # any field the user left untouched before validating/saving.
+        current_cfg = cm.config or cm.load_config() or {}
+        _restore_masked_secrets(payload, current_cfg)
 
         # Validate before saving
         ok, err, exc = _validate_payload(payload, cm)
