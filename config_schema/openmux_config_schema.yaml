@@ -113,6 +113,23 @@ properties:
         acl:
           type: array
           items: { type: string }
+  ssh_listener:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [name, bind_port, target]
+      properties:
+        name: { type: string }
+        bind_host: { type: string, default: 0.0.0.0 }
+        bind_port: { type: integer, minimum: 1, maximum: 65535 }
+        target: { type: string }
+        read_only: { type: boolean, default: false }
+        enabled: { type: boolean, default: true }
+        require_auth: { type: boolean, default: true }
+        acl:
+          type: array
+          items: { type: string }
   serial_ports:
     type: array
     items:
