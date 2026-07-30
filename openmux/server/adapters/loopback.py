@@ -63,6 +63,10 @@ class LoopbackPort:
 
         # Client capacity hint used by wrappers/manager
         self.max_read_write_users = int(config.get("max_read_write_users", 5))
+        # Console-group access control (issue #24): empty on both = open to all
+        # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
+        self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
+        self.read_only_groups: List[str] = list(config.get("read_only_groups") or [])
         # Unified interface placeholders
         # data_callback is set by PortManager.register_unified_port() or wired here
         # if the adapter already has a PM at construction time.

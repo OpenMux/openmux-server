@@ -74,6 +74,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Term | Meaning | Do not use |
 |---|---|---|
 | Permission | The access level of a user: `admin`, `read-write`, or `read-only`. | role (for these three levels) |
+| Console group | A named group that controls read-write or read-only access to one console, via a port's `read_write_groups`/`read_only_groups` and a user's `groups`. | role (for a console-level group), team |
 | API key | A static credential used instead of a username and password. | token (use "API key" for this credential type) |
 | Allow-list | The set of adapter/module names permitted by `security.yaml`. | whitelist |
 | Control menu | The in-band Ctrl+E,c command menu on telnet/SSH sessions for read-write access control. | escape menu |

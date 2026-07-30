@@ -164,3 +164,134 @@ def test_get_rw_holders_display_excludes_read_only_clients(cm, port_manager):
 
 def test_get_rw_holders_display_empty_for_unknown_port(cm):
     assert cm.get_rw_holders_display("does-not-exist") == []
+
+
+# ---------------------------------------------------------------------------
+# connect_client_to_port: console-group access control (issue #24)
+
+
+class TestConnectClientToPortGroupAcl:
+    """Integration tests for group-based per-console access control.
+
+    Uses the real `PortManager` + `LoopbackAdapter` + `AuthManager` stack so
+    the attributes threaded through the port classes (`read_write_groups`,
+    `read_only_groups`) and `UnifiedPortWrapper` are exercised end to end.
+    """
+
+    async def _make_manager(self, monkeypatch, port_config: Dict[str, Any], auth_config: Dict[str, Any]):
+        from openmux.server import data_logger as dl_mod
+        from openmux.server.adapters.loopback import LoopbackAdapter
+        from openmux.server.auth_manager import AuthManager
+        from openmux.server.port_manager import PortManager
+
+        class _DummyDataLogger:
+            def record(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(dl_mod.DataLogger, "get", classmethod(lambda cls: _DummyDataLogger()))
+
+        pm = PortManager([])
+        adapter = LoopbackAdapter("loop", {"loopback_ports": [port_config]})
+        adapter.main_port_manager = pm
+        pm.set_unified_adapters([adapter])
+        assert await adapter.start() is True
+
+        auth = AuthManager(auth_config)
+        return ConsoleManager(pm, auth)
+
+    @pytest.mark.asyncio
+    async def test_default_allow_when_no_groups_configured(self, monkeypatch):
+        # No read_write_groups/read_only_groups -> today's default-allow parity:
+        # a non-loopback-forced port grants read-write while a slot is free.
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 1},
+            {"users": [{"username": "alice", "password_hash": "x"}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        assert (ok, mode, reason) == (True, "read-write", None)
+
+    @pytest.mark.asyncio
+    async def test_rw_group_member_gets_read_write(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 2, "read_write_groups": ["ops"]},
+            {"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        assert (ok, mode, reason) == (True, "read-write", None)
+
+    @pytest.mark.asyncio
+    async def test_ro_group_member_gets_read_only_never_promoted(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {
+                "name": "p1",
+                "max_read_write_users": 5,
+                "read_write_groups": ["ops"],
+                "read_only_groups": ["viewers"],
+            },
+            {"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "bob")
+        assert (ok, mode, reason) == (True, "read-only", None)
+
+    @pytest.mark.asyncio
+    async def test_user_not_in_any_group_is_denied(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {
+                "name": "p1",
+                "max_read_write_users": 5,
+                "read_write_groups": ["ops"],
+                "read_only_groups": ["viewers"],
+            },
+            {"users": [{"username": "eve", "password_hash": "x"}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "eve")
+        assert (ok, mode, reason) == (False, None, "denied_by_group_acl")
+
+    @pytest.mark.asyncio
+    async def test_admin_bypasses_group_acl(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 5, "read_write_groups": ["ops"]},
+            {"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "root")
+        assert (ok, mode, reason) == (True, "read-write", None)
+
+    @pytest.mark.asyncio
+    async def test_unknown_user_is_denied_no_permissions(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 5},
+            {"users": [{"username": "alice", "password_hash": "x"}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "ghost")
+        assert (ok, mode, reason) == (False, None, "no_permissions")
+
+    @pytest.mark.asyncio
+    async def test_loopback_without_acl_keeps_legacy_force_read_write(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "loopback1", "max_read_write_users": 1},
+            {"users": [{"username": "alice", "password_hash": "x"}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "loopback1", "alice")
+        assert (ok, mode, reason) == (True, "read-write", None)
+
+    @pytest.mark.asyncio
+    async def test_loopback_with_explicit_acl_is_not_auto_promoted(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {
+                "name": "loopback1",
+                "max_read_write_users": 1,
+                "read_write_groups": ["ops"],
+                "read_only_groups": ["viewers"],
+            },
+            {"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "loopback1", "bob")
+        assert (ok, mode, reason) == (True, "read-only", None)

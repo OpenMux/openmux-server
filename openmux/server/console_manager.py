@@ -191,7 +191,72 @@ class ConsoleManager:
                 if not self.console_clients[port_name]:
                     self.console_clients.pop(port_name, None)
 
-    async def connect_client_to_port(self, client_id: str, port_name: str, username: str) -> Tuple[bool, str]:
+    def _has_write_slots(self, port: Optional[Any]) -> bool:
+        """Return whether a port has an available read-write slot."""
+        if port is None:
+            return False
+        max_rw_users = getattr(port, "max_read_write_users", 1)
+        current_rw_users = sum(
+            1 for client in getattr(port, "connected_clients", []) if client.get("mode") == "read-write"
+        )
+        return current_rw_users < max_rw_users
+
+    def _resolve_access_mode(
+        self, port: Optional[Any], port_name: str, permissions: Optional[str], username: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve the console-group-aware access mode for a connecting user.
+
+        Precedence: admin bypasses all ACLs; a loopback port without an
+        explicit ACL keeps the legacy always-read-write shortcut; a port
+        with neither `read_write_groups` nor `read_only_groups` configured
+        stays open to all authenticated users (today's slot-contention
+        behavior); otherwise the user's console groups (see
+        `AuthManager.get_user_groups`) must intersect one of the two lists.
+
+        Returns:
+            Tuple[Optional[str], Optional[str]]: (mode, deny_reason). ``mode``
+            is "read-write"/"read-only" when access is granted (deny_reason is
+            then None); ``mode`` is None with a deny_reason when denied.
+        """
+        if permissions == "admin":
+            self.logger.info(f"Granting read-write access to admin user for port {port_name}")
+            return "read-write", None
+
+        is_loopback = bool(
+            getattr(port, "loopback", False)
+            or getattr(port, "adapter_type", "") == "loopback"
+            or "loopback" in port_name.lower()
+        )
+        rw_groups = set(getattr(port, "read_write_groups", None) or [])
+        ro_groups = set(getattr(port, "read_only_groups", None) or [])
+
+        if is_loopback and not (rw_groups or ro_groups):
+            self.logger.info(f"Auto-promoting client to read-write for loopback port {port_name}")
+            return "read-write", None
+
+        if not (rw_groups or ro_groups):
+            # Default-allow: no console ACL configured, anyone authenticated competes for slots.
+            if self._has_write_slots(port):
+                self.logger.info(
+                    f"Granting read-write access to user {username} for port {port_name} (slot available)"
+                )
+                return "read-write", None
+            self.logger.info(f"Granting read-only access to user {username} for port {port_name}")
+            return "read-only", None
+
+        # Explicit console-group ACL mode
+        user_groups = self.auth_manager.get_user_groups(username)
+        if user_groups & rw_groups:
+            return "read-write", None
+        if user_groups & ro_groups:
+            self.logger.info(f"Granting read-only access to user {username} for port {port_name} (group ACL)")
+            return "read-only", None
+
+        return None, "denied_by_group_acl"
+
+    async def connect_client_to_port(
+        self, client_id: str, port_name: str, username: str
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
         """Connect a client id to a port and determine access mode.
 
         Args:
@@ -200,7 +265,10 @@ class ConsoleManager:
             username: Authenticated username for permission lookup.
 
         Returns:
-            Tuple[bool, str]: (success flag, access mode "read-only"|"read-write").
+            Tuple[bool, Optional[str], Optional[str]]: (success flag, access
+            mode "read-only"|"read-write" or None, deny reason code
+            ("no_permissions"|"denied_by_group_acl"|"port_full") when access
+            was not granted, else None.
         """
         # Check if client is already connected to a port
         if client_id in self.client_port_map:
@@ -208,47 +276,22 @@ class ConsoleManager:
             # Disconnect from the old port first
             await self.disconnect_client_from_port(client_id, old_port)
 
-        # Get user permissions
+        # Get user permissions; an unrecognized identity (no role assigned) gets no access at all.
         permissions = self.auth_manager.get_user_permissions(username)
+        if permissions is None:
+            self.logger.warning(f"Denying connection for '{username}' to port {port_name}: no permissions assigned")
+            return False, None, "no_permissions"
 
-        # Check if this is a loopback port - always use read-write for loopback
-        is_loopback = False
-        has_write_slots = False
+        port = None
         try:
-            port = None
-            try:
-                port = self.port_manager.get_port(port_name)
-            except Exception:
-                port = None
-            if port is not None:
-                # Check if it's a loopback port by adapter type or port name
-                is_loopback = (
-                    getattr(port, "loopback", False)
-                    or getattr(port, "adapter_type", "") == "loopback"
-                    or "loopback" in port_name.lower()
-                )
-                # Check if port has available write slots
-                max_rw_users = getattr(port, "max_read_write_users", 1)
-                current_rw_users = sum(
-                    1 for client in getattr(port, "connected_clients", []) if client.get("mode") == "read-write"
-                )
-                has_write_slots = current_rw_users < max_rw_users
+            port = self.port_manager.get_port(port_name)
         except Exception:
-            pass
+            port = None
 
-        # Determine client mode based on permissions and port characteristics
-        if is_loopback:
-            mode = "read-write"
-            self.logger.info(f"Auto-promoting client to read-write for loopback port {port_name}")
-        elif permissions == "admin":
-            mode = "read-write"
-            self.logger.info(f"Granting read-write access to admin user for port {port_name}")
-        elif has_write_slots:
-            mode = "read-write"
-            self.logger.info(f"Granting read-write access to user {username} for port {port_name} (slot available)")
-        else:
-            mode = "read-only"
-            self.logger.info(f"Granting read-only access to user {username} for port {port_name}")
+        mode, reason = self._resolve_access_mode(port, port_name, permissions, username)
+        if mode is None:
+            self.logger.warning(f"Denying connection for '{username}' to port {port_name}: {reason}")
+            return False, None, reason
 
         # Add client to port; if read-write is full, fall back to read-only
         success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
@@ -259,16 +302,18 @@ class ConsoleManager:
             )
             success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
 
-        if success:
-            # Map client to port
-            self.client_port_map[client_id] = port_name
+        if not success:
+            return False, None, "port_full"
 
-            # Start per-client data forwarding task
-            self._ensure_client_forwarding_task(port_name, client_id)
+        # Map client to port
+        self.client_port_map[client_id] = port_name
 
-            self.logger.info(f"Client {username} ({client_id}) connected to port {port_name} in {mode} mode")
+        # Start per-client data forwarding task
+        self._ensure_client_forwarding_task(port_name, client_id)
 
-        return success, mode
+        self.logger.info(f"Client {username} ({client_id}) connected to port {port_name} in {mode} mode")
+
+        return True, mode, None
 
     async def disconnect_client_from_port(self, client_id: str, port_name: str) -> bool:
         """Disconnect a client from a specific port.

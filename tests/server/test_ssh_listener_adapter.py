@@ -70,10 +70,10 @@ class FakeConsoleManager:
 
     async def connect_client_to_port(self, client_id: str, port_name: str, username: str):
         if not self.attach_ok:
-            return False, "read-only"
+            return False, None, "port_full"
         self.attached[client_id] = port_name
         self.client_modes[client_id] = self.mode
-        return True, self.mode
+        return True, self.mode, None
 
     async def disconnect_client_from_port(self, client_id: str, port_name: str) -> None:
         self.attached.pop(client_id, None)

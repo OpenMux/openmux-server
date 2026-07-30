@@ -115,6 +115,7 @@ In practice this means the repository and release artifacts should contain the r
 - Multiple concurrent users per console
 - Read-write and read-only access modes
 - Configurable permissions and read-write access control
+- Per-console group access control (`read_write_groups`/`read_only_groups` per port, `groups` per user/API key)
 - Network binding to specific interfaces or localhost
 - Optional raw WebSocket per-port streaming (web_console adapter + websocket client adapter)
 
@@ -244,6 +245,11 @@ serial_ports:
     parity: N
     stopbits: 1
     max_read_write_users: 1
+    # Optional per-console group ACL. Empty/omitted on both lists = open to all
+    # authenticated users (default). Once either list is set, only matching
+    # groups get access; admin permission always bypasses this.
+    read_write_groups: [ops]
+    read_only_groups: [viewers]
 ```
 
 Because authentication now lives in `config/authentication.yaml`, accompanying credentials are defined there:
@@ -257,6 +263,7 @@ users:
   - username: user1
     password_hash: <REPLACE_WITH_SECURE_HASH>
     permissions: read-write
+    groups: [ops]
 api_keys:
   - name: lab-agent
     key: <REPLACE_WITH_RANDOM_SECRET>

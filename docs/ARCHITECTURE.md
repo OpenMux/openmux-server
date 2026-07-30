@@ -402,3 +402,46 @@ distinct_instances        # count shortcut
 - Optional replication of active stream state across paths (true multipath aggregation) instead of single-primary model.
 
 This section formalizes the identity model so operators and integrators can rely on stable semantics for monitoring and tooling.
+
+---
+## 17. Access Control: Console Groups
+
+Per-console (per-port) access control layers on top of the global `permissions` role
+(`admin`/`read-write`/`read-only`).
+
+### 17.1 Model
+- A user or API key may declare `groups: [str]` in `authentication.yaml`. External auth (PAM)
+  reuses the resolved system group names as-is as console groups — there is no separate mapping
+  table.
+- A port may declare `read_write_groups: [str]` and `read_only_groups: [str]` in `server.yaml`
+  (alongside `max_read_write_users`).
+- **Default-allow**: if a port sets neither list, it is open to all authenticated users, exactly
+  as before this feature existed (loopback ports additionally keep their legacy "always
+  read-write" shortcut in this mode).
+- **Explicit ACL mode**: once a port sets either list, membership decides access:
+  - `admin` permission always bypasses group ACLs (unchanged from before).
+  - A user whose groups intersect `read_write_groups` is eligible for read-write (subject to the
+    normal `max_read_write_users` slot contention, falling back to read-only if full).
+  - A user whose groups intersect only `read_only_groups` gets read-only and is never promoted.
+  - A user in neither list is denied outright (distinct from "port full").
+  - A user with no resolved permissions at all (unknown identity) is denied outright — this closed
+    a pre-existing gap where such users silently got read-write access.
+
+### 17.2 Enforcement Chokepoint
+All local console attachment goes through `ConsoleManager.connect_client_to_port()`
+(`openmux/server/console_manager.py`), used identically by `client_listener`, `ssh_listener`,
+`telnet_listener`, and `web_console`. It returns `(success, mode, reason)`; `reason` is one of
+`"no_permissions"`, `"denied_by_group_acl"`, `"port_full"`, or `None` on success, and each adapter
+surfaces a reason-specific message to the client. Enforcement reads `read_write_groups`/
+`read_only_groups` off the port object generically (`getattr`), so it works the same way for every
+adapter type, including federated ports, without any per-adapter special-casing.
+
+### 17.3 Federation (MuxCon) Propagation
+`read_write_groups`/`read_only_groups` are threaded onto `PortMetadata`
+(`openmux/common/federation_types.py`) and included in `to_dict()`/`to_federation_dict()`. When a
+node advertises its local ports over MuxCon, these fields travel in the `PORTS:FEDERATED` wire
+message; the receiving node's `RemotePortProxy` copies them from the parsed `PortMetadata`, so
+`ConsoleManager` enforces the same group ACL against remote clients as it does locally, with no
+separate remote-enforcement mechanism.
+
+

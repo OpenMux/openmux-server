@@ -463,6 +463,7 @@ class TestClientManager:
         client_manager.console_manager.connect_client_to_port.return_value = (
             True,
             "read-only",
+            None,
         )
 
         # Mock _handle_console_mode to avoid running the console mode loop
@@ -492,6 +493,7 @@ class TestClientManager:
         client_manager.console_manager.connect_client_to_port.return_value = (
             True,
             "read-write",
+            None,
         )
 
         # Mock _handle_console_mode to avoid running the console mode loop
@@ -523,7 +525,7 @@ class TestClientManager:
             patch.object(
                 client_manager.console_manager,
                 "connect_client_to_port",
-                new=AsyncMock(return_value=(False, None)),
+                new=AsyncMock(return_value=(False, None, "port_full")),
             ),
         ):
 
@@ -683,7 +685,7 @@ class TestClientManager:
 
         # Mock console manager unified attach/detach methods
         client_manager.console_manager.disconnect_client_from_port = AsyncMock()
-        client_manager.console_manager.connect_client_to_port = AsyncMock(return_value=(True, "read-only"))
+        client_manager.console_manager.connect_client_to_port = AsyncMock(return_value=(True, "read-only", None))
 
         # Mock asyncio.sleep
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
@@ -711,7 +713,7 @@ class TestClientManager:
 
         # Mock console manager unified attach/detach methods
         client_manager.console_manager.disconnect_client_from_port = AsyncMock()
-        client_manager.console_manager.connect_client_to_port = AsyncMock(return_value=(False, None))
+        client_manager.console_manager.connect_client_to_port = AsyncMock(return_value=(False, None, "port_full"))
 
         # Mock asyncio.sleep
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:

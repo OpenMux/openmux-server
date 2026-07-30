@@ -447,3 +447,84 @@ async def test_fast_shutdown_end_closes(monkeypatch):
         await c_writer.wait_closed()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_advertise_local_ports_includes_group_acl(monkeypatch):
+    """Console-group ACL (issue #24): read_write_groups/read_only_groups configured
+    on a local port must be included in the federated PORTS:FEDERATED advertisement
+    so a peer server can enforce the same ACL for remote clients."""
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [{"host": "127.0.0.1", "port": 9000, "enabled": True}]}})
+
+    class PM:
+        async def get_port_list_with_federation(self):
+            return [
+                {
+                    "name": "p1",
+                    "adapter_type": "loopback",
+                    "description": "",
+                    "connected": True,
+                    "max_read_write_users": 1,
+                    "read_write_groups": ["ops"],
+                    "read_only_groups": ["viewers"],
+                }
+            ]
+
+    ad.main_port_manager = PM()
+
+    server, s_reader, s_writer, c_reader, c_writer = await _make_stream_pair()
+    try:
+        conn_id = "in:127.0.0.1:12346:1"
+        ad.connections[conn_id] = {"writer": s_writer, "auth_ok": True}
+        ad._wire_state[conn_id] = {"send_next": 1}
+
+        await ad._maybe_advertise_local_ports(conn_id)
+        # Skip the control-frame header line, then accumulate the payload until END:PORTS
+        await asyncio.wait_for(c_reader.readline(), timeout=1)
+        accum = b""
+        while True:
+            part = await asyncio.wait_for(c_reader.readline(), timeout=1)
+            accum += part
+            if b"END:PORTS" in part or part == b"":
+                break
+        text = accum.decode("utf-8", errors="replace")
+        assert '"read_write_groups":["ops"]' in text
+        assert '"read_only_groups":["viewers"]' in text
+    finally:
+        s_writer.close()
+        c_writer.close()
+        await s_writer.wait_closed()
+        await c_writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_register_remote_port_from_dict_propagates_group_acl():
+    """Console-group ACL (issue #24): a federated port dict carrying
+    read_write_groups/read_only_groups must result in a RemotePortProxy whose
+    attributes carry the same groups, so ConsoleManager enforces them locally."""
+    from openmux.server.port_manager import PortManager
+
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = PortManager([])
+    ad.main_port_manager = pm
+
+    pd = {
+        "name": "remote1",
+        "description": "Remote port",
+        "adapter_type": "remote_muxcon",
+        "origin_server": {"server_id": "peer1", "hostname": "peer1", "port": 0, "server_type": "leaf"},
+        "status": "connected",
+        "max_rw_users": 3,
+        "read_write_groups": ["ops"],
+        "read_only_groups": ["viewers"],
+    }
+
+    conn_id = "in:127.0.0.1:9999:1"
+    await ad._register_remote_port_from_dict(conn_id, pd)
+
+    proxy = pm.get_port("remote1")
+    assert proxy is not None
+    assert proxy.read_write_groups == ["ops"]
+    assert proxy.read_only_groups == ["viewers"]

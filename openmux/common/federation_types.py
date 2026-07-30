@@ -188,6 +188,10 @@ class PortMetadata:
         conflict_reason: Human explanation for alias/conflict scenario.
         federation_type: How the port entered the federation view.
         last_seen: Timestamp of last successful refresh / observation.
+        read_write_groups: Console groups granted read-write access (issue #24);
+            None/empty means open to all authenticated users.
+        read_only_groups: Console groups granted read-only access (issue #24);
+            None/empty means open to all authenticated users.
     """
 
     name: str
@@ -218,6 +222,11 @@ class PortMetadata:
     # and may be omitted for other adapter types.
     serial_config: Optional[Dict[str, Any]] = None
     line_status: Optional[Dict[str, Any]] = None
+
+    # Console-group access control (issue #24), propagated across muxcon federation
+    # so a remote server can enforce the same per-console ACL as the origin.
+    read_write_groups: Optional[List[str]] = None
+    read_only_groups: Optional[List[str]] = None
 
     def get_display_name(self) -> str:
         """Return the user‑facing port name.
@@ -268,6 +277,8 @@ class PortMetadata:
             # Optional: include richer details when present
             **({"serial_config": self.serial_config} if self.serial_config is not None else {}),
             **({"line_status": self.line_status} if self.line_status is not None else {}),
+            **({"read_write_groups": self.read_write_groups} if self.read_write_groups else {}),
+            **({"read_only_groups": self.read_only_groups} if self.read_only_groups else {}),
         }
 
     def to_federation_dict(self) -> Dict[str, Any]:
@@ -293,4 +304,6 @@ class PortMetadata:
             # Optional serial details where applicable
             **({"serial_config": self.serial_config} if self.serial_config is not None else {}),
             **({"line_status": self.line_status} if self.line_status is not None else {}),
+            **({"read_write_groups": self.read_write_groups} if self.read_write_groups else {}),
+            **({"read_only_groups": self.read_only_groups} if self.read_only_groups else {}),
         }

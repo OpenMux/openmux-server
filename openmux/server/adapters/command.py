@@ -83,6 +83,10 @@ class CommandPort:
         self.env = config.get("env")
         self.description = config.get("description", f"Command: {self.command}")
         self.max_read_write_users = config.get("max_read_write_users", 1)
+        # Console-group access control (issue #24): empty on both = open to all
+        # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
+        self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
+        self.read_only_groups: List[str] = list(config.get("read_only_groups") or [])
 
         # Behaviour flags
         self.interactive = config.get("interactive", False)

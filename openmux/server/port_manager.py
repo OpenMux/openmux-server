@@ -201,6 +201,9 @@ class PortManager:
                 self.is_running = getattr(unified_port, "is_running", True)
                 self.connected_clients = []
                 self.max_read_write_users = getattr(unified_port, "max_read_write_users", 5)
+                # Console-group access control (issue #24): empty on both = open to all.
+                self.read_write_groups = list(getattr(unified_port, "read_write_groups", None) or [])
+                self.read_only_groups = list(getattr(unified_port, "read_only_groups", None) or [])
                 self.adapter_type = adapter_type
                 self.loopback = str(adapter_type).lower() == "loopback"
 
@@ -227,6 +230,8 @@ class PortManager:
                     "connected": bool(getattr(self.unified_port, "is_connected", self.is_running)),
                     "connected_clients": len(self.connected_clients),
                     "max_read_write_users": self.max_read_write_users,
+                    "read_write_groups": list(self.read_write_groups),
+                    "read_only_groups": list(self.read_only_groups),
                 }
                 # Include adapter-provided snapshot details when available
                 snapshot = getattr(self.unified_port, "get_status_snapshot", None)

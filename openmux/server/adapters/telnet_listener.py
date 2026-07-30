@@ -386,9 +386,14 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             remote_host=peer_ip,
             username=username,
         )
-        attach_ok = await self._attach_session(session)
+        attach_ok, attach_reason = await self._attach_session(session)
         if not attach_ok:
-            await self._send_and_close(writer, b"Failed to attach to port\r\n")
+            if attach_reason == "denied_by_group_acl":
+                await self._send_and_close(writer, b"Access denied to this port\r\n")
+            elif attach_reason == "no_permissions":
+                await self._send_and_close(writer, b"No permissions assigned to this account\r\n")
+            else:
+                await self._send_and_close(writer, b"Failed to attach to port\r\n")
             return
         self.sessions[client_id] = session
         self.logger.info(
@@ -774,32 +779,33 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         except Exception:
             pass
 
-    async def _attach_session(self, session: TelnetSession) -> bool:
+    async def _attach_session(self, session: TelnetSession) -> Tuple[bool, Optional[str]]:
         if not self.console_manager:
-            return False
+            return False, None
         try:
-            ok, mode = await self.console_manager.connect_client_to_port(
+            ok, mode, reason = await self.console_manager.connect_client_to_port(
                 session.client_id,
                 session.port_name,
                 session.username,
             )
         except Exception as exc:
             self.logger.error("Console manager attach failed for %s: %s", session.client_id, exc)
-            return False
+            return False, None
         if ok:
             session.port_mode = mode
         else:
             self.logger.warning(
-                "Console manager rejected telnet client %s for port %s",
+                "Console manager rejected telnet client %s for port %s (reason=%s)",
                 session.client_id,
                 session.port_name,
+                reason,
             )
         if ok and hasattr(self.console_manager, "register_client_channel"):
             try:
                 self.console_manager.register_client_channel(session.client_id, self)
             except Exception:
                 pass
-        return bool(ok)
+        return bool(ok), reason
 
     async def _disconnect_session(self, client_id: str, *, reason: str) -> None:
         session = self.sessions.pop(client_id, None)

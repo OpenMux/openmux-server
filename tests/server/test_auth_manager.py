@@ -177,3 +177,52 @@ def test_get_ed25519_pubkeys_for_user_and_use_filters_by_username():
     bob_keys = am.get_ed25519_pubkeys_for_user_and_use("bob", "ssh")
     assert set(bob_keys.keys()) == {"b1"}
     assert am.get_ed25519_pubkeys_for_user_and_use("carol", "ssh") == {}
+
+
+# ---------------------------------------------------------------------------
+# get_user_groups (console access groups, issue #24)
+# ---------------------------------------------------------------------------
+
+class TestGetUserGroups:
+
+    def test_static_user_explicit_groups_plus_implicit_user(self):
+        am = AuthManager({
+            "users": [
+                {"username": "alice", "password_hash": "x", "permissions": "read-write", "groups": ["ops", "net"]},
+            ],
+        })
+        assert am.get_user_groups("alice") == {"user", "ops", "net"}
+
+    def test_static_user_no_groups_gets_implicit_user_only(self):
+        am = AuthManager({
+            "users": [{"username": "bob", "password_hash": "x", "permissions": "read-write"}],
+        })
+        assert am.get_user_groups("bob") == {"user"}
+
+    def test_api_key_groups(self):
+        am = AuthManager({
+            "api_keys": [{"key": "K1", "name": "automation", "permissions": "read-write", "groups": ["ci"]}],
+        })
+        assert am.get_user_groups("automation") == {"user", "ci"}
+
+    def test_unknown_user_returns_empty_set(self):
+        am = AuthManager({"users": [{"username": "alice", "password_hash": "x"}]})
+        assert am.get_user_groups("nope") == set()
+
+    def test_external_auth_groups_reused_as_console_groups(self):
+        am = AuthManager({"external_auth": {"enabled": True}})
+        am._ext_auth_groups_cache["carol"] = {
+            "groups": ["openmux_admin", "field-techs"],
+            "expires": time.time() + 300,
+        }
+        assert am.get_user_groups("carol") == {"user", "openmux_admin", "field-techs"}
+
+    def test_read_only_permission_deprecation_warning_logged_once(self, caplog):
+        am = AuthManager({
+            "users": [{"username": "viewer", "password_hash": "x", "permissions": "read-only"}],
+        })
+        with caplog.at_level("WARNING"):
+            assert am.get_user_permissions("viewer") == "read-only"
+            assert am.get_user_permissions("viewer") == "read-only"
+        deprecation_msgs = [r for r in caplog.records if "deprecated" in r.message]
+        assert len(deprecation_msgs) == 1

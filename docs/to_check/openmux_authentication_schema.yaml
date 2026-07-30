@@ -17,6 +17,9 @@ properties:
         username: { type: string }
         password_hash: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
         permissions: { type: string, enum: [admin, read-write, read-only] }
+        groups:
+          type: array
+          items: { type: string }
   api_keys:
     type: array
     items:
@@ -27,6 +30,9 @@ properties:
         name: { type: string }
         key: { type: string }
         permissions: { type: string, enum: [admin, read-write, read-only] }
+        groups:
+          type: array
+          items: { type: string }
   public_keys:
     type: array
     items:

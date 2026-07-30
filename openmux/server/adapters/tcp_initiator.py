@@ -66,6 +66,10 @@ class TcpInitiatorPort:
         self.auto_reconnect = config.get("auto_reconnect", True)
         self.reconnect_delay = config.get("reconnect_delay", 5.0)
         self.enabled = bool(config.get("enabled", True))
+        # Console-group access control (issue #24): empty on both = open to all
+        # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
+        self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
+        self.read_only_groups: List[str] = list(config.get("read_only_groups") or [])
 
         # Connect-on-demand: stay disconnected until a user actively opens the port
         self.connect_on_demand: bool = bool(config.get("connect_on_demand", False))

@@ -152,7 +152,9 @@ class OpenMuxProtocolHandler:
         if not await self.console_manager.port_exists(port_name):
             await client.send(f"Port {port_name} not found\r\n".encode())
             return
-        success, mode = await self.console_manager.connect_client_to_port(client.client_id, port_name, client.username)
+        success, mode, _reason = await self.console_manager.connect_client_to_port(
+            client.client_id, port_name, client.username
+        )
         if success:
             client.connected_port = port_name
             client.mode = mode
@@ -237,7 +239,9 @@ class OpenMuxProtocolHandler:
                 # Unified-only: simulate reconnect by detaching and re-attaching the client
                 await self.console_manager.disconnect_client_from_port(client.client_id, client.connected_port)
                 await asyncio.sleep(0.2)
-                success, mode = await self.console_manager.connect_client_to_port(client.client_id, port_name, client.username)
+                success, mode, _reason = await self.console_manager.connect_client_to_port(
+                    client.client_id, port_name, client.username
+                )
                 if success:
                     client.connected_port = port_name
                     client.mode = mode

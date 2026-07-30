@@ -42,6 +42,8 @@ Every port instance **must** expose the following attributes:
 | `data_callback` | `Callable \| None` | Set by `PortManager.register_unified_port()` to `pm.send_data`. The port must call `await self.data_callback(self.name, data)` for all outbound data. Initialized to `None`; absent PM is an error (see below). |
 | `always_buffer` | `bool` | When `True`, PM enqueues data even when no clients are connected. Defaults to `False`. |
 | `max_read_write_users` | `int` | Maximum number of simultaneous read-write clients. Used by PM for access control. |
+| `read_write_groups` | `List[str]` | Console groups granted read-write access. Empty on both this and `read_only_groups` means the port is open to all authenticated users (today's default behavior). |
+| `read_only_groups` | `List[str]` | Console groups granted read-only access. A user in this group is never promoted to read-write, even if `max_read_write_users` slots are free. |
 
 > **Note:** Ports do **not** own or allocate a `data_queue`. The `UnifiedPortWrapper` created by PM owns the delivery queue. Any `data_queue` attribute on a port is a test-only staging buffer and is not part of this contract.
 

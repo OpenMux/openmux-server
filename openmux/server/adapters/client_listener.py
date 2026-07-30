@@ -796,7 +796,9 @@ class TcpServerAdapter(BaseGenericAdapter):
         try:
             # Use console manager to handle the connection
             if self.console_manager:
-                success, mode = await self.console_manager.connect_client_to_port(client.client_id, port_name, client.username)
+                success, mode, reason = await self.console_manager.connect_client_to_port(
+                    client.client_id, port_name, client.username
+                )
 
                 if success:
                     client.connected_port = port_name
@@ -846,7 +848,12 @@ class TcpServerAdapter(BaseGenericAdapter):
                         pass
                     self.logger.info(f"Client {client.client_id} connected to port {port_name} in {access_mode} mode")
                 else:
-                    await client.send_line(f"ERROR:CONNECT:Cannot connect to port {port_name}")
+                    if reason == "denied_by_group_acl":
+                        await client.send_line(f"ERROR:CONNECT:Access denied to port {port_name}")
+                    elif reason == "no_permissions":
+                        await client.send_line("ERROR:CONNECT:No permissions assigned to this account")
+                    else:
+                        await client.send_line(f"ERROR:CONNECT:Cannot connect to port {port_name}")
             else:
                 await client.send_line("ERROR:CONNECT:Console manager not available")
 

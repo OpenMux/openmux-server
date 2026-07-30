@@ -189,7 +189,7 @@ async def test_connect_disconnect_and_forwarding():
             self.port_manager = type("PM", (), {"write_to_port": self.write_to_port})()
         async def connect_client_to_port(self, cid, port, user):
             self.connected.append((cid, port, user))
-            return True, "read-write"
+            return True, "read-write", None
         async def disconnect_client_from_port(self, cid, port):
             self.disconnected.append((cid, port))
         def register_client_channel(self, cid, adapter_ref):

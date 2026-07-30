@@ -852,12 +852,14 @@
           'auth.users': {
             username: 'Login username for HTTP basic-auth.',
             password_hash: 'SHA-256 hex password hash. Use the Hash password helper to derive it client-side without leaving the browser.',
-            permissions: 'Role for future fine-grained access control.'
+            permissions: 'Role for future fine-grained access control.',
+            groups: 'Console groups this user belongs to, used for per-console read_write_groups/read_only_groups access control.'
           },
           'auth.api_keys': {
             name: 'Human-friendly name for this API key.',
             key: 'The API key string presented by clients.',
-            permissions: 'Access level for this API key.'
+            permissions: 'Access level for this API key.',
+            groups: 'Console groups this API key belongs to, used for per-console read_write_groups/read_only_groups access control.'
           },
           'auth.public_keys': {
             key_id: 'Identifier for this public key (referenced by peers).',
@@ -878,7 +880,9 @@
             dtr: 'Initial DTR line state.',
             rts: 'Initial RTS line state.',
             max_read_write_users: 'Max concurrent read/write users for this port.',
-            scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.'
+            scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.',
+            read_write_groups: 'Console groups granted read-write access. Empty = open to all authenticated users.',
+            read_only_groups: 'Console groups granted read-only access (never promoted to read-write). Empty = open to all authenticated users.'
           },
           'loopback_ports': {
             name: 'Logical name for the software loopback port.',
@@ -886,7 +890,9 @@
             buffer_size: 'Size of the internal buffer (bytes).',
             echo_delay: 'Artificial echo delay in seconds.',
             sanitize_control: 'Replace non-printable control characters with visible placeholders (e.g., show ^C instead of raw control bytes); helps prevent terminal glitches when testing.',
-            max_read_write_users: 'Max concurrent users for this loopback.'
+            max_read_write_users: 'Max concurrent users for this loopback.',
+            read_write_groups: 'Console groups granted read-write access. Empty = open to all authenticated users.',
+            read_only_groups: 'Console groups granted read-only access (never promoted to read-write). Empty = open to all authenticated users.'
           },
           'command_ports': {
             name: 'Logical name for this command-backed port.',
@@ -897,7 +903,9 @@
             max_read_write_users: 'Max concurrent users.',
             interactive: 'Allocate interactive TTY-like behavior.',
             always_buffer: 'Buffer early output until first client connects.',
-            scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.'
+            scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.',
+            read_write_groups: 'Console groups granted read-write access. Empty = open to all authenticated users.',
+            read_only_groups: 'Console groups granted read-only access (never promoted to read-write). Empty = open to all authenticated users.'
           },
           'tcp_initiator_ports': {
             name: 'Logical name for this TCP initiator port.',
@@ -922,7 +930,9 @@
             protocol_username: 'Username for authentication (conserver or openmux).',
             protocol_password: 'Password for authentication. Leave blank if the server uses passwordless / PAM auth.',
             protocol_remote_port: 'Port name on the remote OpenMux server to connect to.',
-            protocol_api_key: 'API key for OpenMux authentication (alternative to username + password).'
+            protocol_api_key: 'API key for OpenMux authentication (alternative to username + password).',
+            read_write_groups: 'Console groups granted read-write access. Empty = open to all authenticated users.',
+            read_only_groups: 'Console groups granted read-only access (never promoted to read-write). Empty = open to all authenticated users.'
           },
           'telnet_listener': {
             name: 'Listener identifier used in logs and client banners.',
@@ -1075,12 +1085,14 @@
           tables['auth.users'] = buildTable('auth.users', annotateColumnsWithDefaults('auth.users', annotateColumnsWithHelp('auth.users', [
             {key:'username', label:'Username', type:'string', required:true},
             {key:'password_hash', label:'Password hash', type:'string', required:true, hiddenList:true},
-            {key:'permissions', label:'Permissions', type:'enum', enum:['admin','read-write','read-only']}
+            {key:'permissions', label:'Permissions', type:'enum', enum:['admin','read-write','read-only']},
+            {key:'groups', label:'Console groups', type:'array-string', hiddenList:true}
           ])));
           tables['auth.api_keys'] = buildTable('auth.api_keys', annotateColumnsWithDefaults('auth.api_keys', annotateColumnsWithHelp('auth.api_keys', [
             {key:'name', label:'Name', type:'string'},
             {key:'key', label:'Key', type:'string', required:true, hiddenList:true},
-            {key:'permissions', label:'Permissions', type:'enum', enum:['admin','read-write','read-only']}
+            {key:'permissions', label:'Permissions', type:'enum', enum:['admin','read-write','read-only']},
+            {key:'groups', label:'Console groups', type:'array-string', hiddenList:true}
           ])));
           tables['auth.public_keys'] = buildTable('auth.public_keys', annotateColumnsWithDefaults('auth.public_keys', annotateColumnsWithHelp('auth.public_keys', [
             {key:'key_id', label:'Key ID', type:'string', required:true},
@@ -1102,7 +1114,9 @@
             {key:'dtr', label:'DTR', type:'boolean'},
             {key:'rts', label:'RTS', type:'boolean'},
             {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
-            {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0}
+            {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
+            {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
+            {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
           ])));
 
           tables['loopback_ports'] = buildTable('loopback_ports', annotateColumnsWithDefaults('loopback_ports', annotateColumnsWithHelp('loopback_ports', [
@@ -1111,7 +1125,9 @@
             {key:'buffer_size', label:'Buffer size', type:'integer', min:1},
             {key:'echo_delay', label:'Echo delay', type:'number', min:0, step:0.1},
             {key:'sanitize_control', label:'Sanitize control', type:'boolean'},
-            {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1}
+            {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
+            {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
+            {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
           ])));
 
           tables['command_ports'] = buildTable('command_ports', annotateColumnsWithDefaults('command_ports', annotateColumnsWithHelp('command_ports', [
@@ -1123,7 +1139,9 @@
             {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
             {key:'interactive', label:'Interactive', type:'boolean'},
             {key:'always_buffer', label:'Always buffer', type:'boolean'},
-            {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0}
+            {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
+            {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
+            {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
           ])));
 
           tables['tcp_initiator_ports'] = buildTable('tcp_initiator_ports', annotateColumnsWithDefaults('tcp_initiator_ports', annotateColumnsWithHelp('tcp_initiator_ports', [
@@ -1149,7 +1167,9 @@
             {key:'protocol_username', label:'Username', type:'string', hiddenList:true},
             {key:'protocol_password', label:'Password', type:'string', hiddenList:true},
             {key:'protocol_remote_port', label:'Remote port', type:'string', hiddenList:true},
-            {key:'protocol_api_key', label:'API key', type:'string', hiddenList:true}
+            {key:'protocol_api_key', label:'API key', type:'string', hiddenList:true},
+            {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
+            {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
           ])));
           tables['telnet_listener'] = buildTable('telnet_listener', annotateColumnsWithDefaults('telnet_listener', annotateColumnsWithHelp('telnet_listener', [
             {key:'name', label:'Name', type:'string', required:true},

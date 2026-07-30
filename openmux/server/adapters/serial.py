@@ -12,7 +12,7 @@ import inspect
 import logging
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from ..data_logger import DataLogger
@@ -57,6 +57,10 @@ class SerialPortConfig:
     log_direction: Optional[str] = None  # Direction filter for data logging: 'in' or 'out'
     log_directions: Optional[List[str]] = None  # Direction filter for data logging: ['in', 'out']
     scrollback_size: int = 0  # bytes to retain for client-requested scrollback replay; 0 = disabled
+    # Console-group access control (issue #24): empty on both = open to all
+    # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
+    read_write_groups: List[str] = field(default_factory=list)
+    read_only_groups: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         """Validate configuration values after initialization.
@@ -100,6 +104,8 @@ class SerialPortWrapper:
         self.name = config.name  # Add name attribute for port manager compatibility
         self.description = config.description
         self.max_read_write_users = config.max_read_write_users  # For port manager compatibility
+        self.read_write_groups = config.read_write_groups
+        self.read_only_groups = config.read_only_groups
         self.logger = logger.getChild(f"serial.{config.name}")
         # Best-effort callback into PortManager listeners via adapter
         self._meta_notify = meta_notify
@@ -580,6 +586,8 @@ class SerialAdapter(BaseGenericAdapter):
                     log_direction=port_config.get("log_direction"),
                     log_directions=port_config.get("log_directions"),
                     scrollback_size=int(port_config.get("scrollback_size", 0)),
+                    read_write_groups=port_config.get("read_write_groups") or [],
+                    read_only_groups=port_config.get("read_only_groups") or [],
                 )
 
                 # Create wrapper
@@ -686,6 +694,8 @@ class SerialAdapter(BaseGenericAdapter):
                 log_direction=config.get("log_direction"),
                 log_directions=config.get("log_directions"),
                 scrollback_size=int(config.get("scrollback_size", 0)),
+                read_write_groups=config.get("read_write_groups") or [],
+                read_only_groups=config.get("read_only_groups") or [],
             )
             notifier = self._make_notifier()
             wrapper = SerialPortWrapper(serial_cfg, self.logger, meta_notify=notifier)

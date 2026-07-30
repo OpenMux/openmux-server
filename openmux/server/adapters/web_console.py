@@ -893,9 +893,17 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
             await ws.close(code=1011, message=b"Console manager not available")
             _cleanup_ws()
             return ws
-        ok, mode = await adapter.console_manager.connect_client_to_port(client_id, port_name, username)
+        ok, mode, reason = await adapter.console_manager.connect_client_to_port(client_id, port_name, username)
         if ok:
             attached = True
+        elif reason == "denied_by_group_acl":
+            await ws.close(code=4003, message=b"Access denied to this port")
+            _cleanup_ws()
+            return ws
+        elif reason == "no_permissions":
+            await ws.close(code=4003, message=b"No permissions assigned to this account")
+            _cleanup_ws()
+            return ws
         else:
             # Fallback: allow meta-only websocket when federated port is currently down
             try:

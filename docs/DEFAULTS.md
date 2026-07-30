@@ -17,6 +17,8 @@ server
 
 authentication
 - At least one of users, api_keys, public_keys, or external_auth must be provided.
+- users[*].groups / api_keys[*].groups: unset (empty). Console groups for per-port `read_write_groups`/`read_only_groups` access control. External-auth (PAM) group names are reused as-is as console groups.
+- users[*].permissions: read-only is deprecated (still works; logs a one-time warning). Use per-port `read_write_groups`/`read_only_groups` instead of the global read-only permission.
 - External authentication (helper binary — e.g. openmux-pam-helper):
   - authentication.external_auth.enabled: false
   - authentication.external_auth.helper: (empty — resolved from PATH or /usr/lib/openmux/openmux-pam-helper)
@@ -75,6 +77,7 @@ serial_ports (per-port) (schema defaults, plus adapter runtime behavior)
 - dtr: true
 - rts: true
 - max_read_write_users: 1
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
 
 serial adapter (runtime defaults from openmux/server/adapters/serial.py)
 - read_coalesce: true
@@ -86,11 +89,13 @@ loopback_ports (per-port) (schema + runtime)
 - echo_delay: 0.0 (schema)
 - max_read_write_users: 5 (schema; legacy read_write_users is normalized to this field with a warning)
 - sanitize_control: true
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior). A loopback port with either list set loses the legacy "always force read-write" shortcut and is enforced like any other port.
 
 command_ports (per-port) (schema defaults)
 - shell: false
 - max_read_write_users: 1
 - cwd, env, interactive, always_buffer: no defaults
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
 
 muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapters/muxcon.py)
 - listeners[*]:

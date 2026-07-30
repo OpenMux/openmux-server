@@ -149,6 +149,12 @@ properties:
         dtr: { type: boolean, default: true }
         rts: { type: boolean, default: true }
         max_read_write_users: { type: integer, minimum: 1, default: 1 }
+        read_write_groups:
+          type: array
+          items: { type: string }
+        read_only_groups:
+          type: array
+          items: { type: string }
   loopback_ports:
     type: array
     items:
@@ -161,6 +167,12 @@ properties:
         buffer_size: { type: integer, minimum: 1, default: 1024 }
         echo_delay: { type: number, minimum: 0, default: 0.0 }
         max_read_write_users: { type: integer, minimum: 1, default: 5 }
+        read_write_groups:
+          type: array
+          items: { type: string }
+        read_only_groups:
+          type: array
+          items: { type: string }
   command_ports:
     type: array
     items:
@@ -177,6 +189,12 @@ properties:
         max_read_write_users: { type: integer, minimum: 1, default: 1 }
         interactive: { type: boolean }
         always_buffer: { type: boolean }
+        read_write_groups:
+          type: array
+          items: { type: string }
+        read_only_groups:
+          type: array
+          items: { type: string }
   tcp_initiator_ports:
     type: array
     items:
@@ -217,6 +235,12 @@ properties:
             password: { type: string }
             remote_port: { type: string }
             api_key: { type: string }
+        read_write_groups:
+          type: array
+          items: { type: string }
+        read_only_groups:
+          type: array
+          items: { type: string }
   openmux_client_ports:
     type: array
     description: "Deprecated. Use tcp_initiator_ports with protocol: {type: openmux} instead."

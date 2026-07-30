@@ -13,7 +13,7 @@ import hashlib
 import logging
 import secrets
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -52,6 +52,8 @@ class AuthManager:
         self._pw_hmac_challenges = {}
         # Authentication failure tracking: (username, ip) -> {failures, first_failure, locked_until}
         self._fail_tracker = {}
+        # Usernames already warned about deprecated "permissions: read-only" (one warning each)
+        self._ro_deprecation_warned: Set[str] = set()
         # Policy parameters (overridable via security policy)
         self._max_fail_window = 300  # seconds window for counting failures
         self._base_lock_seconds = 30  # initial lock duration after threshold
@@ -575,7 +577,9 @@ class AuthManager:
                 if user.get("username") == username:
                     # Explicit permissions field
                     if "permissions" in user:
-                        return user["permissions"]
+                        perms = user["permissions"]
+                        self._warn_if_deprecated_read_only(username, perms)
+                        return perms
                     # Fall through to default if static user matched
                     return "read-write"
 
@@ -593,6 +597,55 @@ class AuthManager:
 
         # Unknown user: if this is reached, the caller likely failed auth.
         return None
+
+    def _warn_if_deprecated_read_only(self, username: str, perms: str) -> None:
+        """Log a one-time deprecation warning for `permissions: read-only` users."""
+        if perms == "read-only" and username not in self._ro_deprecation_warned:
+            self._ro_deprecation_warned.add(username)
+            self.logger.warning(
+                "User '%s' uses deprecated 'permissions: read-only'; console access is now "
+                "controlled per-console via read_write_groups/read_only_groups instead",
+                username,
+            )
+
+    def get_user_groups(self, username: str) -> Set[str]:
+        """Return the console-access groups an identity belongs to.
+
+        Every identity that resolves to a known role (see `get_user_permissions`)
+        implicitly belongs to the built-in "user" group, in addition to any
+        explicit groups. Console-level access control (read_write_groups /
+        read_only_groups on a port) is matched against this set; admin
+        identities bypass group checks entirely and do not need to be listed.
+
+        Args:
+            username: Account identifier (static user, API key name, or
+                external-auth identity).
+
+        Returns:
+            Set[str]: Console group names; empty if the identity is unknown.
+        """
+        if self.get_user_permissions(username) is None:
+            return set()
+
+        groups: Set[str] = {"user"}
+
+        if "users" in self.config:
+            for user in self.config["users"]:
+                if user.get("username") == username:
+                    groups.update(user.get("groups") or [])
+                    return groups
+
+        if "api_keys" in self.config:
+            for key_entry in self.config["api_keys"]:
+                if key_entry.get("name") == username:
+                    groups.update(key_entry.get("groups") or [])
+                    return groups
+
+        if self._ext_auth_enabled:
+            # External-auth system groups are reused as-is as console groups.
+            groups.update(self._resolve_external_groups(username))
+
+        return groups
 
     # =================== External Auth Backend ===================
     def _external_authenticate(self, username: str, password: str) -> bool:
@@ -703,19 +756,50 @@ class AuthManager:
             self.logger.error("External auth helper error for user '%s': %s", username, e)
             return False
 
-    def _ext_auth_group_permissions(self, username: str) -> Optional[str]:
-        """Determine permissions based on group membership.
+    def _resolve_external_groups(self, username: str) -> Set[str]:
+        """Return the raw set of external group names known for a user.
 
-        Checks (in order):
-        1. Groups cached from the last helper JSON response for this user.
-        2. Unix system group membership (grp/pwd).
-        3. default_permission fallback if configured.
-
-        Mapping precedence: admin_group -> "admin"; write_group -> "read-write";
-        read_group -> "read-only". Returns None if no matching group found.
+        Combines groups cached from the last helper JSON response (if still
+        fresh) with a live Unix group lookup (grp/pwd). Shared by
+        `_ext_auth_group_permissions` (admin/write/read role mapping) and
+        `get_user_groups` (raw console-group passthrough).
         """
         import time as _time
 
+        groups: Set[str] = set()
+
+        cached = self._ext_auth_groups_cache.get(username)
+        if cached and _time.time() < cached.get("expires", 0):
+            groups.update(cached["groups"])
+
+        try:
+            import grp
+            import pwd
+
+            try:
+                pw = pwd.getpwnam(username)
+                primary_gid = pw.pw_gid
+                primary_group = grp.getgrgid(primary_gid).gr_name if primary_gid is not None else None
+            except KeyError:
+                primary_group = None
+
+            if primary_group:
+                groups.add(primary_group)
+            for g in grp.getgrall():
+                if username in (g.gr_mem or []):
+                    groups.add(g.gr_name)
+        except Exception as e:  # pragma: no cover - environment-dependent
+            self.logger.debug("Group lookup failed for '%s': %s", username, e)
+
+        return groups
+
+    def _ext_auth_group_permissions(self, username: str) -> Optional[str]:
+        """Determine permissions based on group membership.
+
+        Mapping precedence: admin_group -> "admin"; write_group -> "read-write";
+        read_group -> "read-only". Falls back to `default_permission` if no
+        configured group matches.
+        """
         admin_g = self._ext_auth_groups.get("admin_group")
         write_g = self._ext_auth_groups.get("write_group")
         read_g = self._ext_auth_groups.get("read_group")
@@ -729,40 +813,13 @@ class AuthManager:
                 return "read-only"
             return None
 
-        # 1. Groups from helper JSON (most authoritative for external users)
-        cached = self._ext_auth_groups_cache.get(username)
-        if cached and _time.time() < cached.get("expires", 0):
-            result = _map_groups(set(cached["groups"]))
-            if result:
-                return result
+        result = _map_groups(self._resolve_external_groups(username))
+        if result:
+            return result
 
-        # 2. Unix group membership
-        try:
-            import grp
-            import pwd
-
-            try:
-                pw = pwd.getpwnam(username)
-                primary_gid = pw.pw_gid
-                primary_group = grp.getgrgid(primary_gid).gr_name if primary_gid is not None else None
-            except KeyError:
-                primary_group = None
-
-            groups: set = set()
-            if primary_group:
-                groups.add(primary_group)
-            for g in grp.getgrall():
-                if username in (g.gr_mem or []):
-                    groups.add(g.gr_name)
-
-            result = _map_groups(groups)
-            if result:
-                return result
-        except Exception as e:  # pragma: no cover - environment-dependent
-            self.logger.debug("Group lookup failed for '%s': %s", username, e)
-
-        # 3. Configured default for external-auth users
+        # Configured default for external-auth users
         return self._ext_auth_default_permission
+
     def get_api_key_permissions(self, api_key: str) -> Optional[str]:
         """Return permissions associated with an API key.
 

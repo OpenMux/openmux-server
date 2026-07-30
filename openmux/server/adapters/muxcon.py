@@ -2531,6 +2531,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         max_rw = None
                         serial_cfg = None
                         line_status = None
+                        rw_groups = None
+                        ro_groups = None
                         if meta is not None:
                             try:
                                 origin = getattr(meta, "origin_server", None)
@@ -2539,6 +2541,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 max_rw = getattr(meta, "max_rw_users", None)
                                 serial_cfg = getattr(meta, "serial_config", None)
                                 line_status = getattr(meta, "line_status", None)
+                                rw_groups = getattr(meta, "read_write_groups", None)
+                                ro_groups = getattr(meta, "read_only_groups", None)
                             except Exception:
                                 pass
                         ent[pname] = {
@@ -2549,6 +2553,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             "max_rw_users": max_rw,
                             "serial_config": serial_cfg,
                             "line_status": line_status,
+                            "read_write_groups": rw_groups,
+                            "read_only_groups": ro_groups,
                         }
                     except Exception:
                         continue
@@ -2602,6 +2608,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             federation_type=FederationType.PULL,
                             serial_config=rec.get("serial_config"),
                             line_status=rec.get("line_status"),
+                            read_write_groups=rec.get("read_write_groups") or None,
+                            read_only_groups=rec.get("read_only_groups") or None,
                         )
                         proxy = self.RemotePortProxy(self, peer_key, pname, metadata)
                         proxy.is_connected = bool(rec.get("connected", False))
@@ -2740,6 +2748,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 elif "state" in p:
                     status = p.get("state")
                 max_rw = p.get("max_read_write_users", p.get("max_rw_users", 1))
+                rw_groups = p.get("read_write_groups") or None
+                ro_groups = p.get("read_only_groups") or None
                 # Optional serial details for local serial or loopback ports
                 serial_cfg = None
                 line_status = None
@@ -2800,6 +2810,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         max_rw_users=max_rw,
                         serial_config=serial_cfg,
                         line_status=line_status,
+                        read_write_groups=rw_groups,
+                        read_only_groups=ro_groups,
                     )
                 )
 
@@ -4350,6 +4362,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 line_status = ls
         except Exception:
             line_status = None
+        rw_groups = pd.get("read_write_groups") or None
+        ro_groups = pd.get("read_only_groups") or None
 
         metadata = PortMetadata(
             name=name,
@@ -4363,6 +4377,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             federation_type=FederationType.PULL,
             serial_config=serial_cfg,
             line_status=line_status,
+            read_write_groups=rw_groups,
+            read_only_groups=ro_groups,
         )
 
         # Reuse existing proxy if present to preserve clients and sessions
@@ -4683,6 +4699,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.description = getattr(metadata, "description", f"Remote port {remote_port_name}")
             self.connected_clients: List[Dict[str, Any]] = []
             self.max_read_write_users: int = int(getattr(metadata, "max_rw_users", 5) or 5)
+            # Console-group access control (issue #24), propagated from the origin
+            # server's PortMetadata so ConsoleManager enforces the same ACL locally.
+            self.read_write_groups: List[str] = list(getattr(metadata, "read_write_groups", None) or [])
+            self.read_only_groups: List[str] = list(getattr(metadata, "read_only_groups", None) or [])
             self.state = PortState.ACTIVE
             # Offline cache support
             self.last_seen: float = time.time()
