@@ -163,6 +163,7 @@ await port.stop()
 | `description` | Human-readable label shown in the UI and status pages. |
 | `on_client_count_changed(count)` | Called by PM when the number of connected read-write clients changes. |
 | `adapter_type` | String identifying the adapter class. Surfaced in port listings. |
+| `scrollback_size` | `int` bytes of recent output to retain for client-requested scrollback replay; `0` (default) disables it. The `UnifiedPortWrapper` reads this attribute once at registration and owns the actual ring buffer (`_scrollback`) and replay (`get_scrollback()`) — a port only needs to read `scrollback_size` from its config in `__init__` and expose it; see `serial.py`, `command.py`, `loopback.py`, and `tcp_initiator.py` for the pattern. |
 
 ---
 

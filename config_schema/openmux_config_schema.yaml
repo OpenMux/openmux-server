@@ -149,6 +149,7 @@ properties:
         dtr: { type: boolean, default: true }
         rts: { type: boolean, default: true }
         max_read_write_users: { type: integer, minimum: 1, default: 1 }
+        scrollback_size: { type: integer, minimum: 0, default: 0 }
         read_write_groups:
           type: array
           items: { type: string }
@@ -167,6 +168,7 @@ properties:
         buffer_size: { type: integer, minimum: 1, default: 1024 }
         echo_delay: { type: number, minimum: 0, default: 0.0 }
         max_read_write_users: { type: integer, minimum: 1, default: 5 }
+        scrollback_size: { type: integer, minimum: 0, default: 0 }
         read_write_groups:
           type: array
           items: { type: string }
@@ -189,6 +191,7 @@ properties:
         max_read_write_users: { type: integer, minimum: 1, default: 1 }
         interactive: { type: boolean }
         always_buffer: { type: boolean }
+        scrollback_size: { type: integer, minimum: 0, default: 0 }
         read_write_groups:
           type: array
           items: { type: string }
@@ -235,6 +238,7 @@ properties:
             password: { type: string }
             remote_port: { type: string }
             api_key: { type: string }
+        scrollback_size: { type: integer, minimum: 0, default: 0 }
         read_write_groups:
           type: array
           items: { type: string }

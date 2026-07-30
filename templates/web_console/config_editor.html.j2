@@ -891,6 +891,7 @@
             echo_delay: 'Artificial echo delay in seconds.',
             sanitize_control: 'Replace non-printable control characters with visible placeholders (e.g., show ^C instead of raw control bytes); helps prevent terminal glitches when testing.',
             max_read_write_users: 'Max concurrent users for this loopback.',
+            scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.',
             read_write_groups: 'Console groups granted read-write access. Empty = open to all authenticated users.',
             read_only_groups: 'Console groups granted read-only access (never promoted to read-write). Empty = open to all authenticated users.'
           },
@@ -931,6 +932,7 @@
             protocol_password: 'Password for authentication. Leave blank if the server uses passwordless / PAM auth.',
             protocol_remote_port: 'Port name on the remote OpenMux server to connect to.',
             protocol_api_key: 'API key for OpenMux authentication (alternative to username + password).',
+            scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.',
             read_write_groups: 'Console groups granted read-write access. Empty = open to all authenticated users.',
             read_only_groups: 'Console groups granted read-only access (never promoted to read-write). Empty = open to all authenticated users.'
           },
@@ -1126,6 +1128,7 @@
             {key:'echo_delay', label:'Echo delay', type:'number', min:0, step:0.1},
             {key:'sanitize_control', label:'Sanitize control', type:'boolean'},
             {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
+            {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
             {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
             {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
           ])));
@@ -1168,6 +1171,7 @@
             {key:'protocol_password', label:'Password', type:'string', hiddenList:true},
             {key:'protocol_remote_port', label:'Remote port', type:'string', hiddenList:true},
             {key:'protocol_api_key', label:'API key', type:'string', hiddenList:true},
+            {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
             {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
             {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
           ])));

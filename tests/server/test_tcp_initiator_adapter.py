@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from openmux.server.adapters.tcp_initiator import TcpInitiatorAdapter, TcpInitiatorPort
+from openmux.server.port_manager import PortManager
 
 
 class FakeReader:
@@ -299,6 +300,7 @@ async def test_adapter_reconcile_ports(monkeypatch):
         _batch_timeout = 0.015
         enabled = True
         config: dict = {}
+        scrollback_size = 0
 
     adapter.ports["a"] = PortObj()  # type: ignore[assignment]
 
@@ -478,3 +480,38 @@ async def test_disconnect_when_idle_cancelled_by_new_user(monkeypatch):
     # Should still be connected because timer was cancelled
     assert port.is_connected is True
     await port.stop()
+
+
+@pytest.mark.asyncio
+async def test_scrollback_size_from_config_is_replayable():
+    """A tcp_initiator port with scrollback_size buffers inbound data for replay."""
+    pm = PortManager([])
+    adapter = TcpInitiatorAdapter(
+        "ti",
+        {"tcp_initiator_ports": [{"name": "p1", "host": "h", "port": 1, "scrollback_size": 32, "auto_reconnect": False}]},
+    )
+    adapter.main_port_manager = pm
+    port = TcpInitiatorPort(
+        "p1", {"host": "h", "port": 1, "scrollback_size": 32, "auto_reconnect": False}, adapter
+    )
+    adapter.ports["p1"] = port
+    assert await pm.register_unified_port("p1", port, adapter) is True
+
+    await adapter._handle_port_data("p1", b"hello")
+    assert pm.get_scrollback("p1") == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_scrollback_disabled_by_default():
+    """scrollback_size defaults to 0 (disabled) when not configured."""
+    pm = PortManager([])
+    adapter = TcpInitiatorAdapter(
+        "ti", {"tcp_initiator_ports": [{"name": "p1", "host": "h", "port": 1, "auto_reconnect": False}]}
+    )
+    adapter.main_port_manager = pm
+    port = TcpInitiatorPort("p1", {"host": "h", "port": 1, "auto_reconnect": False}, adapter)
+    adapter.ports["p1"] = port
+    assert await pm.register_unified_port("p1", port, adapter) is True
+
+    await adapter._handle_port_data("p1", b"hello")
+    assert pm.get_scrollback("p1") == b""

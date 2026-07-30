@@ -70,6 +70,8 @@ class TcpInitiatorPort:
         # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
         self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
         self.read_only_groups: List[str] = list(config.get("read_only_groups") or [])
+        # Scrollback replay buffer size in bytes; 0 = disabled. See docs/ADAPTER_PORT_CONTRACT.md.
+        self.scrollback_size: int = int(config.get("scrollback_size", 0))
 
         # Connect-on-demand: stay disconnected until a user actively opens the port
         self.connect_on_demand: bool = bool(config.get("connect_on_demand", False))
@@ -438,6 +440,10 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 return False
             if not item.get("port"):
                 return False
+            if "scrollback_size" in item:
+                sbs = item["scrollback_size"]
+                if not isinstance(sbs, int) or sbs < 0:
+                    return False
             # For compat sections (openmux_client_ports), inject protocol sub-key
             # before delegating to the handler's validate_config
             validate_item = (
@@ -647,6 +653,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 "disconnect_when_idle": bool(cfg.get("disconnect_when_idle", False)),
                 "idle_disconnect_delay": float(cfg.get("idle_disconnect_delay", 30.0)),
                 "protocol": protocol_cfg,
+                "scrollback_size": int(cfg.get("scrollback_size", 0)),
             }
 
         updated: List[str] = []
@@ -673,6 +680,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                         "disconnect_when_idle": getattr(port, "disconnect_when_idle", False),
                         "idle_disconnect_delay": getattr(port, "idle_disconnect_delay", 30.0),
                         "protocol": getattr(port, "config", {}).get("protocol", {}),
+                        "scrollback_size": getattr(port, "scrollback_size", None),
                     }
                 except Exception:
                     old_cfg = {}

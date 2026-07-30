@@ -77,6 +77,8 @@ class LoopbackPort:
         # Hints for port manager queue policy
         self.always_buffer = False
         self._queue_fallback_logged = False
+        # Scrollback replay buffer size in bytes; 0 = disabled. See docs/ADAPTER_PORT_CONTRACT.md.
+        self.scrollback_size: int = int(config.get("scrollback_size", 0))
 
     async def _emit_data(self, payload: bytes) -> None:
         """Send payload through data_callback.
@@ -407,6 +409,10 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                     sc = entry["sanitize_control"]
                     if not isinstance(sc, bool):
                         return False
+                if "scrollback_size" in entry:
+                    sbs = entry["scrollback_size"]
+                    if not isinstance(sbs, int) or sbs < 0:
+                        return False
                 # Unified-only: reject legacy synonyms
                 if "read_write_users" in entry or "read_write_users_max" in entry:
                     return False
@@ -617,6 +623,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "buffer_size": cfg.get("buffer_size", 1024),
                 "sanitize_control": bool(cfg.get("sanitize_control", True)),
                 "max_read_write_users": int(cfg.get("max_read_write_users", 5)),
+                "scrollback_size": int(cfg.get("scrollback_size", 0)),
             }
 
         updated: List[str] = []
@@ -630,6 +637,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                     "buffer_size": getattr(port, "buffer_size", None),
                     "sanitize_control": getattr(port, "sanitize_control", None),
                     "max_read_write_users": getattr(port, "max_read_write_users", None),
+                    "scrollback_size": getattr(port, "scrollback_size", None),
                 }
             except Exception:
                 old_cfg = {}

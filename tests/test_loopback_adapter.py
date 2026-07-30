@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from openmux.server.adapters.loopback import LoopbackAdapter, LoopbackPort
+from openmux.server.port_manager import PortManager
 
 
 class _PortManagerStub:
@@ -209,6 +210,7 @@ async def test_adapter_reconcile_ports_unchanged(monkeypatch):
         buffer_size = 1024
         sanitize_control = True
         max_read_write_users = 5
+        scrollback_size = 0
 
     adapter.ports["a"] = PortObj()  # type: ignore[assignment]
 
@@ -242,12 +244,14 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
         buffer_size = 1024
         sanitize_control = True
         max_read_write_users = 5
+        scrollback_size = 0
 
     class PortB:
         echo_delay = 0.0
         buffer_size = 512  # will be changed to 2048
         sanitize_control = True
         max_read_write_users = 5
+        scrollback_size = 0
 
     adapter.ports["a"] = PortA()  # type: ignore[assignment]
     adapter.ports["b"] = PortB()  # type: ignore[assignment]
@@ -277,3 +281,33 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
     assert "b" in destroyed
     assert "b" in created  # destroyed then recreated
     assert "c" in created
+
+
+@pytest.mark.asyncio
+async def test_scrollback_size_from_config_is_replayable():
+    """A loopback port with scrollback_size buffers echoed data for replay."""
+    pm = PortManager([])
+    adapter = LoopbackAdapter(
+        "loop", {"loopback_ports": [{"name": "p1", "scrollback_size": 32, "sanitize_control": False}]}
+    )
+    adapter.main_port_manager = pm
+    pm.set_unified_adapters([adapter])
+    assert await adapter.start() is True
+
+    await adapter.write_to_port("p1", b"hello")
+    assert pm.get_scrollback("p1") == b"hello"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_scrollback_disabled_by_default():
+    """scrollback_size defaults to 0 (disabled) when not configured."""
+    pm = PortManager([])
+    adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "p1", "sanitize_control": False}]})
+    adapter.main_port_manager = pm
+    pm.set_unified_adapters([adapter])
+    assert await adapter.start() is True
+
+    await adapter.write_to_port("p1", b"hello")
+    assert pm.get_scrollback("p1") == b""
+    await adapter.stop()
