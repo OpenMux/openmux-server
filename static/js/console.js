@@ -407,6 +407,8 @@ let splashShown = false; function showSplash() { if (splashShown) return; splash
     ' Welcome to the OpenMux Web Console',
     ' - Select a Console from the dropdown and click Connect',
     ' - URL params: ?port=<name>&autoconnect=1 (add &scrollback=0 to skip scrollback replay)',
+    ' - Add &embed=1 to start with the sidebar collapsed (for embedding in an iframe);',
+    '   use the sidebar toggle button in the top bar to bring it back',
     ' - Disconnect/Reconnect using the button on the right',
     '',]; for (const line of art) term.write(line + '\r\n'); fitTerminal(); }
 

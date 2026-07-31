@@ -410,8 +410,9 @@ async def handle_console(request: web.Request) -> web.Response:
         
         ports = adapter._get_ports_snapshot()
         current_port = request.query.get("port")
+        embed = request.query.get("embed", "").lower() in ("1", "true", "yes", "on")
 
-        body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
+        body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm, embed=embed)  # type: ignore[attr-defined]
     except Exception as exc:
         adapter.logger.error(f"Console render failed: {exc}")
         raise web.HTTPInternalServerError(text="Failed to render console page.\n")
@@ -1773,6 +1774,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         ports: Optional[list] = None,
         current_port: Optional[str] = None,
         user_permission: Optional[str] = None,
+        embed: bool = False,
     ) -> bytes:
         """Render the xterm-based console page using the Jinja2 'console.html.j2' template."""
         asset_error = getattr(self, "_asset_error", None)
@@ -1796,6 +1798,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             ports=ports or [],
             current_port=current_port,
             user_permission=user_permission,
+            embed=embed,
         )
         return html_text.encode("utf-8")
 

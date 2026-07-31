@@ -12,7 +12,7 @@
   <body class="{% block body_class %}{% endblock %}">
     {% set nav_ports = sidebar_ports if (sidebar_ports is defined and sidebar_ports) else ports %}
     <div class="app-layout">
-      <aside class="sidebar" id="sidebar">
+      <aside class="sidebar{% if embed %} collapsed{% endif %}" id="sidebar">
         <div class="sidebar-header">
           <div class="brand">
             {% if logo_url %}
