@@ -30,7 +30,9 @@ try { const ro = new ResizeObserver(() => fitTerminal()); ro.observe(document.ge
 
 const qs = new URLSearchParams(window.location.search);
 const bannerEl = document.getElementById('banner');
-const selectEl = document.getElementById('portSelect');
+const portDisplayName = document.getElementById('portDisplayName');
+const portDisplayDesc = document.getElementById('portDisplayDesc');
+const selectedPortName = (qs.get('port') || '').trim();
 const connectBtn = document.getElementById('connect');
 const logsBtn = document.getElementById('logsButton');
 let ws; let ports = []; let currentConnectedPort = null; let portIsUp = false;
@@ -39,24 +41,15 @@ let wsDownTimer = null;
 // Debounce timer to delay showing Port-down (yellow) banner to avoid flicker during quick switches
 let portDownTimer = null;
 
-function portLabel(p) {
-  const name = p.name || 'unknown';
-  const desc = p.description ? ` — ${p.description}` : '';
-  const origin = p.origin_server_id ? ` — ${p.origin_server_id}` : '';
-  const adapter = p.adapter || p.adapter_type || '';
-  const adapterTxt = adapter ? ` [${adapter}]` : '';
-  return `${name}${desc}${origin}${adapterTxt}`;
+function updatePortDisplay() {
+  if (!portDisplayName || !portDisplayDesc) return;
+  const p = ports.find(x => x.name === selectedPortName);
+  portDisplayName.textContent = selectedPortName || 'No console selected';
+  portDisplayDesc.textContent = (p && p.description) ? p.description : '';
 }
 function populatePorts(list) {
   ports = Array.isArray(list) ? list : [];
-  selectEl.innerHTML = '';
-  for (const p of ports) {
-    const opt = document.createElement('option');
-    opt.value = p.name; opt.textContent = portLabel(p);
-    selectEl.appendChild(opt);
-  }
-  const qp = qs.get('port');
-  if (qp && ports.find(p => p.name === qp)) selectEl.value = qp;
+  updatePortDisplay();
 }
 async function loadPorts() {
   try {
@@ -366,7 +359,7 @@ term.onData((data) => {
   try { ws && ws.send(data); } catch (e) {}
 });
 function isConnected() { return ws && ws.readyState === WebSocket.OPEN; }
-function currentPort() { return (selectEl.value || '').trim(); }
+function currentPort() { return selectedPortName; }
 function openLogsWindow() {
   const port = currentPort();
   if (!port) { alert('Select a port first.'); return; }
@@ -404,7 +397,7 @@ let splashShown = false; function showSplash() { if (splashShown) return; splash
     '  \x1b[0m',
     '',
     ' Welcome to the OpenMux Web Console',
-    ' - Select a Console from the dropdown and click Connect',
+    ' - Select a Console from the left menu and click Connect',
     ' - URL params: ?port=<name>',
     '   - Add &scrollback=0 to skip scrollback replay',
     '   - Add &embed=1 to start with the sidebar collapsed',
@@ -427,18 +420,6 @@ function updateSidebarHighlight(portName) {
   });
 }
 
-selectEl.addEventListener('change', () => {
-  const prev = currentConnectedPort;
-  const next = currentPort();
-  updateButton();
-  updateSidebarHighlight(next);
-  if (infoOverlay.style.display !== 'none') renderInfo(ports.find(x => x.name === next) || null);
-  // If currently connected and user selects a different port, auto-switch
-  if (isConnected() && next && next !== prev) {
-    abortSlowPaste('Switching port');
-    connectSelected();
-  }
-});
 function connectSelected() {
   const port = currentPort(); if (!port) { alert('Select a console'); return; }
   if (isConnected()) {
@@ -563,6 +544,7 @@ function connectSelected() {
           } else {
             ports.push(merged);
           }
+          if (currentPort() === msg.name) updatePortDisplay();
           // Track port-up/down for selected port
           if (currentPort() === msg.name) {
             portIsUp = !!merged.connected;
@@ -615,7 +597,7 @@ function _closeWsOnExit() {
 }
 window.addEventListener('beforeunload', _closeWsOnExit);
 window.addEventListener('pagehide', _closeWsOnExit);
-loadPorts().then(() => { const qpName = qs.get('port'); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; connectSelected(); } updateButton(); if (qpName) updateSidebarHighlight(qpName); if (!qpName) showSplash(); });
+loadPorts().then(() => { const qpName = selectedPortName; if (qpName) { connectSelected(); } updateButton(); if (qpName) updateSidebarHighlight(qpName); if (!qpName) showSplash(); });
 
 // Keyboard shortcut: Ctrl+] then 'r' to request read-write directly from Web UI
 window.addEventListener('keydown', (e) => {

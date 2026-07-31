@@ -94,8 +94,10 @@ header .extras { display: flex; gap: 8px; align-items: center; }
 /* Console toolbar specific layout */
 header.site .toolbar-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 header.site .toolbar-controls label { color: var(--text-muted); font-size: 12px; }
-header.site .toolbar-controls select#portSelect { min-width: 220px; max-width: 420px; }
 header.site .toolbar-controls #connect.btn { padding: 6px 12px; }
+header.site .port-display { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; margin-left: 8px; }
+header.site .port-display b { font-size: 14px; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+header.site .port-display .muted { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Header brand (logo + title) */
 header .brand { display: flex; align-items: center; gap: 8px; margin-right: 8px; }
 header .brand .logo-img { width: 20px; height: 20px; border-radius: 4px; object-fit: contain; background: var(--logo-bg); }

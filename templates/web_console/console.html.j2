@@ -14,10 +14,15 @@
 
 {% block page_title %}Console{% endblock %}
 
+{% block page_subtitle %}
+  <div id="portDisplay" class="port-display">
+    <b id="portDisplayName"></b>
+    <span id="portDisplayDesc" class="muted"></span>
+  </div>
+{% endblock %}
+
 {% block header_actions %}
   <div class="toolbar-controls">
-    <label for="portSelect">Port:</label>
-    <select id="portSelect" title="Select a port to connect"></select>
     <button class="btn" id="connect">Connect</button>
   </div>
   <div id="roIndicatorWrap" style="position:relative; display:none">

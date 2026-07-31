@@ -224,7 +224,9 @@ class PortManager:
                 """Return a status snapshot for this unified wrapper."""
                 status = {
                     "name": self.name,
-                    "description": self.description,
+                    # Read live so reconcile_ports' in-place description updates (soft reload)
+                    # are reflected without requiring the wrapper to be recreated.
+                    "description": getattr(self.unified_port, "description", self.description),
                     "adapter": self.adapter_type,
                     "state": (self.unified_port.state.value if hasattr(self.unified_port, "state") else "active"),
                     "is_running": self.is_running,
