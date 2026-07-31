@@ -353,7 +353,7 @@ async def _render_status_page(
             user_perm = adapter._get_effective_permission(username, request)
         except Exception:
             user_perm = None
-        current_port = request.query.get("port") or request.query.get("console")
+        current_port = request.query.get("port")
         sort_key, sort_dir, preserved_query = _extract_sort_params(request)
         status_payload = _assemble_status_payload(adapter, preloaded_ports=ports)
         status_payload["sidebar_ports"] = status_payload.get("ports", [])
@@ -374,7 +374,7 @@ async def handle_index(request: web.Request) -> web.Response:
     try:
         q = request.query_string or ""
         lq = q.lower()
-        if ("console=" in lq) or ("port=" in lq):
+        if "port=" in lq:
             base_path = adapter._effective_base_path(request)
             bp = base_path or ""
             location = f"{bp}/console" + (f"?{q}" if q else "")
@@ -409,7 +409,7 @@ async def handle_console(request: web.Request) -> web.Response:
             user_perm = None
         
         ports = adapter._get_ports_snapshot()
-        current_port = request.query.get("port") or request.query.get("console")
+        current_port = request.query.get("port")
 
         body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
     except Exception as exc:
@@ -434,7 +434,7 @@ async def handle_logs(request: web.Request) -> web.Response:
         ports = adapter._get_ports_snapshot()
         port_name = request.match_info.get("port_name")
         if not port_name:
-            port_name = request.rel_url.query.get("port") or request.rel_url.query.get("console")
+            port_name = request.rel_url.query.get("port")
         port_name = (port_name or "").strip()
         tail_param = request.rel_url.query.get("tail")
         tail = 200

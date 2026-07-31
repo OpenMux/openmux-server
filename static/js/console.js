@@ -55,7 +55,7 @@ function populatePorts(list) {
     opt.value = p.name; opt.textContent = portLabel(p);
     selectEl.appendChild(opt);
   }
-  const qp = qs.get('console') || qs.get('port');
+  const qp = qs.get('port');
   if (qp && ports.find(p => p.name === qp)) selectEl.value = qp;
 }
 async function loadPorts() {
@@ -406,7 +406,7 @@ let splashShown = false; function showSplash() { if (splashShown) return; splash
     '',
     ' Welcome to the OpenMux Web Console',
     ' - Select a Console from the dropdown and click Connect',
-    ' - URL params: ?console=<name>&autoconnect=1',
+    ' - URL params: ?port=<name>&autoconnect=1 (add &scrollback=0 to skip scrollback replay)',
     ' - Disconnect/Reconnect using the button on the right',
     '',]; for (const line of art) term.write(line + '\r\n'); fitTerminal(); }
 
@@ -613,7 +613,7 @@ function _closeWsOnExit() {
 }
 window.addEventListener('beforeunload', _closeWsOnExit);
 window.addEventListener('pagehide', _closeWsOnExit);
-loadPorts().then(() => { const qpName = qs.get('console') || qs.get('port'); const qpAuto = truthyParam(qs.get('autoconnect')); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; const legacyAuto = !!qs.get('port') && !qs.has('autoconnect'); if (qpAuto || legacyAuto) { connectSelected(); } } updateButton(); if (qpName) updateSidebarHighlight(qpName); const didAuto = (qpName && (qpAuto || (!!qs.get('port') && !qs.has('autoconnect')))); if (!didAuto) showSplash(); });
+loadPorts().then(() => { const qpName = qs.get('port'); const qpAuto = truthyParam(qs.get('autoconnect')); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; if (qpAuto) { connectSelected(); } } updateButton(); if (qpName) updateSidebarHighlight(qpName); if (!(qpName && qpAuto)) showSplash(); });
 
 // Keyboard shortcut: Ctrl+] then 'r' to request read-write directly from Web UI
 window.addEventListener('keydown', (e) => {

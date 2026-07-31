@@ -233,7 +233,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
             plugin_nav = adapter._get_allowed_plugin_nav(username, request=request) if hasattr(adapter, "_get_allowed_plugin_nav") else []
             
             ports = adapter._get_ports_snapshot() if hasattr(adapter, "_get_ports_snapshot") else []
-            current_port = request.query.get("port") or request.query.get("console")
+            current_port = request.query.get("port")
 
             # Attempt to load defaults from docs/DEFAULTS.md for UI hinting
             import json as _json
