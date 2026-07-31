@@ -34,7 +34,7 @@
             {% for item in plugin_nav %}
               {% set required = item.require %}
               {% if not required or required == user_permission %}
-                {% if item.path != '/plugins/config-editor' %}
+                {% if item.path != '/config-editor' %}
                   <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="{{ base_path }}{{ item.path }}">
                     <span class="icon">🔌</span> {{ item.title }}
                   </a>
@@ -64,7 +64,7 @@
         <!-- Config editor: pinned above footer, admin-only, expands upward -->
         {% if plugin_nav and plugin_nav|length > 0 %}
           {% for item in plugin_nav %}
-            {% if item.path == '/plugins/config-editor' %}
+            {% if item.path == '/config-editor' %}
               {% set required = item.require %}
               {% if not required or required == user_permission %}
                 <div class="sidebar-config-area">

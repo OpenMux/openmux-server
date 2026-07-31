@@ -168,7 +168,9 @@ class PluginRegistry:
             """Attempt import and register plugin if successful.
 
             Args:
-                module_name: Module within this package containing the class.
+                module_name: Module within this package containing the class,
+                    or a fully-qualified dotted path (e.g. starting with
+                    "openmux.") for adapters that live outside this package.
                 class_name: Adapter class name to import.
                 display_name: Human-friendly adapter label.
                 config_section: Config section key mapping to this plugin.
@@ -177,8 +179,9 @@ class PluginRegistry:
                 On failure logs a warning and records import error; continues
                 without raising to allow partial adapter availability.
             """
+            full_module_name = module_name if module_name.startswith("openmux.") else f"{__package__}.{module_name}"
             try:
-                module = __import__(f"{__package__}.{module_name}", fromlist=[class_name])  # type: ignore
+                module = __import__(full_module_name, fromlist=[class_name])  # type: ignore
                 adapter_cls = getattr(module, class_name)
             except Exception as e:  # pragma: no cover (import failure path)
                 msg = f"{e.__class__.__name__}: {e}"
@@ -201,7 +204,9 @@ class PluginRegistry:
             ("client_listener", "TcpServerAdapter", "Client Listener", "client_listener"),
             ("telnet_listener", "TelnetListenerAdapter", "Telnet Listener", "telnet_listener"),
             ("ssh_listener", "SshListenerAdapter", "SSH Listener", "ssh_listener"),
-            ("web_console", "WebConsoleAdapter", "Web Console", "web_console"),
+            # WebConsole is a core, integrated component, not a peripheral port adapter -
+            # it lives at openmux.server.web_console rather than under this package.
+            ("openmux.server.web_console", "WebConsoleAdapter", "Web Console", "web_console"),
             ("muxcon", "UnifiedMuxConAdapter", "MuxCon Federation", "muxcon"),
             ("web_status", "WebStatusAdapter", "Web Status", "web_status"),
             # openmux_client_ports is a compat alias handled by TcpInitiatorAdapter

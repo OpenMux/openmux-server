@@ -45,7 +45,7 @@ try:  # Prefer importlib.metadata (std lib)
 except Exception:  # pragma: no cover
     _dist_version = None  # type: ignore
 
-from .base_adapter import AdapterCapability, BaseGenericAdapter
+from openmux.server.adapters.base_adapter import AdapterCapability, BaseGenericAdapter
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-9;?]*[ -/]*[@-~]")
 

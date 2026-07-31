@@ -1167,8 +1167,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         return out;
       }
 
-async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/plugins/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); if('writable_sections' in j || 'writable_enforced' in j){ setWritableMetadata(j.writable_sections||[], j.writable_enforced); } markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
-async function validateOnly(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Validation failed'); return; } try{ const r=await fetch(withBase('/plugins/config-editor/validate'),{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Validation OK'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Validation failed'); } }catch(e){ setStatus(false,String(e)); } }
+async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); if('writable_sections' in j || 'writable_enforced' in j){ setWritableMetadata(j.writable_sections||[], j.writable_enforced); } markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
+async function validateOnly(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Validation failed'); return; } try{ const r=await fetch(withBase('/config-editor/validate'),{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Validation OK'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Validation failed'); } }catch(e){ setStatus(false,String(e)); } }
 async function refreshSidebarPorts() {
   try {
     // Small delay to let the server finish port reconciliation before querying
@@ -1204,7 +1204,7 @@ async function saveConfig(){
   catch(e){ setStatus(false, e.message||'Save failed'); return; }
   try{
     const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf;
-    const r=await fetch(withBase('/plugins/config-editor/apply'),{method:'POST', headers, body: JSON.stringify(payload)});
+    const r=await fetch(withBase('/config-editor/apply'),{method:'POST', headers, body: JSON.stringify(payload)});
     const j=await r.json();
     if(r.ok && j.ok){
       markClean();
@@ -1254,7 +1254,7 @@ function setReloadStatus(ok, msgOrObj){
 async function requestReload(kind){
   try{
     const headers={'Content-Type':'application/json'}; if(csrf) headers['X-OMX-CSRF']=csrf;
-    const url = kind==='soft' ? '/plugins/config-editor/reload/soft' : '/plugins/config-editor/reload/full';
+    const url = kind==='soft' ? '/config-editor/reload/soft' : '/config-editor/reload/full';
     const r = await fetch(withBase(url), { method:'POST', headers, credentials: 'same-origin' });
     const ct = (r.headers && r.headers.get('content-type')) || '';
     if (r.redirected || (r.url && r.url.indexOf('/login') !== -1) || (ct && ct.indexOf('application/json') === -1)){

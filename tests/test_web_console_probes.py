@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from aiohttp import ClientSession, TCPConnector, WSMsgType
 
-from openmux.server.adapters.web_console import WebConsoleAdapter
+from openmux.server.web_console import WebConsoleAdapter
 from openmux.server.auth_manager import AuthManager
 from openmux.server.console_manager import ConsoleManager
 from openmux.server.port_manager import PortManager

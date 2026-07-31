@@ -63,7 +63,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 
 | Term | Meaning | Do not use |
 |---|---|---|
-| Config Editor | The web console plugin at `/plugins/config-editor` that edits `server.yaml` sections. | config UI, settings page |
+| Config Editor | The web console plugin at `/config-editor` that edits `server.yaml` sections. | config UI, settings page |
 | View | One sub-page of the Config Editor, selected with the `?view=` query parameter (for example `ports`, `muxcon`). | tab, panel (for the top-level sub-page) |
 | Writable section | A config section the current user is allowed to save, per `security.yaml`. | editable section |
 | Soft reload | A reload that reconciles adapters and ports without a full restart (SIGHUP). | hot reload |

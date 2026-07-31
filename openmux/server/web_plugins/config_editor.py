@@ -637,7 +637,7 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
 
 
 def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    base = "/plugins/config-editor"
+    base = "/config-editor"
     app.router.add_get(base, _handle_view)
     app.router.add_get(base + "/data", _handle_data)
     app.router.add_get(base + "/schema", _handle_schema)

@@ -98,6 +98,10 @@ class OpenMuxServer:
 
         self.unified_adapter_factory = GenericAdapterFactory(security_policy=self.security_policy)
         self.unified_adapters = []
+        # First-class handle to the WebConsole adapter (if configured), kept in sync
+        # alongside self.unified_adapters. Used instead of adapter-type string
+        # matching to identify "the" web console for its self-restart handling.
+        self.web_console: Optional[Any] = None
 
         # Server state
         self.is_running = False
@@ -108,6 +112,17 @@ class OpenMuxServer:
         self._control_socket_path = None
 
         # Legacy connection adapter configuration removed; unified adapters handle connections where applicable
+
+    @staticmethod
+    def _find_web_console(adapters: List[Any]) -> Optional[Any]:
+        """Return the WebConsole adapter instance among `adapters`, if any."""
+        for adapter in adapters or []:
+            try:
+                if str(adapter.get_adapter_type() or "").strip().lower() == "webconsole":
+                    return adapter
+            except Exception:
+                continue
+        return None
 
     def _refresh_security_policy(self) -> None:
         is_initial_load = self.security_policy is None
@@ -185,6 +200,7 @@ class OpenMuxServer:
 
             # Create unified adapters from configuration
             self.unified_adapters = self.unified_adapter_factory.create_adapters_from_config(full_config)
+            self.web_console = self._find_web_console(self.unified_adapters)
 
             if self.unified_adapters:
                 self.logger.info(f"Created {len(self.unified_adapters)} unified adapters")
@@ -576,7 +592,7 @@ class OpenMuxServer:
                 endpoints_lines: list[str] = []
                 atype_l = adapter_type.lower()
 
-                if atype_l in ("webconsole", "web_console", "web-console"):
+                if adapter is self.web_console:
                     host = details.get("host")
                     port = details.get("port")
                     tls = bool(details.get("tls"))
@@ -983,8 +999,7 @@ class OpenMuxServer:
                     atype = adapter.get_adapter_type()
                     # Avoid self-stop deadlock: if the reload was triggered from the web console itself,
                     # defer stopping that web console instance until after we return the HTTP response.
-                    atype_l = str(atype).lower()
-                    if origin == "config-editor" and str(ctx.get("web_adapter_name") or "") == aname and atype_l in ("webconsole", "web_console", "web-console"):
+                    if origin == "config-editor" and str(ctx.get("web_adapter_name") or "") == aname and adapter is self.web_console:
                         self.logger.warning(f"[reload-full:{req_id}] Deferring stop of self-hosted WebConsole '{aname}' to avoid in-request shutdown")
                         deferred_old_wc = adapter
                         # Do not count as stopped here; will stop later
@@ -1021,6 +1036,9 @@ class OpenMuxServer:
                 pass
             # Clear adapter list and detach from port manager
             self.unified_adapters = []
+            # Note: deliberately not clearing self.web_console here - if its stop was
+            # deferred (deferred_old_wc), it is still running until the deferred task
+            # completes; it gets reassigned below once adapters are recreated.
             try:
                 self.port_manager.set_unified_adapters([])
             except Exception:
@@ -1037,6 +1055,9 @@ class OpenMuxServer:
             except Exception as e:
                 self.logger.error(f"Full reload: config load failed: {e}")
                 summary["errors"].append({"phase": "load_config", "error": str(e)})
+                # deferred_old_wc (if set) is still alive; otherwise the old WebConsole
+                # was already stopped above, so there is no current instance to track.
+                self.web_console = deferred_old_wc
                 return summary
 
             full_config = self.config_manager.config or {}
@@ -1044,23 +1065,21 @@ class OpenMuxServer:
             # Recreate adapters
             try:
                 self.unified_adapters = self.unified_adapter_factory.create_adapters_from_config(full_config)
+                self.web_console = self._find_web_console(self.unified_adapters)
+                deferred_new_wc = self.web_console
                 try:
                     self.logger.info(f"[reload-full:{req_id}] Created {len(self.unified_adapters)} unified adapters")
                     for a in self.unified_adapters:
                         atype = a.get_adapter_type()
                         summary["created_adapters"].append({"name": getattr(a, "name", "?"), "type": atype})
                         self.logger.debug(f"[reload-full:{req_id}] Created: {getattr(a, 'name', '?')} ({atype})")
-                        try:
-                            if atype.lower() in ("webconsole", "web_console", "web-console"):
-                                deferred_new_wc = a
-                        except Exception:
-                            pass
                 except Exception:
                     pass
             except Exception as e:
                 self.logger.error(f"Full reload: adapter creation failed: {e}", exc_info=True)
                 summary["errors"].append({"phase": "create_adapters", "error": str(e)})
                 self.unified_adapters = []
+                self.web_console = deferred_old_wc
                 return summary
 
             # Reattach to port manager

@@ -145,7 +145,7 @@ web_status (runtime defaults from openmux/server/adapters/web_status.py)
 - cors_enable: true
 - enable_fault_injection: false
 
-web_console (runtime defaults from openmux/server/adapters/web_console.py)
+web_console (runtime defaults from openmux/server/web_console.py)
 - host: 0.0.0.0
 - port: 8081
 - ssl_port: 8443
