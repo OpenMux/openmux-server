@@ -393,7 +393,6 @@ function hideBanner() {
   document.body.classList.remove('port-down');
 }
 function updateButton() { if (isConnected()) connectBtn.textContent = 'Disconnect'; else if (currentConnectedPort && currentPort() === currentConnectedPort) connectBtn.textContent = 'Reconnect'; else connectBtn.textContent = 'Connect'; }
-function truthyParam(val) { if (!val) return false; const v = String(val).toLowerCase(); return v === '1' || v === 'true' || v === 'yes' || v === 'on'; }
 let splashShown = false; function showSplash() { if (splashShown) return; splashShown = true; const art = [
     '\x1b[36m',
     '    ___                   __  __               ____                      _      ',
@@ -406,9 +405,10 @@ let splashShown = false; function showSplash() { if (splashShown) return; splash
     '',
     ' Welcome to the OpenMux Web Console',
     ' - Select a Console from the dropdown and click Connect',
-    ' - URL params: ?port=<name>&autoconnect=1 (add &scrollback=0 to skip scrollback replay)',
-    ' - Add &embed=1 to start with the sidebar collapsed (for embedding in an iframe);',
-    '   use the sidebar toggle button in the top bar to bring it back',
+    ' - URL params: ?port=<name>',
+    '   - Add &scrollback=0 to skip scrollback replay',
+    '   - Add &embed=1 to start with the sidebar collapsed',
+    '     use the sidebar toggle button in the top bar to bring it back',
     ' - Disconnect/Reconnect using the button on the right',
     '',]; for (const line of art) term.write(line + '\r\n'); fitTerminal(); }
 
@@ -615,7 +615,7 @@ function _closeWsOnExit() {
 }
 window.addEventListener('beforeunload', _closeWsOnExit);
 window.addEventListener('pagehide', _closeWsOnExit);
-loadPorts().then(() => { const qpName = qs.get('port'); const qpAuto = truthyParam(qs.get('autoconnect')); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; if (qpAuto) { connectSelected(); } } updateButton(); if (qpName) updateSidebarHighlight(qpName); if (!(qpName && qpAuto)) showSplash(); });
+loadPorts().then(() => { const qpName = qs.get('port'); if (qpName) { if (!ports.find(p => p.name === qpName)) { const opt = document.createElement('option'); opt.value = qpName; opt.textContent = qpName; selectEl.appendChild(opt); } selectEl.value = qpName; connectSelected(); } updateButton(); if (qpName) updateSidebarHighlight(qpName); if (!qpName) showSplash(); });
 
 // Keyboard shortcut: Ctrl+] then 'r' to request read-write directly from Web UI
 window.addEventListener('keydown', (e) => {
