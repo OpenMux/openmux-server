@@ -18,7 +18,7 @@ Provide a lightweight listener that exposes selected OpenMux ports over simple T
 - **Control Menu (Ctrl+E,c)**: Any session can press Ctrl+E then `c` to open an in-band control menu, matching the CLI client's own escape sequence. Commands: `a` request read-write, `f` force-take read-write (demotes other holders), `s` release read-write (switch to read-only), `w` show who holds read-write, `i` show session info, `v` show server version, `e` change this session's escape sequence, `.` disconnect, `?` show the menu. On a `read_only: true` listener, `a` and `f` are rejected with a clear message; `w`/`i`/`v`/`?` still work. A force-take on another adapter type (TCP CLI, web console) also notifies this session with `[Your read-write access was taken by another user]`.
 - **Minimal Telnet Handling**: Treat the socket as raw TCP. Do not emit Telnet negotiations; echoed data is controlled by the underlying port.
 - **Failure Messaging**: On ACL failure, missing target, or ambiguity, send a short banner (e.g., `Port console1 unavailable`) and close the socket.
-- **Config Editor Integration**: `telnet_listener` is a first-class section that can be modified in the Config Editor UI, subject to `config_editor.writable_sections`.
+- **Config Editor Integration**: `telnet_listener` is a first-class section that can be modified in the Config Editor UI, subject to the resolved `config_editor` writable-section set.
 
 ### Example Configuration
 ```yaml
@@ -71,9 +71,7 @@ telnet_listener:
 7. On either side closing, send summary banner (optional) and close the other side.
 
 ### 3. Config & Security Wiring
-- Update `security.yaml` defaults:
-  - Add `openmux.server.adapters.telnet_listener` to `allowed_modules`.
-  - Add `telnet_listener` to `allowed_adapter_types` and `telnet_listener` section to canonical allow-lists.
+- Update `security.yaml`'s known-name lists in `security_policy.py`: add `telnetlistener` to the known adapter types, and `telnet_listener` to the known config_editor sections (both already covered by the default `allowed: ["*"]`).
 - Extend `ConfigManager` parser and schema checks to accept `telnet_listener` alongside other listener sections.
 - Add `telnet_listener` to the Config Editor metadata so fields can be edited (with validation for IP/CIDR, port range, etc.).
 - Document that security enforcement is ACL-only; highlight lack of OpenMux auth in README/docs.

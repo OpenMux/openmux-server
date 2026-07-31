@@ -17,6 +17,7 @@ from .auth_manager import AuthManager
 from .config_manager import ConfigManager
 from .console_manager import ConsoleManager
 from .port_manager import PortManager
+from .security_policy import SecurityPolicyError
 
 
 class OpenMuxServer:
@@ -109,8 +110,18 @@ class OpenMuxServer:
         # Legacy connection adapter configuration removed; unified adapters handle connections where applicable
 
     def _refresh_security_policy(self) -> None:
+        is_initial_load = self.security_policy is None
         try:
             policy = self.config_manager.get_security_policy()
+        except SecurityPolicyError as exc:
+            if is_initial_load:
+                self.logger.error("Invalid security.yaml; refusing to start: %s", exc)
+                raise
+            self.logger.error(
+                "Invalid security.yaml on reload; keeping the last-known-good security " "policy in effect: %s",
+                exc,
+            )
+            return
         except Exception as exc:
             self.logger.warning("Failed to load security policy: %s", exc)
             return

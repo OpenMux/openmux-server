@@ -1,75 +1,51 @@
 # Security policy for OpenMux server components.
-# - Controls which adapter modules/types may be instantiated.
-# - Defines which sections the Config Editor can modify.
-# - Provides authentication rate-limit tuning.
+#
+# This file controls two things:
+#   1. Which adapter types the server is allowed to instantiate (`adapters`).
+#   2. Which top-level `server.yaml` sections the Web Config Editor is
+#      allowed to write (`config_editor`).
+# It also carries authentication rate-limit tuning (`rate_limits`).
+#
+# Both `adapters` and `config_editor` use the same two-key mini-schema:
+#
+#   allowed:  ["*"]   # names to permit, or "*" for "all known names"
+#   disabled: []      # names to subtract from `allowed`; always wins on overlap
+#
+# The effective set is always `allowed - disabled` (plain set difference).
+# Omitting `allowed` defaults to `["*"]`; omitting `disabled` defaults to `[]`.
+# There is no other special case - for example, a fully read-only Config
+# Editor is simply `{allowed: ["*"], disabled: ["*"]}`, and blocking one
+# adapter type while keeping the rest open is `{allowed: ["*"], disabled:
+# ["telnet_listener"]}`.
+#
+# An unknown/misspelled key, or an unknown value inside `allowed`/`disabled`,
+# is a hard error: the server refuses to start with an invalid security.yaml,
+# and refuses a hot-reload (SIGHUP/SIGUSR1) that would introduce one - the
+# last-known-good policy stays in effect and the error is logged.
+#
+# Known adapter type names (case-insensitive; "_"/"-"/space are ignored):
+#   loopback, tcp_initiator, serial, command, client_listener, web_console,
+#   muxcon, web_status, openmux_client, telnet_listener, ssh_listener
+#
+# Known config_editor section names (case-insensitive; match server.yaml
+# top-level keys exactly):
+#   server, authentication, logging, loopback_ports, serial_ports,
+#   command_ports, tcp_initiator_ports, openmux_client_ports,
+#   client_listener, telnet_listener, ssh_listener, muxcon, web_console,
+#   web_status
 
 adapters:
-  block_unlisted: true
-  allowed_modules:
-    - openmux.server.adapters.loopback
-    - openmux.server.adapters.tcp_initiator
-    - openmux.server.adapters.serial
-    - openmux.server.adapters.command
-    - openmux.server.adapters.client_listener
-    - openmux.server.adapters.web_console
-    - openmux.server.adapters.muxcon
-    - openmux.server.adapters.web_status
-    - openmux.server.adapters.telnet_listener
-  allowed_adapter_types:
-    - loopback
-    - tcp_initiator
-    - serial
-    - command
-    - client_listener
-    - web_console
-    - muxcon
-    - web_status
-    - openmux_client
-    - telnet_listener
+  allowed:
+    - "*"
+  disabled: []
 
 config_editor:
-  # Writable section keys control which top-level config blocks the Web Config Editor
-  # is allowed to mutate. Available values (matching the YAML structure) are:
-  #   server               - Server identity/metadata.
-  #   authentication       - User accounts, API keys, and PAM options.
-  #   logging              - Log files, console logging, rotation limits.
-  #   loopback_ports       - Loopback adapter definitions.
-  #   serial_ports         - Serial/TTY adapter definitions.
-  #   command_ports        - Command adapter entries (process-backed ports).
-  #   tcp_initiator_ports  - Outbound TCP initiator adapter entries.
-  #   openmux_client_ports - Remote OpenMux client adapter entries.
-  #   client_listener      - Primary client listener settings.
-  #   telnet_listener      - Telnet listener bridges.
-  #   muxcon               - Federation (MuxCon) settings.
-  #   web_console          - Web console listener + UI behavior.
-  #   web_status           - Status API listener.
-  writable_sections:
-    - server
-    - authentication
-    - logging
-    - loopback_ports
-    - serial_ports
-    - command_ports
-    - tcp_initiator_ports
-    - openmux_client_ports
-    - client_listener
-    - telnet_listener
-    - muxcon
-    - web_console
-    - web_status
+  allowed:
+    - "*"
+  disabled: []
 
 rate_limits:
   authentication:
     window_seconds: 300
     failure_threshold: 5
     base_lock_seconds: 30
-
-command_adapter:
-  drop_privileges:
-    # When the server runs as root, command adapter subprocesses can shed
-    # privileges before exec. Specify the target user/group here.
-    user: openmux
-    group: openmux
-    supplementary_groups:
-      - dialout
-    umask: 0o077

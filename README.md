@@ -274,50 +274,38 @@ pam:
 
 ### Security Policy (`config/security.yaml`)
 
-The security sidecar enforces which adapters may run, which modules may be imported, and which Config Editor sections are writable. A minimal example:
+The security sidecar controls which adapter types may run and which Config
+Editor sections are writable. Both `adapters` and `config_editor` share the
+same `allowed`/`disabled` mini-schema:
 
 ```yaml
 adapters:
-  block_unlisted: true
-  allowed_modules:
-    - openmux.server.adapters.serial
-    - openmux.server.adapters.loopback
-    - openmux.server.adapters.command
-    - openmux.server.adapters.tcp_initiator
-  allowed_adapter_types:
-    - serial
-    - loopback
-    - command
-    - tcp_initiator
+  allowed:
+    - "*"       # or a list of adapter type names, e.g. [serial, loopback, command]
+  disabled: []  # subtracted from `allowed`; always wins on overlap
 
 config_editor:
-  writable_sections:
-    - server
-    - logging
-    - serial_ports
+  allowed:
+    - "*"
+  disabled: []
+
+rate_limits:
+  authentication:
+    window_seconds: 300
+    failure_threshold: 5
+    base_lock_seconds: 30
 ```
 
-Any adapter whose module or type is not listed is rejected before it can start. Leaving `config_editor.writable_sections` empty makes the UI read-only; omitting the block entirely keeps legacy behavior (all sections editable).
+The effective set is always `allowed - disabled`, where `"*"` means "every
+known name for that block". Omitting `allowed` defaults to `["*"]`; omitting
+`disabled` defaults to `[]`. A fully read-only Config Editor is simply
+`{allowed: ["*"], disabled: ["*"]}`; blocking one adapter type while keeping
+the rest open is `{allowed: ["*"], disabled: [telnet_listener]}`.
 
-#### Command Adapter Privilege Drop
-When the OpenMux server runs as root, the command adapter can optionally drop
-to an unprivileged user before executing subprocesses. Configure the target
-identity in `config/security.yaml`:
-
-```yaml
-command_adapter:
-  drop_privileges:
-    user: openmux
-    group: openmux
-    supplementary_groups:
-      - dialout
-    umask: 0o077
-```
-
-The drop only occurs when a privileged server (euid 0) launches the adapter.
-If the server already runs as a non-root user, the command adapter logs that
-it skipped the drop and continues normally. Supplementary groups and umask are
-optional; omit them to keep the defaults.
+An unknown/misspelled key, or an unknown value inside `allowed`/`disabled`,
+is a hard error: the server refuses to start with an invalid `security.yaml`,
+and a hot-reload (SIGHUP/SIGUSR1) that would introduce one is rejected - the
+last-known-good policy stays in effect and the error is logged loudly.
 
 #### Adapter Fail-Fast (Default-On)
 The server aborts startup (exit code 2) if a top-level adapter-like section is present

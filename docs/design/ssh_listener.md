@@ -48,8 +48,8 @@ instead of a plaintext socket.
   self-signed TLS cert autogeneration). Generated once on first start and
   reused afterward.
 - **Config Editor Integration**: `ssh_listener` is a first-class section
-  editable in the Config Editor UI, subject to
-  `config_editor.writable_sections`.
+  editable in the Config Editor UI, subject to the resolved `config_editor`
+  writable-section set.
 
 ### Example Configuration
 ```yaml
@@ -84,9 +84,9 @@ A client picks a port either interactively (`ssh alice@host -p 2023`, then
   public-key lookups (SSH-specific; `telnet_listener` doesn't need this
   since it only does password auth).
 - Wired into `factory.py` (`built_ins`), `main.py` (soft-reload bootstrap +
-  reconcile), and `config/security.yaml` (`allowed_modules`,
-  `allowed_adapter_types`, `config_editor.writable_sections`), same pattern
-  as `telnet_listener`.
+  reconcile), and the known-name lists in `security_policy.py` (adapter type
+  `sshlistener`, config_editor section `ssh_listener`), same pattern as
+  `telnet_listener`.
 
 ## Testing
 - `tests/server/test_ssh_listener_adapter.py` covers `validate_config`,

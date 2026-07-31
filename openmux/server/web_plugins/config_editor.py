@@ -53,11 +53,17 @@ def _find_config_manager(adapter) -> Optional[ConfigManager]:
 
 
 def _get_writable_metadata(cm: Optional[ConfigManager]) -> Tuple[List[str], bool]:
+    """Return (writable_sections, enforced) for the Config Editor UI.
+
+    Enforcement is unconditional under the current security policy; the
+    boolean is always True when a policy could be loaded, and kept only for
+    backward compatibility with the existing UI/JSON contract.
+    """
     if not cm:
         return [], False
     try:
         policy = cm.get_security_policy()
-        return sorted(policy.get_writable_sections()), policy.is_config_editor_enforced()
+        return sorted(policy.get_writable_sections()), True
     except Exception:
         return [], False
 
@@ -196,8 +202,6 @@ def _enforce_writable_sections(cm: ConfigManager, payload: Dict[str, Any]) -> Se
     try:
         policy = cm.get_security_policy()
     except Exception:
-        return set()
-    if not policy.is_config_editor_enforced():
         return set()
     current_cfg = cm.config or cm.load_config() or {}
     modified = _detect_modified_sections(current_cfg, payload)

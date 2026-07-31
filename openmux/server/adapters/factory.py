@@ -429,11 +429,7 @@ class GenericAdapterFactory:
         plugin: AdapterPlugin,
         adapter_type: Optional[str],
     ) -> bool:
-        module_name = getattr(plugin.adapter_class, "__module__", None)
-        return policy.is_adapter_allowed(
-            module_name=module_name,
-            adapter_type=(adapter_type or plugin.config_section),
-        )
+        return policy.is_adapter_allowed(adapter_type=(adapter_type or plugin.config_section))
 
     def _create_adapter_instances(self, plugin: AdapterPlugin, plugin_config: Any) -> List[BaseGenericAdapter]:
         """Create one or more adapter instances for a plugin.

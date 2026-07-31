@@ -34,9 +34,9 @@ Add (and maintain) a test that:
 The primary config (`server.yaml`) may reference two sidecar files: `authentication.yaml` and `security.yaml`.
 
 - `authentication.yaml` contains only the `authentication` mapping (users, API keys, public keys, external_auth). When externalized, `server.yaml` MUST omit inline credentials, and ConfigManager MUST keep the merged runtime view consistent for consumers.
-- `security.yaml` defines the adapter allow-list (`allowed_modules`, `allowed_adapter_types`), `config_editor.writable_sections`, authentication rate-limit overrides, and (optionally) the drop-to-user policy for the Command adapter. `block_unlisted` defaults to true; disabling it must be an explicit, documented choice.
+- `security.yaml` defines the adapter allow-list and the Config Editor allow-list under the shared `adapters.allowed`/`adapters.disabled` and `config_editor.allowed`/`config_editor.disabled` mini-schema (effective set is always `allowed - disabled`; `"*"` means "all known names"), plus authentication rate-limit overrides. Unknown keys or unknown allow/disable values are a hard error - the server refuses to start, and refuses a hot-reload that would introduce one, keeping the last-known-good policy in effect.
 - CLI flags `-a/--auth-config` and `-s/--security-config` MUST remain available so deployments can relocate sidecars. Defaults derive from the directory containing `server.yaml`.
-- Config Editor and hot-reload operations MUST honor `config_editor.writable_sections`. Empty list => read-only UI; absence of the block => legacy editable behavior.
+- Config Editor and hot-reload operations MUST honor the resolved `config_editor` writable-section set (`allowed - disabled`). An empty resolved set means the UI is fully read-only.
 - The Config Editor MUST NOT send stored secrets (user `password_hash`, `api_keys[].key`, and initiator `password`/`api_key` fields) to the browser. It returns a mask sentinel instead and restores the stored value on save unless the admin submits a new value.
 
 Any future sidecar files (e.g., secrets) require expanding this section with invariants before implementation.

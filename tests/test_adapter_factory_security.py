@@ -43,15 +43,10 @@ def dummy_registry():
 
 
 def _policy(allowed_types):
-    module_name = DummyAdapter.__module__
-    return SecurityPolicy.from_mapping(
-        {
-            "adapters": {
-                "allowed_modules": [module_name],
-                "allowed_adapter_types": allowed_types,
-            }
-        }
-    )
+    # Built directly (not via from_mapping) since "dummy" is a test-only
+    # adapter type that isn't in the real, fixed known-adapter-type universe
+    # that from_mapping() validates against.
+    return SecurityPolicy(allowed_adapter_types=set(allowed_types))
 
 
 def test_factory_creates_adapter_when_policy_allows(dummy_registry):
