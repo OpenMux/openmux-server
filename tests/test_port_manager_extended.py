@@ -151,6 +151,16 @@ async def test_unified_wrapper_and_queueing():
     got = dq.get_nowait()
     assert got == b"Y"
 
+    # dropped_chunks starts at zero and is surfaced via get_status()
+    assert wrapper.get_status()["dropped_chunks"] == 0
+
+    # Overflowing a per-client queue evicts the oldest chunk and increments the counter
+    wrapper.client_queues["c1"] = asyncio.Queue(maxsize=1)
+    await wrapper.client_queues["c1"].put(b"old")
+    assert await pm.send_data("u1", b"new") is True
+    assert wrapper.client_queues["c1"].get_nowait() == b"new"
+    assert wrapper.get_status()["dropped_chunks"] == 1
+
     # Unregister unified port
     assert await pm.unregister_unified_port("u1") is True
 
@@ -309,6 +319,8 @@ async def test_force_enqueue_and_drop_oldest(monkeypatch):
     first = port.data_queue.get_nowait()
     second = port.data_queue.get_nowait()
     assert first == b"2" and second == b"3"
+    # Drop-oldest eviction is counted (surfaced via UnifiedPortWrapper.get_status())
+    assert port.dropped_chunks == 1
 
 
 @pytest.mark.asyncio

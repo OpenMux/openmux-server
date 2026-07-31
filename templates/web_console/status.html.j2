@@ -56,6 +56,9 @@
         {% if p.server_chain and p.server_chain|length > 0 %}
           <tr><th>Chain</th><td class="muted">{{ p.server_chain|join(' → ') }}</td></tr>
         {% endif %}
+        {% if p.dropped_chunks %}
+          <tr><th>Dropped chunks</th><td><span class="tag tiny bad">{{ p.dropped_chunks }}</span></td></tr>
+        {% endif %}
         {% if (not conn) and lseen %}
           <tr><th>Last seen</th><td>{{ lseen | fmt_ts }}</td></tr>
         {% endif %}

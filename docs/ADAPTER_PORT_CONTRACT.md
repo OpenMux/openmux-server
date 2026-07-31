@@ -106,7 +106,7 @@ else:
 ```
 
 `data_callback` is `pm.send_data`, which applies per-port
-policies (client presence, `always_buffer`, `drop_oldest_on_full`, DataLogger
+policies (client presence, `always_buffer`, drop-oldest-on-full, DataLogger
 recording) before placing data in the wrapper's internal queue for client
 delivery.
 

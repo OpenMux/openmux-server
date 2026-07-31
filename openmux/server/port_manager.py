@@ -211,6 +211,8 @@ class PortManager:
                 # remains as a test-only staging buffer accessed via port.read_data().
                 self.data_queue = asyncio.Queue(maxsize=100)
                 self.client_queues: Dict[str, asyncio.Queue] = {}
+                # Count of chunks evicted by the drop-oldest-on-full policy, surfaced via get_status().
+                self.dropped_chunks = 0
                 # Surface adapter-specific buffering hints so the manager can honor them
                 self.always_buffer = bool(getattr(unified_port, "always_buffer", False))
                 # Scrollback ring buffer: retains the last scrollback_size bytes for replay
@@ -232,6 +234,7 @@ class PortManager:
                     "max_read_write_users": self.max_read_write_users,
                     "read_write_groups": list(self.read_write_groups),
                     "read_only_groups": list(self.read_only_groups),
+                    "dropped_chunks": self.dropped_chunks,
                 }
                 # Include adapter-provided snapshot details when available
                 snapshot = getattr(self.unified_port, "get_status_snapshot", None)
@@ -1001,6 +1004,7 @@ class PortManager:
                             try:
                                 q.get_nowait()
                                 q.put_nowait(data)
+                                port.dropped_chunks = getattr(port, "dropped_chunks", 0) + 1
                                 self.logger.debug(
                                     f"Queue full for {port_name}:{cid}; dropped oldest chunk"
                                 )
@@ -1033,6 +1037,7 @@ class PortManager:
                             try:
                                 port.data_queue.get_nowait()
                                 port.data_queue.put_nowait(data)
+                                port.dropped_chunks = getattr(port, "dropped_chunks", 0) + 1
                                 self.logger.debug(
                                     f"Queue full for {port_name}; dropped oldest chunk to enqueue {len(data)} bytes"
                                 )
