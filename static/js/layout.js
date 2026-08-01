@@ -42,6 +42,15 @@
       }
   };
 
+  // Clicking the "Console" label expands the port list when it's collapsed,
+  // instead of always navigating away to the console page.
+  window.onConsoleNavClick = function(e) {
+      const el = document.getElementById('console-ports');
+      if (el && el.style.display === 'none') {
+          window.toggleConsolePorts(e);
+      }
+  };
+
   window.toggleConfigMenu = function(e) {
       e.preventDefault();
       e.stopPropagation();
