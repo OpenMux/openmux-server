@@ -19,7 +19,7 @@ import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Set
-from openmux.server.port_utils import safe_get_port
+from openmux.server.port_utils import resolve_port_connected_state, safe_get_port
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 
@@ -177,26 +177,38 @@ class TcpServerAdapter(BaseGenericAdapter):
             pass
 
     def _on_port_meta_update(self, port_name: str, changes: Optional[Dict[str, Any]] = None):
-        """Relay federated port up/down notices to attached TCP clients.
+        """Relay port up/down notices to attached TCP clients.
 
-        Expects PortManager to call this when muxcon reports disconnection or reconnection.
+        Covers federated proxy disconnects (from muxcon) as well as local
+        unified-adapter ports (serial/tcp_initiator) that report their own
+        connect/disconnect transitions via PortManager.notify_meta_updated.
         """
         try:
             if not port_name or port_name not in self.port_clients:
                 return
-            # Down events from muxcon
-            if isinstance(changes, dict) and changes.get("event") in ("federated_disconnected", "federated_cached_offline"):
-                self._emit_notice_to_port_clients(port_name, "\r\n[Port disconnected on server]\r\n")
-                return
+            if isinstance(changes, dict):
+                # Down events: federated proxy disconnects, or any adapter reporting
+                # connected=False (e.g. serial_disconnected/tcp_disconnected).
+                if changes.get("event") in ("federated_disconnected", "federated_cached_offline") or (
+                    "connected" in changes and not changes.get("connected")
+                ):
+                    self._emit_notice_to_port_clients(port_name, "\r\n[Port disconnected on server]\r\n")
+                    return
             # On general meta update, check if port transitioned to connected
             pm = getattr(self.console_manager, "port_manager", None)
             if pm:
                 port_obj = safe_get_port(pm, port_name)
                 if port_obj is not None:
-                    is_up = bool(getattr(port_obj, "is_connected", True))
+                    is_up = resolve_port_connected_state(port_obj)
+                    if is_up is None:
+                        is_up = True
                     # If reconnection occurred, inform clients
-                    if is_up and isinstance(changes, dict) and changes.get("event") in (
-                        "federated_port_registered", "client_connected", "port_registered"
+                    if is_up and isinstance(changes, dict) and (
+                        changes.get("event") in (
+                            "federated_port_registered", "client_connected", "port_registered",
+                            "serial_connected", "tcp_connected",
+                        )
+                        or changes.get("connected") is True
                     ):
                         self._emit_notice_to_port_clients(port_name, "\r\n[Reconnected]\r\n")
         except Exception:
@@ -572,7 +584,13 @@ class TcpServerAdapter(BaseGenericAdapter):
                 elif not client._write_blocked_notified:
                     client._write_blocked_notified = True
                     try:
-                        await client.send_raw_data(b"\r\n[Write blocked: console is in read-only mode]\r\n")
+                        pm = getattr(self.console_manager, "port_manager", None)
+                        port_obj = safe_get_port(pm, client.connected_port) if pm else None
+                        is_up = resolve_port_connected_state(port_obj)
+                        if is_up is False:
+                            await client.send_raw_data(b"\r\n[Write blocked: port is disconnected on server]\r\n")
+                        else:
+                            await client.send_raw_data(b"\r\n[Write blocked: console is in read-only mode]\r\n")
                     except Exception:
                         pass
             except Exception as e:
@@ -833,17 +851,16 @@ class TcpServerAdapter(BaseGenericAdapter):
 
                     client.mode = "read-write" if access_mode == "READ_WRITE" else "read-only"
                     await client.send_line(f"CONNECTED:{port_name}:{access_mode}")
-                    # If the target port is a federated proxy and currently down,
-                    # immediately inform the client so they understand why no data flows yet.
+                    # If the target port (federated proxy or local serial/tcp_initiator
+                    # adapter) is currently disconnected, immediately inform the client
+                    # so they understand why no data flows yet.
                     try:
                         pm = getattr(self.console_manager, "port_manager", None)
                         if pm:
                             port_obj = safe_get_port(pm, port_name)
-                            if port_obj is not None:
-                                is_fed = hasattr(port_obj, "remote_port_name")
-                                is_up = bool(getattr(port_obj, "is_connected", True))
-                                if is_fed and not is_up:
-                                    await client.send_raw_data(b"\r\n[Port disconnected on server]\r\n")
+                            is_up = resolve_port_connected_state(port_obj)
+                            if is_up is False:
+                                await client.send_raw_data(b"\r\n[Port disconnected on server]\r\n")
                     except Exception:
                         pass
                     self.logger.info(f"Client {client.client_id} connected to port {port_name} in {access_mode} mode")

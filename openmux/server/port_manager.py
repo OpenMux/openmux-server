@@ -878,9 +878,15 @@ class PortManager:
                     if hasattr(port, "is_connected") and not bool(getattr(port, "is_connected")):
                         self.logger.error(f"WRITE BLOCKED: federated connection not found for {port_name}")
                         return False
-                    await port.write_data(data, client_id=client_id)  # type: ignore
+                    result = await port.write_data(data, client_id=client_id)  # type: ignore
                 else:
-                    await port.write_data(data)
+                    result = await port.write_data(data)
+                # write_data may return None (legacy ports with no result), or a bool
+                # reporting whether the underlying adapter actually accepted the data
+                # (e.g. False when the local serial/tcp_initiator connection is down).
+                if isinstance(result, bool) and not result:
+                    self.logger.warning(f"WRITE FAILED: adapter reported write failure for port={port_name}")
+                    return False
                 return True
             except Exception as e:
                 self.logger.error(f"Failed to write to port {port_name}: {e}", exc_info=True)

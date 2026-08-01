@@ -49,3 +49,22 @@ def safe_get_port(port_manager: Any, port_name: Any) -> Optional[Any]:
         return get_port_fn(port_name)
     except (KeyError, LookupError, ValueError, AttributeError, TypeError):
         return None
+
+
+def resolve_port_connected_state(port_obj: Any) -> Optional[bool]:
+    """Return the live is_connected state for a port, or None if not applicable.
+
+    Handles both federated proxies (``is_connected`` set directly on the
+    port object) and local unified-adapter ports (``is_connected`` set on
+    the wrapped ``unified_port``, e.g. SerialPortWrapper/TcpInitiatorPort).
+    Returns None when the underlying port type has no connection concept
+    (e.g. command/loopback ports are always considered "up").
+    """
+    if port_obj is None:
+        return None
+    inner = getattr(port_obj, "unified_port", None)
+    if inner is not None and hasattr(inner, "is_connected"):
+        return bool(getattr(inner, "is_connected"))
+    if hasattr(port_obj, "is_connected"):
+        return bool(getattr(port_obj, "is_connected"))
+    return None

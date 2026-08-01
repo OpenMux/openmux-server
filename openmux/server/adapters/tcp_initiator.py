@@ -43,19 +43,30 @@ class TcpInitiatorPort:
     state: PortState  # enforced contract annotation
     is_connected: bool  # enforced contract annotation (network readiness flag)
 
-    def __init__(self, name: str, config: Dict[str, Any], adapter: "TcpInitiatorAdapter"):
+    def __init__(
+        self,
+        name: str,
+        config: Dict[str, Any],
+        adapter: "TcpInitiatorAdapter",
+        meta_notify: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ):
         """Initialize a TCP initiator port instance.
 
         Args:
             name: Logical port name (unique within the adapter).
             config: Per-port configuration (host, port, TLS, timeouts, batching).
             adapter: Owning adapter instance.
+            meta_notify: Optional callback invoked on connect/disconnect transitions
+                so PortManager listeners can push live status to clients.
         """
         self.name = name
         self.config = config
         self.adapter = adapter
         self.logger = logging.getLogger(f"tcp_initiator.{name}")
         self.state = PortState.CONFIGURED
+        # Best-effort callback into PortManager listeners via adapter
+        self._meta_notify = meta_notify
+        self._last_notified_connected: Optional[bool] = None
 
         # Connection configuration
         self.host = config.get("host", "")
@@ -183,6 +194,7 @@ class TcpInitiatorPort:
             self.logger.info(f"Successfully connected to {self.host}:{self.port}")
             # Reset so the next disconnect logs immediately
             self._last_failed_warn_ts = None
+            self._notify_meta(True)
             self.read_task = asyncio.create_task(self._read_loop())
             return True
         except asyncio.TimeoutError:
@@ -217,6 +229,16 @@ class TcpInitiatorPort:
         else:
             self.logger.debug(message)
 
+    def _notify_meta(self, connected: bool) -> None:
+        """Notify PortManager listeners of a connect/disconnect transition, once per state."""
+        try:
+            if self._meta_notify and self._last_notified_connected is not connected:
+                event = "tcp_connected" if connected else "tcp_disconnected"
+                self._meta_notify(self.name, {"event": event, "connected": connected})
+                self._last_notified_connected = connected
+        except Exception:
+            self.logger.debug("Meta notify failed for %s", self.name, exc_info=True)
+
     async def _disconnect(self) -> None:
         """Close the active TCP connection and reset stream state."""
         if not self.is_connected:
@@ -233,6 +255,7 @@ class TcpInitiatorPort:
             self.is_connected = False
             self.reader = None
             self.writer = None
+            self._notify_meta(False)
 
     async def _read_loop(self) -> None:
         """Continuously read inbound data until connection closes or cancelled."""
@@ -243,6 +266,7 @@ class TcpInitiatorPort:
                     if not data:
                         self.logger.info(f"Connection to {self.host}:{self.port} closed by remote")
                         self.is_connected = False
+                        self._notify_meta(False)
                         break
                     decoded = self._protocol_handler.decode(data)
                     if decoded:
@@ -252,6 +276,7 @@ class TcpInitiatorPort:
                 except Exception as e:
                     self.logger.error(f"Error reading from {self.host}:{self.port}: {e}", exc_info=True)
                     self.is_connected = False
+                    self._notify_meta(False)
                     break
         except asyncio.CancelledError:
             pass
@@ -384,7 +409,7 @@ class TcpInitiatorPort:
                     self.is_connected = False
                     break
                 debug_enabled = self.logger.isEnabledFor(logging.DEBUG)
-                start = time.perf_counter() if debug_enabled else None
+                start = time.perf_counter() if debug_enabled else 0.0
                 self.writer.write(self._protocol_handler.encode(to_send))
                 await self.writer.drain()
                 if debug_enabled:
@@ -424,6 +449,17 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             AdapterCapability.PROVIDES_PORTS,
             AdapterCapability.BIDIRECTIONAL_DATA,
         }
+
+    def _make_notifier(self) -> Callable[[str, Dict[str, Any]], None]:
+        """Return a meta-notify callback bound to this adapter's port manager."""
+        def _notif(pname: str, payload: Dict[str, Any], _self=self) -> None:
+            try:
+                mpm = getattr(_self, "main_port_manager", None)
+                if mpm and hasattr(mpm, "notify_meta_updated"):
+                    mpm.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return _notif
 
     @classmethod
     def validate_config(cls, config: Dict[str, Any]) -> bool:
@@ -478,7 +514,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
 
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
         try:
-            tcp_port = TcpInitiatorPort(port_name, config, self)
+            tcp_port = TcpInitiatorPort(port_name, config, self, meta_notify=self._make_notifier())
             self.wire_port_data_callback(tcp_port, self._handle_port_data)
             if await tcp_port.start():
                 self.ports[port_name] = tcp_port
