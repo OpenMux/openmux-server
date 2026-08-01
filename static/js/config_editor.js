@@ -163,9 +163,6 @@
         'web_console.static_dir': 'Directory for static assets (xterm, css, js).',
         'web_console.template_dir': 'Directory containing Jinja2 templates.',
         'web_console.session_ttl_seconds': 'How long browser sessions remain valid before re-login is required (seconds).',
-        'web_console.login_throttle_max_attempts': 'Failed login attempts per IP allowed within the window before blocking.',
-        'web_console.login_throttle_window_seconds': 'Sliding window length (seconds) used to count failed logins per IP.',
-        'web_console.login_throttle_lock_seconds': 'Lock duration (seconds) once an IP exceeds the max attempts.',
         'web_console.enable_probes': 'Expose /healthz /livez /readyz endpoints.',
         'web_console.probes_include_details': 'Return extra JSON (version, uptime, clients) in probes.',
         'web_console.use_tls': 'Serve the web console over HTTPS.',
@@ -212,9 +209,6 @@
         // web_console
         'web_console.enable_ui': true,
         'web_console.session_ttl_seconds': 28800,
-        'web_console.login_throttle_max_attempts': 10,
-        'web_console.login_throttle_window_seconds': 60,
-        'web_console.login_throttle_lock_seconds': 300,
         'web_console.enable_probes': true,
         'web_console.probes_include_details': false,
         'web_console.use_tls': false,
@@ -1071,9 +1065,6 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         setVal('web_console.tls_autogen', deepGet(current, 'web_console.tls_autogen'));
         setVal('web_console.tls_dir', deepGet(current, 'web_console.tls_dir'));
         setVal('web_console.session_ttl_seconds', deepGet(current, 'web_console.session_ttl_seconds'));
-        setVal('web_console.login_throttle_max_attempts', deepGet(current, 'web_console.login_throttle_max_attempts'));
-        setVal('web_console.login_throttle_window_seconds', deepGet(current, 'web_console.login_throttle_window_seconds'));
-        setVal('web_console.login_throttle_lock_seconds', deepGet(current, 'web_console.login_throttle_lock_seconds'));
 
         // web_console.plugins: map ["pkg.mod", ...] -> [{module: "pkg.mod"}, ...]
         const wcPlugins = deepGet(current, 'web_console.plugins') || [];
@@ -1156,7 +1147,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         // web_status
         if(getVal('web_status.host')!==undefined || getVal('web_status.port')!==undefined){ deepSet(out,'web_status',{}); maybeSet('web_status.host','web_status.host'); maybeSet('web_status.port','web_status.port'); maybeSet('web_status.enable_http_api','web_status.enable_http_api'); maybeSet('web_status.cors_enable','web_status.cors_enable'); maybeSet('web_status.enable_fault_injection','web_status.enable_fault_injection'); }
         // web_console
-        if(getVal('web_console.host')!==undefined || getVal('web_console.port')!==undefined){ deepSet(out,'web_console',{}); ['host','port','ssl_port','base_path','respect_forwarded_prefix','enable_ui','realm','static_dir','template_dir','enable_probes','probes_include_details','use_tls','ssl_cert','ssl_key','tls_autogen','tls_dir','session_ttl_seconds','login_throttle_max_attempts','login_throttle_window_seconds','login_throttle_lock_seconds'].forEach(k=>{ maybeSet('web_console.'+k,'web_console.'+k); }); }
+        if(getVal('web_console.host')!==undefined || getVal('web_console.port')!==undefined){ deepSet(out,'web_console',{}); ['host','port','ssl_port','base_path','respect_forwarded_prefix','enable_ui','realm','static_dir','template_dir','enable_probes','probes_include_details','use_tls','ssl_cert','ssl_key','tls_autogen','tls_dir','session_ttl_seconds'].forEach(k=>{ maybeSet('web_console.'+k,'web_console.'+k); }); }
         // web_console.plugins from table -> array of strings
         const wcpl = tables['web_console.plugins'] && tables['web_console.plugins']._get ? tables['web_console.plugins']._get() : [];
         if (wcpl && wcpl.length>0) {

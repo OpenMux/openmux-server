@@ -419,12 +419,14 @@ Supported keys:
 - `static_dir`: Directory for static assets (xterm, css, js)
 - `template_dir`: Directory for Jinja2 templates (optional)
 - `session_ttl_seconds`: Browser session lifetime in seconds (default: 28800)
-- `login_throttle_max_attempts`: Failed login attempts allowed per IP within the window
-- `login_throttle_window_seconds`: Rolling window for login throttling (seconds)
-- `login_throttle_lock_seconds`: Duration of lockout once the attempt limit is exceeded (seconds)
 - `enable_probes`: Register health endpoints `/healthz`, `/livez`, `/readyz` (default: true)
 - `probes_include_details`: Include extended JSON in probe responses (default: false)
 - `plugins`: List of Python modules to load as web console plugins
+
+Failed login lockout (per username + IP) is controlled by `rate_limits.authentication`
+in `security.yaml`, shared with all other password-based login paths (TCP, telnet,
+SSH listeners). See `config/security.yaml` for its `window_seconds`,
+`failure_threshold`, and `base_lock_seconds` keys.
 
 TLS/HTTPS keys:
 - `use_tls`: Enable HTTPS and WSS (default: false)

@@ -527,13 +527,13 @@ async def handle_login(request: web.Request) -> web.Response:
             body = adapter._render_login(error=error, next_url=safe_next, message=message)
             return web.Response(body=body, content_type="text/html")
 
-        throttle_message = adapter._check_login_throttle(client_ip)
-        if throttle_message:
-            return _render_login_response(True, throttle_message)
+        auth_manager = adapter.auth_manager
+        if auth_manager and username and hasattr(auth_manager, "is_user_locked") and auth_manager.is_user_locked(username, client_ip):
+            return _render_login_response(True, "Too many failed attempts for this account. Please try again later.")
         ok = False
-        if adapter.auth_manager and username:
+        if auth_manager and username:
             try:
-                ok = bool(adapter.auth_manager.authenticate(username, password))
+                ok = bool(auth_manager.authenticate(username, password))
             except Exception:
                 ok = False
         if ok:
@@ -555,7 +555,8 @@ async def handle_login(request: web.Request) -> web.Response:
             # Create session
             sid = secrets.token_urlsafe(32)
             now = time.time()
-            adapter._clear_login_failures(client_ip)
+            if auth_manager and hasattr(auth_manager, "clear_auth_failures"):
+                auth_manager.clear_auth_failures(username, client_ip)
             adapter._sessions[sid] = {"username": username, "created": now, "last_seen": now, "ip": client_ip}
             resp = web.HTTPFound(location=str(next_url))
             cookie_kwargs = {
@@ -582,7 +583,8 @@ async def handle_login(request: web.Request) -> web.Response:
             resp.set_cookie(adapter._session_cookie_name, sid, **cookie_kwargs)
             raise resp
         # Failure -> show login page with message
-        adapter._record_login_failure(client_ip)
+        if auth_manager and username and hasattr(auth_manager, "register_auth_failure"):
+            auth_manager.register_auth_failure(username, client_ip)
         return _render_login_response(True)
 
     # GET: if already authenticated, bounce to next
@@ -1247,13 +1249,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             self._session_cookie_name = "omx_session"
         self.session_ttl_seconds = int(cfg.get("session_ttl_seconds", 8 * 3600))
-        self.login_throttle_max_attempts = int(cfg.get("login_throttle_max_attempts", 10))
-        self.login_throttle_window_seconds = int(cfg.get("login_throttle_window_seconds", 60))
-        self.login_throttle_lock_seconds = int(cfg.get("login_throttle_lock_seconds", 5 * 60))
-        self.login_throttle_enabled = (
-            self.login_throttle_max_attempts > 0 and self.login_throttle_lock_seconds > 0
-        )
-        self._login_failures: Dict[str, Dict[str, Any]] = {}
         # Plugins configuration
         self.plugins_cfg = cfg.get("plugins", [])
         # Collected plugin navigation items (if templates wish to render them)
@@ -2668,76 +2663,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             return out
         return out
-
-    # --- Login throttling helpers ---
-    def _check_login_throttle(self, ip: Optional[str]) -> Optional[str]:
-        if not (self.login_throttle_enabled and ip):
-            return None
-        record = self._login_failures.get(ip)
-        if not record:
-            return None
-        now = time.time()
-        attempts = record.get("attempts")
-        if not isinstance(attempts, deque):
-            attempts = deque()
-            record["attempts"] = attempts
-        cutoff = now - float(self.login_throttle_window_seconds)
-        while attempts and attempts[0] < cutoff:
-            attempts.popleft()
-        blocked_until = float(record.get("blocked_until") or 0.0)
-        if blocked_until and now < blocked_until:
-            remaining = max(1, int(blocked_until - now))
-            minutes, seconds = divmod(remaining, 60)
-            if minutes and seconds:
-                wait = f"{minutes}m {seconds}s"
-            elif minutes:
-                wait = f"{minutes}m"
-            else:
-                wait = f"{seconds}s"
-            return f"Too many failed attempts from this address. Try again in {wait}."
-        if blocked_until and now >= blocked_until:
-            record["blocked_until"] = 0.0
-        if not attempts and not record.get("blocked_until"):
-            self._login_failures.pop(ip, None)
-        return None
-
-    def _record_login_failure(self, ip: Optional[str]) -> None:
-        if not (self.login_throttle_enabled and ip):
-            return
-        now = time.time()
-        record = self._login_failures.setdefault(ip, {"attempts": deque(), "blocked_until": 0.0})
-        attempts = record.get("attempts")
-        if not isinstance(attempts, deque):
-            attempts = deque()
-            record["attempts"] = attempts
-        cutoff = now - float(self.login_throttle_window_seconds)
-        while attempts and attempts[0] < cutoff:
-            attempts.popleft()
-        if record.get("blocked_until"):
-            # Already blocked; do not extend window to avoid indefinite locks
-            return
-        attempts.append(now)
-        if len(attempts) >= self.login_throttle_max_attempts:
-            record["blocked_until"] = now + float(self.login_throttle_lock_seconds)
-            attempts.clear()
-            try:
-                self.logger.warning(
-                    "Login throttling triggered for %s (locked %ss)", ip, self.login_throttle_lock_seconds
-                )
-            except Exception:
-                pass
-
-    def _clear_login_failures(self, ip: Optional[str]) -> None:
-        if not (self.login_throttle_enabled and ip):
-            return
-        record = self._login_failures.get(ip)
-        if not record:
-            return
-        attempts = record.get("attempts")
-        if isinstance(attempts, deque):
-            attempts.clear()
-        record["blocked_until"] = 0.0
-        self._login_failures.pop(ip, None)
 
     # --- Utility: IP extraction ---
     def _get_client_ip(self, request: web.Request) -> Optional[str]:
