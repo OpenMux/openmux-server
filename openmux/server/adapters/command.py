@@ -459,6 +459,14 @@ class CommandPort:
             self.logger.error(f"Error spawning process for {self.name}: {e}", exc_info=True)
             return False
 
+    def get_status_snapshot(self) -> Dict[str, Any]:
+        """Return static config details for port listings."""
+        return {
+            "serial_config": {
+                "device": f"shell:{self.command}",
+            }
+        }
+
     def _build_preexec_fn(self):
         if not self.use_pty:
             return None

@@ -116,6 +116,14 @@ class TcpInitiatorPort:
         if not self.port:
             raise ValueError(f"TCP initiator port {self.name} requires 'port' configuration")
 
+    def get_status_snapshot(self) -> Dict[str, Any]:
+        """Return static config details for port listings."""
+        return {
+            "serial_config": {
+                "device": f"tcp:{self.host}:{self.port}",
+            }
+        }
+
     async def start(self) -> bool:
         """Start the TCP initiator port (non-blocking)."""
         if not self.enabled:
@@ -375,13 +383,21 @@ class TcpInitiatorPort:
                     self.logger.error(f"Writer is None while flushing batched data to {self.name}")
                     self.is_connected = False
                     break
-                start = time.perf_counter()
+                debug_enabled = self.logger.isEnabledFor(logging.DEBUG)
+                start = time.perf_counter() if debug_enabled else None
                 self.writer.write(self._protocol_handler.encode(to_send))
                 await self.writer.drain()
-                elapsed = time.perf_counter() - start
-                self.logger.info(
-                    f"TCP BATCH PROFILE: Flushed {len(to_send)} bytes to {self.host}:{self.port} in {elapsed:.6f}s (batch_size={self._batch_size}, batch_timeout={self._batch_timeout})"
-                )
+                if debug_enabled:
+                    elapsed = time.perf_counter() - start
+                    self.logger.debug(
+                        "TCP BATCH PROFILE: Flushed %d bytes to %s:%s in %.6fs (batch_size=%d, batch_timeout=%s)",
+                        len(to_send),
+                        self.host,
+                        self.port,
+                        elapsed,
+                        self._batch_size,
+                        self._batch_timeout,
+                    )
             except Exception as e:
                 self.logger.error(f"Error flushing batched data to {self.name}: {e}", exc_info=True)
                 self.is_connected = False

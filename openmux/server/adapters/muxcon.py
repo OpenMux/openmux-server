@@ -2755,42 +2755,33 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 line_status = None
                 try:
                     at_lower = str(adapter_type).lower()
-                    if at_lower == "serial":
-                        sc = p.get("serial_config") or {}
-                        if sc:
-                            serial_cfg = {
-                                "device": sc.get("device"),
-                                "baudrate": sc.get("baudrate"),
-                                "bytesize": sc.get("bytesize"),
-                                "parity": sc.get("parity"),
-                                "stopbits": sc.get("stopbits"),
-                                "flow_control": sc.get("flow_control"),
-                            }
+                    sc = p.get("serial_config") or {}
+                    if sc:
+                        # Forward whatever config the local adapter snapshot provides
+                        # (serial/loopback have full fields, command/tcp_initiator only
+                        # set "device" so remote peers still see a Device value).
+                        serial_cfg = {
+                            "device": sc.get("device"),
+                            "baudrate": sc.get("baudrate"),
+                            "bytesize": sc.get("bytesize"),
+                            "parity": sc.get("parity"),
+                            "stopbits": sc.get("stopbits"),
+                            "flow_control": sc.get("flow_control"),
+                        }
                         ls = p.get("line_status")
                         if isinstance(ls, dict) and ls:
                             line_status = ls
                     elif at_lower == "loopback":
                         # Emulate serial-like metadata for loopback ports so remote peers
                         # can render consistent details without UI-specific patches.
-                        sc = p.get("serial_config") or {}
-                        if sc:
-                            serial_cfg = {
-                                "device": sc.get("device"),
-                                "baudrate": sc.get("baudrate"),
-                                "bytesize": sc.get("bytesize"),
-                                "parity": sc.get("parity"),
-                                "stopbits": sc.get("stopbits"),
-                                "flow_control": sc.get("flow_control"),
-                            }
-                        else:
-                            serial_cfg = {
-                                "device": f"loopback:{name}",
-                                "baudrate": 9600,
-                                "bytesize": 8,
-                                "parity": "N",
-                                "stopbits": 1,
-                                "flow_control": "none",
-                            }
+                        serial_cfg = {
+                            "device": f"loopback:{name}",
+                            "baudrate": 9600,
+                            "bytesize": 8,
+                            "parity": "N",
+                            "stopbits": 1,
+                            "flow_control": "none",
+                        }
                         ls = p.get("line_status")
                         if isinstance(ls, dict) and ls:
                             line_status = ls
