@@ -9,7 +9,12 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openmux.server.adapters import ssh_listener as ssh_listener_module
-from openmux.server.adapters.ssh_listener import ListenerConfig, SshListenerAdapter, _match_ssh_pubkey
+from openmux.server.adapters.ssh_listener import (
+    ListenerConfig,
+    SshListenerAdapter,
+    _match_ssh_pubkey,
+    _OpenMuxSshServer,
+)
 
 
 class FakePort:
@@ -250,6 +255,57 @@ async def test_password_auth_failure_then_success(tmp_path, monkeypatch):
         await adapter.stop()
 
 
+def test_pubkey_offers_do_not_count_against_password_attempt_cap():
+    """Regression test: a real SSH client auto-offers several identities
+    (each a routine, unsigned query - not a failed login) before ever
+    reaching a password prompt. Those offers must not share the same
+    connection-close budget as actual typed password attempts, or a
+    legitimate user can be disconnected after typing just one wrong
+    password (see the ssh_listener 'Disconnected by application' bug).
+    """
+
+    class FakeConn:
+        def __init__(self):
+            self.closed = False
+
+        def get_extra_info(self, name):
+            return ("127.0.0.1", 12345)
+
+        def set_extra_info(self, **kwargs):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    auth = FakeAuthManager(valid={"alice": "secret"})
+    entry = make_entry(target="loopback1")
+    adapter = SshListenerAdapter("s1", {"ssh_listener": [entry]})
+    adapter.set_auth_manager(auth)
+    listener = adapter.listeners[0]
+
+    server = _OpenMuxSshServer(adapter, listener)
+    conn = FakeConn()
+    server.connection_made(conn)
+    server.begin_auth("alice")
+
+    # Two unmatched identities offered automatically by the client - not
+    # registered for "alice", so each query is rejected, but this must not
+    # consume the password-attempt budget.
+    assert server.validate_public_key("alice", object()) is False
+    assert server.validate_public_key("alice", object()) is False
+    assert conn.closed is False
+
+    # A single mistyped password - previously the 3rd combined attempt,
+    # which force-closed the connection before the user could retry.
+    assert server.validate_password("alice", "wrong") is False
+    assert conn.closed is False
+    assert "alice" in auth.failures
+
+    # The correct password still works - the account was never locked out.
+    assert server.validate_password("alice", "secret") is True
+    assert conn.closed is False
+
+
 @pytest.mark.asyncio
 async def test_password_auth_locked_user_rejected(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"}, locked_users=["alice"])
@@ -354,6 +410,36 @@ async def test_menu_mode_selects_port(tmp_path, monkeypatch):
             await process.stdin.drain()
             data = await asyncio.wait_for(process.stdout.read(4), timeout=5)
             assert data == b"ping"
+        console = adapter.console_manager
+        assert list(console.attached.values()) == ["loopback2"]
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_menu_mode_selects_port_with_pty_and_bare_cr(tmp_path, monkeypatch):
+    """A real interactive client (pty allocated) sends Enter as a bare `\r`.
+
+    Regression test: `_read_ssh_line` used to rely on `readline()`, which
+    only recognizes `\n` and hung forever on pty sessions since asyncssh's
+    own line editor is disabled on this raw (`encoding=None`) channel.
+    """
+    auth = FakeAuthManager(valid={"alice": "secret"})
+    entry = make_entry(target="*", require_auth=True)
+    adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1", "loopback2"], auth)
+    port = adapter.listeners[0].effective_port
+    try:
+        async with asyncssh.connect(
+            "127.0.0.1", port=port, username="alice", password="secret", known_hosts=None, client_keys=None
+        ) as conn:
+            process = await conn.create_process(term_type="xterm", encoding=None)
+            await asyncio.wait_for(process.stdout.readuntil(b"Port: "), timeout=5)
+            process.stdin.write(b"loopback2\r")
+            await process.stdin.drain()
+            process.stdin.write(b"ping\r")
+            await process.stdin.drain()
+            data = await asyncio.wait_for(process.stdout.readuntil(b"ping"), timeout=5)
+            assert data.endswith(b"ping")
         console = adapter.console_manager
         assert list(console.attached.values()) == ["loopback2"]
     finally:

@@ -45,10 +45,14 @@ _MENU_TARGET = "*"
 _MENU_MAX_ATTEMPTS = 5
 _MENU_IDLE_TIMEOUT = 60.0
 
-# Per-connection password/pubkey attempt cap (auth_manager's own lockout is
-# the real security control; this just mirrors telnet_listener's behavior of
+# Per-connection PASSWORD attempt cap (auth_manager's own lockout is the real
+# security control; this just mirrors telnet_listener's behavior of
 # disconnecting a misbehaving client instead of waiting for the client to
-# give up on its own).
+# give up on its own). Public-key offers are excluded: an SSH client
+# routinely probes several identities (often twice each - once unsigned to
+# query, once signed) before ever reaching a password prompt, so counting
+# those against the same budget could disconnect - or even account-lock via
+# auth_manager - a legitimate user before they type a single password.
 _AUTH_MAX_ATTEMPTS = 3
 
 # Host key is shared by all ssh_listener entries in this adapter instance and
@@ -125,7 +129,7 @@ class _OpenMuxSshServer(asyncssh.SSHServer):
         self._peer_ip = "unknown"
         self._pending_username = ""
         self._embedded_descriptor: Optional[str] = None
-        self._attempts = 0
+        self._pw_attempts = 0
 
     def connection_made(self, conn) -> None:
         self._conn = conn
@@ -155,54 +159,63 @@ class _OpenMuxSshServer(asyncssh.SSHServer):
         auth_manager = self._adapter.auth_manager
         if not auth_manager or self._auth_blocked():
             return False
-        self._attempts += 1
+        self._pw_attempts += 1
         try:
             ok = bool(auth_manager.authenticate_user(self._pending_username, password))
         except Exception:
             ok = False
-        self._finish_attempt(auth_manager, ok)
+        if ok:
+            self._on_auth_success(auth_manager)
+        else:
+            self._on_password_failure(auth_manager)
         return ok
 
     def public_key_auth_supported(self) -> bool:
         return True
 
     def validate_public_key(self, username: str, key: "asyncssh.SSHKey") -> bool:
+        # Not gated by the password attempt cap: a single client typically
+        # offers several identities (and each may be probed twice, once
+        # unsigned then once signed), which is routine and not a failed
+        # login attempt - see the _AUTH_MAX_ATTEMPTS comment above.
         auth_manager = self._adapter.auth_manager
-        if not auth_manager or self._auth_blocked():
+        if not auth_manager or self._is_locked(auth_manager):
             return False
-        self._attempts += 1
         ok = _match_ssh_pubkey(auth_manager, self._pending_username, key)
-        self._finish_attempt(auth_manager, ok)
+        if ok:
+            self._on_auth_success(auth_manager)
         return ok
 
-    def _auth_blocked(self) -> bool:
-        if self._attempts >= _AUTH_MAX_ATTEMPTS:
-            return True
-        auth_manager = self._adapter.auth_manager
+    def _is_locked(self, auth_manager: Any) -> bool:
         try:
             return bool(auth_manager.is_user_locked(self._pending_username, self._peer_ip))
         except Exception:
             return False
 
-    def _finish_attempt(self, auth_manager: Any, ok: bool) -> None:
-        if ok:
-            if hasattr(auth_manager, "clear_auth_failures"):
-                try:
-                    auth_manager.clear_auth_failures(self._pending_username, self._peer_ip)
-                except Exception:
-                    pass
-            if self._conn is not None:
-                self._conn.set_extra_info(
-                    openmux_username=self._pending_username,
-                    openmux_embedded_descriptor=self._embedded_descriptor,
-                )
-            return
+    def _auth_blocked(self) -> bool:
+        if self._pw_attempts >= _AUTH_MAX_ATTEMPTS:
+            return True
+        return self._is_locked(self._adapter.auth_manager)
+
+    def _on_auth_success(self, auth_manager: Any) -> None:
+        if hasattr(auth_manager, "clear_auth_failures"):
+            try:
+                auth_manager.clear_auth_failures(self._pending_username, self._peer_ip)
+            except Exception:
+                pass
+        if self._conn is not None:
+            self._conn.set_extra_info(
+                openmux_username=self._pending_username,
+                openmux_embedded_descriptor=self._embedded_descriptor,
+            )
+
+    def _on_password_failure(self, auth_manager: Any) -> None:
         if hasattr(auth_manager, "register_auth_failure"):
             try:
                 auth_manager.register_auth_failure(self._pending_username, self._peer_ip)
             except Exception:
                 pass
-        if self._attempts >= _AUTH_MAX_ATTEMPTS and self._conn is not None:
+        if self._pw_attempts >= _AUTH_MAX_ATTEMPTS and self._conn is not None:
             try:
                 self._conn.close()
             except Exception:
@@ -809,13 +822,53 @@ class SshListenerAdapter(BaseGenericAdapter):
         return None
 
     async def _read_ssh_line(self, process: Any, timeout: float = _MENU_IDLE_TIMEOUT) -> Optional[str]:
+        """Read one line of menu input from the raw SSH channel.
+
+        This connection is opened with `encoding=None` (needed so the
+        post-attach data pump can forward raw bytes, including the
+        Ctrl+E control-menu escape sequence, byte for byte). That also
+        disables asyncssh's own pty line editor, so a real interactive
+        client's Enter key (which sends a bare `\r`, not `\n`) is never
+        translated to a newline. `process.stdin.readline()` only
+        recognizes `\n` and would hang forever waiting for one, so line
+        endings are detected by hand instead. Typed input is only
+        echoed back (with basic backspace handling) when a pty was
+        actually requested; non-interactive/scripted clients (no pty)
+        get the previous silent, non-editing behavior.
+        """
+        echo = process.get_terminal_type() is not None
+        buf = bytearray()
         try:
-            line = await asyncio.wait_for(process.stdin.readline(), timeout=timeout)
+            while True:
+                b = await asyncio.wait_for(process.stdin.read(1), timeout=timeout)
+                if not b:
+                    return None
+                if b in (b"\r", b"\n"):
+                    if echo:
+                        await self._echo_ssh_bytes(process, b"\r\n")
+                    break
+                if b in (b"\x08", b"\x7f"):  # Backspace / DEL
+                    await self._handle_ssh_backspace(process, buf, echo)
+                    continue
+                buf.extend(b)
+                if echo:
+                    await self._echo_ssh_bytes(process, b)
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             return None
-        if not line:
-            return None
-        return line.decode("utf-8", errors="ignore").rstrip("\r\n")
+        return buf.decode("utf-8", errors="ignore")
+
+    async def _handle_ssh_backspace(self, process: Any, buf: bytearray, echo: bool) -> None:
+        """Erase the last buffered byte for a menu-input backspace/DEL keypress."""
+        if not buf:
+            return
+        buf.pop()
+        if echo:
+            await self._echo_ssh_bytes(process, b"\x08 \x08")
+
+    async def _echo_ssh_bytes(self, process: Any, data: bytes) -> None:
+        """Write raw bytes back to an interactive menu session's terminal."""
+        process.stdout.write(data)
+        await process.stdout.drain()
 
     async def _send_port_list(self, process: Any) -> None:
         entries: List[Dict[str, Any]] = []
