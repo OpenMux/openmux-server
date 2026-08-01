@@ -1399,7 +1399,7 @@ function updateView() {
         if(navReload) navReload.classList.remove('active');
         if(navListeners) navListeners.classList.remove('active');
           if(navAuth) navAuth.classList.remove('active');
-        if(pageTitle) pageTitle.textContent = 'Config Editor - Setup';
+        if(pageTitle) pageTitle.textContent = 'Config Editor - Server';
     }
     // Ensure parent is active
     if(navParent) navParent.classList.add('active');
