@@ -76,6 +76,7 @@ _KNOWN_CONFIG_SECTIONS: FrozenSet[str] = frozenset(
         "muxcon",
         "web_console",
         "web_status",
+        "port_actions",
     }
 )
 

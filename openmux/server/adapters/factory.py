@@ -9,9 +9,9 @@ or invalid adapter definitions.
 import logging
 from typing import Any, Dict, List, Optional, Type
 
+from ..security_policy import SecurityPolicy
 from .base_adapter import BaseGenericAdapter
 from .lifecycle import DynamicPortManager
-from ..security_policy import SecurityPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -349,7 +349,7 @@ class GenericAdapterFactory:
             active_plugins = self.registry.discover_active_plugins(config)
             logger.info(f"Creating adapters for {len(active_plugins)} active plugins")
             # Emit warnings for config sections that have no registered plugin (likely import failure or typo)
-            core_sections = {"adapters", "server", "authentication", "logging"}
+            core_sections = {"adapters", "server", "authentication", "logging", "port_actions"}
             missing_sections: List[str] = []
             for section, val in config.items():
                 if section in core_sections:
@@ -408,7 +408,7 @@ class GenericAdapterFactory:
             import_errors = self.registry.get_import_errors()
             # Any explicitly configured sections missing adapters should abort
             if "active_plugins" in locals():  # ensure we are in legacy branch context
-                core_sections = {"adapters", "server", "authentication", "logging"}
+                core_sections = {"adapters", "server", "authentication", "logging", "port_actions"}
                 configured_sections = [s for s in config.keys() if s not in core_sections]
                 produced_sections = {p.config_section for p in self.registry.get_all_plugins()}
                 missing = [s for s in configured_sections if s not in produced_sections]

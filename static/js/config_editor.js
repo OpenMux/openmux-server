@@ -681,6 +681,11 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           advertise_filters: 'Default advertise filters for peers authenticated with this key.',
           accept_filters: 'Default accept filters for peers authenticated with this key.'
         }
+        ,
+        'port_actions.action_ports': {
+          action_id: 'Action script id, e.g. echo_probe, slow_noop, confirm_probe, setup_wizard.',
+          ports: 'Comma-separated port names granted this action, or * for every port.'
+        }
       };
 
       function annotateColumnsWithHelp(rootId, cols){
@@ -937,6 +942,12 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
             updateAdvisory();
           }
         });
+        // Port Actions: action_ports (dict of action_id -> [port_name, ...]) as a table of rows
+        tables['port_actions.action_ports'] = buildTable('port_actions.action_ports', annotateColumnsWithHelp('port_actions.action_ports', [
+          {key:'action_id', label:'Action ID', type:'string', required:true, placeholder:'echo_probe'},
+          {key:'ports', label:'Ports (comma, or *)', type:'array-string'}
+        ]));
+
         // Hook UI toggle warning
         const uiToggle = q('web_console.enable_ui');
         if(uiToggle){
@@ -1029,7 +1040,6 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         setVal('muxcon.auth_key_id', deepGet(current, 'muxcon.auth_key_id'));
         setVal('muxcon.auth_private_key', deepGet(current, 'muxcon.auth_private_key'));
         tables['muxcon.listeners']._set(deepGet(current, 'muxcon.listeners')||[]);
-        // For initiators, map flattened keys
         const inits = (deepGet(current, 'muxcon.initiators')||[]).map(it=>{
           const flat = {...it};
           if(it && typeof it.options==='object' && it.options){ Object.keys(it.options).forEach(k=>{ flat['options.'+k]=it.options[k]; }); }
@@ -1065,6 +1075,16 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         setVal('web_console.tls_autogen', deepGet(current, 'web_console.tls_autogen'));
         setVal('web_console.tls_dir', deepGet(current, 'web_console.tls_dir'));
         setVal('web_console.session_ttl_seconds', deepGet(current, 'web_console.session_ttl_seconds'));
+
+        setVal('port_actions.actions_dir', deepGet(current, 'port_actions.actions_dir'));
+        try {
+          const actionPorts = deepGet(current, 'port_actions.action_ports') || {};
+          const rows = Object.keys(actionPorts).map(function(actionId){
+            const ports = actionPorts[actionId];
+            return {action_id: actionId, ports: Array.isArray(ports)? ports: []};
+          });
+          if (tables['port_actions.action_ports']) tables['port_actions.action_ports']._set(rows);
+        } catch(_e){}
 
         // web_console.plugins: map ["pkg.mod", ...] -> [{module: "pkg.mod"}, ...]
         const wcPlugins = deepGet(current, 'web_console.plugins') || [];
@@ -1154,6 +1174,16 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           const arr = wcpl.map(r=>r && r.module).filter(m=>m && String(m).trim().length>0);
           if (arr.length>0) deepSet(out, 'web_console.plugins', arr);
         }
+        // port_actions: actions_dir + action_ports (table rows -> dict of action_id -> ports)
+        const portActions = {};
+        const actionsDir = getVal('port_actions.actions_dir'); if(actionsDir!==undefined) portActions.actions_dir = actionsDir;
+        const apRows = tables['port_actions.action_ports'] && tables['port_actions.action_ports']._get ? tables['port_actions.action_ports']._get() : [];
+        if (apRows && apRows.length>0) {
+          const actionPorts = {};
+          apRows.forEach(r=>{ if(r && r.action_id){ actionPorts[r.action_id] = Array.isArray(r.ports)? r.ports: []; } });
+          if (Object.keys(actionPorts).length>0) portActions.action_ports = actionPorts;
+        }
+        if (Object.keys(portActions).length>0) deepSet(out, 'port_actions', portActions);
         // management removed
         return out;
       }
@@ -1283,6 +1313,7 @@ function updateView() {
       const vPorts = document.getElementById('view-ports');
       const vListeners = document.getElementById('view-listeners');
     const vMuxcon = document.getElementById('view-muxcon');
+    const vActions = document.getElementById('view-actions');
     const vSetup2 = document.getElementById('view-setup-2');
     const vReload = document.getElementById('view-reload');
     
@@ -1291,6 +1322,7 @@ function updateView() {
     const navPorts = document.getElementById('nav-config-ports');
       const navListeners = document.getElementById('nav-config-listeners');
     const navMuxcon = document.getElementById('nav-config-muxcon');
+    const navActions = document.getElementById('nav-config-actions');
     const navReload = document.getElementById('nav-config-reload');
     const navParent = document.getElementById('nav-config-parent');
     const pageTitle = document.querySelector('.page');
@@ -1300,6 +1332,7 @@ function updateView() {
           if(vAuth) vAuth.style.display = 'none';
         if(vSetup2) vSetup2.style.display = 'none';
         if(vMuxcon) vMuxcon.style.display = 'none';
+        if(vActions) vActions.style.display = 'none';
         if(vReload) vReload.style.display = 'none';
         if(vPorts) vPorts.style.display = 'block';
         if(vListeners) vListeners.style.display = 'none';
@@ -1307,6 +1340,7 @@ function updateView() {
         if(navSetup) navSetup.classList.remove('active');
           if(navAuth) navAuth.classList.remove('active');
         if(navMuxcon) navMuxcon.classList.remove('active');
+        if(navActions) navActions.classList.remove('active');
         if(navReload) navReload.classList.remove('active');
         if(navPorts) navPorts.classList.add('active');
         if(navListeners) navListeners.classList.remove('active');
@@ -1317,6 +1351,7 @@ function updateView() {
         if(vSetup2) vSetup2.style.display = 'none';
         if(vPorts) vPorts.style.display = 'none';
         if(vMuxcon) vMuxcon.style.display = 'none';
+        if(vActions) vActions.style.display = 'none';
         if(vReload) vReload.style.display = 'none';
         if(vListeners) vListeners.style.display = 'block';
         
@@ -1324,6 +1359,7 @@ function updateView() {
           if(navAuth) navAuth.classList.remove('active');
         if(navPorts) navPorts.classList.remove('active');
         if(navMuxcon) navMuxcon.classList.remove('active');
+        if(navActions) navActions.classList.remove('active');
         if(navReload) navReload.classList.remove('active');
         if(navListeners) navListeners.classList.add('active');
         if(pageTitle) pageTitle.textContent = 'Config Editor - Listeners';
@@ -1333,6 +1369,7 @@ function updateView() {
           if(vSetup2) vSetup2.style.display = 'none';
           if(vPorts) vPorts.style.display = 'none';
           if(vMuxcon) vMuxcon.style.display = 'none';
+          if(vActions) vActions.style.display = 'none';
           if(vReload) vReload.style.display = 'none';
           if(vListeners) vListeners.style.display = 'none';
         
@@ -1340,6 +1377,7 @@ function updateView() {
           if(navPorts) navPorts.classList.remove('active');
           if(navListeners) navListeners.classList.remove('active');
           if(navMuxcon) navMuxcon.classList.remove('active');
+          if(navActions) navActions.classList.remove('active');
           if(navReload) navReload.classList.remove('active');
           if(navAuth) navAuth.classList.add('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Authentication';
@@ -1350,6 +1388,7 @@ function updateView() {
         if(vPorts) vPorts.style.display = 'none';
         if(vReload) vReload.style.display = 'none';
         if(vListeners) vListeners.style.display = 'none';
+        if(vActions) vActions.style.display = 'none';
         if(vMuxcon) vMuxcon.style.display = 'block';
         
         if(navSetup) navSetup.classList.remove('active');
@@ -1357,14 +1396,34 @@ function updateView() {
         if(navReload) navReload.classList.remove('active');
         if(navListeners) navListeners.classList.remove('active');
           if(navAuth) navAuth.classList.remove('active');
+        if(navActions) navActions.classList.remove('active');
         if(navMuxcon) navMuxcon.classList.add('active');
         if(pageTitle) pageTitle.textContent = 'Config Editor - Muxcon';
+    } else if (view === 'actions') {
+        if(vSetup) vSetup.style.display = 'none';
+          if(vAuth) vAuth.style.display = 'none';
+        if(vSetup2) vSetup2.style.display = 'none';
+        if(vPorts) vPorts.style.display = 'none';
+        if(vReload) vReload.style.display = 'none';
+        if(vListeners) vListeners.style.display = 'none';
+        if(vMuxcon) vMuxcon.style.display = 'none';
+        if(vActions) vActions.style.display = 'block';
+
+        if(navSetup) navSetup.classList.remove('active');
+        if(navPorts) navPorts.classList.remove('active');
+        if(navReload) navReload.classList.remove('active');
+        if(navListeners) navListeners.classList.remove('active');
+          if(navAuth) navAuth.classList.remove('active');
+        if(navMuxcon) navMuxcon.classList.remove('active');
+        if(navActions) navActions.classList.add('active');
+        if(pageTitle) pageTitle.textContent = 'Config Editor - Actions';
     } else if (view === 'reload') {
         if(vSetup) vSetup.style.display = 'none';
           if(vAuth) vAuth.style.display = 'none';
         if(vSetup2) vSetup2.style.display = 'none';
         if(vPorts) vPorts.style.display = 'none';
         if(vMuxcon) vMuxcon.style.display = 'none';
+        if(vActions) vActions.style.display = 'none';
         if(vReload) vReload.style.display = 'block';
         if(vListeners) vListeners.style.display = 'none';
         
@@ -1373,6 +1432,7 @@ function updateView() {
         if(navMuxcon) navMuxcon.classList.remove('active');
         if(navListeners) navListeners.classList.remove('active');
           if(navAuth) navAuth.classList.remove('active');
+        if(navActions) navActions.classList.remove('active');
         if(navReload) navReload.classList.add('active');
         if(pageTitle) pageTitle.textContent = 'Config Editor - Reload';
     } else {
@@ -1381,12 +1441,14 @@ function updateView() {
         if(vSetup2) vSetup2.style.display = 'block';
         if(vPorts) vPorts.style.display = 'none';
         if(vMuxcon) vMuxcon.style.display = 'none';
+        if(vActions) vActions.style.display = 'none';
         if(vReload) vReload.style.display = 'none';
         if(vListeners) vListeners.style.display = 'none';
         
         if(navSetup) navSetup.classList.add('active');
         if(navPorts) navPorts.classList.remove('active');
         if(navMuxcon) navMuxcon.classList.remove('active');
+        if(navActions) navActions.classList.remove('active');
         if(navReload) navReload.classList.remove('active');
         if(navListeners) navListeners.classList.remove('active');
           if(navAuth) navAuth.classList.remove('active');

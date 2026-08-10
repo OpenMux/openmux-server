@@ -35,6 +35,10 @@
 
   --bg-terminal: #111;
   --fg-terminal: #fff;
+
+  --attention-color: #ffcc00;
+  --attention-glow: rgba(255, 204, 0, 0.5);
+  --attention-bg: rgba(255, 204, 0, 0.12);
 }
 
 [data-theme="light"] {
@@ -73,6 +77,10 @@
 
   --bg-terminal: #f8fafc;
   --fg-terminal: #1e293b;
+
+  --attention-color: #b8860b;
+  --attention-glow: rgba(184, 134, 11, 0.4);
+  --attention-bg: rgba(184, 134, 11, 0.15);
 }
 
 html, body { height: 100%; margin: 0; background: var(--bg-app); color: var(--text-main); font: 14px/1.5 -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
@@ -159,7 +167,11 @@ body.console { display: flex; flex-direction: column; min-height: 100vh; }
 body.console .main-content { overflow: hidden; }
 body.console .console-body { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; position: relative; }
 #term-container { flex: 1 1 auto; min-height: 0; display: flex; }
-#term { flex: 1 1 auto; width: 100%; height: 100%; }
+#term { flex: 1 1 auto; width: 100%; height: 100%; min-width: 0; }
+#actionTermSplitter { flex: 0 0 6px; cursor: col-resize; background: var(--border-color); }
+#actionTermSplitter:hover, #actionTermSplitter.dragging { background: var(--accent-color); }
+#actionTermPane { flex: 0 0 auto; display: flex; flex-direction: column; min-width: 0; border-left: 1px solid var(--border-color); background: var(--bg-terminal); }
+#actionTerm { flex: 1 1 auto; min-height: 0; }
 
 /* Connection banner for prominent WS disconnect/alerts */
 .banner { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 12px 24px; display: none; z-index: 20; text-align: center; border-radius: 4px; white-space: nowrap; }
@@ -196,6 +208,18 @@ body.mode-readonly header.site { background: #2a2200; border-bottom-color: #6b5a
 .chip { display: inline-block; padding: 4px 8px; border-radius: 14px; background: var(--bg-hover); color: var(--text-main); border: 1px solid var(--border-color); font-size: 12px; }
 .chip.ok { border-color: var(--status-ok-text); }
 .chip.bad { border-color: var(--status-err-text); }
+
+/* Flashing highlight for operator-input controls waiting on a human - stops once the
+   operator notices/interacts (see console.js's showOperatorPrompt/showActionStrip). */
+@keyframes action-attention-pulse {
+  0%, 100% { box-shadow: 0 0 2px 1px var(--attention-glow); }
+  50% { box-shadow: 0 0 12px 5px var(--attention-glow); }
+}
+.action-needs-attention {
+  border: 2px solid var(--attention-color) !important;
+  background: var(--attention-bg) !important;
+  animation: action-attention-pulse 1.1s ease-in-out infinite;
+}
 
 .log-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 .log-controls select, .log-controls input { min-width: 160px; }

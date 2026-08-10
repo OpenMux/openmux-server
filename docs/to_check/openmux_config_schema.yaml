@@ -186,6 +186,16 @@ properties:
       enable_http_api: { type: boolean }
       cors_enable: { type: boolean }
       enable_fault_injection: { type: boolean }
+  port_actions:
+    type: object
+    additionalProperties: false
+    properties:
+      actions_dir: { type: string }
+      action_ports:
+        type: object
+        additionalProperties:
+          type: array
+          items: { type: string }
 
 anyOf:
   - required: [client_listener]

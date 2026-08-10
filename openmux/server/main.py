@@ -4,14 +4,14 @@ OpenMux Server - Main entry point (Unified Adapters)
 """
 import argparse
 import asyncio
-import logging
 import contextlib
+import json
+import logging
 import os
 import signal
+import stat
 import sys
 from typing import Any, Dict, List, Optional
-import json
-import stat
 
 from .auth_manager import AuthManager
 from .config_manager import ConfigManager
@@ -169,7 +169,7 @@ class OpenMuxServer:
         if self.shutdown_event:
             asyncio.create_task(self._monitor_shutdown_event())
 
-    # Legacy port initialization removed (unified-only)
+        # Legacy port initialization removed (unified-only)
 
         # Initialize unified adapters (new system)
         await self._initialize_unified_adapters()
@@ -212,6 +212,8 @@ class OpenMuxServer:
                 for adapter in self.unified_adapters:
                     if hasattr(adapter, "main_port_manager"):
                         adapter.main_port_manager = self.port_manager
+                    if hasattr(adapter, "server_config"):
+                        adapter.server_config = full_config
                     set_auth = getattr(adapter, "set_auth_manager", None)
                     if callable(set_auth):
                         set_auth(self.auth_manager)
@@ -257,11 +259,11 @@ class OpenMuxServer:
                 try:
                     cfg = getattr(self.config_manager, "config", {}) or {}
                     # Preferred location: server.control_socket
-                    srv = (cfg.get("server", {}) or {})
+                    srv = cfg.get("server", {}) or {}
                     path = srv.get("control_socket")
                     if not path:
                         # Back-compat (deprecated): runtime.control_socket
-                        rt = (cfg.get("runtime", {}) or {})
+                        rt = cfg.get("runtime", {}) or {}
                         path = rt.get("control_socket")
                         if path:
                             try:
@@ -330,11 +332,15 @@ class OpenMuxServer:
             if action == "reload":
                 scope = str(req.get("scope") or "soft").lower()
                 if scope == "soft":
-                    res = await self.reload_adapters_soft(context={"origin": "control-socket", "user": "local", "remote": addr, "req_id": "ctl-soft"})
+                    res = await self.reload_adapters_soft(
+                        context={"origin": "control-socket", "user": "local", "remote": addr, "req_id": "ctl-soft"}
+                    )
                     await self._write_control_response(writer, ok=True, result=res)
                     return
                 elif scope == "full":
-                    res = await self.reload_adapters_full(context={"origin": "control-socket", "user": "local", "remote": addr, "req_id": "ctl-full"})
+                    res = await self.reload_adapters_full(
+                        context={"origin": "control-socket", "user": "local", "remote": addr, "req_id": "ctl-full"}
+                    )
                     await self._write_control_response(writer, ok=True, result=res)
                     return
                 else:
@@ -345,7 +351,9 @@ class OpenMuxServer:
                 adapters = getattr(self, "unified_adapters", []) or []
                 started = sum(1 for a in adapters if getattr(a, "is_running", False))
                 names = [getattr(a, "name", "?") for a in adapters]
-                await self._write_control_response(writer, ok=True, result={"adapters": names, "started": started, "total": len(adapters)})
+                await self._write_control_response(
+                    writer, ok=True, result={"adapters": names, "started": started, "total": len(adapters)}
+                )
                 return
             else:
                 await self._write_control_response(writer, ok=False, error=f"unknown_action: {action}")
@@ -360,7 +368,9 @@ class OpenMuxServer:
                 writer.close()
                 await writer.wait_closed()
 
-    async def _write_control_response(self, writer: asyncio.StreamWriter, ok: bool, error: Optional[str] = None, result: Optional[Dict[str, Any]] = None):
+    async def _write_control_response(
+        self, writer: asyncio.StreamWriter, ok: bool, error: Optional[str] = None, result: Optional[Dict[str, Any]] = None
+    ):
         resp: Dict[str, Any] = {"ok": bool(ok)}
         if error:
             resp["error"] = str(error)
@@ -639,9 +649,7 @@ class OpenMuxServer:
                     endpoints_lines = [status_info.get("endpoint", "N/A")]
 
                 for line in endpoints_lines:
-                    self.logger.info(
-                        f"  {adapter.name:15} ({adapter_type:15}) {line:25} {status}"
-                    )
+                    self.logger.info(f"  {adapter.name:15} ({adapter_type:15}) {line:25} {status}")
 
         # Show unified port adapters
         if port_unified_adapters:
@@ -761,7 +769,9 @@ class OpenMuxServer:
         """
         req_id = (context or {}).get("req_id") or "sig"
         try:
-            self.logger.info(f"[reload-soft:{req_id}] Initiating soft reload (origin={ (context or {}).get('origin', 'unknown') })")
+            self.logger.info(
+                f"[reload-soft:{req_id}] Initiating soft reload (origin={ (context or {}).get('origin', 'unknown') })"
+            )
         except Exception:
             pass
 
@@ -771,6 +781,7 @@ class OpenMuxServer:
             cfg_path = getattr(self.config_manager, "config_path", None)
             self.logger.info(f"[reload-soft:{req_id}] Loading config from {cfg_path}")
             import time as _t
+
             _t0 = _t.time()
             new_cfg = self._reload_config_from_disk()
             self.logger.info(f"[reload-soft:{req_id}] Config loaded in {_t.time()-_t0:.3f}s")
@@ -845,7 +856,9 @@ class OpenMuxServer:
                         self.unified_adapters.append(_na)
                         self.port_manager.set_unified_adapters(self.unified_adapters)
                         adapters.append(_na)
-                        self.logger.info(f"[reload-soft:{req_id}] Bootstrapped new {_type_key} adapter; reconcile will populate ports")
+                        self.logger.info(
+                            f"[reload-soft:{req_id}] Bootstrapped new {_type_key} adapter; reconcile will populate ports"
+                        )
                     else:
                         self.logger.error(f"[reload-soft:{req_id}] New {_type_key} adapter failed to start")
             except Exception as _e:
@@ -968,6 +981,7 @@ class OpenMuxServer:
         try:
             # Correlation and origin context for logs
             import time as _time
+
             ctx = context or {}
             req_id = str(ctx.get("req_id") or "srv")
             origin = str(ctx.get("origin") or "unknown")
@@ -999,8 +1013,14 @@ class OpenMuxServer:
                     atype = adapter.get_adapter_type()
                     # Avoid self-stop deadlock: if the reload was triggered from the web console itself,
                     # defer stopping that web console instance until after we return the HTTP response.
-                    if origin == "config-editor" and str(ctx.get("web_adapter_name") or "") == aname and adapter is self.web_console:
-                        self.logger.warning(f"[reload-full:{req_id}] Deferring stop of self-hosted WebConsole '{aname}' to avoid in-request shutdown")
+                    if (
+                        origin == "config-editor"
+                        and str(ctx.get("web_adapter_name") or "") == aname
+                        and adapter is self.web_console
+                    ):
+                        self.logger.warning(
+                            f"[reload-full:{req_id}] Deferring stop of self-hosted WebConsole '{aname}' to avoid in-request shutdown"
+                        )
                         deferred_old_wc = adapter
                         # Do not count as stopped here; will stop later
                         continue
@@ -1014,14 +1034,14 @@ class OpenMuxServer:
                             f"[reload-full:{req_id}] Timeout stopping {aname} ({atype}) after {STOP_TIMEOUT_S:.1f}s; continuing",
                             exc_info=False,
                         )
-                        summary["errors"].append({
-                            "adapter": aname,
-                            "stop_timeout": STOP_TIMEOUT_S,
-                        })
-                    else:
-                        self.logger.info(
-                            f"[reload-full:{req_id}] Stopped {aname} ({atype}) in {_time.monotonic()-_t0:.3f}s"
+                        summary["errors"].append(
+                            {
+                                "adapter": aname,
+                                "stop_timeout": STOP_TIMEOUT_S,
+                            }
                         )
+                    else:
+                        self.logger.info(f"[reload-full:{req_id}] Stopped {aname} ({atype}) in {_time.monotonic()-_t0:.3f}s")
                     summary["stopped"] += 1
                     try:
                         summary["stopped_adapters"].append({"name": aname, "type": atype})
@@ -1049,6 +1069,7 @@ class OpenMuxServer:
                 cfg_path = getattr(self.config_manager, "config_path", None)
                 self.logger.info(f"[reload-full:{req_id}] Loading config from {cfg_path}")
                 import time as _t
+
                 _t0 = _t.time()
                 self._reload_config_from_disk()
                 self.logger.info(f"[reload-full:{req_id}] Config loaded in {_t.time()-_t0:.3f}s")
@@ -1097,6 +1118,8 @@ class OpenMuxServer:
                 try:
                     if hasattr(adapter, "main_port_manager"):
                         adapter.main_port_manager = self.port_manager
+                    if hasattr(adapter, "server_config"):
+                        adapter.server_config = full_config
                     set_auth = getattr(adapter, "set_auth_manager", None)
                     if callable(set_auth):
                         set_auth(self.auth_manager)
@@ -1105,11 +1128,15 @@ class OpenMuxServer:
                         set_console(self.console_manager)
                     try:
                         atype = adapter.get_adapter_type()
-                        self.logger.debug(f"[reload-full:{req_id}] Wired dependencies for {getattr(adapter, 'name', '?')} ({atype})")
+                        self.logger.debug(
+                            f"[reload-full:{req_id}] Wired dependencies for {getattr(adapter, 'name', '?')} ({atype})"
+                        )
                     except Exception:
                         pass
                 except Exception as e:
-                    self.logger.error(f"Full reload: dependency wiring failed for {getattr(adapter, 'name', '?')}: {e}", exc_info=True)
+                    self.logger.error(
+                        f"Full reload: dependency wiring failed for {getattr(adapter, 'name', '?')}: {e}", exc_info=True
+                    )
                     summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "wire_error": str(e)})
 
             # Start adapters
@@ -1124,7 +1151,9 @@ class OpenMuxServer:
                     # If we deferred stopping the current WebConsole, also defer starting the new WebConsole
                     if deferred_old_wc is not None and adapter is deferred_new_wc:
                         summary["web_console_restart_deferred"] = True
-                        self.logger.warning(f"[reload-full:{req_id}] Deferring start of new WebConsole '{aname}' until after response")
+                        self.logger.warning(
+                            f"[reload-full:{req_id}] Deferring start of new WebConsole '{aname}' until after response"
+                        )
                         continue
                     self.logger.info(f"[reload-full:{req_id}] Starting {aname} ({atype}) ...")
                     _s0 = _time.monotonic()
@@ -1135,10 +1164,12 @@ class OpenMuxServer:
                             f"[reload-full:{req_id}] Timeout starting {aname} ({atype}) after {START_TIMEOUT_S:.1f}s",
                             exc_info=False,
                         )
-                        summary["errors"].append({
-                            "adapter": aname,
-                            "start_timeout": START_TIMEOUT_S,
-                        })
+                        summary["errors"].append(
+                            {
+                                "adapter": aname,
+                                "start_timeout": START_TIMEOUT_S,
+                            }
+                        )
                         ok = False
                     if ok:
                         summary["started"] += 1
@@ -1162,7 +1193,9 @@ class OpenMuxServer:
                         except Exception:
                             pass
                     else:
-                        summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "start_error": "start returned False"})
+                        summary["errors"].append(
+                            {"adapter": getattr(adapter, "name", "?"), "start_error": "start returned False"}
+                        )
                 except Exception as e:
                     self.logger.error(f"Full reload: start failed for {getattr(adapter, 'name', '?')}: {e}", exc_info=True)
                     summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "start_error": str(e)})
@@ -1195,6 +1228,7 @@ class OpenMuxServer:
         STOP_TIMEOUT_S = 10.0
         START_TIMEOUT_S = 10.0
         import time as _time
+
         an_old = getattr(old_adapter, "name", "?")
         an_new = getattr(new_adapter, "name", "?")
         try:
@@ -1202,9 +1236,13 @@ class OpenMuxServer:
             _t0 = _time.monotonic()
             try:
                 await asyncio.wait_for(old_adapter.stop(), timeout=STOP_TIMEOUT_S)
-                self.logger.info(f"[reload-full:{req_id}] [deferred] Stopped WebConsole '{an_old}' in {_time.monotonic()-_t0:.3f}s")
+                self.logger.info(
+                    f"[reload-full:{req_id}] [deferred] Stopped WebConsole '{an_old}' in {_time.monotonic()-_t0:.3f}s"
+                )
             except asyncio.TimeoutError:
-                self.logger.error(f"[reload-full:{req_id}] [deferred] Timeout stopping WebConsole '{an_old}' after {STOP_TIMEOUT_S:.1f}s")
+                self.logger.error(
+                    f"[reload-full:{req_id}] [deferred] Timeout stopping WebConsole '{an_old}' after {STOP_TIMEOUT_S:.1f}s"
+                )
         except Exception as e:
             self.logger.error(f"[reload-full:{req_id}] [deferred] Error stopping WebConsole '{an_old}': {e}", exc_info=True)
 
@@ -1216,9 +1254,13 @@ class OpenMuxServer:
                 ok = await asyncio.wait_for(new_adapter.start(), timeout=START_TIMEOUT_S)
             except asyncio.TimeoutError:
                 ok = False
-                self.logger.error(f"[reload-full:{req_id}] [deferred] Timeout starting WebConsole '{an_new}' after {START_TIMEOUT_S:.1f}s")
+                self.logger.error(
+                    f"[reload-full:{req_id}] [deferred] Timeout starting WebConsole '{an_new}' after {START_TIMEOUT_S:.1f}s"
+                )
             if ok:
-                self.logger.info(f"[reload-full:{req_id}] [deferred] Started WebConsole '{an_new}' in {_time.monotonic()-_s0:.3f}s")
+                self.logger.info(
+                    f"[reload-full:{req_id}] [deferred] Started WebConsole '{an_new}' in {_time.monotonic()-_s0:.3f}s"
+                )
             else:
                 self.logger.error(f"[reload-full:{req_id}] [deferred] Failed to start WebConsole '{an_new}'")
         except Exception as e:
@@ -1606,9 +1648,7 @@ def main():
                         runtime_cfg = (cfg2 or {}).get("runtime", {}) or {}
                         pidfile = runtime_cfg.get("pidfile")
                         if pidfile:
-                            logging.warning(
-                                "Using deprecated runtime.pidfile; please move to server.pidfile"
-                            )
+                            logging.warning("Using deprecated runtime.pidfile; please move to server.pidfile")
                 except Exception:
                     pidfile = None
             if not pidfile:
@@ -1651,8 +1691,7 @@ def main():
                         security_config_path=parsed_args.security_config,
                     )
                     cfg3 = cm3.load_config() or {}
-                    pidfile = ((cfg3.get("server", {}) or {}).get("pidfile")
-                               or (cfg3.get("runtime", {}) or {}).get("pidfile"))
+                    pidfile = (cfg3.get("server", {}) or {}).get("pidfile") or (cfg3.get("runtime", {}) or {}).get("pidfile")
                 except Exception:
                     pidfile = None
             if not pidfile:

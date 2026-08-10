@@ -7,6 +7,15 @@ Adapters are configured via top-level section keys. These keys are the *source o
 `server`, `authentication`, `logging`, `client_listener`, `serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`, `openmux_client_ports`, `muxcon`, `web_console`, and `web_status`.
 New sections MUST be documented here before being accepted. Sidecar files (see §7) still materialize in-memory under these canonical keys.
 
+`port_actions` is also a canonical top-level section, but it has no adapter behind
+it: it holds config for the Port Actions web plugin only (`actions_dir`,
+`action_ports`), read via `WebConsoleAdapter.server_config` (see
+[docs/design/port_actions.md](design/port_actions.md)). Like `server`/
+`authentication`/`logging`, it is exempted from the factory's missing-adapter
+fail-fast check (`core_sections` in
+[openmux/server/adapters/factory.py](../openmux/server/adapters/factory.py))
+rather than mapped to a `config_section` on a registered adapter plugin.
+
 
 ## 2. No Implicit Transformation
 The factory MUST NOT rewrite, remove, wrap, or rename user-provided sections. Loading is read-only.

@@ -270,6 +270,20 @@
   </div>
   </div>
 
+  <div id="view-actions" class="config-view" style="display:none">
+  <div class="config-section" data-config-section="port_actions">
+    <div class="section-header"><span class="title">Port Actions</span> <span class="desc">Per-port action catalog and allow-list</span></div>
+    <div class="section">
+      <div class="field"><label for="port_actions.actions_dir">Actions directory</label><input id="port_actions.actions_dir" type="text" placeholder="openmux/server/actions/examples" /><span class="help">Directory of action scripts loaded into the catalog. Requires a reload to take effect.</span></div>
+    </div>
+  </div>
+
+  <div class="config-section" data-config-section="port_actions">
+    <div class="section-header"><span class="title">Action-to-port assignments</span> <span class="desc">Which ports each action is allowed to run on</span></div>
+    <div id="port_actions.action_ports"></div>
+  </div>
+  </div>
+
   <div id="view-setup-2" class="config-view">
   <div class="config-section" data-config-section="web_status">
     <div class="section-header"><span class="title">Web status</span> <span class="desc">Read-only status server</span></div>

@@ -167,6 +167,53 @@ def test_get_rw_holders_display_empty_for_unknown_port(cm):
 
 
 # ---------------------------------------------------------------------------
+# broadcast_control_frame_to_port
+
+
+@pytest.mark.asyncio
+async def test_broadcast_control_frame_to_port_delivers_to_all_viewers_of_that_port(cm, port_manager):
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+    _attach(cm, port, "other", "C", "carol", "read-write")
+    adapter_a = FakeAdapterChannel(accept=True)
+    adapter_b = FakeAdapterChannel(accept=True)
+    adapter_c = FakeAdapterChannel(accept=True)
+    cm.client_to_manager["A"] = adapter_a
+    cm.client_to_manager["B"] = adapter_b
+    cm.client_to_manager["C"] = adapter_c
+
+    payload = {"type": "action_run", "event": "action_started", "run_id": "r1"}
+    delivered = await cm.broadcast_control_frame_to_port("p1", payload)
+
+    assert delivered == 2
+    assert adapter_a.received == [payload]
+    assert adapter_b.received == [payload]
+    assert adapter_c.received == []  # different port, not delivered
+
+
+@pytest.mark.asyncio
+async def test_broadcast_control_frame_to_port_counts_only_successful_deliveries(cm, port_manager):
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+    cm.client_to_manager["A"] = FakeAdapterChannel(accept=True)
+    cm.client_to_manager["B"] = FakeAdapterChannel(accept=False)
+
+    delivered = await cm.broadcast_control_frame_to_port("p1", {"type": "action_run"})
+
+    assert delivered == 1
+
+
+@pytest.mark.asyncio
+async def test_broadcast_control_frame_to_port_no_viewers_returns_zero(cm, port_manager):
+    port_manager.ports["p1"] = FakePort()
+    assert await cm.broadcast_control_frame_to_port("p1", {"type": "action_run"}) == 0
+
+
+# ---------------------------------------------------------------------------
 # connect_client_to_port: console-group access control (issue #24)
 
 

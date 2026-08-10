@@ -60,6 +60,12 @@ server:
   # Local control interfaces
   control_socket: logs/openmux.sock
   pidfile: logs/openmux.pid
+port_actions:
+  actions_dir: openmux/server/actions/examples
+  action_ports:
+    echo_probe: [loopback1, loopback2]
+    slow_noop: [loopback1, loopback2]
+    confirm_probe: [loopback1, loopback2]
 web_console:
   enable_probes: true
   enable_ui: true
@@ -68,6 +74,8 @@ web_console:
   - openmux.server.web_plugins.config_editor
   #- openmux.server.web_plugins.os_customizer
   #- openmux.server.web_plugins.federated_proxy
+  - module: openmux.server.web_plugins.port_actions
+    enabled: true
   port: 80
   probes_include_details: true
   realm: OpenMux

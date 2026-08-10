@@ -35,13 +35,45 @@
   </div>
   <button class="btn" id="menuToggle" type="button" title="Open control menu">Menu</button>
   <button class="btn" id="infoToggle" type="button" title="Show port info">Info</button>
+  <button class="btn" id="actionsToggle" type="button" title="Port Actions" style="display:none">Actions</button>
   <button class="btn" id="logsButton" type="button" title="Open logs in new window">Show Logs</button>
 {% endblock %}
 
 {% block content_wrapper %}
   <div class="console-body">
     <div id="banner" class="banner error">WebSocket disconnected. Click Connect to retry.</div>
-    <div id="term-container"><div id="term"></div></div>
+    <div id="term-container">
+      <div id="term"></div>
+      <div id="actionTermSplitter" style="display:none;" title="Drag to resize"></div>
+      <div id="actionTermPane" style="display:none; width:40%; min-width:260px; box-sizing:border-box;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 8px; border-bottom:1px solid var(--border-color, #333);">
+          <b id="actionTermTitle" class="mini"></b>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span id="actionTermStatus" class="tag"></span>
+            <button id="actionTermTakeOver" class="btn" type="button" style="display:none" title="Become the operator who can answer this run's prompts">Take over as operator</button>
+            <button id="actionTermClose" class="btn" type="button" title="Close (the run keeps going in the background)">✕</button>
+          </div>
+        </div>
+        <div id="actionTerm"></div>
+        <div id="actionsOperatorPrompt" style="display:none; padding:6px; border-top:1px solid var(--border-color, #333);">
+          <div id="actionsOperatorPromptText" class="mini"></div>
+          <div id="actionsOperatorReadonlyNote" class="muted mini" style="display:none; margin-top:4px;">Only the current operator can answer this prompt &mdash; use "Take over as operator" above.</div>
+          <div id="actionsOperatorText" style="display:flex; gap:6px; margin-top:6px;">
+            <input type="text" id="actionsOperatorInput" style="flex:1; box-sizing:border-box;" />
+            <button id="actionsOperatorSend" class="btn" type="button">Send</button>
+          </div>
+          <div id="actionsOperatorButtons" style="display:none; gap:6px; margin-top:6px; flex-wrap:wrap;"></div>
+          <div id="actionsOperatorSelect" style="display:none; gap:6px; margin-top:6px;">
+            <select id="actionsOperatorSelectEl" style="flex:1; box-sizing:border-box;"></select>
+            <button id="actionsOperatorSelectSend" class="btn" type="button">Send</button>
+          </div>
+          <div id="actionsOperatorRadio" style="display:none; flex-direction:column; gap:6px; margin-top:6px;">
+            <div id="actionsOperatorRadioEl" style="display:flex; flex-direction:column; gap:2px;"></div>
+            <button id="actionsOperatorRadioSend" class="btn" type="button" style="align-self:flex-start;">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Control menu overlay (Ctrl+E) -->
@@ -89,6 +121,45 @@
       <div class="muted">No port selected</div>
     </div>
   </aside>
+
+  <!-- Port Actions overlay: catalog, run form, live structured event log, run history -->
+  <aside id="actionsOverlay" class="card" style="position:fixed; top:64px; right:16px; min-width: 340px; max-width: 420px; max-height: 70vh; overflow:auto; display:none; z-index:10;">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+      <div class="muted">Port Actions</div>
+      <button id="actionsClose" class="btn" type="button" title="Close">✕</button>
+    </div>
+    <div id="actionsList" class="mini" style="margin-top:8px;">
+      <div class="muted">Loading…</div>
+    </div>
+    <div id="actionsRunPanel" style="display:none; margin-top:10px; border-top:1px solid var(--border-color, #444); padding-top:8px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <b id="actionsRunTitle"></b>
+        <button id="actionsRunBack" class="btn" type="button">Back</button>
+      </div>
+      <div id="actionsRunDesc" class="muted mini" style="margin:4px 0 8px;"></div>
+      <form id="actionsRunForm"></form>
+      <button id="actionsRunSubmit" class="btn" type="button" style="margin-top:6px;">Run</button>
+      <div id="actionsRunStatus" class="mini" style="margin-top:8px;"></div>
+      <div style="margin-top:10px;">
+        <div class="muted" style="display:flex; align-items:center; justify-content:space-between;">
+          <span>Run history</span>
+          <button id="actionsHistoryRefresh" class="btn" type="button">Refresh</button>
+        </div>
+        <div id="actionsHistory" class="mini" style="margin-top:6px;"></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Persistent strip: stays visible while a Port Action is running even if the
+       overlay above is closed, so the operator knows something still holds the lock. -->
+  <div id="actionRunStrip" class="chip" style="position:fixed; bottom:16px; right:16px; display:none; z-index:15; cursor:pointer;" title="Click to view">
+    <span id="actionRunStripText">Action running…</span>
+  </div>
+
+  <!-- Brief action-related notice (deep-link autorun, operator take-over, etc.) - shown
+       so an operator watching the screen isn't surprised by a change with no visible
+       click (docs/design/port_actions.md "Deep-linking an action"/"Operator input"). -->
+  <div id="actionToast" class="chip" style="position:fixed; bottom:56px; right:16px; display:none; z-index:16;"></div>
 {% endblock %}
 
 {% block scripts %}

@@ -25,8 +25,8 @@ term.open(termEl);
 function fitTerminal() { try { fitAddon && fitAddon.fit(); } catch (_) {} }
 window.fitTerminal = fitTerminal; // Expose for layout sidebar toggle
 window.addEventListener('load', () => { fitTerminal(); setTimeout(fitTerminal, 0); });
-window.addEventListener('resize', () => { fitTerminal(); });
-try { const ro = new ResizeObserver(() => fitTerminal()); ro.observe(document.getElementById('term-container')); } catch (_) {}
+window.addEventListener('resize', () => { fitTerminal(); fitActionTerminal(); });
+try { const ro = new ResizeObserver(() => { fitTerminal(); fitActionTerminal(); }); ro.observe(document.getElementById('term-container')); } catch (_) {}
 
 const qs = new URLSearchParams(window.location.search);
 const bannerEl = document.getElementById('banner');
@@ -72,6 +72,9 @@ const infoClose = document.getElementById('infoClose');
 let infoTimer = null;
 // Minimal mode tracking per port (updated from server control frames)
 let clientMode = 'read-only';
+// This WS connection's own client_id, learned from the server's initial client_mode
+// frame; passed to Port Actions run requests so the runner can self-demote/restore us.
+let myClientId = null;
 // Ctrl+E menu wiring
 const ctrlMenu = document.getElementById('ctrlMenu');
 const ctrlClose = document.getElementById('ctrlClose');
@@ -349,6 +352,584 @@ function closeInfo() { infoOverlay.style.display = 'none'; if (infoTimer) { clea
 infoToggle.addEventListener('click', () => { const visible = infoOverlay.style.display !== 'none'; if (visible) closeInfo(); else openInfo(); });
 infoClose.addEventListener('click', () => closeInfo());
 
+// --- Port Actions overlay: catalog, run form, live event log, run history ---
+const actionsOverlay = document.getElementById('actionsOverlay');
+const actionsToggle = document.getElementById('actionsToggle');
+const actionsClose = document.getElementById('actionsClose');
+const actionsListEl = document.getElementById('actionsList');
+const actionsRunPanel = document.getElementById('actionsRunPanel');
+const actionsRunTitle = document.getElementById('actionsRunTitle');
+const actionsRunDesc = document.getElementById('actionsRunDesc');
+const actionsRunForm = document.getElementById('actionsRunForm');
+const actionsRunSubmit = document.getElementById('actionsRunSubmit');
+const actionsRunStatus = document.getElementById('actionsRunStatus');
+const actionsRunBack = document.getElementById('actionsRunBack');
+const actionsHistoryRefresh = document.getElementById('actionsHistoryRefresh');
+const actionsHistoryEl = document.getElementById('actionsHistory');
+const actionsOperatorPrompt = document.getElementById('actionsOperatorPrompt');
+const actionsOperatorPromptText = document.getElementById('actionsOperatorPromptText');
+const actionsOperatorReadonlyNote = document.getElementById('actionsOperatorReadonlyNote');
+const actionsOperatorText = document.getElementById('actionsOperatorText');
+const actionsOperatorInput = document.getElementById('actionsOperatorInput');
+const actionsOperatorSend = document.getElementById('actionsOperatorSend');
+const actionsOperatorButtons = document.getElementById('actionsOperatorButtons');
+const actionsOperatorSelect = document.getElementById('actionsOperatorSelect');
+const actionsOperatorSelectEl = document.getElementById('actionsOperatorSelectEl');
+const actionsOperatorSelectSend = document.getElementById('actionsOperatorSelectSend');
+const actionsOperatorRadio = document.getElementById('actionsOperatorRadio');
+const actionsOperatorRadioEl = document.getElementById('actionsOperatorRadioEl');
+const actionsOperatorRadioSend = document.getElementById('actionsOperatorRadioSend');
+
+let actionsCsrf = null;
+let actionsCatalog = [];
+let currentAction = null;
+let currentActionsWs = null;
+// Who may currently answer this run's operator-input prompts (see "Taking over as
+// operator" in the design doc) - kept in sync via the `operator_changed` event.
+let currentRunOperatorClientId = null;
+// Another client's already-running action on this port, discovered via loadActionsCatalog();
+// cleared once the user clicks the strip to join it (see joinActiveRun()).
+let pendingJoinRun = null;
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function fetchActionsCSRF() {
+  try {
+    const res = await fetch(getBasePath() + '/api/csrf', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const data = await res.json();
+    actionsCsrf = data.csrf || null;
+  } catch (_) { /* no session cookie (e.g. Basic Auth client) - CSRF not required then */ }
+}
+
+function actionsHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (actionsCsrf) headers['X-OMX-CSRF'] = actionsCsrf;
+  return headers;
+}
+
+async function loadActionsCatalog() {
+  const port = currentPort();
+  if (!port) { actionsToggle.style.display = 'none'; return; }
+  try {
+    const res = await fetch(`${getBasePath()}/api/ports/${encodeURIComponent(port)}/actions`, { credentials: 'same-origin', cache: 'no-store' });
+    if (!res.ok) { actionsCatalog = []; actionsToggle.style.display = 'none'; return; }
+    const data = await res.json();
+    actionsCatalog = Array.isArray(data.actions) ? data.actions : [];
+    actionsToggle.style.display = actionsCatalog.length ? '' : 'none';
+    if (data.active_run && !currentActionsWs) {
+      pendingJoinRun = data.active_run;
+      const label = (actionsCatalog.find((a) => a.id === pendingJoinRun.action_id) || {}).name || pendingJoinRun.action_id;
+      showActionStrip(`Script running: ${label} \u2014 click to join`);
+    }
+  } catch (_) {
+    actionsCatalog = [];
+    actionsToggle.style.display = 'none';
+  }
+}
+
+function showActionsListView() {
+  actionsListEl.style.display = '';
+  actionsRunPanel.style.display = 'none';
+}
+
+function renderActionsList() {
+  showActionsListView();
+  if (!actionsCatalog.length) {
+    actionsListEl.innerHTML = '<div class="muted">No actions available for this port</div>';
+    return;
+  }
+  actionsListEl.innerHTML = actionsCatalog.map((a) =>
+    `<div class="actions-item" data-action-id="${escapeHtml(a.id)}" style="padding:6px 0; border-bottom:1px solid var(--border-color); cursor:pointer;">` +
+    `<b>${escapeHtml(a.name || a.id)}</b><div class="muted mini">${escapeHtml(a.description || '')}</div></div>`
+  ).join('');
+  actionsListEl.querySelectorAll('.actions-item').forEach((el) => {
+    el.addEventListener('click', () => {
+      const action = actionsCatalog.find((a) => a.id === el.getAttribute('data-action-id'));
+      if (action) openActionRunPanel(action);
+    });
+  });
+}
+
+function closeActionRunStream() {
+  if (currentActionsWs) { try { currentActionsWs.close(); } catch (_) {} currentActionsWs = null; }
+  currentRunOperatorClientId = null;
+  updateOperatorTakeOverUI();
+  hideOperatorPrompt();
+}
+
+// Action-run terminal: a vertical split of #term-container (beside the main port
+// console) showing the run's transcript/operator prompt - see docs/design/port_actions.md
+// "Live view"/"UI surface". Lazily created since xterm.js needs a visible container to fit.
+const actionTermPane = document.getElementById('actionTermPane');
+const actionTermSplitter = document.getElementById('actionTermSplitter');
+const actionTermEl = document.getElementById('actionTerm');
+const actionTermTitle = document.getElementById('actionTermTitle');
+const actionTermStatus = document.getElementById('actionTermStatus');
+const actionTermTakeOver = document.getElementById('actionTermTakeOver');
+const actionTermClose = document.getElementById('actionTermClose');
+let actionTerm = null;
+let actionTermFit = null;
+const ACTION_TERM_WIDTH_KEY = 'omx_action_term_width';
+
+// Taking over as operator (docs/design/port_actions.md "Operator input"): mirrors the
+// port's own "Force take read-write" - any connected viewer can become the client whose
+// operator_input frames the running script accepts, notified to everyone via the
+// `operator_changed` event so a previous operator learns they lost that role live.
+function updateOperatorTakeOverUI() {
+  if (actionTermTakeOver) {
+    const show = !!currentActionsWs && !!currentRunOperatorClientId && currentRunOperatorClientId !== myClientId;
+    actionTermTakeOver.style.display = show ? '' : 'none';
+  }
+  applyOperatorInputDisabledState();
+}
+
+// Whether this client may answer the current run's operator-input prompt: true once no
+// operator is assigned yet (e.g. before the first `operator_changed`/launch assignment
+// arrives) or once this client is the assigned operator.
+function isCurrentOperator() {
+  return !currentRunOperatorClientId || currentRunOperatorClientId === myClientId;
+}
+
+// Non-operator viewers can see a running action's operator-input prompt (it's part of
+// the shared live view) but must not be able to answer it - disable every control here
+// so only the assigned operator's clicks/keystrokes actually do anything.
+function applyOperatorInputDisabledState() {
+  const enabled = isCurrentOperator();
+  if (actionsOperatorInput) actionsOperatorInput.disabled = !enabled;
+  if (actionsOperatorSend) actionsOperatorSend.disabled = !enabled;
+  if (actionsOperatorButtons) actionsOperatorButtons.querySelectorAll('button').forEach((b) => { b.disabled = !enabled; });
+  if (actionsOperatorSelectEl) actionsOperatorSelectEl.disabled = !enabled;
+  if (actionsOperatorSelectSend) actionsOperatorSelectSend.disabled = !enabled;
+  if (actionsOperatorRadioEl) actionsOperatorRadioEl.querySelectorAll('input').forEach((r) => { r.disabled = !enabled; });
+  if (actionsOperatorRadioSend) actionsOperatorRadioSend.disabled = !enabled;
+  if (actionsOperatorReadonlyNote) actionsOperatorReadonlyNote.style.display = enabled ? 'none' : '';
+}
+if (actionTermTakeOver) actionTermTakeOver.addEventListener('click', () => {
+  if (!currentActionsWs || currentActionsWs.readyState !== WebSocket.OPEN) return;
+  try { currentActionsWs.send(JSON.stringify({ type: 'operator_take_over' })); } catch (_) {}
+});
+
+function ensureActionTerm() {
+  if (actionTerm) return;
+  const colors = getThemeColors();
+  actionTerm = new Terminal({ convertEol: true, theme: { background: colors.background, foreground: colors.foreground } });
+  actionTermFit = (window.FitAddon) ? new window.FitAddon.FitAddon() : null;
+  if (actionTermFit) actionTerm.loadAddon(actionTermFit);
+  actionTerm.open(actionTermEl);
+}
+function fitActionTerminal() { try { actionTermFit && actionTermFit.fit(); } catch (_) {} }
+window.addEventListener('theme-changed', () => {
+  if (!actionTerm) return;
+  const colors = getThemeColors();
+  actionTerm.options.theme = { background: colors.background, foreground: colors.foreground };
+});
+
+function openActionTermPane() {
+  ensureActionTerm();
+  actionTermSplitter.style.display = 'block';
+  actionTermPane.style.display = 'flex';
+  const savedWidth = parseInt(localStorage.getItem(ACTION_TERM_WIDTH_KEY), 10);
+  if (savedWidth) actionTermPane.style.width = savedWidth + 'px';
+  fitTerminal();
+  fitActionTerminal();
+  setTimeout(() => { fitTerminal(); fitActionTerminal(); }, 0);
+  // The pane's own header already shows status - the fixed bottom-right strip would
+  // otherwise sit on top of the pane's operator-input box.
+  hideActionStrip();
+}
+// Only hides the pane - the run's WS stream keeps updating in the background (same
+// "closing only hides" pattern as the Actions overlay/persistent strip). Re-shows the
+// strip if a run is still active, since it's now the only visible "still running" cue.
+function closeActionTermPane() {
+  actionTermSplitter.style.display = 'none';
+  actionTermPane.style.display = 'none';
+  setTimeout(fitTerminal, 0);
+  if (currentActionsWs) showActionStrip(lastActionStripText || 'Action running\u2026');
+}
+if (actionTermClose) actionTermClose.addEventListener('click', () => closeActionTermPane());
+
+// Draggable vertical divider between #term and #actionTermPane; width persists across reloads.
+if (actionTermSplitter) {
+  let dragging = false;
+  actionTermSplitter.addEventListener('mousedown', (e) => {
+    dragging = true;
+    actionTermSplitter.classList.add('dragging');
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const containerRect = document.getElementById('term-container').getBoundingClientRect();
+    let width = containerRect.right - e.clientX;
+    width = Math.max(220, Math.min(width, containerRect.width - 220));
+    actionTermPane.style.width = width + 'px';
+    fitTerminal();
+    fitActionTerminal();
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    actionTermSplitter.classList.remove('dragging');
+    try { localStorage.setItem(ACTION_TERM_WIDTH_KEY, parseInt(actionTermPane.style.width, 10)); } catch (_) {}
+  });
+}
+
+// Renders one start-run param as a form field. `widget` selects the control:
+//   "text" (default) - a text/number/password <input> (per `p.type`/`p.sensitive`).
+//   "select"          - a <select> built from `p.choices` ({label, value} dicts).
+//   "radio"           - one radio button per `p.choices` entry.
+function renderActionParamField(p) {
+  const def = (p.default !== null && p.default !== undefined) ? String(p.default) : '';
+  const labelHtml = `${escapeHtml(p.name)}${p.required ? ' *' : ''}` +
+    (p.description ? `<span class="muted"> - ${escapeHtml(p.description)}</span>` : '');
+  if (p.widget === 'select') {
+    const options = (p.choices || []).map((c) =>
+      `<option value="${escapeHtml(c.value)}"${c.value === def ? ' selected' : ''}>${escapeHtml(c.label)}</option>`
+    ).join('');
+    return `<label class="mini" style="display:block; margin-top:6px;">${labelHtml}` +
+      `<select name="${escapeHtml(p.name)}" ${p.required ? 'required' : ''} ` +
+      `style="display:block; width:100%; box-sizing:border-box; margin-top:2px;">${options}</select></label>`;
+  }
+  if (p.widget === 'radio') {
+    const options = (p.choices || []).map((c) =>
+      `<label class="mini" style="display:flex; align-items:center; gap:4px; font-weight:normal; margin-top:2px;">` +
+      `<input type="radio" name="${escapeHtml(p.name)}" value="${escapeHtml(c.value)}"${c.value === def ? ' checked' : ''} ${p.required ? 'required' : ''} /> ${escapeHtml(c.label)}</label>`
+    ).join('');
+    return `<div class="mini" style="margin-top:6px;">${labelHtml}<div style="margin-top:2px;">${options}</div></div>`;
+  }
+  const inputType = (p.type === 'int' || p.type === 'float') ? 'number' : (p.sensitive ? 'password' : 'text');
+  return `<label class="mini" style="display:block; margin-top:6px;">${labelHtml}` +
+    `<input type="${inputType}" name="${escapeHtml(p.name)}" value="${escapeHtml(def)}" ${p.required ? 'required' : ''} ` +
+    `style="display:block; width:100%; box-sizing:border-box; margin-top:2px;" /></label>`;
+}
+
+function openActionRunPanel(action) {
+  currentAction = action;
+  closeActionRunStream();
+  closeActionTermPane();
+  ensureActionTerm();
+  actionTerm.clear();
+  actionTermTitle.textContent = '';
+  actionTermStatus.textContent = '';
+  actionsListEl.style.display = 'none';
+  actionsRunPanel.style.display = '';
+  actionsRunTitle.textContent = action.name || action.id;
+  actionsRunDesc.textContent = action.description || '';
+  actionsRunStatus.textContent = '';
+  hideOperatorPrompt();
+  actionsRunForm.innerHTML = (action.params || []).map(renderActionParamField).join('') || '<div class="muted">No parameters</div>';
+  loadRunHistory();
+}
+
+actionsRunBack.addEventListener('click', () => { closeActionRunStream(); showActionsListView(); });
+
+function collectActionParams() {
+  const params = {};
+  const fieldByName = {};
+  (currentAction.params || []).forEach((p) => { fieldByName[p.name] = p; });
+  new FormData(actionsRunForm).forEach((value, key) => {
+    const spec = fieldByName[key] || {};
+    if (spec.type === 'int') params[key] = value === '' ? null : parseInt(value, 10);
+    else if (spec.type === 'float') params[key] = value === '' ? null : parseFloat(value);
+    else params[key] = value;
+  });
+  return params;
+}
+
+function streamActionRun(runId) {
+  closeActionRunStream();
+  ensureActionTerm();
+  actionTermTitle.textContent = (currentAction && (currentAction.name || currentAction.id)) || 'Action';
+  openActionTermPane();
+  closeActionsOverlay(); // the run dialog sits over the action terminal pane; get it out of the way once streaming starts
+  const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+  const qs = myClientId ? `?client_id=${encodeURIComponent(myClientId)}` : '';
+  const sock = new WebSocket(`${proto}://${location.host}${getBasePath()}/ws/actions/${encodeURIComponent(runId)}${qs}`);
+  currentActionsWs = sock;
+  let currentStepName = null; // last-seen meta.step (see docs/design/port_actions.md), reused so a
+  // later "waiting for input" event can still say WHICH step it's waiting for.
+  sock.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    const ts = msg.ts ? new Date(msg.ts * 1000).toLocaleTimeString() : '';
+    const meta = msg.meta ? ' ' + JSON.stringify(msg.meta) : '';
+    actionTerm.write(`[${ts}] ${msg.event || ''}${meta}\n`);
+    const label = (currentAction && (currentAction.name || currentAction.id)) || 'action';
+    if (msg.event === 'action_finished') {
+      hideOperatorPrompt();
+      actionTermTitle.textContent = `${label} — ${msg.status || 'finished'}`;
+      actionTermStatus.textContent = `Finished: ${msg.status || 'unknown'}`;
+      actionsRunStatus.textContent = `Finished: ${msg.status || 'unknown'}`;
+      currentRunOperatorClientId = null;
+      updateOperatorTakeOverUI();
+      loadRunHistory();
+      showActionStrip(`${label}: ${msg.status || 'finished'}`);
+      setTimeout(() => { if (!currentActionsWs) hideActionStrip(); }, 6000);
+    } else if (msg.event === 'step_waiting_for_operator') {
+      const stagePrefix = currentStepName ? `${currentStepName}: ` : '';
+      actionTermTitle.textContent = `${label} — ${stagePrefix}waiting for input`;
+      actionTermStatus.textContent = 'Waiting for input…';
+      showOperatorPrompt(msg.prompt, msg.kind, msg.choices);
+      showActionStrip(`${label}: ${stagePrefix}waiting for input — click to answer`);
+    } else if (msg.event === 'operator_changed') {
+      const wasOperator = currentRunOperatorClientId === myClientId;
+      currentRunOperatorClientId = msg.operator_client_id;
+      updateOperatorTakeOverUI();
+      if (wasOperator && currentRunOperatorClientId !== myClientId) {
+        showActionToast('Another user took over as operator for this run');
+      }
+    } else {
+      // Example scripts conventionally put the current step name in meta.step
+      // (see docs/design/port_actions.md) - surface it in the pane's heading (most
+      // prominent spot); the small status tag stays a short generic word so the two
+      // don't just repeat each other.
+      // (Not written to actionsRunStatus: that lives in the start-run overlay, which
+      // closeActionsOverlay() hides for the whole run - nothing there is visible now.)
+      const step = msg.meta && msg.meta.step;
+      if (step) currentStepName = step;
+      actionTermTitle.textContent = step ? `${label} — ${step}` : `${label} — ${msg.event || 'running'}`;
+      actionTermStatus.textContent = msg.event || 'running';
+      showActionStrip(`Action running: ${label} — ${step || msg.event || ''}`);
+    }
+  };
+  sock.onclose = () => { if (currentActionsWs === sock) currentActionsWs = null; };
+  updateOperatorTakeOverUI();
+}
+
+// Operator input (docs/design/port_actions.md "Operator input"): answers a script's
+// session.prompt()/wait_for_input()/confirm()/choose()/select()/radio() call, routed
+// upstream over the same run WS. `kind` selects which control row is shown:
+//   "text" (default)  - a text input + Send button.
+//   "buttons"         - one button per choice; clicking answers immediately.
+//   "select"          - a <select> (options supplied by the script) + Send button.
+//   "radio"           - one radio button per choice + Send button.
+function showOperatorPrompt(prompt, kind, choices) {
+  if (!actionsOperatorPrompt) return;
+  actionsOperatorPromptText.textContent = prompt || 'Script is waiting for input';
+  actionsOperatorPrompt.style.display = '';
+  actionsOperatorPrompt.classList.add('action-needs-attention');
+  const isButtons = kind === 'buttons';
+  const isSelect = kind === 'select';
+  const isRadio = kind === 'radio';
+  if (actionsOperatorText) actionsOperatorText.style.display = (isButtons || isSelect || isRadio) ? 'none' : 'flex';
+  if (actionsOperatorButtons) actionsOperatorButtons.style.display = isButtons ? 'flex' : 'none';
+  if (actionsOperatorSelect) actionsOperatorSelect.style.display = isSelect ? 'flex' : 'none';
+  if (actionsOperatorRadio) actionsOperatorRadio.style.display = isRadio ? 'flex' : 'none';
+  if (isButtons && actionsOperatorButtons) {
+    actionsOperatorButtons.innerHTML = '';
+    (choices || []).forEach((choice) => {
+      const btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.type = 'button';
+      btn.textContent = choice.label;
+      btn.addEventListener('click', () => sendOperatorInput(choice.value));
+      actionsOperatorButtons.appendChild(btn);
+    });
+  } else if (isSelect && actionsOperatorSelectEl) {
+    actionsOperatorSelectEl.innerHTML = '';
+    (choices || []).forEach((choice) => {
+      const opt = document.createElement('option');
+      opt.value = choice.value;
+      opt.textContent = choice.label;
+      actionsOperatorSelectEl.appendChild(opt);
+    });
+  } else if (isRadio && actionsOperatorRadioEl) {
+    actionsOperatorRadioEl.innerHTML = '';
+    (choices || []).forEach((choice, i) => {
+      const label = document.createElement('label');
+      label.className = 'mini';
+      label.style.cssText = 'display:flex; align-items:center; gap:4px; font-weight:normal;';
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = 'actionsOperatorRadioGroup';
+      input.value = choice.value;
+      if (i === 0) input.checked = true;
+      label.appendChild(input);
+      label.appendChild(document.createTextNode(choice.label));
+      actionsOperatorRadioEl.appendChild(label);
+    });
+  } else {
+    actionsOperatorInput.value = '';
+    actionsOperatorInput.focus();
+  }
+  applyOperatorInputDisabledState();
+}
+function hideOperatorPrompt() {
+  if (actionsOperatorPrompt) {
+    actionsOperatorPrompt.style.display = 'none';
+    actionsOperatorPrompt.classList.remove('action-needs-attention');
+  }
+}
+// Any interaction inside the prompt counts as "the operator noticed it" - stop flashing
+// right away rather than waiting for the answer to actually be sent.
+if (actionsOperatorPrompt) {
+  actionsOperatorPrompt.addEventListener('click', () => actionsOperatorPrompt.classList.remove('action-needs-attention'));
+  actionsOperatorPrompt.addEventListener('focusin', () => actionsOperatorPrompt.classList.remove('action-needs-attention'));
+}
+// `value` is passed explicitly by button clicks; text/select/radio controls are read here.
+function sendOperatorInput(value) {
+  if (!currentActionsWs || currentActionsWs.readyState !== WebSocket.OPEN) return;
+  if (!isCurrentOperator()) return; // defense-in-depth: controls are already disabled for non-operators
+  let text = value;
+  if (text === undefined) {
+    if (actionsOperatorSelect && actionsOperatorSelect.style.display !== 'none') {
+      text = actionsOperatorSelectEl.value;
+    } else if (actionsOperatorRadio && actionsOperatorRadio.style.display !== 'none') {
+      const checked = actionsOperatorRadioEl.querySelector('input[type="radio"]:checked');
+      text = checked ? checked.value : '';
+    } else {
+      text = actionsOperatorInput.value;
+    }
+  }
+  try { currentActionsWs.send(JSON.stringify({ type: 'operator_input', text })); } catch (_) {}
+  hideOperatorPrompt();
+}
+if (actionsOperatorSend) actionsOperatorSend.addEventListener('click', () => sendOperatorInput());
+if (actionsOperatorInput) actionsOperatorInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendOperatorInput(); });
+if (actionsOperatorSelectSend) actionsOperatorSelectSend.addEventListener('click', () => sendOperatorInput());
+if (actionsOperatorRadioSend) actionsOperatorRadioSend.addEventListener('click', () => sendOperatorInput());
+
+// Extracted so both the Run button and a deep-link's &autorun=1 can trigger the same
+// run path (docs/design/port_actions.md "Deep-linking an action") - autorun goes through
+// this exact same auth/permission/validation-checked API call, no shortcut taken.
+async function launchCurrentAction() {
+  if (!currentAction) return;
+  const port = currentPort();
+  if (!port) return;
+  const params = collectActionParams();
+  actionsRunSubmit.disabled = true;
+  actionsRunStatus.textContent = 'Starting\u2026';
+  ensureActionTerm();
+  actionTerm.clear();
+  try {
+    const res = await fetch(`${getBasePath()}/api/ports/${encodeURIComponent(port)}/actions/${encodeURIComponent(currentAction.id)}/run`, {
+      method: 'POST', credentials: 'same-origin', headers: actionsHeaders(),
+      body: JSON.stringify({ params, client_id: myClientId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { actionsRunStatus.textContent = `Failed to start: ${data.message || res.status}`; return; }
+    actionsRunStatus.textContent = `Running (run ${data.run_id})`;
+    showActionStrip(`Action running: ${currentAction.name || currentAction.id}`);
+    streamActionRun(data.run_id);
+    currentRunOperatorClientId = myClientId; // the launcher starts out as the operator
+    updateOperatorTakeOverUI();
+  } catch (e) {
+    actionsRunStatus.textContent = `Failed to start: ${e}`;
+  } finally {
+    actionsRunSubmit.disabled = false;
+  }
+}
+actionsRunSubmit.addEventListener('click', () => launchCurrentAction());
+
+async function loadRunHistory() {
+  if (!currentAction) return;
+  const port = currentPort();
+  try {
+    const res = await fetch(
+      `${getBasePath()}/api/ports/${encodeURIComponent(port)}/actions/${encodeURIComponent(currentAction.id)}/runs`,
+      { credentials: 'same-origin', cache: 'no-store' }
+    );
+    if (!res.ok) { actionsHistoryEl.innerHTML = '<div class="muted">Unavailable</div>'; return; }
+    const data = await res.json();
+    const runs = Array.isArray(data.runs) ? data.runs.slice(0, 10) : [];
+    if (!runs.length) { actionsHistoryEl.innerHTML = '<div class="muted">No runs yet</div>'; return; }
+    actionsHistoryEl.innerHTML = `<table class="mini-table"><tbody>${runs.map((r) =>
+      `<tr><th>${new Date(r.started_at * 1000).toLocaleTimeString()}</th><td>${escapeHtml(r.username)}</td><td>${escapeHtml(r.status)}</td></tr>`
+    ).join('')}</tbody></table>`;
+  } catch (_) {
+    actionsHistoryEl.innerHTML = '<div class="muted">Unavailable</div>';
+  }
+}
+actionsHistoryRefresh.addEventListener('click', () => loadRunHistory());
+
+// Persistent strip: stays visible while a run is active even if the overlay is
+// closed, so it's clear something is still active and holding the read-write lock.
+const actionRunStrip = document.getElementById('actionRunStrip');
+const actionRunStripText = document.getElementById('actionRunStripText');
+let lastActionStripText = '';
+function showActionStrip(text) {
+  lastActionStripText = text;
+  if (!actionRunStrip) return;
+  // Suppress the fixed bottom-right strip while the action term pane is open - it
+  // docks to the right too and would otherwise overlap the pane's operator-input box.
+  if (actionTermPane && actionTermPane.style.display !== 'none') { actionRunStrip.style.display = 'none'; return; }
+  actionRunStripText.textContent = text;
+  actionRunStrip.style.display = 'inline-block';
+  actionRunStrip.classList.toggle('action-needs-attention', text.indexOf('waiting for input') !== -1);
+}
+function hideActionStrip() {
+  if (!actionRunStrip) return;
+  actionRunStrip.style.display = 'none';
+  actionRunStrip.classList.remove('action-needs-attention');
+}
+// Late join (docs/design/port_actions.md "Late join"): open the run panel for an action
+// already started by someone else, and stream its full event history plus live updates.
+function joinActiveRun(activeRun) {
+  const action = actionsCatalog.find((a) => a.id === activeRun.action_id) || { id: activeRun.action_id, name: activeRun.action_id, params: [] };
+  openActionsOverlay();
+  openActionRunPanel(action);
+  actionsRunStatus.textContent = `Running (run ${activeRun.run_id}) — joined in progress`;
+  streamActionRun(activeRun.run_id);
+  currentRunOperatorClientId = activeRun.operator_client_id || null;
+  updateOperatorTakeOverUI();
+}
+if (actionRunStrip) actionRunStrip.addEventListener('click', () => {
+  actionRunStrip.classList.remove('action-needs-attention');
+  if (pendingJoinRun && !currentAction) { joinActiveRun(pendingJoinRun); pendingJoinRun = null; return; }
+  openActionsOverlay();
+  if (currentAction) { actionsListEl.style.display = 'none'; actionsRunPanel.style.display = ''; }
+});
+
+// Closing the overlay only hides it - the run keeps executing server-side and its
+// WS stream (and the strip above) keep updating in the background regardless.
+function openActionsOverlay() { actionsOverlay.style.display = 'block'; if (!currentAction) renderActionsList(); else { actionsListEl.style.display = 'none'; actionsRunPanel.style.display = ''; } }
+function closeActionsOverlay() { actionsOverlay.style.display = 'none'; }
+actionsToggle.addEventListener('click', () => {
+  const visible = actionsOverlay.style.display !== 'none';
+  if (visible) closeActionsOverlay(); else openActionsOverlay();
+});
+actionsClose.addEventListener('click', () => closeActionsOverlay());
+
+// Deep-linking (docs/design/port_actions.md "Deep-linking an action"): `?action=<id>`
+// opens that action pre-selected, `&<param_name>=<value>` (bare declared param names)
+// pre-fills its run form, `&autorun=1` launches it immediately - through the exact same
+// `launchCurrentAction()`/API call a manual "Run" click uses, so auth/permission/param
+// validation are never bypassed. Sensitive params are never read from the URL.
+const actionToast = document.getElementById('actionToast');
+function showActionToast(text) {
+  if (!actionToast) return;
+  actionToast.textContent = text;
+  actionToast.style.display = 'inline-block';
+  setTimeout(() => { actionToast.style.display = 'none'; }, 5000);
+}
+function applyActionDeepLink() {
+  const actionId = (qs.get('action') || '').trim();
+  if (!actionId) return;
+  const action = actionsCatalog.find((a) => a.id === actionId);
+  if (!action) return;
+  openActionsOverlay();
+  openActionRunPanel(action);
+  (action.params || []).forEach((p) => {
+    if (p.sensitive) return; // never pre-fill sensitive params from the URL
+    const raw = qs.get(p.name);
+    if (raw === null) return;
+    const field = actionsRunForm.elements.namedItem(p.name);
+    if (!field) return;
+    if (typeof RadioNodeList !== 'undefined' && field instanceof RadioNodeList) {
+      for (const el of field) { if (el.value === raw) { el.checked = true; break; } }
+    } else {
+      field.value = raw;
+    }
+  });
+  if (qs.get('autorun') === '1' && actionsRunForm.reportValidity()) {
+    showActionToast(`Auto-starting action: ${action.name || action.id}\u2026`);
+    launchCurrentAction();
+  }
+}
+
+
 term.onData((data) => {
   if (clientMode !== 'read-write') {
     if (data.includes('\r')) {
@@ -402,6 +983,9 @@ let splashShown = false; function showSplash() { if (splashShown) return; splash
     '   - Add &scrollback=0 to skip scrollback replay',
     '   - Add &embed=1 to start with the sidebar collapsed',
     '     use the sidebar toggle button in the top bar to bring it back',
+    '   - Add &action=<id> to open a Port Action run form pre-selected',
+    '     &<param_name>=<value> pre-fills a param, &autorun=1 launches it',
+    '     (never for params marked sensitive - those are never read from the URL)',
     ' - Disconnect/Reconnect using the button on the right',
     '',]; for (const line of art) term.write(line + '\r\n'); fitTerminal(); }
 
@@ -504,9 +1088,11 @@ function connectSelected() {
         }
         if (msg && msg.type === 'client_mode') {
           clientMode = (msg.mode === 'read-write') ? 'read-write' : 'read-only';
+          if (msg.client_id) myClientId = msg.client_id;
           updateCtrlMenuButtons();
           if (Array.isArray(msg.rw_holders) || msg.max_rw_users !== undefined) updateRoMenuInfo(msg.rw_holders || [], msg.max_rw_users);
-          if (msg.ok === false && msg.reason !== 'demoted') {
+          const silentReasons = ['demoted', 'action_self_demoted', 'action_restored'];
+          if (msg.ok === false && !silentReasons.includes(msg.reason)) {
             if (msg.max_rw_users === 0) {
               try { term.write('\r\n[read-write is not available on this port – configured with 0 read-write users]\r\n'); } catch (_) {}
             } else {
@@ -516,6 +1102,10 @@ function connectSelected() {
           }
           if (msg.reason === 'demoted') {
             try { term.write('\r\n[Your read-write access was taken by another user]\r\n'); } catch (_) {}
+          } else if (msg.reason === 'action_self_demoted') {
+            try { term.write('\r\n[Your read-write access was set aside to run a Port Action]\r\n'); } catch (_) {}
+          } else if (msg.reason === 'action_restored') {
+            try { term.write('\r\n[Read-write access restored after the Port Action finished]\r\n'); } catch (_) {}
           }
           if (clientMode === 'read-write' && msg.ok !== false && msg.reason !== 'demoted') {
             hideCtrlMenu();
@@ -523,6 +1113,22 @@ function connectSelected() {
           }
           if (infoOverlay.style.display !== 'none') {
             renderInfo(ports.find(x => x.name === currentPort()) || null);
+          }
+          return;
+        }
+        if (msg && msg.type === 'action_run') {
+          // Live "script started/finished" notice for consoles that haven't joined this
+          // run themselves (see docs/design/port_actions.md "Live view") - a client that
+          // already has the run's own WS stream open handles it via streamActionRun()
+          // instead, so skip here to avoid clobbering that richer live state.
+          if (currentActionsWs) return;
+          if (msg.event === 'action_started') {
+            pendingJoinRun = { run_id: msg.run_id, action_id: msg.action_id, operator_client_id: msg.operator_client_id };
+            const label = (actionsCatalog.find((a) => a.id === msg.action_id) || {}).name || msg.action_name || msg.action_id;
+            showActionStrip(`Script running: ${label} \u2014 click to join`);
+          } else if (msg.event === 'action_finished' && pendingJoinRun && pendingJoinRun.run_id === msg.run_id) {
+            pendingJoinRun = null;
+            hideActionStrip();
           }
           return;
         }
@@ -594,10 +1200,12 @@ connectBtn.addEventListener('click', () => { if (isConnected()) { try { abortSlo
 // entry and back/forward navigations where beforeunload may not fire).
 function _closeWsOnExit() {
   try { if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'Page navigated away'); } catch (_) {}
+  closeActionRunStream();
 }
 window.addEventListener('beforeunload', _closeWsOnExit);
 window.addEventListener('pagehide', _closeWsOnExit);
 loadPorts().then(() => { const qpName = selectedPortName; if (qpName) { connectSelected(); } updateButton(); if (qpName) updateSidebarHighlight(qpName); if (!qpName) showSplash(); });
+Promise.all([fetchActionsCSRF(), loadActionsCatalog()]).then(() => applyActionDeepLink());
 
 // Keyboard shortcut: Ctrl+] then 'r' to request read-write directly from Web UI
 window.addEventListener('keydown', (e) => {

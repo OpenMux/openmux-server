@@ -665,6 +665,30 @@ class ConsoleManager:
             self.logger.debug(f"send_control_frame_to_client failed for {client_id}", exc_info=True)
             return False
 
+    async def broadcast_control_frame_to_port(self, port_name: str, payload: Dict[str, Any]) -> int:
+        """Deliver a control frame to every client currently attached to `port_name`.
+
+        Mirrors `send_control_frame_to_client` but fans out to all viewers (e.g. a
+        "Port Action started" live notice, see docs/design/port_actions.md "Live view"),
+        regardless of which adapter each client is on.
+
+        Args:
+            port_name: Port whose current viewers should receive the frame.
+            payload: JSON-serializable control message.
+
+        Returns:
+            int: Number of clients the frame was successfully delivered to.
+        """
+        client_ids = [cid for cid, p in self.client_port_map.items() if p == port_name]
+        delivered = 0
+        for client_id in client_ids:
+            try:
+                if await self.send_control_frame_to_client(client_id, payload):
+                    delivered += 1
+            except Exception:
+                self.logger.debug(f"broadcast_control_frame_to_port failed for {client_id}", exc_info=True)
+        return delivered
+
     async def force_promote_client(self, client_id: str, port_name: str) -> Tuple[bool, List[str]]:
         """Demote existing read-write holders on a port, then promote a client.
 

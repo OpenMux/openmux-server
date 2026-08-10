@@ -629,6 +629,7 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
                 "muxcon": {"type": "object"},
                 "web_status": {"type": "object"},
                 "web_console": {"type": "object"},
+                "port_actions": {"type": "object"},
             },
         }
 

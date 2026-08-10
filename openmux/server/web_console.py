@@ -18,27 +18,27 @@ Notes:
 
 import asyncio
 import base64
-import html
-import logging
-import time
-import os
-import ssl
-import hmac
 import hashlib
+import hmac
+import html
+import importlib
 import json
+import logging
+import os
 import re
+import secrets
+import ssl
+import time
+import urllib.parse
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
-from typing import Callable
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from aiohttp import web
-from openmux.server.port_utils import safe_get_port, natural_sort_key
-from openmux.server.web_plugins import ADAPTER_APP_KEY
+
 from openmux.server.data_logger import DataLogger
-import secrets
-import urllib.parse
-import importlib
+from openmux.server.port_utils import natural_sort_key, safe_get_port
+from openmux.server.web_plugins import ADAPTER_APP_KEY
 
 try:  # Prefer importlib.metadata (std lib)
     from importlib.metadata import version as _dist_version  # type: ignore
@@ -169,6 +169,7 @@ def _extract_sort_params(request: web.Request) -> Tuple[str, str, str]:
     base_query = urllib.parse.urlencode(preserved, doseq=True)
     return sort_key, sort_dir, base_query
 
+
 def _tail_file(path: Path, limit: int) -> list[str]:
     """Return the last ``limit`` lines from ``path``.
 
@@ -200,6 +201,7 @@ def _sanitize_log_line(line: str) -> str:
 
 # --- aiohttp middleware & route handlers (module-level) ---
 
+
 def _get_adapter(request: web.Request) -> "WebConsoleAdapter":
     """Return the WebConsoleAdapter stored in the aiohttp app, narrowing from BaseGenericAdapter."""
     return request.app[ADAPTER_APP_KEY]  # type: ignore[return-value]
@@ -223,6 +225,7 @@ async def auth_middleware(request: web.Request, handler):
         base_path = adapter._effective_base_path(request)
     except Exception:
         base_path = ""
+
     def _pref(p: str) -> str:
         try:
             if not base_path:
@@ -279,16 +282,14 @@ async def auth_middleware(request: web.Request, handler):
         return await handler(request)
 
     # Semi-public: /proxy should not be redirected here; attach username if present and allow handler to enforce
-    if (
-        path == "/proxy"
-        or path.startswith("/proxy/")
-        or path == _pref("/proxy")
-        or path.startswith(_pref("/proxy/"))
-    ):
+    if path == "/proxy" or path.startswith("/proxy/") or path == _pref("/proxy") or path.startswith(_pref("/proxy/")):
         _attach_session_user()
         return await handler(request)
 
     # 0) SSO trust header (for federated proxy)
+    # Only the header-parsing/verification is guarded here; a downstream handler
+    # exception must never be caught by this block and re-cast as a 401.
+    authenticated_via_sso = False
     try:
         sso_header_name = getattr(adapter, "sso_trust_header", "X-OMX-SSO")
         sso_value = request.headers.get(sso_header_name)
@@ -299,13 +300,18 @@ async def auth_middleware(request: web.Request, handler):
                 po = claims.get("perm")
                 if isinstance(po, str) and po:
                     request["perm_override"] = po
-                return await handler(request)
+                authenticated_via_sso = True
     except Exception:
         pass
+    if authenticated_via_sso:
+        return await handler(request)
 
     # 1) Try Basic Auth first (preserve backward compatibility for non-browser clients)
+    # As above, only credential parsing/verification is guarded; the handler call
+    # itself must run outside this try so its exceptions are not swallowed.
     auth = request.headers.get("Authorization")
     if auth and auth.lower().startswith("basic "):
+        authenticated_via_basic = False
         try:
             enc = auth.split(" ", 1)[1].strip()
             raw = base64.b64decode(enc).decode("utf-8", errors="ignore")
@@ -313,18 +319,17 @@ async def auth_middleware(request: web.Request, handler):
                 username, password = raw.split(":", 1)
                 if adapter.auth_manager and adapter.auth_manager.authenticate(username, password):
                     request["username"] = username
-                    return await handler(request)
+                    authenticated_via_basic = True
         except Exception:
             pass
+        if authenticated_via_basic:
+            return await handler(request)
         # Basic Auth attempted but failed -> 401 for programmatic clients
         return web.Response(status=401, text="Unauthorized\n", headers={"WWW-Authenticate": f'Basic realm="{adapter.realm}"'})
 
-    # 2) Session cookie
-    try:
-        if _attach_session_user():
-            return await handler(request)
-    except Exception:
-        pass
+    # 2) Session cookie (_attach_session_user already fails safe, returning False on error)
+    if _attach_session_user():
+        return await handler(request)
 
     # Not authenticated -> for API/probe endpoints, return 401 Basic challenge; else redirect to login
     if path == "/readyz" or path == _pref("/readyz") or path.startswith("/api/") or path.startswith(_pref("/api/")):
@@ -333,6 +338,7 @@ async def auth_middleware(request: web.Request, handler):
     # Redirect to base-scoped login
     login_url = _pref("/login") + f"?next={next_url}"
     raise web.HTTPFound(location=login_url)
+
 
 async def _render_status_page(
     request: web.Request,
@@ -407,7 +413,7 @@ async def handle_console(request: web.Request) -> web.Response:
             user_perm = adapter._get_effective_permission(username, request)
         except Exception:
             user_perm = None
-        
+
         ports = adapter._get_ports_snapshot()
         current_port = request.query.get("port")
         embed = request.query.get("embed", "").lower() in ("1", "true", "yes", "on")
@@ -523,12 +529,18 @@ async def handle_login(request: web.Request) -> web.Response:
             client_ip = adapter._get_client_ip(request) if hasattr(adapter, "_get_client_ip") else None
         except Exception:
             client_ip = None
+
         def _render_login_response(error: bool, message: Optional[str] = None) -> web.Response:
             body = adapter._render_login(error=error, next_url=safe_next, message=message)
             return web.Response(body=body, content_type="text/html")
 
         auth_manager = adapter.auth_manager
-        if auth_manager and username and hasattr(auth_manager, "is_user_locked") and auth_manager.is_user_locked(username, client_ip):
+        if (
+            auth_manager
+            and username
+            and hasattr(auth_manager, "is_user_locked")
+            and auth_manager.is_user_locked(username, client_ip)
+        ):
             return _render_login_response(True, "Too many failed attempts for this account. Please try again later.")
         ok = False
         if auth_manager and username:
@@ -737,7 +749,11 @@ async def handle_api_reload(request: web.Request) -> web.Response:
                     clients = list(getattr(pobj, "connected_clients", []) or []) if pobj is not None else []
                     for c in clients:
                         cid = c.get("client_id") if isinstance(c, dict) else None
-                        if cid and adapter.console_manager is not None and hasattr(adapter.console_manager, "disconnect_client_from_port"):
+                        if (
+                            cid
+                            and adapter.console_manager is not None
+                            and hasattr(adapter.console_manager, "disconnect_client_from_port")
+                        ):
                             await adapter.console_manager.disconnect_client_from_port(cid, pname)
                 except Exception:
                     pass
@@ -930,8 +946,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
         except Exception:
             pass
         adapter.logger.info(
-            f"Web client {client_id} connected to port {port_name} "
-            + (f"({mode})" if attached else "(meta-only)")
+            f"Web client {client_id} connected to port {port_name} " + (f"({mode})" if attached else "(meta-only)")
         )
 
         if attached:
@@ -941,6 +956,9 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                     "type": "client_mode",
                     "ok": True,
                     "mode": granted_mode,
+                    # Lets the browser pass its own client_id back on actions it triggers
+                    # (e.g. Port Actions self-demote/auto-restore, see docs/design/port_actions.md).
+                    "client_id": client_id,
                 }
                 if granted_mode == "read-only":
                     holders = _rw_holders_for_port(adapter, port_name)
@@ -981,7 +999,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                     # Handle client control frames starting with 'OMXCTRL '
                     try:
                         if isinstance(msg.data, str) and msg.data.startswith("OMXCTRL "):
-                            payload = msg.data[len("OMXCTRL "):]
+                            payload = msg.data[len("OMXCTRL ") :]
                             req = json.loads(payload)
                             if isinstance(req, dict) and req.get("type") in ("request_rw", "promote"):
                                 ok = False
@@ -1028,7 +1046,9 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                         try:
                                             other_ws = adapter._clients.get(other_id)
                                             if other_ws is not None:
-                                                await other_ws.send_str("OMXCTRL " + json.dumps(demotion, separators=(",", ":")))
+                                                await other_ws.send_str(
+                                                    "OMXCTRL " + json.dumps(demotion, separators=(",", ":"))
+                                                )
                                         except Exception:
                                             pass
                                 resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
@@ -1189,7 +1209,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             self.base_path = str(cfg.get("base_path", "/"))
         except Exception:
             self.base_path = "/"
-        # Respect X-Forwarded-Prefix for URL generation (does not affect routing) 
+        # Respect X-Forwarded-Prefix for URL generation (does not affect routing)
         self.respect_forwarded_prefix = bool(cfg.get("respect_forwarded_prefix", True))
         # Optional template/static configuration
         self.template_dir = cfg.get("template_dir")  # directory with Jinja2 templates
@@ -1215,6 +1235,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
         # Will be set by server
         self.console_manager = None
         self.auth_manager = None
+        # Full raw server config (all top-level sections), set by main.py after
+        # adapter creation - lets a plugin read its OWN top-level config section
+        # (e.g. `port_actions`) rather than only this adapter's `web_console` section.
+        self.server_config: Optional[Dict[str, Any]] = None
 
         # Runtime (aiohttp)
         # Runners/sites (support dual HTTP/HTTPS when ssl_port is used)
@@ -1229,7 +1253,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self._client_meta = {}  # client_id -> {ip, username}
         # Event-driven meta push support
         self._meta_subscribers = {}  # port_name -> set(client_id)
-        self._meta_debounce = {}     # port_name -> last_broadcast_ts
+        self._meta_debounce = {}  # port_name -> last_broadcast_ts
         self._meta_min_interval = 0.3
         # Template engine will be prepared on start
         self._jinja_env = None
@@ -1416,7 +1440,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         if str(node) == str(local_id):
                             allowed = True
                         elif muxcon is not None:
-                            allowed = any(str(c.get("server_id")) == str(node) for c in (getattr(muxcon, "connections", {}) or {}).values())
+                            allowed = any(
+                                str(c.get("server_id")) == str(node)
+                                for c in (getattr(muxcon, "connections", {}) or {}).values()
+                            )
                         if not allowed:
                             return None
                     except Exception:
@@ -1451,12 +1478,16 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                     local_server_id = getattr(muxcon_local, "server_id", None)
                                 except Exception:
                                     local_server_id = None
+
                                 def _has_proxy_prefix(v: str) -> bool:
                                     try:
                                         return "/proxy/" in (v or "")
                                     except Exception:
                                         return False
-                                if (str(node) and str(node) == str(local_server_id)) and (_has_proxy_prefix(xfp) or _has_proxy_prefix(path)):
+
+                                if (str(node) and str(node) == str(local_server_id)) and (
+                                    _has_proxy_prefix(xfp) or _has_proxy_prefix(path)
+                                ):
                                     return claims
                             except Exception:
                                 pass
@@ -1601,7 +1632,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 self._started_monotonic = time.monotonic()
                 self._started_wall = time.time()
                 self.is_running = True
-                self.logger.info(f"WebConsole HTTPS on https://{self.host}:{self.ssl_port} (primary); HTTP redirect on http://{self.host}:{self.port}")
+                self.logger.info(
+                    f"WebConsole HTTPS on https://{self.host}:{self.ssl_port} (primary); HTTP redirect on http://{self.host}:{self.port}"
+                )
                 return True
             else:
                 # single-site: honor use_tls on the configured port only
@@ -1714,7 +1747,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 self.template_dir = str((Path.cwd() / "templates" / "web_console").resolve())
         except Exception:
             # Fallback to module-relative dirs if cwd fails
-            base = Path(__file__).resolve().parents[3] if len(Path(__file__).resolve().parents) >= 3 else Path(__file__).resolve().parent
+            base = (
+                Path(__file__).resolve().parents[3]
+                if len(Path(__file__).resolve().parents) >= 3
+                else Path(__file__).resolve().parent
+            )
             self.static_dir = self.static_dir or str((base / "static").resolve())
             self.template_dir = self.template_dir or str((base / "templates" / "web_console").resolve())
 
@@ -1729,6 +1766,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     autoescape=select_autoescape(["html", "xml"]),
                     enable_async=False,
                 )
+
                 # Register handy filters
                 def _fmt_ts(value):
                     try:
@@ -1741,6 +1779,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v))
                     except Exception:
                         return str(value)
+
                 try:
                     self._jinja_env.filters["fmt_ts"] = _fmt_ts
                 except Exception:
@@ -1892,6 +1931,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             for c in (fed.get("connections") or [])
             if isinstance(c, dict) and c.get("connection_id") is not None
         }
+
         # Build rport_map primarily from connections[].ports_registered
         # Helper: add ports into map with de-dup by name
         def _add_ports(target: Dict[str, list], key: str, ports_list: list) -> None:
@@ -2020,7 +2060,13 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     if "connected" in changes:
                         immediate = True
                     ev = changes.get("event")
-                    if ev in ("serial_connected", "serial_disconnected", "federated_disconnected", "port_registered", "port_unregistered"):
+                    if ev in (
+                        "serial_connected",
+                        "serial_disconnected",
+                        "federated_disconnected",
+                        "port_registered",
+                        "port_unregistered",
+                    ):
                         immediate = True
             except Exception:
                 immediate = False
@@ -2131,7 +2177,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     else (
                         bool(live_connected)
                         if live_connected is not None
-                        else bool(info.get("connected", info.get("is_running", False)) )
+                        else bool(info.get("connected", info.get("is_running", False)))
                     )
                 ),
             }
@@ -2180,11 +2226,13 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 # peers configured
                 try:
                     for p in getattr(muxcon, "peers", []) or []:
-                        peers_cfg.append({
-                            "host": getattr(p, "host", None),
-                            "port": getattr(p, "port", None),
-                            "options": getattr(p, "options", {}) or {},
-                        })
+                        peers_cfg.append(
+                            {
+                                "host": getattr(p, "host", None),
+                                "port": getattr(p, "port", None),
+                                "options": getattr(p, "options", {}) or {},
+                            }
+                        )
                 except Exception:
                     pass
                 # active connections
@@ -2247,7 +2295,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                     origin_info = {"server_id": getattr(origin, "server_id", None)} if origin else None
                                 try:
                                     chain_info = []
-                                    for s in (chain_objs or []):
+                                    for s in chain_objs or []:
                                         if callable(getattr(s, "to_dict", None)):
                                             chain_info.append(s.to_dict())  # type: ignore[attr-defined]
                                         else:
@@ -2301,26 +2349,28 @@ class WebConsoleAdapter(BaseGenericAdapter):
                             "missed": hb.get("missed"),
                             "status": (("ok" if hb.get("missed", 0) == 0 else "degraded") if hb else None),
                         }
-                        connections.append({
-                            "connection_id": cid,
-                            "role": role,
-                            "opened_at": c.get("opened_at", opened_at),
-                            "last_seen": c.get("last_seen", opened_at),
-                            "uptime_seconds": uptime_seconds,
-                            "remote_peer": peer,
-                            "handshake": {
-                                "version": hs_version,
-                                "client_type": ct,
-                                "capabilities": hs_caps,
-                                "server_id": c.get("server_id"),
-                                "instance_id": c.get("instance_id"),
-                            },
-                            "active": True,
-                            "ports_registered": ports_registered,
-                            "counts": {"streams": streams_count, "ports": len(ports_registered)},
-                            "heartbeat": hb_view,
-                            **(self._derive_mpath_info_for_muxcon(muxcon, cid) or {}),
-                        })
+                        connections.append(
+                            {
+                                "connection_id": cid,
+                                "role": role,
+                                "opened_at": c.get("opened_at", opened_at),
+                                "last_seen": c.get("last_seen", opened_at),
+                                "uptime_seconds": uptime_seconds,
+                                "remote_peer": peer,
+                                "handshake": {
+                                    "version": hs_version,
+                                    "client_type": ct,
+                                    "capabilities": hs_caps,
+                                    "server_id": c.get("server_id"),
+                                    "instance_id": c.get("instance_id"),
+                                },
+                                "active": True,
+                                "ports_registered": ports_registered,
+                                "counts": {"streams": streams_count, "ports": len(ports_registered)},
+                                "heartbeat": hb_view,
+                                **(self._derive_mpath_info_for_muxcon(muxcon, cid) or {}),
+                            }
+                        )
                 except Exception:
                     pass
 
@@ -2345,7 +2395,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         "connected": bool(p.get("connected", p.get("is_running", False))),
                         "adapter_type": "remote_muxcon",
                         "status": (
-                            p.get("adapter_status", {}).get("status") if isinstance(p.get("adapter_status"), dict) else p.get("state", "connected")
+                            p.get("adapter_status", {}).get("status")
+                            if isinstance(p.get("adapter_status"), dict)
+                            else p.get("state", "connected")
                         ),
                         "origin_server": origin_obj,
                         "server_chain_info": chain_info,
@@ -2523,7 +2575,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         last_ack = None
                         last_req = None
                         missed = 0
-                    last_activity = max(v for v in [last_seen or 0, (last_ack or 0)] if isinstance(v, (int, float))) if (last_seen or last_ack) else 0
+                    last_activity = (
+                        max(v for v in [last_seen or 0, (last_ack or 0)] if isinstance(v, (int, float)))
+                        if (last_seen or last_ack)
+                        else 0
+                    )
                     overdue = False
                     try:
                         if hb_interval and last_req:
@@ -2535,38 +2591,42 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         if missed > 1 or overdue:
                             is_stale = True
                             stale_total += 1
-                    conns.append({
-                        "conn_id": cid,
-                        "pref": pref,
-                        "opened_at": opened_at,
-                        "last_seen": last_seen,
-                        "age_sec": (now - opened_at) if opened_at else None,
-                        "idle_sec": (now - last_activity) if last_activity else ((now - last_seen) if last_seen else None),
-                        "stale": is_stale,
-                        "is_primary": cid == primary,
-                        "server_id": server_id,
-                        "instance_id": instance_id,
-                    })
+                    conns.append(
+                        {
+                            "conn_id": cid,
+                            "pref": pref,
+                            "opened_at": opened_at,
+                            "last_seen": last_seen,
+                            "age_sec": (now - opened_at) if opened_at else None,
+                            "idle_sec": (now - last_activity) if last_activity else ((now - last_seen) if last_seen else None),
+                            "stale": is_stale,
+                            "is_primary": cid == primary,
+                            "server_id": server_id,
+                            "instance_id": instance_id,
+                        }
+                    )
                 total_conns += len(conns)
                 non_stale = sum(1 for c in conns if not c["stale"])
-                groups_payload.append({
-                    "peer_key": peer_key,
-                    "primary": primary,
-                    "primary_pref": next((c["pref"] for c in conns if c["conn_id"] == primary), None),
-                    "connections": conns,
-                    "non_stale": non_stale,
-                    "stale": len(conns) - non_stale,
-                    "server_ids": sorted(server_ids),
-                    "instance_ids": sorted(instance_ids),
-                    "distinct_instances": len(instance_ids),
-                    "metrics": {
-                        "sendbuf_size": sendbuf_sz,
-                        "rx_buffer_depth": rxbuf_depth,
-                        "retransmissions": retx_count,
-                        "tx_bytes": tx_bytes,
-                        "rx_bytes": rx_bytes,
-                    },
-                })
+                groups_payload.append(
+                    {
+                        "peer_key": peer_key,
+                        "primary": primary,
+                        "primary_pref": next((c["pref"] for c in conns if c["conn_id"] == primary), None),
+                        "connections": conns,
+                        "non_stale": non_stale,
+                        "stale": len(conns) - non_stale,
+                        "server_ids": sorted(server_ids),
+                        "instance_ids": sorted(instance_ids),
+                        "distinct_instances": len(instance_ids),
+                        "metrics": {
+                            "sendbuf_size": sendbuf_sz,
+                            "rx_buffer_depth": rxbuf_depth,
+                            "retransmissions": retx_count,
+                            "tx_bytes": tx_bytes,
+                            "rx_bytes": rx_bytes,
+                        },
+                    }
+                )
             return {
                 "timestamp": now,
                 "groups": groups_payload,
@@ -2608,13 +2668,15 @@ class WebConsoleAdapter(BaseGenericAdapter):
                             if cid:
                                 seen_ids.add(str(cid))
                             meta = self._resolve_client_meta(cid)
-                            out.append({
-                                "client_id": cid,
-                                "username": username,
-                                "port": pname,
-                                "type": meta.get("type"),
-                                "ip": meta.get("ip"),
-                            })
+                            out.append(
+                                {
+                                    "client_id": cid,
+                                    "username": username,
+                                    "port": pname,
+                                    "type": meta.get("type"),
+                                    "ip": meta.get("ip"),
+                                }
+                            )
                         except Exception:
                             continue
                 except Exception:
@@ -2631,13 +2693,15 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         p = meta.get("port")
                         if not p:
                             continue
-                        out.append({
-                            "client_id": cid,
-                            "username": meta.get("username"),
-                            "port": p,
-                            "type": meta.get("type", "websocket"),
-                            "ip": meta.get("ip"),
-                        })
+                        out.append(
+                            {
+                                "client_id": cid,
+                                "username": meta.get("username"),
+                                "port": p,
+                                "type": meta.get("type", "websocket"),
+                                "ip": meta.get("ip"),
+                            }
+                        )
                     except Exception:
                         continue
             except Exception:
@@ -2692,7 +2756,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         val = it[4:].strip().strip('"')
                         # Remove possible brackets
                         if val.startswith("[") and "]" in val:
-                            val = val[1:val.find("]")]
+                            val = val[1 : val.find("]")]
                         # Remove possible port suffix
                         if ":" in val and val.count(":") == 1:
                             host, _port = val.split(":", 1)
@@ -2982,7 +3046,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                                     "server_id": getattr(origin, "server_id", None),
                                                     "hostname": getattr(origin, "hostname", None),
                                                     "port": getattr(origin, "port", None),
-                                                    "server_type": getattr(getattr(origin, "server_type", None), "value", None),
+                                                    "server_type": getattr(
+                                                        getattr(origin, "server_type", None), "value", None
+                                                    ),
                                                     "description": getattr(origin, "description", None),
                                                 }
                                         except Exception:
@@ -2998,16 +3064,20 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                             if callable(to_dict):
                                                 chain_info.append(to_dict())
                                             else:
-                                                chain_info.append({
-                                                    "server_id": getattr(s, "server_id", str(s)),
-                                                    "hostname": getattr(s, "hostname", None),
-                                                    "port": getattr(s, "port", None),
-                                                    "server_type": getattr(getattr(s, "server_type", None), "value", None),
-                                                    "description": getattr(s, "description", None),
-                                                })
+                                                chain_info.append(
+                                                    {
+                                                        "server_id": getattr(s, "server_id", str(s)),
+                                                        "hostname": getattr(s, "hostname", None),
+                                                        "port": getattr(s, "port", None),
+                                                        "server_type": getattr(getattr(s, "server_type", None), "value", None),
+                                                        "description": getattr(s, "description", None),
+                                                    }
+                                                )
                                         info["server_chain_info"] = chain_info
                                     except Exception:
-                                        info["server_chain_info"] = [{"server_id": sid} for sid in info.get("server_chain", [])]
+                                        info["server_chain_info"] = [
+                                            {"server_id": sid} for sid in info.get("server_chain", [])
+                                        ]
                                     # Federation type if present
                                     ftype = getattr(meta, "federation_type", None)
                                     info["federation_type"] = getattr(ftype, "value", ftype) if ftype is not None else None
@@ -3042,12 +3112,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                         if meta:
                                             ip = meta.get("ip")
                                             typ = meta.get("type")
-                                        details.append({
-                                            "client_id": cid,
-                                            "username": u,
-                                            "ip": ip,
-                                            "type": typ or None,
-                                        })
+                                        details.append(
+                                            {
+                                                "client_id": cid,
+                                                "username": u,
+                                                "ip": ip,
+                                                "type": typ or None,
+                                            }
+                                        )
                                     except Exception:
                                         pass
                                 if usernames:
@@ -3062,23 +3134,31 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                                 existing_ids.add(str(ecid))
                                         except Exception:
                                             continue
-                                    extra = [cid for cid, meta in (self._client_meta or {}).items() if isinstance(meta, dict) and meta.get("port") == name and str(cid) not in existing_ids]
+                                    extra = [
+                                        cid
+                                        for cid, meta in (self._client_meta or {}).items()
+                                        if isinstance(meta, dict) and meta.get("port") == name and str(cid) not in existing_ids
+                                    ]
                                     if extra:
                                         info["client_count"] = int(info.get("client_count", 0)) + len(extra)
                                         try:
-                                            ex_usernames = [str((self._client_meta.get(cid) or {}).get("username") or cid) for cid in extra]
+                                            ex_usernames = [
+                                                str((self._client_meta.get(cid) or {}).get("username") or cid) for cid in extra
+                                            ]
                                             info.setdefault("clients", [])
                                             info["clients"].extend(ex_usernames)
                                             # Also extend details with enriched meta
                                             for cid in extra:
                                                 try:
                                                     meta = self._resolve_client_meta(cid) or {}
-                                                    details.append({
-                                                        "client_id": cid,
-                                                        "username": meta.get("username") or cid,
-                                                        "ip": meta.get("ip"),
-                                                        "type": meta.get("type", "websocket"),
-                                                    })
+                                                    details.append(
+                                                        {
+                                                            "client_id": cid,
+                                                            "username": meta.get("username") or cid,
+                                                            "ip": meta.get("ip"),
+                                                            "type": meta.get("type", "websocket"),
+                                                        }
+                                                    )
                                                 except Exception:
                                                     continue
                                         except Exception:
@@ -3090,22 +3170,31 @@ class WebConsoleAdapter(BaseGenericAdapter):
                             else:
                                 # If the port doesn't expose connected_clients, approximate from our meta
                                 try:
-                                    extras = [cid for cid, meta in (self._client_meta or {}).items() if isinstance(meta, dict) and meta.get("port") == name]
+                                    extras = [
+                                        cid
+                                        for cid, meta in (self._client_meta or {}).items()
+                                        if isinstance(meta, dict) and meta.get("port") == name
+                                    ]
                                     if extras:
                                         info["client_count"] = len(extras)
                                         try:
-                                            info["clients"] = [str((self._client_meta.get(cid) or {}).get("username") or cid) for cid in extras]
+                                            info["clients"] = [
+                                                str((self._client_meta.get(cid) or {}).get("username") or cid)
+                                                for cid in extras
+                                            ]
                                             # Build details list as well
                                             det = []
                                             for cid in extras:
                                                 try:
                                                     meta = self._resolve_client_meta(cid) or {}
-                                                    det.append({
-                                                        "client_id": cid,
-                                                        "username": meta.get("username") or cid,
-                                                        "ip": meta.get("ip"),
-                                                        "type": meta.get("type", "websocket"),
-                                                    })
+                                                    det.append(
+                                                        {
+                                                            "client_id": cid,
+                                                            "username": meta.get("username") or cid,
+                                                            "ip": meta.get("ip"),
+                                                            "type": meta.get("type", "websocket"),
+                                                        }
+                                                    )
                                                 except Exception:
                                                     continue
                                             if det:
@@ -3381,12 +3470,13 @@ class WebConsoleAdapter(BaseGenericAdapter):
             return cert_path, key_path
         # Lazy import cryptography to avoid hard dep if TLS not used
         try:
+            from datetime import datetime, timedelta  # type: ignore
+
             from cryptography import x509  # type: ignore
+            from cryptography.hazmat.backends import default_backend  # type: ignore
             from cryptography.hazmat.primitives import hashes, serialization  # type: ignore
             from cryptography.hazmat.primitives.asymmetric import ec  # type: ignore
-            from cryptography.hazmat.backends import default_backend  # type: ignore
             from cryptography.x509.oid import NameOID  # type: ignore
-            from datetime import datetime, timedelta  # type: ignore
         except Exception as e:  # pragma: no cover - dependency missing
             raise RuntimeError(f"cryptography not available for TLS autogen: {e}")
 
