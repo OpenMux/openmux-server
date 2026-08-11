@@ -85,6 +85,43 @@ async def test_expect_raises_without_a_client_queue(pm):
 
 
 @pytest.mark.asyncio
+async def test_expect_consumes_matched_bytes_so_repeat_expect_waits_for_new_data(pm):
+    session = ActionSession(pm, "p1", "c1")
+    queue = pm.ports["p1"].client_queues["c1"]
+    await queue.put(b"login: ")
+
+    matched = await session.expect(r"login:", timeout=1.0)
+    assert matched == "login:"
+
+    with pytest.raises(ActionTimeoutError):
+        await session.expect(r"login:", timeout=0.05)
+
+    await queue.put(b"login: ")
+    matched = await session.expect(r"login:", timeout=1.0)
+    assert matched == "login:"
+
+
+@pytest.mark.asyncio
+async def test_expect_leaves_unmatched_trailing_bytes_in_buffer(pm):
+    session = ActionSession(pm, "p1", "c1")
+    session._buffer.extend(b"foo bar baz")
+    matched = await session.expect(r"bar", timeout=1.0)
+    assert matched == "bar"
+    assert bytes(session._buffer) == b" baz"
+
+
+@pytest.mark.asyncio
+async def test_clear_buffer_discards_buffered_data(pm):
+    session = ActionSession(pm, "p1", "c1")
+    session._buffer.extend(b"stale output")
+    session.clear_buffer()
+    assert bytes(session._buffer) == b""
+
+    with pytest.raises(ActionTimeoutError):
+        await session.expect(r"stale", timeout=0.05)
+
+
+@pytest.mark.asyncio
 async def test_wait_for_input_and_confirm(pm):
     session = ActionSession(pm, "p1", "c1")
     session.submit_operator_input("yes")

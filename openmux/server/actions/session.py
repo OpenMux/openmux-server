@@ -41,6 +41,15 @@ class ActionSession:
             return None
         return getattr(port, "client_queues", {}).get(self.client_id)
 
+    def _consume(self, decoded_text: str, end: int) -> None:
+        """Drop bytes for `decoded_text[:end]` from `self._buffer` after a match."""
+        consumed_len = len(decoded_text[:end].encode("utf-8", errors="replace"))
+        del self._buffer[:consumed_len]
+
+    def clear_buffer(self) -> None:
+        """Discard any buffered inbound bytes, so the next `expect()` only sees new output."""
+        self._buffer.clear()
+
     async def send(self, text: str) -> None:
         """Write `text` to the port as-is (no newline added)."""
         ok = await self.port_manager.write_to_port(self.port_name, text.encode("utf-8"), client_id=self.client_id)
@@ -56,6 +65,9 @@ class ActionSession:
 
         Checks already-buffered bytes first, then consumes new chunks from the
         client's delivery queue as they arrive. Returns the matched substring.
+        Matched bytes (and anything before them) are dropped from the buffer, so a
+        later `expect()` with the same pattern must see fresh output, not re-match
+        the same stale bytes instantly.
 
         Raises:
             ActionTimeoutError: `timeout` elapsed before `pattern` matched.
@@ -66,8 +78,10 @@ class ActionSession:
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
 
-        match = regex.search(self._buffer.decode("utf-8", errors="replace"))
+        text = self._buffer.decode("utf-8", errors="replace")
+        match = regex.search(text)
         if match:
+            self._consume(text, match.end())
             return match.group(0)
 
         queue = self._client_queue()
@@ -83,8 +97,10 @@ class ActionSession:
             except asyncio.TimeoutError:
                 raise ActionTimeoutError(f"Timed out waiting for pattern {pattern!r} on port {self.port_name}")
             self._buffer.extend(chunk)
-            match = regex.search(self._buffer.decode("utf-8", errors="replace"))
+            text = self._buffer.decode("utf-8", errors="replace")
+            match = regex.search(text)
             if match:
+                self._consume(text, match.end())
                 return match.group(0)
 
     async def prompt(

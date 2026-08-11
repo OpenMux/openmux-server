@@ -91,6 +91,9 @@ an action attaches to `PortManager` exactly like a console client does, through
   input parameters) and an `async def run(session, params, log)` entry point.
 - `session` is a small expect-style wrapper: `await session.send(text)`,
   `await session.expect(pattern, timeout=...)`, `await session.sendline(text)`.
+  A matched `expect()` (and anything before it) is dropped from the buffer, so a
+  later `expect()` sees only new output. `session.clear_buffer()` discards buffered
+  bytes without waiting for a match.
 - `params` is a dict of the user-supplied inputs, validated against the `ACTION`
   metadata's declared parameter types before the script runs.
 - Each declared param (`ActionParam` in `registry.py`) has a `widget`, defaulting to
