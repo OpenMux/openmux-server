@@ -129,6 +129,7 @@
       <div class="muted">Port Actions</div>
       <div style="display:flex; gap:6px;">
         <button id="actionsListRefresh" class="btn" type="button" title="Reload the action list from disk">⟳</button>
+        <button id="actionsRunBack" class="btn" type="button" style="display:none" title="Back to the actions list">&larr; Back</button>
         <button id="actionsClose" class="btn" type="button" title="Close">✕</button>
       </div>
     </div>
@@ -136,10 +137,7 @@
       <div class="muted">Loading…</div>
     </div>
     <div id="actionsRunPanel" style="display:none; margin-top:10px; border-top:1px solid var(--border-color, #444); padding-top:8px;">
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-        <b id="actionsRunTitle"></b>
-        <button id="actionsRunBack" class="btn" type="button">Back</button>
-      </div>
+      <b id="actionsRunTitle"></b>
       <div id="actionsRunDesc" class="muted mini" style="margin:4px 0 8px;"></div>
       <form id="actionsRunForm"></form>
       <button id="actionsRunSubmit" class="btn" type="button" style="margin-top:6px;">Run</button>

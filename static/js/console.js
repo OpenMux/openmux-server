@@ -434,6 +434,18 @@ async function loadActionsCatalog() {
 function showActionsListView() {
   actionsListEl.style.display = '';
   actionsRunPanel.style.display = 'none';
+  actionsRunBack.style.display = 'none';
+  actionsClose.style.display = '';
+}
+
+// Shows the single-action run panel instead of the catalog list, and swaps the overlay's
+// top-right button from close (✕) to Back (←) - pressing it returns to the list, where
+// ✕ closes the whole overlay (see docs/design/port_actions.md "UI surface").
+function showActionsRunView() {
+  actionsListEl.style.display = 'none';
+  actionsRunPanel.style.display = '';
+  actionsRunBack.style.display = '';
+  actionsClose.style.display = 'none';
 }
 
 function renderActionsList() {
@@ -624,10 +636,9 @@ function openActionRunPanel(action) {
   actionTermTitle.textContent = '';
   actionTermStatus.textContent = '';
   actionTermStatus.classList.remove('bad');
-  actionsListEl.style.display = 'none';
-  actionsRunPanel.style.display = '';
   actionsRunTitle.textContent = action.name || action.id;
   actionsRunDesc.textContent = action.description || '';
+  showActionsRunView();
   setActionsRunStatus('', false);
   hideOperatorPrompt();
   actionsRunForm.innerHTML = (action.params || []).map(renderActionParamField).join('') || '<div class="muted">No parameters</div>';
@@ -912,7 +923,7 @@ if (actionRunStrip) actionRunStrip.addEventListener('click', () => {
   actionRunStrip.classList.remove('action-needs-attention');
   if (pendingJoinRun && !currentAction) { joinActiveRun(pendingJoinRun); pendingJoinRun = null; return; }
   openActionsOverlay();
-  if (currentAction) { actionsListEl.style.display = 'none'; actionsRunPanel.style.display = ''; }
+  if (currentAction) showActionsRunView();
 });
 
 // Closing the overlay only hides it - the run keeps executing server-side and its
@@ -938,7 +949,7 @@ async function refreshActionsCatalog() {
 }
 function openActionsOverlay() {
   actionsOverlay.style.display = 'block';
-  if (!currentAction) { renderActionsList(); } else { actionsListEl.style.display = 'none'; actionsRunPanel.style.display = ''; }
+  if (!currentAction) { renderActionsList(); } else { showActionsRunView(); }
   refreshActionsCatalog();
 }
 function closeActionsOverlay() { actionsOverlay.style.display = 'none'; }
