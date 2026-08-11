@@ -99,7 +99,8 @@ an action attaches to `PortManager` exactly like a console client does, through
   inbound text seen so far without waiting for a pattern match — it drains any
   already-queued chunks first, so a script can inspect the current output (e.g. to
   branch on it) without needing an `expect()` call; pass `consume=True` to also drop
-  the returned text from the buffer.
+  the returned text from the buffer. See [action_session.md](action_session.md) for
+  the full `ActionSession` API reference.
 - `params` is a dict of the user-supplied inputs, validated against the `ACTION`
   metadata's declared parameter types before the script runs.
 - Each declared param (`ActionParam` in `registry.py`) has a `widget`, defaulting to
