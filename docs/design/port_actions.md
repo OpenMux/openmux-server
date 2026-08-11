@@ -343,9 +343,10 @@ sends this frame after a confirmation prompt.
 `DataLogger` resolves a port's log file from either a `port_obj.config["log_file"]`
 override or the default `logs/ports/{port_name}.log`, keyed by whatever `port_name`
 string is passed to `record()`. No DataLogger change is needed: route action traffic
-through `DataLogger.get().record(port_name=f"{port_name}__action_{run_id}", ...)` to get
-a fully separate, self-contained transcript file per run
-(`logs/ports/{port_name}__action_{run_id}.log`), independent of the port's own log.
+through `DataLogger.get().record(port_name=run.log_port_name, ...)` to get a fully
+separate, self-contained transcript file per run
+(`logs/ports/{port_name}_action_{action_id}_{started_YYYYMMDDHHMMSS}_{run_id}.log`),
+independent of the port's own log.
 
 `ActionRunner._publish()` is the single place every event (the script's own `log()`
 messages *and* the runner's own `action_started`/`progress`/`waiting_for_operator`/
@@ -463,8 +464,8 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
 4. Late-join ("Script running — Join") via active-action meta + action-run scrollback
    replay; per-run persisted log + run history/audit list. **Implemented**: `active_run`
    in the actions catalog response + structured-event history replay on `/ws/actions/<id>`;
-   the persisted per-run log (`logs/ports/{port}__action_{run_id}.log`, phase 1) and run
-   history list (`GET .../runs`, phase 2) already existed from earlier phases.
+   the persisted per-run log (`logs/ports/{port}_action_{action_id}_{started}_{run_id}.log`,
+   phase 1) and run history list (`GET .../runs`, phase 2) already existed from earlier phases.
 5. Operator-input channel (`session.wait_for_input()`/`confirm()`), force-take parity
    with existing console controls. **Implemented**: `waiting_for_operator` event +
    `client_id`-gated `{"type": "operator_input", ...}` frames on `/ws/actions/<run_id>` +

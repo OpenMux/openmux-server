@@ -48,8 +48,12 @@ class ActionRun:
 
     @property
     def log_port_name(self) -> str:
-        """Synthetic port name used to key this run's own log file."""
-        return f"{self.port_name}__action_{self.run_id}"
+        """Synthetic port name used to key this run's own log file (see docs/design/
+        port_actions.md, "Persisted log"):
+        `<port>_action_<action_id>_<started YYYYMMDDHHMMSS UTC>_<run_id>`.
+        """
+        started = time.strftime("%Y%m%d%H%M%S", time.gmtime(self.started_at))
+        return f"{self.port_name}_action_{self.action_id}_{started}_{self.run_id}"
 
     def summary(self) -> Dict[str, Any]:
         """JSON-serializable snapshot for API/UI consumption (excludes the raw exception)."""
