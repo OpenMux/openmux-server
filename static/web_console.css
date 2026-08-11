@@ -240,6 +240,26 @@ body.mode-readonly header.site { background: #2a2200; border-bottom-color: #6b5a
   animation: action-attention-pulse 1.1s ease-in-out infinite;
 }
 
+/* Script-chosen accent colors for the operator prompt (session.prompt(..., color=...),
+   see docs/design/action_session.md). "none"/no attribute keeps the default styling
+   above. Override the same --attention-* vars .action-needs-attention already uses. */
+#actionsOperatorPrompt[data-color="red"] { --attention-color: #ff4d4d; --attention-glow: rgba(255, 77, 77, 0.5); --attention-bg: rgba(255, 77, 77, 0.12); }
+#actionsOperatorPrompt[data-color="green"] { --attention-color: #33cc66; --attention-glow: rgba(51, 204, 102, 0.5); --attention-bg: rgba(51, 204, 102, 0.12); }
+#actionsOperatorPrompt[data-color="blue"] { --attention-color: #4d88ff; --attention-glow: rgba(77, 136, 255, 0.5); --attention-bg: rgba(77, 136, 255, 0.12); }
+#actionsOperatorPrompt[data-color="pink"] { --attention-color: #ff66b3; --attention-glow: rgba(255, 102, 179, 0.5); --attention-bg: rgba(255, 102, 179, 0.12); }
+#actionsOperatorPrompt[data-color="yellow"] { --attention-color: #ffe066; --attention-glow: rgba(255, 224, 102, 0.5); --attention-bg: rgba(255, 224, 102, 0.12); }
+#actionsOperatorPrompt[data-color="orange"] { --attention-color: #ff8c33; --attention-glow: rgba(255, 140, 51, 0.5); --attention-bg: rgba(255, 140, 51, 0.12); }
+#actionsOperatorPrompt[data-color="purple"] { --attention-color: #b366ff; --attention-glow: rgba(179, 102, 255, 0.5); --attention-bg: rgba(179, 102, 255, 0.12); }
+
+[data-theme="light"] #actionsOperatorPrompt[data-color="red"] { --attention-color: #c0392b; --attention-glow: rgba(192, 57, 43, 0.4); --attention-bg: rgba(192, 57, 43, 0.15); }
+[data-theme="light"] #actionsOperatorPrompt[data-color="green"] { --attention-color: #1e8449; --attention-glow: rgba(30, 132, 73, 0.4); --attention-bg: rgba(30, 132, 73, 0.15); }
+[data-theme="light"] #actionsOperatorPrompt[data-color="blue"] { --attention-color: #2962ff; --attention-glow: rgba(41, 98, 255, 0.4); --attention-bg: rgba(41, 98, 255, 0.15); }
+[data-theme="light"] #actionsOperatorPrompt[data-color="pink"] { --attention-color: #c2185b; --attention-glow: rgba(194, 24, 91, 0.4); --attention-bg: rgba(194, 24, 91, 0.15); }
+[data-theme="light"] #actionsOperatorPrompt[data-color="yellow"] { --attention-color: #b8960b; --attention-glow: rgba(184, 150, 11, 0.4); --attention-bg: rgba(184, 150, 11, 0.15); }
+[data-theme="light"] #actionsOperatorPrompt[data-color="orange"] { --attention-color: #c1650a; --attention-glow: rgba(193, 101, 10, 0.4); --attention-bg: rgba(193, 101, 10, 0.15); }
+[data-theme="light"] #actionsOperatorPrompt[data-color="purple"] { --attention-color: #7b2fbe; --attention-glow: rgba(123, 47, 190, 0.4); --attention-bg: rgba(123, 47, 190, 0.15); }
+
+
 .log-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 .log-controls select, .log-controls input { min-width: 160px; }
 .log-meta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; font-size: 13px; color: var(--text-muted); }

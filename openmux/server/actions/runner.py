@@ -272,7 +272,7 @@ class ActionRunner:
                 self.port_manager,
                 port_name,
                 run.client_id,
-                on_input_wait=lambda prompt, kind, choices, step: self._publish(
+                on_input_wait=lambda prompt, kind, choices, step, color: self._publish(
                     run.run_id,
                     {
                         "event": "waiting_for_operator",
@@ -280,6 +280,7 @@ class ActionRunner:
                         "kind": kind,
                         "choices": choices,
                         "step": step,
+                        "color": color,
                         "ts": time.time(),
                     },
                 ),

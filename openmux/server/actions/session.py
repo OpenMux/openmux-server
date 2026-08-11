@@ -14,6 +14,11 @@ from typing import Callable, Dict, List, Optional
 from openmux.server.actions.choices import Choice, normalize_choices
 from openmux.server.actions.errors import ActionSessionError, ActionTimeoutError
 
+# Accent colors a script can request for the operator-input prompt border/flash (see
+# `prompt()`'s `color` param and docs/design/port_actions.md, "Operator input").
+# "none" (the default) keeps the console's built-in attention color.
+VALID_PROMPT_COLORS = {"none", "red", "green", "blue", "pink", "yellow", "orange", "purple"}
+
 
 class ActionSession:
     """Send/expect interface bound to one port attachment (one `client_id`)."""
@@ -24,7 +29,7 @@ class ActionSession:
         port_name: str,
         client_id: str,
         on_input_wait: Optional[
-            Callable[[Optional[str], str, Optional[List[Dict[str, str]]], Optional[str]], None]
+            Callable[[Optional[str], str, Optional[List[Dict[str, str]]], Optional[str], str], None]
         ] = None,
         on_progress: Optional[Callable[[str, Optional[int]], None]] = None,
     ):
@@ -36,7 +41,8 @@ class ActionSession:
         # Called (sync) each time wait_for_input()/confirm() starts waiting, so the
         # caller can surface a "waiting_for_operator" structured event (see
         # docs/design/port_actions.md "Operator input"). Receives the current step
-        # (last set via progress(), if any) so the event is self-contained.
+        # (last set via progress(), if any) and the prompt's accent color, so the
+        # event is self-contained.
         self._on_input_wait = on_input_wait
         # Called (sync) from progress(), so the caller can surface a "progress"
         # structured event. Separate from on_input_wait: progress is the script's own
@@ -164,6 +170,7 @@ class ActionSession:
         *,
         kind: str = "text",
         choices: Optional[List[Choice]] = None,
+        color: str = "none",
         timeout: Optional[float] = None,
     ) -> str:
         """Pause until the operator answers, via any of the console UI's input kinds.
@@ -184,13 +191,18 @@ class ActionSession:
         `choices`: required (non-empty) for "buttons"/"select"/"radio" - a list of plain
           values, or `{"label": ..., "value": ...}` dicts to show a different label
           than the value returned to the script.
+        `color`: accent color for the prompt's border/flash - one of
+          `VALID_PROMPT_COLORS` (`"none"` for the console's default). Purely visual,
+          e.g. to make a destructive confirm() stand out in red.
         """
         if kind in ("buttons", "select", "radio") and not choices:
             raise ValueError(f"kind={kind!r} requires a non-empty choices list")
+        if color not in VALID_PROMPT_COLORS:
+            raise ValueError(f"color must be one of {sorted(VALID_PROMPT_COLORS)}, got {color!r}")
         normalized_choices = normalize_choices(choices) if choices else None
         if self._on_input_wait is not None:
             try:
-                self._on_input_wait(text, kind, normalized_choices, self._current_step)
+                self._on_input_wait(text, kind, normalized_choices, self._current_step, color)
             except Exception:
                 pass
         if timeout is None:
@@ -200,31 +212,32 @@ class ActionSession:
         except asyncio.TimeoutError:
             raise ActionTimeoutError(f"Timed out waiting for operator input ({text or 'no prompt'})")
 
-    async def wait_for_input(self, prompt: Optional[str] = None, timeout: Optional[float] = None) -> str:
+    async def wait_for_input(self, prompt: Optional[str] = None, color: str = "none", timeout: Optional[float] = None) -> str:
         """Pause until the operator supplies a line of free-form text."""
-        return await self.prompt(prompt, kind="text", timeout=timeout)
+        return await self.prompt(prompt, kind="text", color=color, timeout=timeout)
 
-    async def confirm(self, prompt: str, timeout: Optional[float] = None) -> bool:
+    async def confirm(self, prompt: str, color: str = "none", timeout: Optional[float] = None) -> bool:
         """Pause until the operator clicks Yes or No (rendered as buttons)."""
         value = await self.prompt(
             prompt,
             kind="buttons",
             choices=[{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}],
+            color=color,
             timeout=timeout,
         )
         return value.strip().lower() in ("y", "yes", "1", "true")
 
-    async def choose(self, prompt: str, choices: List[Choice], timeout: Optional[float] = None) -> str:
+    async def choose(self, prompt: str, choices: List[Choice], color: str = "none", timeout: Optional[float] = None) -> str:
         """Pause until the operator clicks one of `choices` (rendered as buttons)."""
-        return await self.prompt(prompt, kind="buttons", choices=choices, timeout=timeout)
+        return await self.prompt(prompt, kind="buttons", choices=choices, color=color, timeout=timeout)
 
-    async def select(self, prompt: str, choices: List[Choice], timeout: Optional[float] = None) -> str:
+    async def select(self, prompt: str, choices: List[Choice], color: str = "none", timeout: Optional[float] = None) -> str:
         """Pause until the operator picks one of `choices` from a dropdown and sends it."""
-        return await self.prompt(prompt, kind="select", choices=choices, timeout=timeout)
+        return await self.prompt(prompt, kind="select", choices=choices, color=color, timeout=timeout)
 
-    async def radio(self, prompt: str, choices: List[Choice], timeout: Optional[float] = None) -> str:
+    async def radio(self, prompt: str, choices: List[Choice], color: str = "none", timeout: Optional[float] = None) -> str:
         """Pause until the operator picks one of `choices` from radio buttons and sends it."""
-        return await self.prompt(prompt, kind="radio", choices=choices, timeout=timeout)
+        return await self.prompt(prompt, kind="radio", choices=choices, color=color, timeout=timeout)
 
     def submit_operator_input(self, text: str) -> None:
         """Feed operator-supplied text to a pending `wait_for_input`/`confirm` call."""

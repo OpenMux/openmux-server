@@ -75,17 +75,21 @@ One base primitive, `prompt()`, backs five convenience wrappers. All are
 coroutines that block until the operator answers (or `timeout` elapses,
 raising `ActionTimeoutError`).
 
-#### `await session.prompt(text=None, *, kind="text", choices=None, timeout=None) -> str`
+#### `await session.prompt(text=None, *, kind="text", choices=None, color="none", timeout=None) -> str`
 The base primitive; every wrapper below just calls this with fixed
 arguments.
 - `kind`: one of `"text"`, `"buttons"`, `"select"`, `"radio"`.
 - `choices`: required (non-empty) for `"buttons"`/`"select"`/`"radio"` — a
   list of plain values, or `{"label": ..., "value": ...}` dicts. Normalized
   by `openmux.server.actions.choices.normalize_choices()`.
+- `color`: accent color for the prompt's border/flash in the console — one
+  of `"none"` (default), `"red"`, `"green"`, `"blue"`, `"pink"`, `"yellow"`,
+  `"orange"`, `"purple"` (`session.VALID_PROMPT_COLORS`). Purely visual, e.g.
+  to make a destructive `confirm()` stand out in red.
 - **Raises**: `ValueError` if a choice-based `kind` gets an empty/missing
-  `choices`.
+  `choices`, or if `color` isn't one of `VALID_PROMPT_COLORS`.
 - Invokes the session's `on_input_wait` callback (if set), synchronously,
-  with `(text, kind, normalized_choices, current_step)` — this is how
+  with `(text, kind, normalized_choices, current_step, color)` — this is how
   `ActionRunner` turns a pending prompt into a `waiting_for_operator`
   structured event carrying the script's last-reported step (see
   `progress()` above, and port_actions.md, "Operator input"). Callback
@@ -93,11 +97,11 @@ arguments.
 
 | Wrapper | `kind` | Returns |
 |---|---|---|
-| `await session.wait_for_input(prompt=None, timeout=None)` | `"text"` | free-form text |
-| `await session.confirm(prompt, timeout=None)` | `"buttons"` (Yes/No) | `bool` (lenient parse: `y`/`yes`/`1`/`true`, case-insensitive) |
-| `await session.choose(prompt, choices, timeout=None)` | `"buttons"` | the chosen value |
-| `await session.select(prompt, choices, timeout=None)` | `"select"` | the chosen value |
-| `await session.radio(prompt, choices, timeout=None)` | `"radio"` | the chosen value |
+| `await session.wait_for_input(prompt=None, color="none", timeout=None)` | `"text"` | free-form text |
+| `await session.confirm(prompt, color="none", timeout=None)` | `"buttons"` (Yes/No) | `bool` (lenient parse: `y`/`yes`/`1`/`true`, case-insensitive) |
+| `await session.choose(prompt, choices, color="none", timeout=None)` | `"buttons"` | the chosen value |
+| `await session.select(prompt, choices, color="none", timeout=None)` | `"select"` | the chosen value |
+| `await session.radio(prompt, choices, color="none", timeout=None)` | `"radio"` | the chosen value |
 
 #### `session.submit_operator_input(text: str) -> None`
 Feeds operator-supplied text to whichever `prompt()`/wrapper call is

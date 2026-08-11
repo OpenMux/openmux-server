@@ -778,7 +778,7 @@ function streamActionRun(runId) {
       showActionStrip(`Action running: ${label} — ${msg.step || ''}`);
     } else if (msg.event === 'waiting_for_operator') {
       actionTermStatus.textContent = 'Waiting for input…';
-      showOperatorPrompt(msg.prompt, msg.kind, msg.choices);
+      showOperatorPrompt(msg.prompt, msg.kind, msg.choices, msg.color);
       setActionWaitingBadge(true); // overlay only - never touches the step/percent already shown
       showActionStrip(`${label}: waiting for input — click to answer`);
     } else if (msg.event === 'operator_changed') {
@@ -808,11 +808,15 @@ function streamActionRun(runId) {
 //   "buttons"         - one button per choice; clicking answers immediately, no Send row.
 //   "select"          - a <select> (options supplied by the script).
 //   "radio"           - one radio button per choice.
-function showOperatorPrompt(prompt, kind, choices) {
+function showOperatorPrompt(prompt, kind, choices, color) {
   if (!actionsOperatorPrompt) return;
   actionsOperatorPromptText.textContent = prompt || 'Script is waiting for input';
   actionsOperatorPrompt.style.display = '';
   actionsOperatorPrompt.classList.add('action-needs-attention');
+  // Script-chosen accent color (session.prompt(..., color=...), see docs/design/
+  // action_session.md) - CSS keys off this attribute to override the default
+  // --attention-* colors; "none"/absent leaves the default styling.
+  actionsOperatorPrompt.dataset.color = color || 'none';
   const isButtons = kind === 'buttons';
   const isSelect = kind === 'select';
   const isRadio = kind === 'radio';
@@ -869,6 +873,7 @@ function hideOperatorPrompt() {
   if (actionsOperatorPrompt) {
     actionsOperatorPrompt.style.display = 'none';
     actionsOperatorPrompt.classList.remove('action-needs-attention');
+    delete actionsOperatorPrompt.dataset.color;
   }
   setActionWaitingBadge(false);
 }

@@ -263,7 +263,7 @@ label". This is a second, separate channel from the device I/O already covered a
   running script's pending `session.prompt(...)` call (an `asyncio.Queue` inside
   `ActionSession`), not to the device. `wait_for_input()`, `confirm()`, `choose()`,
   `select()`, and `radio()` are convenience wrappers around `session.prompt(text, *,
-  kind, choices, timeout)`:
+  kind, choices, color, timeout)`:
   - `wait_for_input(prompt)` — `kind="text"`: a free-form single-line input + Send
     button (the original/default behavior).
   - `confirm(prompt)` — `kind="buttons"` with fixed `Yes`/`No` choices; returns `bool`.
@@ -276,10 +276,15 @@ label". This is a second, separate channel from the device I/O already covered a
     Send button; the operator picks one, then sends.
   `choices` is a list of plain values, or `{"label": ..., "value": ...}` dicts to show a
   different label than the value returned to the script (normalized by
-  `choices.normalize_choices()`, shared with the start-run param `widget`s above). The
-  `#actionTermPane`'s `#actionsOperatorPrompt` box swaps between a text input, a row of
-  buttons, a `<select>`, or a column of radio buttons based on the event's `kind` field
-  (`showOperatorPrompt(prompt, kind, choices)` in `console.js`).
+  `choices.normalize_choices()`, shared with the start-run param `widget`s above).
+  `color` (all five wrappers accept it) picks the prompt box's accent color — `"none"`
+  (default) or one of `session.VALID_PROMPT_COLORS` (`red`, `green`, `blue`, `pink`,
+  `yellow`, `orange`, `purple`), purely visual (e.g. red for a destructive `confirm()`).
+  The `#actionTermPane`'s `#actionsOperatorPrompt` box swaps between a text input, a row
+  of buttons, a `<select>`, or a column of radio buttons based on the event's `kind`
+  field, and colors its border/flash based on the event's `color` field
+  (`showOperatorPrompt(prompt, kind, choices, color)` in `console.js`, styled via
+  `#actionsOperatorPrompt[data-color="..."]` in `web_console.css`).
 - Permission for the operator channel is separate from the port's read-write slot: only
   the client identified as `ActionRun.operator_client_id` (the run's launcher by
   default, reassignable mid-run — see "Taking over as operator" below) may answer via
@@ -288,7 +293,7 @@ label". This is a second, separate channel from the device I/O already covered a
   silently ignored (no error surfaced, matching the allow-list-only security model used
   elsewhere in this design).
 - A pending `prompt()` call (via any of the five wrappers above) is reflected as a
-  `waiting_for_operator` structured event carrying `prompt`, `kind`, and (for
+  `waiting_for_operator` structured event carrying `prompt`, `kind`, `color`, and (for
   `buttons`/`select`/`radio`) the normalized `choices` list, published the same way as
   any other action event (history-replayed for late joiners, per phase 4), so it's
   obvious the run is paused and needs a human, not just idle.
