@@ -274,14 +274,25 @@ class ActionRunner:
                 run.status = "timeout"
                 run.error = f"Action timed out after {run_timeout}s"
                 run.exception = ActionTimeoutError(run.error)
+                logger.warning(
+                    "Action %s run %s on port %s timed out after %ss", run.action_id, run.run_id, port_name, run_timeout
+                )
+                log("action_timeout", {"error": run.error})
             except Exception as exc:
                 run.status = "failed"
                 run.error = str(exc)
                 run.exception = exc
+                # exc_info=True so a genuine script/backend bug leaves a full traceback in
+                # the server log, not just the short message surfaced to the UI/run history.
+                logger.error(
+                    "Action %s run %s on port %s failed: %s", run.action_id, run.run_id, port_name, exc, exc_info=True
+                )
+                log("action_error", {"error": str(exc), "error_type": type(exc).__name__})
         except PortBusyError as exc:
             run.status = "failed"
             run.error = str(exc)
             run.exception = exc
+            logger.warning("Action %s run %s on port %s could not start: %s", run.action_id, run.run_id, port_name, exc)
         finally:
             run.ended_at = time.time()
             await self._detach_and_restore(run)
@@ -289,7 +300,14 @@ class ActionRunner:
             self._sessions.pop(run.run_id, None)
             self._notify(port_name, "action_finished", run)
             self._publish(
-                run.run_id, {"event": "action_finished", "run_id": run.run_id, "status": run.status, "ts": time.time()}
+                run.run_id,
+                {
+                    "event": "action_finished",
+                    "run_id": run.run_id,
+                    "status": run.status,
+                    "error": run.error,
+                    "ts": time.time(),
+                },
             )
             await self._broadcast_action_run_event(run, action, "action_finished")
             self._subscribers.pop(run.run_id, None)

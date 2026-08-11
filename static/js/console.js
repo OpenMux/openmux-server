@@ -613,11 +613,12 @@ function openActionRunPanel(action) {
   actionTerm.clear();
   actionTermTitle.textContent = '';
   actionTermStatus.textContent = '';
+  actionTermStatus.classList.remove('bad');
   actionsListEl.style.display = 'none';
   actionsRunPanel.style.display = '';
   actionsRunTitle.textContent = action.name || action.id;
   actionsRunDesc.textContent = action.description || '';
-  actionsRunStatus.textContent = '';
+  setActionsRunStatus('', false);
   hideOperatorPrompt();
   actionsRunForm.innerHTML = (action.params || []).map(renderActionParamField).join('') || '<div class="muted">No parameters</div>';
   loadRunHistory();
@@ -659,9 +660,19 @@ function streamActionRun(runId) {
     const label = (currentAction && (currentAction.name || currentAction.id)) || 'action';
     if (msg.event === 'action_finished') {
       hideOperatorPrompt();
+      const failed = msg.status === 'failed' || msg.status === 'timeout';
       actionTermTitle.textContent = `${label} — ${msg.status || 'finished'}`;
       actionTermStatus.textContent = `Finished: ${msg.status || 'unknown'}`;
-      actionsRunStatus.textContent = `Finished: ${msg.status || 'unknown'}`;
+      actionTermStatus.classList.toggle('bad', failed);
+      if (failed && msg.error) {
+        // Full traceback for backend bugs goes to the server log (see runner.py); this
+        // is the short message so an operator doesn't need log access to see WHY it failed.
+        actionTerm.write(`Error: ${msg.error}\n`);
+        setActionsRunStatus(`Finished: ${msg.status} — ${msg.error}`, true);
+        showActionToast(`${label} failed: ${msg.error}`);
+      } else {
+        setActionsRunStatus(`Finished: ${msg.status || 'unknown'}`, false);
+      }
       currentRunOperatorClientId = null;
       updateOperatorTakeOverUI();
       loadRunHistory();
@@ -794,13 +805,18 @@ if (actionsOperatorRadioSend) actionsOperatorRadioSend.addEventListener('click',
 // Extracted so both the Run button and a deep-link's &autorun=1 can trigger the same
 // run path (docs/design/port_actions.md "Deep-linking an action") - autorun goes through
 // this exact same auth/permission/validation-checked API call, no shortcut taken.
+function setActionsRunStatus(text, isError) {
+  actionsRunStatus.textContent = text;
+  actionsRunStatus.style.color = isError ? 'var(--status-err-text)' : '';
+}
+
 async function launchCurrentAction() {
   if (!currentAction) return;
   const port = currentPort();
   if (!port) return;
   const params = collectActionParams();
   actionsRunSubmit.disabled = true;
-  actionsRunStatus.textContent = 'Starting\u2026';
+  setActionsRunStatus('Starting\u2026', false);
   ensureActionTerm();
   actionTerm.clear();
   try {
@@ -809,14 +825,21 @@ async function launchCurrentAction() {
       body: JSON.stringify({ params, client_id: myClientId }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) { actionsRunStatus.textContent = `Failed to start: ${data.message || res.status}`; return; }
-    actionsRunStatus.textContent = `Running (run ${data.run_id})`;
+    if (!res.ok) {
+      // Rejected before a run was even created (bad/missing params, or another action
+      // already running on this port) - also logged server-side, see runner.py.
+      const message = data.message || res.status;
+      setActionsRunStatus(`Failed to start: ${message}`, true);
+      actionTerm.write(`Failed to start: ${message}\n`);
+      return;
+    }
+    setActionsRunStatus(`Running (run ${data.run_id})`, false);
     showActionStrip(`Action running: ${currentAction.name || currentAction.id}`);
     streamActionRun(data.run_id);
     currentRunOperatorClientId = myClientId; // the launcher starts out as the operator
     updateOperatorTakeOverUI();
   } catch (e) {
-    actionsRunStatus.textContent = `Failed to start: ${e}`;
+    setActionsRunStatus(`Failed to start: ${e}`, true);
   } finally {
     actionsRunSubmit.disabled = false;
   }
@@ -870,7 +893,7 @@ function joinActiveRun(activeRun) {
   const action = actionsCatalog.find((a) => a.id === activeRun.action_id) || { id: activeRun.action_id, name: activeRun.action_id, params: [] };
   openActionsOverlay();
   openActionRunPanel(action);
-  actionsRunStatus.textContent = `Running (run ${activeRun.run_id}) — joined in progress`;
+  setActionsRunStatus(`Running (run ${activeRun.run_id}) — joined in progress`, false);
   streamActionRun(activeRun.run_id);
   currentRunOperatorClientId = activeRun.operator_client_id || null;
   updateOperatorTakeOverUI();

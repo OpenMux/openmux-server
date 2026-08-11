@@ -17,6 +17,8 @@ sending a bare newline (`session.send("\\n")`) is enough to trigger the prompt t
 
 import asyncio
 
+from openmux.server.actions.errors import ActionTimeoutError
+
 ACTION = {
     "id": "setup_wizard",
     "name": "Setup wizard (demo)",
@@ -55,13 +57,16 @@ async def run(session, params, log):
     log("step_started", {"step": "launch_params", "device_type": params["device_type"], "priority": params["priority"]})
 
     log("step_started", {"step": "confirm_start"})
-    ok = await session.confirm("Start the setup wizard?", timeout=120.0)
+    ok = await session.confirm("Start the setup wizard?", timeout=10.0)
     if not ok:
         log("done", {"status": "declined"})
         return
 
     log("step_started", {"step": "device_name"})
-    name = await session.wait_for_input("Enter a name for this device", timeout=120.0)
+    name = await session.wait_for_input("Enter a name for this device, if you enter 'crash' we will look for something that will timeout", timeout=120.0)
+    if name.lower() == "crash":
+        await session.send(f"waiting for non-existant prompt to time out (10s)\n")
+        await session.expect(r"\[NON-EXISTANT-PROMPT\]", timeout=10.0)
 
     log("step_started", {"step": "mode"})
     mode = await session.choose("Pick a setup mode", ["quick", "full"], timeout=120.0)
@@ -90,6 +95,13 @@ async def run(session, params, log):
         log("step_started", {"step": f"flash: {stage}"})
         await asyncio.sleep(step_seconds)
     log("done", {"step": "flash", "status": "success"})
+
+    log("step_started", {"step": "waiting for non-existant prompt to time out (5s)"})
+    try:
+        await session.send(f"waiting for non-existant prompt to time out (5s)\n")
+        await session.expect(r"\[NON-EXISTANT-PROMPT\]", timeout=5.0)
+    except ActionTimeoutError:
+        log("step_matched", {"step": "waiting for non-existant prompt to time out (10s)", "status": "timed_out"})
 
     # Simulate a reboot prompt: a bare newline is enough to make the loopback
     # adapter emit "[ENTER]", exercising the "wait for the device's prompt" pattern.

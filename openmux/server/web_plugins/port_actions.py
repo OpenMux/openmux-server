@@ -141,6 +141,7 @@ async def _handle_run_action(request: web.Request) -> web.Response:
     try:
         run = state.runner.launch_run(action, port_name, params, username, requesting_client_id=requesting_client_id)
     except (ActionValidationError, PortBusyError) as exc:
+        logger.warning("Rejected run request for action %s on port %s (user %s): %s", action_id, port_name, username, exc)
         return web.json_response({"error": True, "message": str(exc)}, status=400)
     return web.json_response({"run_id": run.run_id, "status": run.status})
 

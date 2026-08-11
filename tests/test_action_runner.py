@@ -397,9 +397,11 @@ async def test_setup_wizard_walks_through_every_operator_input_kind(dummy_logger
     answers = iter(["yes", "my-device", "quick", "115200", "verbose", ""])
 
     async def _wait_for_prompt():
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        # Generous timeout: the script has a deliberate expect() timeout step (~5s) between
+        # the "flash" and "reboot" phases, which sits between two of these prompts.
+        event = await asyncio.wait_for(queue.get(), timeout=8.0)
         while event.get("event") != "step_waiting_for_operator":
-            event = await asyncio.wait_for(queue.get(), timeout=1.0)
+            event = await asyncio.wait_for(queue.get(), timeout=8.0)
         return event
 
     seen_kinds = []
