@@ -470,6 +470,7 @@ const actionTermEl = document.getElementById('actionTerm');
 const actionTermTitle = document.getElementById('actionTermTitle');
 const actionTermStatus = document.getElementById('actionTermStatus');
 const actionTermTakeOver = document.getElementById('actionTermTakeOver');
+const actionTermStop = document.getElementById('actionTermStop');
 const actionTermClose = document.getElementById('actionTermClose');
 let actionTerm = null;
 let actionTermFit = null;
@@ -484,6 +485,9 @@ function updateOperatorTakeOverUI() {
     const show = !!currentActionsWs && !!currentRunOperatorClientId && currentRunOperatorClientId !== myClientId;
     actionTermTakeOver.style.display = show ? '' : 'none';
   }
+  // Stopping a run is operator-only (docs/design/port_actions.md "Stopping a run") - a
+  // non-operator viewer must take over first, same as answering an operator-input prompt.
+  if (actionTermStop) actionTermStop.style.display = (!!currentActionsWs && isCurrentOperator()) ? '' : 'none';
   applyOperatorInputDisabledState();
 }
 
@@ -511,6 +515,11 @@ function applyOperatorInputDisabledState() {
 if (actionTermTakeOver) actionTermTakeOver.addEventListener('click', () => {
   if (!currentActionsWs || currentActionsWs.readyState !== WebSocket.OPEN) return;
   try { currentActionsWs.send(JSON.stringify({ type: 'operator_take_over' })); } catch (_) {}
+});
+if (actionTermStop) actionTermStop.addEventListener('click', () => {
+  if (!currentActionsWs || currentActionsWs.readyState !== WebSocket.OPEN) return;
+  if (!confirm('Stop this running action script? This cannot be undone.')) return;
+  try { currentActionsWs.send(JSON.stringify({ type: 'cancel_run' })); } catch (_) {}
 });
 
 function ensureActionTerm() {

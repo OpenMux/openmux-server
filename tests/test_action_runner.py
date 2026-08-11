@@ -198,9 +198,12 @@ async def test_concurrent_action_on_same_port_fails_fast(dummy_logger):
     with pytest.raises(PortBusyError):
         await runner.start_run(action, "p1", {"text": "hi"}, username="tester2")
 
+    # Cancelling the still-running first run is now a graceful, supported outcome (see
+    # test_cancel_run_stops_a_running_action) rather than a raw CancelledError - _execute()
+    # catches it and reports status="cancelled" instead of propagating.
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    run = await task
+    assert run.status == "cancelled"
     await adapter.stop()
 
 
@@ -419,4 +422,78 @@ async def test_setup_wizard_walks_through_every_operator_input_kind(dummy_logger
 
     assert run.status == "success"
     assert pm.get_client_mode(run.client_id, "p1") is None
+    await adapter.stop()
+
+
+SLOW_NOOP_PATH = str(Path(__file__).resolve().parents[1] / "openmux" / "server" / "actions" / "examples" / "slow_noop.py")
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_stops_a_running_action(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(SLOW_NOOP_PATH)
+    runner = ActionRunner(pm)
+
+    run = runner.launch_run(action, "p1", {"seconds": 30.0}, username="tester", requesting_client_id="human1")
+    queue = runner.subscribe(run.run_id)
+    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+    while event.get("event") != "sleeping":
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+
+    assert runner.cancel_run(run.run_id, requesting_client_id="human1") is True
+
+    task = runner._tasks.get(run.run_id)
+    if task is not None:
+        await task
+
+    assert run.status == "cancelled"
+    # The port's read-write slot is released, same as any other run outcome.
+    assert pm.get_client_mode(run.client_id, "p1") is None
+    assert runner.get_active_run("p1") is None
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_rejected_from_wrong_client(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(SLOW_NOOP_PATH)
+    runner = ActionRunner(pm)
+
+    run = runner.launch_run(action, "p1", {"seconds": 30.0}, username="tester", requesting_client_id="human1")
+    queue = runner.subscribe(run.run_id)
+    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+    while event.get("event") != "sleeping":
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+
+    assert runner.cancel_run(run.run_id, requesting_client_id="someone_else") is False
+    assert run.status == "running"
+
+    # The correct operator can still stop it afterwards.
+    assert runner.cancel_run(run.run_id, requesting_client_id="human1") is True
+    task = runner._tasks.get(run.run_id)
+    if task is not None:
+        await task
+    assert run.status == "cancelled"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_unknown_run_returns_false(dummy_logger):
+    pm, adapter = await _make_pm()
+    runner = ActionRunner(pm)
+
+    assert runner.cancel_run("no-such-run") is False
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_on_finished_run_returns_false(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    runner = ActionRunner(pm)
+
+    run = await runner.start_run(action, "p1", {"text": "hi"}, username="tester")
+    assert run.status == "success"
+
+    assert runner.cancel_run(run.run_id) is False
     await adapter.stop()

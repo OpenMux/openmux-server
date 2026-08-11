@@ -218,6 +218,19 @@ async def _handle_list_runs(request: web.Request) -> web.Response:
     return web.json_response({"runs": runs})
 
 
+def _dispatch_run_ws_frame(
+    state: _PortActionsState, run_id: str, operator_client_id: Optional[str], data: Dict[str, Any]
+) -> None:
+    """Handle one upstream JSON frame on `/ws/actions/<run_id>` (operator input/take-over/cancel)."""
+    frame_type = data.get("type")
+    if frame_type == "operator_input" and isinstance(data.get("text"), str):
+        state.runner.submit_operator_input(run_id, data["text"], requesting_client_id=operator_client_id)
+    elif frame_type == "operator_take_over" and operator_client_id:
+        state.runner.take_over_operator(run_id, operator_client_id)
+    elif frame_type == "cancel_run":
+        state.runner.cancel_run(run_id, requesting_client_id=operator_client_id)
+
+
 async def _handle_ws_run_events(request: web.Request) -> web.StreamResponse:
     """Stream this run's structured events, replaying history first for late joiners.
 
@@ -231,6 +244,9 @@ async def _handle_ws_run_events(request: web.Request) -> web.StreamResponse:
     gated by the `client_id` query param, which must match the run's launcher, and
     `{"type": "operator_take_over"}` frames (see "Taking over as operator"), which
     reassign the run's operator to whoever's `client_id` query param sent the frame.
+    Also accepts `{"type": "cancel_run"}` (see "Stopping a run"), routed to
+    `ActionRunner.cancel_run()` under the same `client_id`-gated permission check as
+    `operator_input`.
     """
     state = request.app[STATE_APP_KEY]
     username = request.get("username")
@@ -257,10 +273,7 @@ async def _handle_ws_run_events(request: web.Request) -> web.StreamResponse:
                 continue
             if not isinstance(data, dict):
                 continue
-            if data.get("type") == "operator_input" and isinstance(data.get("text"), str):
-                state.runner.submit_operator_input(run_id, data["text"], requesting_client_id=operator_client_id)
-            elif data.get("type") == "operator_take_over" and operator_client_id:
-                state.runner.take_over_operator(run_id, operator_client_id)
+            _dispatch_run_ws_frame(state, run_id, operator_client_id, data)
 
     reader_task = asyncio.ensure_future(_read_operator_input())
     try:

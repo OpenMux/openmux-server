@@ -507,3 +507,66 @@ async def test_action_ports_wildcard_grants_action_to_every_port():
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_ws_round_trip_stops_a_running_action():
+    """A `{"type": "cancel_run"}` frame from the run's operator stops it mid-execution
+    (see docs/design/port_actions.md "Stopping a run"); the run's own event stream reports
+    `status == "cancelled"` in its final `action_finished` event, same as any other outcome."""
+    web_adapter, pm, loop_adapter = await _start_console(8965, {"slow_noop": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                "http://127.0.0.1:8965/api/ports/p1/actions/slow_noop/run",
+                headers=AUTH_HEADER,
+                json={"params": {"seconds": 30.0}, "client_id": "launcher1"},
+            ) as resp:
+                assert resp.status == 200
+                run_id = (await resp.json())["run_id"]
+
+            events = []
+            async with session.ws_connect(
+                f"http://127.0.0.1:8965/ws/actions/{run_id}?client_id=launcher1", headers=AUTH_HEADER
+            ) as ws:
+                await ws.send_str(json.dumps({"type": "cancel_run"}))
+                async for msg in ws:
+                    events.append(json.loads(msg.data))
+                    if events[-1].get("event") == "action_finished":
+                        break
+
+            assert events[-1]["status"] == "cancelled"
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_ws_ignored_from_non_operator():
+    """A `cancel_run` frame from someone other than the run's operator is silently
+    ignored, mirroring `operator_input`'s permission model - the run keeps going."""
+    web_adapter, pm, loop_adapter = await _start_console(8966, {"slow_noop": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                "http://127.0.0.1:8966/api/ports/p1/actions/slow_noop/run",
+                headers=AUTH_HEADER,
+                json={"params": {"seconds": 0.2}, "client_id": "launcher1"},
+            ) as resp:
+                assert resp.status == 200
+                run_id = (await resp.json())["run_id"]
+
+            events = []
+            async with session.ws_connect(
+                f"http://127.0.0.1:8966/ws/actions/{run_id}?client_id=someone_else", headers=AUTH_HEADER
+            ) as ws:
+                await ws.send_str(json.dumps({"type": "cancel_run"}))
+                async for msg in ws:
+                    events.append(json.loads(msg.data))
+                    if events[-1].get("event") == "action_finished":
+                        break
+
+            assert events[-1]["status"] == "success"
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()

@@ -24,7 +24,9 @@ console page's run panel, gated by a `client_id` query param on
 force-take reassignment IS also implemented: any connected viewer can send
 `{"type": "operator_take_over"}` to become the new operator, and every viewer
 (including the previous operator) learns about it via an `operator_changed`
-structured event on the run's own live event stream. Phase 6's
+structured event on the run's own live event stream. A run's operator can also stop it
+mid-execution (`{"type": "cancel_run"}` on the same WebSocket, a `#actionTermStop`
+button next to the pane's close button — see "Stopping a run" below). Phase 6's
 deep-linking is implemented: `?action=<id>` (+ bare `&<param_name>=<value>` per
 declared param, + `&autorun=1`) pre-fills and optionally auto-launches an action's run
 form on page load, going through the exact same `launchCurrentAction()`/run-API call a
@@ -303,6 +305,24 @@ brief toast to a previous operator who just lost that role.- **Implemented**: no
   `operator_changed` event) drives this; `sendOperatorInput()` also keeps a
   server-adjacent client-side guard (`isCurrentOperator()`) as defense-in-depth in case
   a control is somehow triggered anyway.
+
+## Stopping a run
+An operator needs a way to abort a stuck or mistaken run without waiting for its
+timeout — e.g. a script sending the wrong command to a live device.
+
+**Implemented**: `ActionRunner.cancel_run(run_id, requesting_client_id=None)` cancels
+the run's background `asyncio.Task`; `_execute()` catches the resulting
+`asyncio.CancelledError`, sets `status = "cancelled"`, and runs its normal cleanup
+(detach the action's client, auto-restore a self-demoted launcher, publish
+`action_finished`) exactly like any other run outcome — a stopped run is never left
+holding the port's read-write slot. Same permission model as `submit_operator_input()`:
+only the run's current `operator_client_id` may cancel it once one is assigned; other
+callers are silently ignored. A viewer sends `{"type": "cancel_run"}` upstream on
+`/ws/actions/<run_id>?client_id=<id>` (the same channel used for `operator_input`/
+`operator_take_over`). The console page's `#actionTermStop` button (next to the pane's
+✕ close button, hidden for non-operators the same way the operator-input controls are)
+sends this frame after a confirmation prompt.
+
 ## Persisted log
 `DataLogger` resolves a port's log file from either a `port_obj.config["log_file"]`
 override or the default `logs/ports/{port_name}.log`, keyed by whatever `port_name`

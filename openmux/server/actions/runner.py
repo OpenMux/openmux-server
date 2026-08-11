@@ -32,7 +32,7 @@ class ActionRun:
     username: str
     params: Dict[str, Any]
     client_id: str
-    status: str = "running"  # running | success | failed | timeout
+    status: str = "running"  # running | success | failed | timeout | cancelled
     started_at: float = field(default_factory=time.time)
     ended_at: Optional[float] = None
     error: Optional[str] = None
@@ -197,6 +197,25 @@ class ActionRunner:
         session.submit_operator_input(text)
         return True
 
+    def cancel_run(self, run_id: str, *, requesting_client_id: Optional[str] = None) -> bool:
+        """Stop a running action mid-execution (see docs/design/port_actions.md "Stopping a run").
+
+        Cancels the run's background `asyncio.Task`; `_execute()` catches the resulting
+        `CancelledError`, sets `status = "cancelled"`, and runs its normal cleanup
+        (detach client, restore auto-demoted launcher, publish `action_finished`) exactly
+        like any other run outcome. Same permission model as `submit_operator_input()`:
+        only the run's `operator_client_id` may cancel it once one is assigned. Returns
+        False for an unknown run, one that isn't running, or an unauthorized caller.
+        """
+        run = self.runs.get(run_id)
+        task = self._tasks.get(run_id)
+        if run is None or run.status != "running" or task is None:
+            return False
+        if run.operator_client_id is not None and requesting_client_id != run.operator_client_id:
+            return False
+        task.cancel()
+        return True
+
     def take_over_operator(self, run_id: str, new_client_id: str) -> bool:
         """Reassign who may answer this run's prompts (mirrors "Force take read-write").
 
@@ -278,6 +297,11 @@ class ActionRunner:
                     "Action %s run %s on port %s timed out after %ss", run.action_id, run.run_id, port_name, run_timeout
                 )
                 log("action_timeout", {"error": run.error})
+            except asyncio.CancelledError:
+                run.status = "cancelled"
+                run.error = "Cancelled by user"
+                logger.info("Action %s run %s on port %s was cancelled", run.action_id, run.run_id, port_name)
+                log("action_cancelled", {"error": run.error})
             except Exception as exc:
                 run.status = "failed"
                 run.error = str(exc)
