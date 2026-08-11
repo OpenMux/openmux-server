@@ -57,19 +57,23 @@ async def run(session, params, log):
     log(f"launch_params: device_type={params['device_type']} priority={params['priority']}")
 
     session.progress("confirm_start", 5)
-    ok = await session.confirm("Start the setup wizard?", timeout=10.0)
+    ok = await session.confirm("Start the setup wizard?", color="blue", timeout=10.0)
     if not ok:
         log("done: declined")
         return
 
     session.progress("device_name", 15)
-    name = await session.wait_for_input("Enter a name for this device, if you enter 'crash' we will look for something that will timeout", timeout=120.0)
+    name = await session.wait_for_input(
+        "Enter a name for this device, if you enter 'crash' we will look for something that will timeout",
+        color="green",
+        timeout=120.0,
+    )
     if name.lower() == "crash":
         await session.send(f"waiting for non-existant prompt to time out (10s)\n")
         await session.expect(r"\[NON-EXISTANT-PROMPT\]", timeout=10.0)
 
     session.progress("mode", 25)
-    mode = await session.choose("Pick a setup mode", ["quick", "full"], timeout=120.0)
+    mode = await session.choose("Pick a setup mode", ["quick", "full"], color="purple", timeout=120.0)
 
     session.progress("baud_rate", 35)
     baud = await session.select(
@@ -79,12 +83,15 @@ async def run(session, params, log):
             {"label": "19200 baud", "value": "19200"},
             {"label": "115200 baud", "value": "115200"},
         ],
+        color="orange",
         timeout=120.0,
     )
     log(f"inputs: name={name} mode={mode} baud={baud}")
 
     session.progress("verbosity", 45)
-    verbosity = await session.radio("Pick a log verbosity for this run", ["quiet", "normal", "verbose"], timeout=120.0)
+    verbosity = await session.radio(
+        "Pick a log verbosity for this run", ["quiet", "normal", "verbose"], color="pink", timeout=120.0
+    )
     log(f"inputs: verbosity={verbosity}")
 
     # Simulate a device flash that takes a moment, in a few visible stages.
@@ -112,7 +119,7 @@ async def run(session, params, log):
     log(f"reboot: matched={matched}")
 
     session.progress("reboot", 98)
-    await session.wait_for_input("Press Enter once the device has finished rebooting", timeout=120.0)
+    await session.wait_for_input("Press Enter once the device has finished rebooting", color="yellow", timeout=120.0)
 
     session.progress("done", 100)
     log(f"done: name={name} mode={mode} baud={baud} verbosity={verbosity}")
