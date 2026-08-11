@@ -7,6 +7,7 @@ See docs/design/port_actions.md ("Locking (read-write slot)", "Persisted log",
 import asyncio
 import logging
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -17,6 +18,13 @@ from openmux.server.actions.session import ActionSession
 from openmux.server.data_logger import DataLogger
 
 logger = logging.getLogger("openmux.server.actions.runner")
+
+
+def _truncate(text: str, limit: int = 4000) -> str:
+    """Cap `text` for a debug-log line; a crash buffer/traceback can be arbitrarily large."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...(truncated, {len(text)} chars total)"
 
 
 @dataclass
@@ -223,6 +231,7 @@ class ActionRunner:
         if run.operator_client_id is not None and requesting_client_id != run.operator_client_id:
             return False
         session.submit_operator_input(text)
+        self._log_debug(run, f"operator_answered: {_truncate(text)!r}")
         return True
 
     def cancel_run(self, run_id: str, *, requesting_client_id: Optional[str] = None) -> bool:
@@ -291,6 +300,16 @@ class ActionRunner:
             except asyncio.QueueFull:
                 logger.warning("Dropping action event for run %s: subscriber queue full", run_id)
 
+    def _log_debug(self, run: ActionRun, text: str) -> None:
+        """Write a debug-only line straight to the run's transcript (see docs/design/
+        port_actions.md "Persisted log") - unlike `_publish()`, never appended to
+        `run.events` or pushed to WS subscribers, so it never reaches the live console.
+        """
+        try:
+            DataLogger.get().record_meta(port_name=run.log_port_name, event=text, client_id=run.client_id)
+        except Exception:
+            logger.error("Failed to record debug info for run %s", run.run_id, exc_info=True)
+
     async def _execute(
         self,
         run: ActionRun,
@@ -331,6 +350,7 @@ class ActionRunner:
                         "ts": time.time(),
                     },
                 ),
+                on_debug=lambda message: self._log_debug(run, message),
             )
             self._sessions[run.run_id] = session
             run_timeout = action.timeout if timeout is None else timeout
@@ -361,6 +381,8 @@ class ActionRunner:
                     "Action %s run %s on port %s failed: %s", run.action_id, run.run_id, port_name, exc, exc_info=True
                 )
                 log(f"action_error: {type(exc).__name__}: {exc}")
+                self._log_debug(run, f"buffer_at_crash: {_truncate(session.read_buffer())!r}")
+                self._log_debug(run, f"traceback:\n{_truncate(traceback.format_exc())}")
         except PortBusyError as exc:
             run.status = "failed"
             run.error = str(exc)

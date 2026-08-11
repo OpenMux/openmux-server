@@ -356,6 +356,16 @@ ends up with the same lines the live terminal view shows, not just the script's 
 `log()` calls. `_format_event_for_log()` renders each structured event as one line,
 mirroring `console.js`'s terminal "detail" text; keep both in sync if either changes.
 
+`ActionRunner._log_debug()` writes extra debug-only lines straight to the same
+transcript file via `DataLogger.record_meta()`, bypassing `_publish()` entirely - these
+never touch `run.events` or WS subscribers, so they never reach the live console, only
+the on-disk file. Covers: the operator's answer to a `prompt()` (`operator_answered`),
+`session.send()`/`sendline()` text (`send`), `session.expect()`'s matched text or the
+buffered-but-unmatched text at timeout (`expect_matched`/`expect_timeout`), and, on an
+unhandled script exception, the port's remaining read buffer and the full Python
+traceback (`buffer_at_crash`/`traceback`) - all truncated (`_truncate()`) since port
+output/tracebacks can be arbitrarily large.
+
 ## Run registry
 Keep a lightweight in-memory `ActionRun` record per run: run_id, port_name, action_id,
 user, redacted params, start/end timestamps, status, the transcript log path, and the

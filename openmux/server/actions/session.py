@@ -20,6 +20,13 @@ from openmux.server.actions.errors import ActionSessionError, ActionTimeoutError
 VALID_PROMPT_COLORS = {"none", "red", "green", "blue", "pink", "yellow", "orange", "purple"}
 
 
+def _truncate(text: str, limit: int = 2000) -> str:
+    """Cap `text` for a debug-log line; port output can be arbitrarily large/noisy."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...(truncated, {len(text)} chars total)"
+
+
 class ActionSession:
     """Send/expect interface bound to one port attachment (one `client_id`)."""
 
@@ -32,6 +39,7 @@ class ActionSession:
             Callable[[Optional[str], str, Optional[List[Dict[str, str]]], Optional[str], str], None]
         ] = None,
         on_progress: Optional[Callable[[str, Optional[int]], None]] = None,
+        on_debug: Optional[Callable[[str], None]] = None,
     ):
         self.port_manager = port_manager
         self.port_name = port_name
@@ -49,7 +57,19 @@ class ActionSession:
         # step/percent reporting, waiting-for-operator is an orthogonal paused state
         # that does not advance (or reset) it.
         self._on_progress = on_progress
+        # Called (sync) with a one-line debug message from send()/sendline()/expect() (matched
+        # text, timeout buffer contents) - written straight to the persisted transcript (see
+        # docs/design/port_actions.md "Persisted log"), never surfaced to WS subscribers/the
+        # live console, so it's safe to be noisier than the operator-facing events above.
+        self._on_debug = on_debug
         self._current_step: Optional[str] = None
+
+    def _debug(self, message: str) -> None:
+        if self._on_debug is not None:
+            try:
+                self._on_debug(message)
+            except Exception:
+                pass
 
     def _client_queue(self) -> Optional[asyncio.Queue]:
         port = self.port_manager.ports.get(self.port_name)
@@ -116,6 +136,7 @@ class ActionSession:
         ok = await self.port_manager.write_to_port(self.port_name, text.encode("utf-8"), client_id=self.client_id)
         if not ok:
             raise ActionSessionError(f"Write to port {self.port_name} was rejected (client {self.client_id} not read-write?)")
+        self._debug(f"send: {_truncate(text)!r}")
 
     async def sendline(self, text: str) -> None:
         """Write `text` followed by a newline."""
@@ -143,6 +164,7 @@ class ActionSession:
         match = regex.search(text)
         if match:
             self._consume(text, match.end())
+            self._debug(f"expect_matched: pattern={pattern!r} matched={_truncate(match.group(0))!r}")
             return match.group(0)
 
         queue = self._client_queue()
@@ -152,16 +174,19 @@ class ActionSession:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                self._debug(f"expect_timeout: pattern={pattern!r} buffer={_truncate(text)!r}")
                 raise ActionTimeoutError(f"Timed out waiting for pattern {pattern!r} on port {self.port_name}")
             try:
                 chunk = await asyncio.wait_for(queue.get(), timeout=remaining)
             except asyncio.TimeoutError:
+                self._debug(f"expect_timeout: pattern={pattern!r} buffer={_truncate(text)!r}")
                 raise ActionTimeoutError(f"Timed out waiting for pattern {pattern!r} on port {self.port_name}")
             self._buffer.extend(chunk)
             text = self._buffer.decode("utf-8", errors="replace")
             match = regex.search(text)
             if match:
                 self._consume(text, match.end())
+                self._debug(f"expect_matched: pattern={pattern!r} matched={_truncate(match.group(0))!r}")
                 return match.group(0)
 
     async def prompt(
