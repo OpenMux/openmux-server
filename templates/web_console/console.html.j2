@@ -55,6 +55,9 @@
             <button id="actionTermClose" class="btn" type="button" title="Close (the run keeps going in the background)">✕</button>
           </div>
         </div>
+        <!-- Hard-to-miss run outcome banner (GitHub issue feedback: the small header tag alone
+             wasn't obvious enough) - shown only once action_finished arrives, see console.js. -->
+        <div id="actionResultBanner" class="action-result-banner" style="display:none;"></div>
         <div id="actionTerm"></div>
         <div id="actionsOperatorPrompt" style="display:none; padding:6px; border-top:1px solid var(--border-color, #333);">
           <div id="actionsOperatorPromptText" class="mini"></div>

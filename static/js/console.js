@@ -488,6 +488,14 @@ const actionTermStatus = document.getElementById('actionTermStatus');
 const actionTermTakeOver = document.getElementById('actionTermTakeOver');
 const actionTermStop = document.getElementById('actionTermStop');
 const actionTermClose = document.getElementById('actionTermClose');
+// Prominent run-outcome banner (GitHub issue feedback: the small actionTermStatus tag
+// alone wasn't obvious enough) - populated/shown only once action_finished arrives.
+const actionResultBanner = document.getElementById('actionResultBanner');
+function hideActionResultBanner() {
+  if (!actionResultBanner) return;
+  actionResultBanner.style.display = 'none';
+  actionResultBanner.classList.remove('ok', 'bad', 'muted');
+}
 let actionTerm = null;
 let actionTermFit = null;
 const ACTION_TERM_WIDTH_KEY = 'omx_action_term_width';
@@ -640,6 +648,7 @@ function openActionRunPanel(action) {
   actionTermTitle.textContent = '';
   actionTermStatus.textContent = '';
   actionTermStatus.classList.remove('bad');
+  hideActionResultBanner();
   actionsRunTitle.textContent = action.name || action.id;
   actionsRunDesc.textContent = action.description || '';
   showActionsRunView();
@@ -667,6 +676,7 @@ function collectActionParams() {
 function streamActionRun(runId) {
   closeActionRunStream();
   currentRunFinished = false;
+  hideActionResultBanner();
   ensureActionTerm();
   actionTermTitle.textContent = (currentAction && (currentAction.name || currentAction.id)) || 'Action';
   openActionTermPane();
@@ -691,6 +701,19 @@ function streamActionRun(runId) {
       actionTermTitle.textContent = `${label} — ${msg.status || 'finished'}`;
       actionTermStatus.textContent = `Finished: ${msg.status || 'unknown'}`;
       actionTermStatus.classList.toggle('bad', failed);
+      if (actionResultBanner) {
+        // One glance, no reading the small header tag required: an icon, the outcome, and
+        // (when relevant) the short error - color-coded ok/bad/muted to match the tag classes.
+        const icons = { success: '\u2713', failed: '\u2717', timeout: '\u23f1', cancelled: '\u25a0' };
+        const icon = icons[msg.status] || '\u2139';
+        const bannerClass = msg.status === 'success' ? 'ok' : msg.status === 'cancelled' ? 'muted' : 'bad';
+        let text = `${icon} ${label} ${msg.status === 'success' ? 'finished successfully' : msg.status || 'finished'}`;
+        if (msg.status !== 'success' && msg.error) text += `: ${msg.error}`;
+        actionResultBanner.textContent = text;
+        actionResultBanner.classList.remove('ok', 'bad', 'muted');
+        actionResultBanner.classList.add(bannerClass);
+        actionResultBanner.style.display = '';
+      }
       if (failed && msg.error) {
         // Full traceback for backend bugs goes to the server log (see runner.py); this
         // is the short message so an operator doesn't need log access to see WHY it failed.
