@@ -389,6 +389,9 @@ let currentActionsWs = null;
 // Who may currently answer this run's operator-input prompts (see "Taking over as
 // operator" in the design doc) - kept in sync via the `operator_changed` event.
 let currentRunOperatorClientId = null;
+// Whether the current run has already sent action_finished - the run WS can stay open
+// (e.g. for history) after that, so this can't be inferred from currentActionsWs alone.
+let currentRunFinished = false;
 // Another client's already-running action on this port, discovered via loadActionsCatalog();
 // cleared once the user clicks the strip to join it (see joinActiveRun()).
 let pendingJoinRun = null;
@@ -500,7 +503,9 @@ function updateOperatorTakeOverUI() {
   }
   // Stopping a run is operator-only (docs/design/port_actions.md "Stopping a run") - a
   // non-operator viewer must take over first, same as answering an operator-input prompt.
-  if (actionTermStop) actionTermStop.style.display = (!!currentActionsWs && isCurrentOperator()) ? '' : 'none';
+  // Also hidden once the run has finished (see GitHub issue #46) - stopping a completed/
+  // failed run makes no sense.
+  if (actionTermStop) actionTermStop.style.display = (!!currentActionsWs && !currentRunFinished && isCurrentOperator()) ? '' : 'none';
   applyOperatorInputDisabledState();
 }
 
@@ -661,6 +666,7 @@ function collectActionParams() {
 
 function streamActionRun(runId) {
   closeActionRunStream();
+  currentRunFinished = false;
   ensureActionTerm();
   actionTermTitle.textContent = (currentAction && (currentAction.name || currentAction.id)) || 'Action';
   openActionTermPane();
@@ -679,6 +685,7 @@ function streamActionRun(runId) {
     actionTerm.write(`[${ts}] ${msg.event || ''}${meta}\n`);
     const label = (currentAction && (currentAction.name || currentAction.id)) || 'action';
     if (msg.event === 'action_finished') {
+      currentRunFinished = true;
       hideOperatorPrompt();
       const failed = msg.status === 'failed' || msg.status === 'timeout';
       actionTermTitle.textContent = `${label} — ${msg.status || 'finished'}`;
