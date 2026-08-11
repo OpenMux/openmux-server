@@ -50,6 +50,28 @@ class ActionSession:
         """Discard any buffered inbound bytes, so the next `expect()` only sees new output."""
         self._buffer.clear()
 
+    def read_buffer(self, *, consume: bool = False) -> str:
+        """Return the inbound text seen so far, without waiting for a pattern match.
+
+        Pulls any chunks already sitting in the client's delivery queue (non-blocking)
+        into the buffer first, so this reflects output that arrived since the last
+        `expect()`/`read_buffer()` call. Pass `consume=True` to also drop the returned
+        text from the buffer (like a matched `expect()`), so a later `expect()`/
+        `read_buffer()` only sees output that arrives after this call.
+        """
+        queue = self._client_queue()
+        if queue is not None:
+            while True:
+                try:
+                    chunk = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                self._buffer.extend(chunk)
+        text = self._buffer.decode("utf-8", errors="replace")
+        if consume:
+            self._buffer.clear()
+        return text
+
     async def send(self, text: str) -> None:
         """Write `text` to the port as-is (no newline added)."""
         ok = await self.port_manager.write_to_port(self.port_name, text.encode("utf-8"), client_id=self.client_id)

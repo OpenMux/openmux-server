@@ -95,7 +95,11 @@ an action attaches to `PortManager` exactly like a console client does, through
   `await session.expect(pattern, timeout=...)`, `await session.sendline(text)`.
   A matched `expect()` (and anything before it) is dropped from the buffer, so a
   later `expect()` sees only new output. `session.clear_buffer()` discards buffered
-  bytes without waiting for a match.
+  bytes without waiting for a match. `session.read_buffer(consume=False)` returns the
+  inbound text seen so far without waiting for a pattern match — it drains any
+  already-queued chunks first, so a script can inspect the current output (e.g. to
+  branch on it) without needing an `expect()` call; pass `consume=True` to also drop
+  the returned text from the buffer.
 - `params` is a dict of the user-supplied inputs, validated against the `ACTION`
   metadata's declared parameter types before the script runs.
 - Each declared param (`ActionParam` in `registry.py`) has a `widget`, defaulting to

@@ -111,6 +111,33 @@ async def test_expect_leaves_unmatched_trailing_bytes_in_buffer(pm):
 
 
 @pytest.mark.asyncio
+async def test_read_buffer_returns_buffered_data_without_consuming(pm):
+    session = ActionSession(pm, "p1", "c1")
+    session._buffer.extend(b"hello world")
+    assert session.read_buffer() == "hello world"
+    assert bytes(session._buffer) == b"hello world"
+
+
+@pytest.mark.asyncio
+async def test_read_buffer_drains_pending_queue_data(pm):
+    session = ActionSession(pm, "p1", "c1")
+    queue = pm.ports["p1"].client_queues["c1"]
+    await queue.put(b"partial ")
+    await queue.put(b"line\n")
+    assert session.read_buffer() == "partial line\n"
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_read_buffer_consume_clears_the_buffer(pm):
+    session = ActionSession(pm, "p1", "c1")
+    session._buffer.extend(b"stale output")
+    assert session.read_buffer(consume=True) == "stale output"
+    assert bytes(session._buffer) == b""
+    assert session.read_buffer() == ""
+
+
+@pytest.mark.asyncio
 async def test_clear_buffer_discards_buffered_data(pm):
     session = ActionSession(pm, "p1", "c1")
     session._buffer.extend(b"stale output")
