@@ -126,7 +126,10 @@
   <aside id="actionsOverlay" class="card" style="position:fixed; top:64px; right:16px; min-width: 340px; max-width: 420px; max-height: 70vh; overflow:auto; display:none; z-index:10;">
     <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
       <div class="muted">Port Actions</div>
-      <button id="actionsClose" class="btn" type="button" title="Close">✕</button>
+      <div style="display:flex; gap:6px;">
+        <button id="actionsListRefresh" class="btn" type="button" title="Reload the action list from disk">⟳</button>
+        <button id="actionsClose" class="btn" type="button" title="Close">✕</button>
+      </div>
     </div>
     <div id="actionsList" class="mini" style="margin-top:8px;">
       <div class="muted">Loading…</div>

@@ -356,6 +356,7 @@ infoClose.addEventListener('click', () => closeInfo());
 const actionsOverlay = document.getElementById('actionsOverlay');
 const actionsToggle = document.getElementById('actionsToggle');
 const actionsClose = document.getElementById('actionsClose');
+const actionsListRefresh = document.getElementById('actionsListRefresh');
 const actionsListEl = document.getElementById('actionsList');
 const actionsRunPanel = document.getElementById('actionsRunPanel');
 const actionsRunTitle = document.getElementById('actionsRunTitle');
@@ -907,13 +908,37 @@ if (actionRunStrip) actionRunStrip.addEventListener('click', () => {
 
 // Closing the overlay only hides it - the run keeps executing server-side and its
 // WS stream (and the strip above) keep updating in the background regardless.
-function openActionsOverlay() { actionsOverlay.style.display = 'block'; if (!currentAction) renderActionsList(); else { actionsListEl.style.display = 'none'; actionsRunPanel.style.display = ''; } }
+//
+// Refetches the catalog every time (the server auto-reloads any action script whose
+// file changed since it was last loaded - see _refresh_catalog() in port_actions.py),
+// so an edited script's params/description show up here without a page reload. If the
+// run panel is currently open, its form is rebuilt from the refreshed definition too.
+async function refreshActionsCatalog() {
+  await loadActionsCatalog();
+  if (currentAction) {
+    const updated = actionsCatalog.find((a) => a.id === currentAction.id);
+    if (updated) {
+      currentAction = updated;
+      actionsRunTitle.textContent = updated.name || updated.id;
+      actionsRunDesc.textContent = updated.description || '';
+      actionsRunForm.innerHTML = (updated.params || []).map(renderActionParamField).join('') || '<div class="muted">No parameters</div>';
+    }
+  } else {
+    renderActionsList();
+  }
+}
+function openActionsOverlay() {
+  actionsOverlay.style.display = 'block';
+  if (!currentAction) { renderActionsList(); } else { actionsListEl.style.display = 'none'; actionsRunPanel.style.display = ''; }
+  refreshActionsCatalog();
+}
 function closeActionsOverlay() { actionsOverlay.style.display = 'none'; }
 actionsToggle.addEventListener('click', () => {
   const visible = actionsOverlay.style.display !== 'none';
   if (visible) closeActionsOverlay(); else openActionsOverlay();
 });
 actionsClose.addEventListener('click', () => closeActionsOverlay());
+actionsListRefresh.addEventListener('click', () => refreshActionsCatalog());
 
 // Deep-linking (docs/design/port_actions.md "Deep-linking an action"): `?action=<id>`
 // opens that action pre-selected, `&<param_name>=<value>` (bare declared param names)

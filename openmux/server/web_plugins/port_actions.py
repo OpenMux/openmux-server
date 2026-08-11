@@ -48,12 +48,15 @@ class _PortActionsState:
     catalog: Dict[str, ActionScript] = field(default_factory=dict)
     action_ports: Dict[str, List[str]] = field(default_factory=dict)
     runner: Optional[ActionRunner] = None
+    actions_dir: Optional[str] = None
+    # action id -> script file mtime as of its last (re)load; drives _refresh_catalog().
+    catalog_mtimes: Dict[str, float] = field(default_factory=dict)
 
 
 STATE_APP_KEY: Final = web.AppKey("openmux_port_actions_state", _PortActionsState)
 
 
-def _load_catalog(actions_dir: Optional[str]) -> Dict[str, ActionScript]:
+def _load_catalog(actions_dir: Optional[str], mtimes: Optional[Dict[str, float]] = None) -> Dict[str, ActionScript]:
     catalog: Dict[str, ActionScript] = {}
     if not actions_dir:
         return catalog
@@ -70,7 +73,59 @@ def _load_catalog(actions_dir: Optional[str]) -> Dict[str, ActionScript]:
             logger.error("Skipping invalid action script %s: %s", path, exc)
             continue
         catalog[action.id] = action
+        if mtimes is not None:
+            try:
+                mtimes[action.id] = path.stat().st_mtime
+            except OSError:
+                pass
     return catalog
+
+
+def _refresh_catalog(state: _PortActionsState) -> None:
+    """Reload any action script whose file changed since it was last loaded.
+
+    Cheap when nothing changed: this only `stat()`s each file in `actions_dir` and
+    re-imports (`load_action_from_file`) just the ones whose mtime moved. Also picks
+    up added/removed script files. Called before serving the catalog and before
+    launching a run, so editing a script's ACTION metadata or run() body takes
+    effect on its very next use - no server reload needed. A script with a syntax
+    error is logged and skipped, keeping whatever version last loaded successfully.
+    """
+    if not state.actions_dir:
+        return
+    base = Path(state.actions_dir)
+    if not base.is_dir():
+        return
+    seen_ids = set()
+    for path in sorted(base.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        existing_id = next((aid for aid, a in state.catalog.items() if a.module_path == str(path)), None)
+        if existing_id is not None and state.catalog_mtimes.get(existing_id) == mtime:
+            seen_ids.add(existing_id)
+            continue
+        try:
+            action = load_action_from_file(str(path))
+        except ActionValidationError as exc:
+            logger.error("Skipping invalid action script %s: %s", path, exc)
+            continue
+        if existing_id is not None and existing_id != action.id:
+            state.catalog.pop(existing_id, None)
+            state.catalog_mtimes.pop(existing_id, None)
+        state.catalog[action.id] = action
+        state.catalog_mtimes[action.id] = mtime
+        seen_ids.add(action.id)
+        logger.info("Reloaded action script %s (id=%s)", path.name, action.id)
+
+    stale = [aid for aid, a in state.catalog.items() if Path(a.module_path).parent == base and aid not in seen_ids]
+    for aid in stale:
+        del state.catalog[aid]
+        state.catalog_mtimes.pop(aid, None)
+        logger.info("Removed action %s: script file no longer present", aid)
 
 
 def _action_summary(action: ActionScript) -> Dict[str, Any]:
@@ -110,6 +165,7 @@ async def _handle_list_actions(request: web.Request) -> web.Response:
     state = request.app[STATE_APP_KEY]
     adapter._require_permission(request, ("read-write", "admin"))
     port_name = request.match_info["port_name"]
+    _refresh_catalog(state)
     actions = [_action_summary(a) for a in _allowed_actions(state, port_name).values()]
     active_run = state.runner.get_active_run(port_name) if state.runner else None
     return web.json_response({"actions": actions, "active_run": active_run.summary() if active_run else None})
@@ -123,6 +179,7 @@ async def _handle_run_action(request: web.Request) -> web.Response:
         raise web.HTTPForbidden(text="CSRF check failed")
     port_name = request.match_info["port_name"]
     action_id = request.match_info["action_id"]
+    _refresh_catalog(state)
     action = _allowed_actions(state, port_name).get(action_id)
     if action is None:
         raise web.HTTPNotFound(text="Action not available on this port")
@@ -237,10 +294,11 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     console_manager = getattr(adapter, "console_manager", None)
     port_manager = getattr(console_manager, "port_manager", None)
     state = _PortActionsState(
-        catalog=_load_catalog(section.get("actions_dir")),
         action_ports={k: list(v) for k, v in (section.get("action_ports") or {}).items()},
         runner=ActionRunner(port_manager, console_manager=console_manager) if port_manager is not None else None,
+        actions_dir=section.get("actions_dir"),
     )
+    state.catalog = _load_catalog(state.actions_dir, state.catalog_mtimes)
     if state.runner is None:
         logger.warning("port_actions plugin registered without a PortManager; actions will not be runnable")
     app[STATE_APP_KEY] = state
