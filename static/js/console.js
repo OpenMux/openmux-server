@@ -857,7 +857,11 @@ function showOperatorPrompt(prompt, kind, choices) {
     });
   } else {
     actionsOperatorInput.value = '';
+    // .focus() fires 'focusin' synchronously, which would otherwise trip the
+    // "operator noticed it" listener below and cancel the flash before it's seen.
+    suppressAttentionClearOnFocus = true;
     actionsOperatorInput.focus();
+    suppressAttentionClearOnFocus = false;
   }
   applyOperatorInputDisabledState();
 }
@@ -870,9 +874,13 @@ function hideOperatorPrompt() {
 }
 // Any interaction inside the prompt counts as "the operator noticed it" - stop flashing
 // right away rather than waiting for the answer to actually be sent.
+let suppressAttentionClearOnFocus = false;
 if (actionsOperatorPrompt) {
   actionsOperatorPrompt.addEventListener('click', () => actionsOperatorPrompt.classList.remove('action-needs-attention'));
-  actionsOperatorPrompt.addEventListener('focusin', () => actionsOperatorPrompt.classList.remove('action-needs-attention'));
+  actionsOperatorPrompt.addEventListener('focusin', () => {
+    if (suppressAttentionClearOnFocus) return;
+    actionsOperatorPrompt.classList.remove('action-needs-attention');
+  });
 }
 // `value` is passed explicitly by button clicks; text/select/radio controls are read here.
 function sendOperatorInput(value) {
