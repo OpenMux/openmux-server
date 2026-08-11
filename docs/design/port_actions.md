@@ -347,6 +347,14 @@ through `DataLogger.get().record(port_name=f"{port_name}__action_{run_id}", ...)
 a fully separate, self-contained transcript file per run
 (`logs/ports/{port_name}__action_{run_id}.log`), independent of the port's own log.
 
+`ActionRunner._publish()` is the single place every event (the script's own `log()`
+messages *and* the runner's own `action_started`/`progress`/`waiting_for_operator`/
+`action_finished`/`operator_changed` events) passes through, so it's also the single
+place that writes to this transcript via `DataLogger.record_meta()` — the on-disk file
+ends up with the same lines the live terminal view shows, not just the script's own
+`log()` calls. `_format_event_for_log()` renders each structured event as one line,
+mirroring `console.js`'s terminal "detail" text; keep both in sync if either changes.
+
 ## Run registry
 Keep a lightweight in-memory `ActionRun` record per run: run_id, port_name, action_id,
 user, redacted params, start/end timestamps, status, the transcript log path, and the

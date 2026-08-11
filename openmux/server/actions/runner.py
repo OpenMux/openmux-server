@@ -66,6 +66,30 @@ class ActionRun:
         }
 
 
+def _format_event_for_log(event: Dict[str, Any]) -> str:
+    """Render a structured event as one persisted-transcript line (mirrors the terminal
+    "detail" text `console.js`'s `sock.onmessage` builds for the same event types, so the
+    on-disk transcript reads the same as the live view - keep both in sync if either changes.
+    """
+    name = event.get("event", "")
+    if name == "progress":
+        step = event.get("step") or ""
+        percent = event.get("percent")
+        return f"progress {step}{f' ({percent}%)' if percent is not None else ''}"
+    if name == "waiting_for_operator":
+        step = event.get("step")
+        prompt = event.get("prompt") or ""
+        return f"waiting_for_operator {f'{step}: ' if step else ''}{prompt}"
+    if name == "action_finished":
+        status = event.get("status") or ""
+        error = event.get("error")
+        return f"action_finished {status}{f': {error}' if error else ''}"
+    if name == "operator_changed":
+        return f"operator_changed operator={event.get('operator_client_id') or ''}"
+    # action_started and freetext log() messages: the event name/message is self-contained.
+    return name
+
+
 class ActionRunner:
     """Coordinates action-script execution: locking, timeout, and the run registry.
 
@@ -247,6 +271,16 @@ class ActionRunner:
         run = self.runs.get(run_id)
         if run is not None:
             run.events.append(event)
+            try:
+                DataLogger.get().record_meta(
+                    port_name=run.log_port_name,
+                    event=_format_event_for_log(event),
+                    client_id=run.client_id,
+                )
+            except Exception:
+                logger.error(
+                    "Failed to record action event %r for run %s", event.get("event"), run_id, exc_info=True
+                )
         for queue in list(self._subscribers.get(run_id, [])):
             try:
                 queue.put_nowait(event)
@@ -427,14 +461,6 @@ class ActionRunner:
         """Build the `log(message)` callable passed into `action.run_func` (freetext, like `logging.info()`)."""
 
         def log(message: str) -> None:
-            try:
-                DataLogger.get().record_meta(
-                    port_name=run.log_port_name,
-                    event=message,
-                    client_id=run.client_id,
-                )
-            except Exception:
-                logger.error("Failed to record action log message %r for run %s", message, run.run_id, exc_info=True)
             self._publish(run.run_id, {"event": message, "ts": time.time()})
 
         return log
