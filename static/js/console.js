@@ -372,14 +372,15 @@ const actionsOperatorPromptText = document.getElementById('actionsOperatorPrompt
 const actionsOperatorReadonlyNote = document.getElementById('actionsOperatorReadonlyNote');
 const actionsOperatorText = document.getElementById('actionsOperatorText');
 const actionsOperatorInput = document.getElementById('actionsOperatorInput');
-const actionsOperatorSend = document.getElementById('actionsOperatorSend');
 const actionsOperatorButtons = document.getElementById('actionsOperatorButtons');
 const actionsOperatorSelect = document.getElementById('actionsOperatorSelect');
 const actionsOperatorSelectEl = document.getElementById('actionsOperatorSelectEl');
-const actionsOperatorSelectSend = document.getElementById('actionsOperatorSelectSend');
 const actionsOperatorRadio = document.getElementById('actionsOperatorRadio');
 const actionsOperatorRadioEl = document.getElementById('actionsOperatorRadioEl');
-const actionsOperatorRadioSend = document.getElementById('actionsOperatorRadioSend');
+// Shared Send control for the text/select/radio prompt kinds - kept in one fixed spot
+// (see actionsOperatorSendRow in the template) so pressing it is muscle-memory across kinds.
+const actionsOperatorSendRow = document.getElementById('actionsOperatorSendRow');
+const actionsOperatorSend = document.getElementById('actionsOperatorSend');
 
 let actionsCsrf = null;
 let actionsCatalog = [];
@@ -519,9 +520,7 @@ function applyOperatorInputDisabledState() {
   if (actionsOperatorSend) actionsOperatorSend.disabled = !enabled;
   if (actionsOperatorButtons) actionsOperatorButtons.querySelectorAll('button').forEach((b) => { b.disabled = !enabled; });
   if (actionsOperatorSelectEl) actionsOperatorSelectEl.disabled = !enabled;
-  if (actionsOperatorSelectSend) actionsOperatorSelectSend.disabled = !enabled;
   if (actionsOperatorRadioEl) actionsOperatorRadioEl.querySelectorAll('input').forEach((r) => { r.disabled = !enabled; });
-  if (actionsOperatorRadioSend) actionsOperatorRadioSend.disabled = !enabled;
   if (actionsOperatorReadonlyNote) actionsOperatorReadonlyNote.style.display = enabled ? 'none' : '';
 }
 if (actionTermTakeOver) actionTermTakeOver.addEventListener('click', () => {
@@ -732,11 +731,13 @@ function streamActionRun(runId) {
 
 // Operator input (docs/design/port_actions.md "Operator input"): answers a script's
 // session.prompt()/wait_for_input()/confirm()/choose()/select()/radio() call, routed
-// upstream over the same run WS. `kind` selects which control row is shown:
-//   "text" (default)  - a text input + Send button.
-//   "buttons"         - one button per choice; clicking answers immediately.
-//   "select"          - a <select> (options supplied by the script) + Send button.
-//   "radio"           - one radio button per choice + Send button.
+// upstream over the same run WS. `kind` selects which control row is shown; text/select/
+// radio all share one Send button fixed at the bottom-left (actionsOperatorSendRow) so
+// its position doesn't shift between prompt kinds:
+//   "text" (default)  - a text input.
+//   "buttons"         - one button per choice; clicking answers immediately, no Send row.
+//   "select"          - a <select> (options supplied by the script).
+//   "radio"           - one radio button per choice.
 function showOperatorPrompt(prompt, kind, choices) {
   if (!actionsOperatorPrompt) return;
   actionsOperatorPromptText.textContent = prompt || 'Script is waiting for input';
@@ -747,8 +748,10 @@ function showOperatorPrompt(prompt, kind, choices) {
   const isRadio = kind === 'radio';
   if (actionsOperatorText) actionsOperatorText.style.display = (isButtons || isSelect || isRadio) ? 'none' : 'flex';
   if (actionsOperatorButtons) actionsOperatorButtons.style.display = isButtons ? 'flex' : 'none';
-  if (actionsOperatorSelect) actionsOperatorSelect.style.display = isSelect ? 'flex' : 'none';
+  if (actionsOperatorSelect) actionsOperatorSelect.style.display = isSelect ? 'block' : 'none';
   if (actionsOperatorRadio) actionsOperatorRadio.style.display = isRadio ? 'flex' : 'none';
+  // Buttons kind has no separate Send - clicking a choice submits it directly.
+  if (actionsOperatorSendRow) actionsOperatorSendRow.style.display = isButtons ? 'none' : 'flex';
   if (isButtons && actionsOperatorButtons) {
     actionsOperatorButtons.innerHTML = '';
     (choices || []).forEach((choice) => {
@@ -820,8 +823,6 @@ function sendOperatorInput(value) {
 }
 if (actionsOperatorSend) actionsOperatorSend.addEventListener('click', () => sendOperatorInput());
 if (actionsOperatorInput) actionsOperatorInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendOperatorInput(); });
-if (actionsOperatorSelectSend) actionsOperatorSelectSend.addEventListener('click', () => sendOperatorInput());
-if (actionsOperatorRadioSend) actionsOperatorRadioSend.addEventListener('click', () => sendOperatorInput());
 
 // Extracted so both the Run button and a deep-link's &autorun=1 can trigger the same
 // run path (docs/design/port_actions.md "Deep-linking an action") - autorun goes through

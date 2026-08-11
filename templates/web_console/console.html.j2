@@ -59,18 +59,21 @@
         <div id="actionsOperatorPrompt" style="display:none; padding:6px; border-top:1px solid var(--border-color, #333);">
           <div id="actionsOperatorPromptText" class="mini"></div>
           <div id="actionsOperatorReadonlyNote" class="muted mini" style="display:none; margin-top:4px;">Only the current operator can answer this prompt &mdash; use "Take over as operator" above.</div>
-          <div id="actionsOperatorText" style="display:flex; gap:6px; margin-top:6px;">
+          <div id="actionsOperatorText" style="display:flex; margin-top:6px;">
             <input type="text" id="actionsOperatorInput" style="flex:1; box-sizing:border-box;" />
-            <button id="actionsOperatorSend" class="btn" type="button">Send</button>
           </div>
           <div id="actionsOperatorButtons" style="display:none; gap:6px; margin-top:6px; flex-wrap:wrap;"></div>
-          <div id="actionsOperatorSelect" style="display:none; gap:6px; margin-top:6px;">
-            <select id="actionsOperatorSelectEl" style="flex:1; box-sizing:border-box;"></select>
-            <button id="actionsOperatorSelectSend" class="btn" type="button">Send</button>
+          <div id="actionsOperatorSelect" style="display:none; margin-top:6px;">
+            <select id="actionsOperatorSelectEl" style="width:100%; box-sizing:border-box;"></select>
           </div>
-          <div id="actionsOperatorRadio" style="display:none; flex-direction:column; gap:6px; margin-top:6px;">
+          <div id="actionsOperatorRadio" style="display:none; flex-direction:column; gap:2px; margin-top:6px;">
             <div id="actionsOperatorRadioEl" style="display:flex; flex-direction:column; gap:2px;"></div>
-            <button id="actionsOperatorRadioSend" class="btn" type="button" style="align-self:flex-start;">Send</button>
+          </div>
+          <!-- Fixed position for text/select/radio kinds (buttons kind has no separate Send - each
+               choice button submits directly) so the operator's pointer/Tab target is always the
+               same regardless of prompt kind - see docs/design/port_actions.md "Operator input". -->
+          <div id="actionsOperatorSendRow" style="display:none; justify-content:flex-start; margin-top:6px;">
+            <button id="actionsOperatorSend" class="btn" type="button">Send</button>
           </div>
         </div>
       </div>
