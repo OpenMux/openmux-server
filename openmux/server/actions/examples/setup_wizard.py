@@ -54,24 +54,24 @@ ACTION = {
 
 async def run(session, params, log):
     step_seconds = params["step_seconds"]
-    log("step_started", {"step": "launch_params", "device_type": params["device_type"], "priority": params["priority"]})
+    log(f"launch_params: device_type={params['device_type']} priority={params['priority']}")
 
-    log("step_started", {"step": "confirm_start"})
+    session.progress("confirm_start", 5)
     ok = await session.confirm("Start the setup wizard?", timeout=10.0)
     if not ok:
-        log("done", {"status": "declined"})
+        log("done: declined")
         return
 
-    log("step_started", {"step": "device_name"})
+    session.progress("device_name", 15)
     name = await session.wait_for_input("Enter a name for this device, if you enter 'crash' we will look for something that will timeout", timeout=120.0)
     if name.lower() == "crash":
         await session.send(f"waiting for non-existant prompt to time out (10s)\n")
         await session.expect(r"\[NON-EXISTANT-PROMPT\]", timeout=10.0)
 
-    log("step_started", {"step": "mode"})
+    session.progress("mode", 25)
     mode = await session.choose("Pick a setup mode", ["quick", "full"], timeout=120.0)
 
-    log("step_started", {"step": "baud_rate"})
+    session.progress("baud_rate", 35)
     baud = await session.select(
         "Pick a baud rate",
         [
@@ -81,36 +81,38 @@ async def run(session, params, log):
         ],
         timeout=120.0,
     )
-    log("step_matched", {"name": name, "mode": mode, "baud": baud})
+    log(f"inputs: name={name} mode={mode} baud={baud}")
 
-    log("step_started", {"step": "verbosity"})
+    session.progress("verbosity", 45)
     verbosity = await session.radio("Pick a log verbosity for this run", ["quiet", "normal", "verbose"], timeout=120.0)
-    log("step_matched", {"verbosity": verbosity})
+    log(f"inputs: verbosity={verbosity}")
 
     # Simulate a device flash that takes a moment, in a few visible stages.
+    flash_percent = {"erasing": 55, "writing": 70, "verifying": 85}
     for stage in ("erasing", "writing", "verifying"):
         await session.send(f"Flashing device: {stage}...\n")
         matched = await session.expect(r"\[ENTER\]", timeout=10.0)
 
-        log("step_started", {"step": f"flash: {stage}"})
+        session.progress(f"flash: {stage}", flash_percent[stage])
         await asyncio.sleep(step_seconds)
-    log("done", {"step": "flash", "status": "success"})
+    log("done: flash complete")
 
-    log("step_started", {"step": "waiting for non-existant prompt to time out (5s)"})
+    session.progress("waiting for non-existant prompt to time out (5s)", 90)
     try:
         await session.send(f"waiting for non-existant prompt to time out (5s)\n")
         await session.expect(r"\[NON-EXISTANT-PROMPT\]", timeout=5.0)
     except ActionTimeoutError:
-        log("step_matched", {"step": "waiting for non-existant prompt to time out (10s)", "status": "timed_out"})
+        log("timed out waiting for non-existant prompt (5s)")
 
     # Simulate a reboot prompt: a bare newline is enough to make the loopback
     # adapter emit "[ENTER]", exercising the "wait for the device's prompt" pattern.
-    log("step_started", {"step": "reboot"})
+    session.progress("reboot", 95)
     await session.send("\n")
     matched = await session.expect(r"\[ENTER\]", timeout=10.0)
-    log("step_matched", {"step": "reboot", "matched": matched})
+    log(f"reboot: matched={matched}")
 
-    log("step_started", {"step": "continue_prompt"})
+    session.progress("reboot", 98)
     await session.wait_for_input("Press Enter once the device has finished rebooting", timeout=120.0)
 
-    log("done", {"status": "success", "name": name, "mode": mode, "baud": baud, "verbosity": verbosity})
+    session.progress("done", 100)
+    log(f"done: name={name} mode={mode} baud={baud} verbosity={verbosity}")

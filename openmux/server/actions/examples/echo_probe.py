@@ -18,9 +18,9 @@ ACTION = {
 
 async def run(session, params, log):
     text = params["text"]
-    log("step_started", {"step": "send"})
+    session.progress("send")
     await session.sendline(text)
-    log("step_started", {"step": "expect_echo"})
+    session.progress("expect_echo")
     matched = await session.expect(text, timeout=5.0)
-    log("step_matched", {"step": "expect_echo", "matched": matched})
-    log("done", {"status": "success"})
+    log(f"expect_echo: matched={matched}")
+    log("done")

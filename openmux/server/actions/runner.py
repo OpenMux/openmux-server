@@ -272,13 +272,23 @@ class ActionRunner:
                 self.port_manager,
                 port_name,
                 run.client_id,
-                on_input_wait=lambda prompt, kind, choices: self._publish(
+                on_input_wait=lambda prompt, kind, choices, step: self._publish(
                     run.run_id,
                     {
-                        "event": "step_waiting_for_operator",
+                        "event": "waiting_for_operator",
                         "prompt": prompt,
                         "kind": kind,
                         "choices": choices,
+                        "step": step,
+                        "ts": time.time(),
+                    },
+                ),
+                on_progress=lambda step, percent: self._publish(
+                    run.run_id,
+                    {
+                        "event": "progress",
+                        "step": step,
+                        "percent": percent,
                         "ts": time.time(),
                     },
                 ),
@@ -296,12 +306,12 @@ class ActionRunner:
                 logger.warning(
                     "Action %s run %s on port %s timed out after %ss", run.action_id, run.run_id, port_name, run_timeout
                 )
-                log("action_timeout", {"error": run.error})
+                log(f"action_timeout: {run.error}")
             except asyncio.CancelledError:
                 run.status = "cancelled"
                 run.error = "Cancelled by user"
                 logger.info("Action %s run %s on port %s was cancelled", run.action_id, run.run_id, port_name)
-                log("action_cancelled", {"error": run.error})
+                log(f"action_cancelled: {run.error}")
             except Exception as exc:
                 run.status = "failed"
                 run.error = str(exc)
@@ -311,7 +321,7 @@ class ActionRunner:
                 logger.error(
                     "Action %s run %s on port %s failed: %s", run.action_id, run.run_id, port_name, exc, exc_info=True
                 )
-                log("action_error", {"error": str(exc), "error_type": type(exc).__name__})
+                log(f"action_error: {type(exc).__name__}: {exc}")
         except PortBusyError as exc:
             run.status = "failed"
             run.error = str(exc)
@@ -412,20 +422,19 @@ class ActionRunner:
                         exc_info=True,
                     )
 
-    def _make_log_func(self, run: ActionRun) -> Callable[..., None]:
-        """Build the `log(event, meta=None)` callable passed into `action.run_func`."""
+    def _make_log_func(self, run: ActionRun) -> Callable[[str], None]:
+        """Build the `log(message)` callable passed into `action.run_func` (freetext, like `logging.info()`)."""
 
-        def log(event: str, meta: Optional[Dict[str, Any]] = None) -> None:
+        def log(message: str) -> None:
             try:
                 DataLogger.get().record_meta(
                     port_name=run.log_port_name,
-                    event=event,
+                    event=message,
                     client_id=run.client_id,
-                    meta=meta,
                 )
             except Exception:
-                logger.error("Failed to record action log event %r for run %s", event, run.run_id, exc_info=True)
-            self._publish(run.run_id, {"event": event, "meta": meta, "ts": time.time()})
+                logger.error("Failed to record action log message %r for run %s", message, run.run_id, exc_info=True)
+            self._publish(run.run_id, {"event": message, "ts": time.time()})
 
         return log
 

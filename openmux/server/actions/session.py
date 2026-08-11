@@ -23,7 +23,10 @@ class ActionSession:
         port_manager,
         port_name: str,
         client_id: str,
-        on_input_wait: Optional[Callable[[Optional[str], str, Optional[List[Dict[str, str]]]], None]] = None,
+        on_input_wait: Optional[
+            Callable[[Optional[str], str, Optional[List[Dict[str, str]]], Optional[str]], None]
+        ] = None,
+        on_progress: Optional[Callable[[str, Optional[int]], None]] = None,
     ):
         self.port_manager = port_manager
         self.port_name = port_name
@@ -31,9 +34,16 @@ class ActionSession:
         self._buffer = bytearray()
         self._operator_input: "asyncio.Queue[str]" = asyncio.Queue()
         # Called (sync) each time wait_for_input()/confirm() starts waiting, so the
-        # caller can surface a "step_waiting_for_operator" structured event (see
-        # docs/design/port_actions.md "Operator input").
+        # caller can surface a "waiting_for_operator" structured event (see
+        # docs/design/port_actions.md "Operator input"). Receives the current step
+        # (last set via progress(), if any) so the event is self-contained.
         self._on_input_wait = on_input_wait
+        # Called (sync) from progress(), so the caller can surface a "progress"
+        # structured event. Separate from on_input_wait: progress is the script's own
+        # step/percent reporting, waiting-for-operator is an orthogonal paused state
+        # that does not advance (or reset) it.
+        self._on_progress = on_progress
+        self._current_step: Optional[str] = None
 
     def _client_queue(self) -> Optional[asyncio.Queue]:
         port = self.port_manager.ports.get(self.port_name)
@@ -49,6 +59,29 @@ class ActionSession:
     def clear_buffer(self) -> None:
         """Discard any buffered inbound bytes, so the next `expect()` only sees new output."""
         self._buffer.clear()
+
+    def progress(self, step: str, percent: Optional[int] = None) -> None:
+        """Report the script's current step, and optionally how far through it is.
+
+        Surfaces a "progress" structured event (see docs/design/port_actions.md,
+        "Operator input" and the progress bar notes) - purely informational, separate
+        from `prompt()`'s waiting-for-operator state, which pauses without advancing
+        (or resetting) the last-reported step/percent.
+
+        `percent`: 0-100, or omit/None for an indeterminate step (still running, no
+        known fraction).
+
+        Raises:
+            ValueError: `percent` is given but outside 0-100.
+        """
+        if percent is not None and not (0 <= percent <= 100):
+            raise ValueError(f"percent must be between 0 and 100, got {percent!r}")
+        self._current_step = step
+        if self._on_progress is not None:
+            try:
+                self._on_progress(step, percent)
+            except Exception:
+                pass
 
     def read_buffer(self, *, consume: bool = False) -> str:
         """Return the inbound text seen so far, without waiting for a pattern match.
@@ -157,7 +190,7 @@ class ActionSession:
         normalized_choices = normalize_choices(choices) if choices else None
         if self._on_input_wait is not None:
             try:
-                self._on_input_wait(text, kind, normalized_choices)
+                self._on_input_wait(text, kind, normalized_choices, self._current_step)
             except Exception:
                 pass
         if timeout is None:

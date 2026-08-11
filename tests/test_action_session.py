@@ -165,7 +165,7 @@ async def test_wait_for_input_times_out(pm):
 @pytest.mark.asyncio
 async def test_confirm_publishes_buttons_kind_with_yes_no_choices(pm):
     seen = []
-    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices: seen.append((text, kind, choices)))
+    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices, step: seen.append((text, kind, choices)))
     session.submit_operator_input("yes")
     assert await session.confirm("continue?", timeout=1.0) is True
     assert seen == [("continue?", "buttons", [{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}])]
@@ -174,7 +174,7 @@ async def test_confirm_publishes_buttons_kind_with_yes_no_choices(pm):
 @pytest.mark.asyncio
 async def test_choose_publishes_buttons_kind_with_given_choices(pm):
     seen = []
-    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices: seen.append((text, kind, choices)))
+    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices, step: seen.append((text, kind, choices)))
     session.submit_operator_input("cancel")
     result = await session.choose("continue or cancel?", ["continue", "cancel"], timeout=1.0)
     assert result == "cancel"
@@ -190,7 +190,7 @@ async def test_choose_publishes_buttons_kind_with_given_choices(pm):
 @pytest.mark.asyncio
 async def test_select_publishes_select_kind_with_label_value_choices(pm):
     seen = []
-    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices: seen.append((text, kind, choices)))
+    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices, step: seen.append((text, kind, choices)))
     session.submit_operator_input("115200")
     result = await session.select(
         "Pick a baud rate",
@@ -219,7 +219,7 @@ async def test_prompt_requires_choices_for_buttons_and_select(pm):
 @pytest.mark.asyncio
 async def test_radio_publishes_radio_kind_with_given_choices(pm):
     seen = []
-    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices: seen.append((text, kind, choices)))
+    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices, step: seen.append((text, kind, choices)))
     session.submit_operator_input("switch")
     result = await session.radio("Pick a device type", ["router", "switch"], timeout=1.0)
     assert result == "switch"
@@ -242,7 +242,46 @@ async def test_prompt_requires_choices_for_radio(pm):
 @pytest.mark.asyncio
 async def test_wait_for_input_publishes_text_kind_with_no_choices(pm):
     seen = []
-    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices: seen.append((text, kind, choices)))
+    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices, step: seen.append((text, kind, choices)))
     session.submit_operator_input("hello")
     assert await session.wait_for_input(prompt="say something", timeout=1.0) == "hello"
     assert seen == [("say something", "text", None)]
+
+
+def test_progress_invokes_on_progress_with_step_and_percent(pm):
+    seen = []
+    session = ActionSession(pm, "p1", "c1", on_progress=lambda step, percent: seen.append((step, percent)))
+    session.progress("flashing firmware", 40)
+    session.progress("rebooting")
+    assert seen == [("flashing firmware", 40), ("rebooting", None)]
+
+
+def test_progress_rejects_out_of_range_percent(pm):
+    session = ActionSession(pm, "p1", "c1")
+    with pytest.raises(ValueError):
+        session.progress("flashing firmware", 101)
+    with pytest.raises(ValueError):
+        session.progress("flashing firmware", -1)
+
+
+def test_progress_callback_exceptions_are_swallowed(pm):
+    def boom(step, percent):
+        raise RuntimeError("boom")
+
+    session = ActionSession(pm, "p1", "c1", on_progress=boom)
+    session.progress("some step", 10)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_prompt_passes_last_progress_step_to_on_input_wait(pm):
+    seen = []
+    session = ActionSession(
+        pm,
+        "p1",
+        "c1",
+        on_input_wait=lambda text, kind, choices, step: seen.append(step),
+    )
+    session.progress("flashing firmware", 40)
+    session.submit_operator_input("yes")
+    await session.confirm("reboot now?", timeout=1.0)
+    assert seen == ["flashing firmware"]

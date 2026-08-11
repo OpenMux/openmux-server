@@ -53,6 +53,23 @@ Returns the buffer's current text without waiting for a pattern match.
 - Use this to branch on recent output ad hoc, without committing to a
   regex and a wait.
 
+### Progress reporting
+
+#### `session.progress(step: str, percent: Optional[int] = None) -> None`
+Reports what the script is doing, for the console page's progress bar (shown
+in the run panel, in the same slot the finished-run outcome banner uses).
+Purely informational — `log(message)` (passed into `run_func` alongside
+`session`) is for freetext/debug messages, like `logging.info()`;
+`progress()` is the one dedicated channel for "what step, how far along".
+- `percent`: `0`-`100`, or omit/`None` for an indeterminate step (still
+  running, no known fraction) — the console page then shows an animated
+  bar with no fill level instead of a specific percentage.
+- Sets the session's current step, which `prompt()` (below) reads to label
+  a pending wait — but waiting for operator input is a separate, paused
+  overlay state, not a step of its own; it never advances or resets the
+  last-reported step/percent.
+- **Raises**: `ValueError` if `percent` is given but outside `0`-`100`.
+
 ### Operator input
 One base primitive, `prompt()`, backs five convenience wrappers. All are
 coroutines that block until the operator answers (or `timeout` elapses,
@@ -68,10 +85,11 @@ arguments.
 - **Raises**: `ValueError` if a choice-based `kind` gets an empty/missing
   `choices`.
 - Invokes the session's `on_input_wait` callback (if set), synchronously,
-  with `(text, kind, normalized_choices)` — this is how `ActionRunner` turns
-  a pending prompt into a `step_waiting_for_operator` structured event (see
-  port_actions.md, "Operator input"). Callback exceptions are swallowed;
-  they never abort the run.
+  with `(text, kind, normalized_choices, current_step)` — this is how
+  `ActionRunner` turns a pending prompt into a `waiting_for_operator`
+  structured event carrying the script's last-reported step (see
+  `progress()` above, and port_actions.md, "Operator input"). Callback
+  exceptions are swallowed; they never abort the run.
 
 | Wrapper | `kind` | Returns |
 |---|---|---|
@@ -90,11 +108,15 @@ and does not check identity.
 
 ## Example
 ```python
+session.progress("connecting", 10)
 await session.sendline("show version")
 banner = await session.expect(r"\$\s*$", timeout=10.0)
+session.progress("connecting", 100)
 
+session.progress("confirm reboot")  # no percent - indeterminate
 ok = await session.confirm("Reboot the device now?", timeout=60.0)
 if ok:
+    session.progress("rebooting")
     await session.sendline("reboot")
     await session.expect(r"\[ENTER\]", timeout=15.0)
 

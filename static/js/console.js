@@ -496,6 +496,35 @@ function hideActionResultBanner() {
   actionResultBanner.style.display = 'none';
   actionResultBanner.classList.remove('ok', 'bad', 'muted');
 }
+// Optional step/percent progress bar, driven by the script's own session.progress() calls
+// (see docs/design/action_session.md) - shares the outcome banner's slot, shown only for
+// scripts that actually call progress(), hidden again once action_finished arrives.
+const actionProgressBar = document.getElementById('actionProgressBar');
+const actionProgressFill = document.getElementById('actionProgressFill');
+const actionProgressLabel = document.getElementById('actionProgressLabel');
+const actionProgressWaiting = document.getElementById('actionProgressWaiting');
+function hideActionProgressBar() {
+  if (!actionProgressBar) return;
+  actionProgressBar.style.display = 'none';
+  actionProgressBar.classList.remove('indeterminate');
+  if (actionProgressFill) actionProgressFill.style.width = '0%';
+  if (actionProgressLabel) actionProgressLabel.textContent = '';
+  setActionWaitingBadge(false);
+}
+function showActionProgress(step, percent) {
+  if (!actionProgressBar) return;
+  actionProgressBar.style.display = '';
+  const indeterminate = percent === null || percent === undefined;
+  actionProgressBar.classList.toggle('indeterminate', indeterminate);
+  if (actionProgressFill) actionProgressFill.style.width = indeterminate ? '' : `${Math.max(0, Math.min(100, percent))}%`;
+  if (actionProgressLabel) actionProgressLabel.textContent = indeterminate ? (step || '') : `${step || ''} (${percent}%)`;
+}
+// Waiting-for-operator is a paused overlay, not a step of its own - it never touches the
+// last-reported step/percent underneath (see docs/design/action_session.md).
+function setActionWaitingBadge(waiting) {
+  if (!actionProgressWaiting) return;
+  actionProgressWaiting.style.display = waiting ? '' : 'none';
+}
 let actionTerm = null;
 let actionTermFit = null;
 const ACTION_TERM_WIDTH_KEY = 'omx_action_term_width';
@@ -649,6 +678,7 @@ function openActionRunPanel(action) {
   actionTermStatus.textContent = '';
   actionTermStatus.classList.remove('bad');
   hideActionResultBanner();
+  hideActionProgressBar();
   actionsRunTitle.textContent = action.name || action.id;
   actionsRunDesc.textContent = action.description || '';
   showActionsRunView();
@@ -677,6 +707,7 @@ function streamActionRun(runId) {
   closeActionRunStream();
   currentRunFinished = false;
   hideActionResultBanner();
+  hideActionProgressBar();
   ensureActionTerm();
   actionTermTitle.textContent = (currentAction && (currentAction.name || currentAction.id)) || 'Action';
   openActionTermPane();
@@ -685,20 +716,29 @@ function streamActionRun(runId) {
   const qs = myClientId ? `?client_id=${encodeURIComponent(myClientId)}` : '';
   const sock = new WebSocket(`${proto}://${location.host}${getBasePath()}/ws/actions/${encodeURIComponent(runId)}${qs}`);
   currentActionsWs = sock;
-  let currentStepName = null; // last-seen meta.step (see docs/design/port_actions.md), reused so a
-  // later "waiting for input" event can still say WHICH step it's waiting for.
   sock.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     const ts = msg.ts ? new Date(msg.ts * 1000).toLocaleTimeString() : '';
-    const meta = msg.meta ? ' ' + JSON.stringify(msg.meta) : '';
-    actionTerm.write(`[${ts}] ${msg.event || ''}${meta}\n`);
+    // Structured events (unlike log() messages) carry their detail as separate top-level
+    // fields, not folded into the event string - spell it out here too, or the terminal
+    // log line would just read the bare event name.
+    let detail = '';
+    if (msg.event === 'progress') {
+      detail = ` ${msg.step || ''}${msg.percent != null ? ` (${msg.percent}%)` : ''}`;
+    } else if (msg.event === 'waiting_for_operator') {
+      detail = ` ${msg.step ? `${msg.step}: ` : ''}${msg.prompt || ''}`;
+    } else if (msg.event === 'action_finished') {
+      detail = ` ${msg.status || ''}${msg.error ? `: ${msg.error}` : ''}`;
+    } else if (msg.event === 'operator_changed') {
+      detail = ` operator=${msg.operator_client_id || ''}`;
+    }
+    actionTerm.write(`[${ts}] ${msg.event || ''}${detail}\n`);
     const label = (currentAction && (currentAction.name || currentAction.id)) || 'action';
     if (msg.event === 'action_finished') {
       currentRunFinished = true;
       hideOperatorPrompt();
       const failed = msg.status === 'failed' || msg.status === 'timeout';
-      actionTermTitle.textContent = `${label} — ${msg.status || 'finished'}`;
       actionTermStatus.textContent = `Finished: ${msg.status || 'unknown'}`;
       actionTermStatus.classList.toggle('bad', failed);
       if (actionResultBanner) {
@@ -728,12 +768,19 @@ function streamActionRun(runId) {
       loadRunHistory();
       showActionStrip(`${label}: ${msg.status || 'finished'}`);
       setTimeout(() => { if (!currentActionsWs) hideActionStrip(); }, 6000);
-    } else if (msg.event === 'step_waiting_for_operator') {
-      const stagePrefix = currentStepName ? `${currentStepName}: ` : '';
-      actionTermTitle.textContent = `${label} — ${stagePrefix}waiting for input`;
+      hideActionProgressBar(); // the outcome banner above takes over this slot now
+    } else if (msg.event === 'progress') {
+      // Script-reported step/percent (session.progress(), see docs/design/action_session.md) -
+      // the step/percent detail lives only in the progress bar now; the tag stays generic
+      // so it isn't just repeating the same text right below it.
+      showActionProgress(msg.step, msg.percent);
+      actionTermStatus.textContent = 'Running';
+      showActionStrip(`Action running: ${label} — ${msg.step || ''}`);
+    } else if (msg.event === 'waiting_for_operator') {
       actionTermStatus.textContent = 'Waiting for input…';
       showOperatorPrompt(msg.prompt, msg.kind, msg.choices);
-      showActionStrip(`${label}: ${stagePrefix}waiting for input — click to answer`);
+      setActionWaitingBadge(true); // overlay only - never touches the step/percent already shown
+      showActionStrip(`${label}: waiting for input — click to answer`);
     } else if (msg.event === 'operator_changed') {
       const wasOperator = currentRunOperatorClientId === myClientId;
       currentRunOperatorClientId = msg.operator_client_id;
@@ -742,17 +789,10 @@ function streamActionRun(runId) {
         showActionToast('Another user took over as operator for this run');
       }
     } else {
-      // Example scripts conventionally put the current step name in meta.step
-      // (see docs/design/port_actions.md) - surface it in the pane's heading (most
-      // prominent spot); the small status tag stays a short generic word so the two
-      // don't just repeat each other.
-      // (Not written to actionsRunStatus: that lives in the start-run overlay, which
-      // closeActionsOverlay() hides for the whole run - nothing there is visible now.)
-      const step = msg.meta && msg.meta.step;
-      if (step) currentStepName = step;
-      actionTermTitle.textContent = step ? `${label} — ${step}` : `${label} — ${msg.event || 'running'}`;
+      // Freetext/debug log() events (see docs/design/action_session.md) - the current step
+      // is reported separately via progress() above, not inferred from these.
       actionTermStatus.textContent = msg.event || 'running';
-      showActionStrip(`Action running: ${label} — ${step || msg.event || ''}`);
+      showActionStrip(`Action running: ${label} — ${msg.event || ''}`);
     }
   };
   sock.onclose = () => { if (currentActionsWs === sock) currentActionsWs = null; };
@@ -826,6 +866,7 @@ function hideOperatorPrompt() {
     actionsOperatorPrompt.style.display = 'none';
     actionsOperatorPrompt.classList.remove('action-needs-attention');
   }
+  setActionWaitingBadge(false);
 }
 // Any interaction inside the prompt counts as "the operator noticed it" - stop flashing
 // right away rather than waiting for the answer to actually be sent.

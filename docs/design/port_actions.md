@@ -18,7 +18,7 @@ a late joiner is NOT implemented, since the raw port terminal already
 broadcasts live to every attached client regardless of mode (see "Live view"
 below), so a late joiner only misses structured events, not raw I/O. Phase 5's
 operator-input channel is implemented (`session.wait_for_input()`/`confirm()`
-feed from a `step_waiting_for_operator` structured event through to the
+feed from a `waiting_for_operator` structured event through to the
 console page's run panel, gated by a `client_id` query param on
 /ws/actions/<run_id>` matching the run's operator) — "Take over as operator"
 force-take reassignment IS also implemented: any connected viewer can send
@@ -183,9 +183,15 @@ two panes side by side, split vertically (left/right, not top/bottom):
   `FitAddon.fit()` never runs against a `display:none` container, with its own
   `Terminal`/`FitAddon` pair (same pattern as the main console) fed by a dedicated
   WebSocket (`/ws/actions/<run_id>`) carrying the action's transcript plus structured
-  events (`step_started`, `step_matched`, `action_finished`, `step_waiting_for_operator`,
-  ...) rendered as one text line per event (timestamp, event name, JSON metadata) — not
-  squeezed into the same grid as raw port bytes.
+  events (`step_started`, `step_matched`, `action_finished`, `waiting_for_operator`,
+  `progress`, ...) rendered as one text line per event (timestamp, event/message text) —
+  not squeezed into the same grid as raw port bytes. `progress` (from
+  `session.progress(step, percent=None)`, see action_session.md) drives an optional
+  progress bar shown in the run panel, in the same slot the finished-run outcome banner
+  uses — hidden entirely for scripts that never call it. `waiting_for_operator`
+  carries the script's last-reported step too, so the console page can show which step
+  a pending prompt belongs to, but is otherwise a separate, paused overlay state, not
+  a step of the progress bar's own sequence.
 
 The split is a draggable divider (`#actionTermSplitter`, `cursor: col-resize`), clamped to
 `[220px, container width - 220px]` and persisted via `localStorage`. The pane is
@@ -282,7 +288,7 @@ label". This is a second, separate channel from the device I/O already covered a
   silently ignored (no error surfaced, matching the allow-list-only security model used
   elsewhere in this design).
 - A pending `prompt()` call (via any of the five wrappers above) is reflected as a
-  `step_waiting_for_operator` structured event carrying `prompt`, `kind`, and (for
+  `waiting_for_operator` structured event carrying `prompt`, `kind`, and (for
   `buttons`/`select`/`radio`) the normalized `choices` list, published the same way as
   any other action event (history-replayed for late joiners, per phase 4), so it's
   obvious the run is paused and needs a human, not just idle.
@@ -447,7 +453,7 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
    the persisted per-run log (`logs/ports/{port}__action_{run_id}.log`, phase 1) and run
    history list (`GET .../runs`, phase 2) already existed from earlier phases.
 5. Operator-input channel (`session.wait_for_input()`/`confirm()`), force-take parity
-   with existing console controls. **Implemented**: `step_waiting_for_operator` event +
+   with existing console controls. **Implemented**: `waiting_for_operator` event +
    `client_id`-gated `{"type": "operator_input", ...}` frames on `/ws/actions/<run_id>` +
    `#actionsOperatorPrompt` UI in the existing flat run panel (not a separate writable
    `#actionTerm` pane, per the phase-3 UI-surface decision above). **Implemented**:

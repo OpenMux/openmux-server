@@ -290,13 +290,13 @@ async def test_operator_input_ws_round_trip():
             ) as ws:
                 async for msg in ws:
                     events.append(json.loads(msg.data))
-                    if events[-1].get("event") == "step_waiting_for_operator":
+                    if events[-1].get("event") == "waiting_for_operator":
                         await ws.send_str(json.dumps({"type": "operator_input", "text": "yes"}))
                     if events[-1].get("event") == "action_finished":
                         break
             event_names = [e.get("event") for e in events]
-            assert "step_waiting_for_operator" in event_names
-            prompt_event = next(e for e in events if e.get("event") == "step_waiting_for_operator")
+            assert "waiting_for_operator" in event_names
+            prompt_event = next(e for e in events if e.get("event") == "waiting_for_operator")
             # confirm() renders as Yes/No buttons (see session.py's ActionSession.confirm).
             assert prompt_event["kind"] == "buttons"
             assert prompt_event["choices"] == [{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}]
@@ -309,7 +309,7 @@ async def test_operator_input_ws_round_trip():
 @pytest.mark.asyncio
 async def test_operator_input_select_probe_ws_round_trip():
     """`select_probe` uses `session.select()` - the script supplies the dropdown
-    choices, which must be published verbatim on the `step_waiting_for_operator`
+    choices, which must be published verbatim on the `waiting_for_operator`
     event (kind="select") for the console page to render."""
     web_adapter, pm, loop_adapter = await _start_console(8961, {"select_probe": ["p1"]})
     try:
@@ -328,11 +328,11 @@ async def test_operator_input_select_probe_ws_round_trip():
             ) as ws:
                 async for msg in ws:
                     events.append(json.loads(msg.data))
-                    if events[-1].get("event") == "step_waiting_for_operator":
+                    if events[-1].get("event") == "waiting_for_operator":
                         await ws.send_str(json.dumps({"type": "operator_input", "text": "ping"}))
                     if events[-1].get("event") == "action_finished":
                         break
-            prompt_event = next(e for e in events if e.get("event") == "step_waiting_for_operator")
+            prompt_event = next(e for e in events if e.get("event") == "waiting_for_operator")
             assert prompt_event["kind"] == "select"
             assert {"label": "Ping", "value": "ping"} in prompt_event["choices"]
             assert events[-1]["status"] == "success"
@@ -362,7 +362,7 @@ async def test_operator_input_ws_rejects_wrong_client_id():
             ) as ws:
                 async for msg in ws:
                     event = json.loads(msg.data)
-                    if event.get("event") == "step_waiting_for_operator":
+                    if event.get("event") == "waiting_for_operator":
                         await ws.send_str(json.dumps({"type": "operator_input", "text": "yes"}))
                         break
 
@@ -381,7 +381,7 @@ async def test_operator_input_ws_rejects_wrong_client_id():
             ) as ws:
                 async for msg in ws:
                     events.append(json.loads(msg.data))
-                    if events[-1].get("event") == "step_waiting_for_operator":
+                    if events[-1].get("event") == "waiting_for_operator":
                         await ws.send_str(json.dumps({"type": "operator_input", "text": "yes"}))
                     if events[-1].get("event") == "action_finished":
                         break
@@ -424,10 +424,10 @@ async def test_operator_take_over_ws_round_trip():
             # Wait until the launcher's own connection has actually observed the prompt
             # before taking over, so take-over reliably happens while one is pending.
             for _ in range(50):
-                if any(e.get("event") == "step_waiting_for_operator" for e in launcher_events):
+                if any(e.get("event") == "waiting_for_operator" for e in launcher_events):
                     break
                 await asyncio.sleep(0.02)
-            assert any(e.get("event") == "step_waiting_for_operator" for e in launcher_events)
+            assert any(e.get("event") == "waiting_for_operator" for e in launcher_events)
 
             async with session.ws_connect(
                 f"http://127.0.0.1:8962/ws/actions/{run_id}?client_id=newop", headers=AUTH_HEADER

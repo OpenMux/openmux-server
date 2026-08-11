@@ -265,7 +265,7 @@ async def test_operator_input_confirm_flow_end_to_end(dummy_logger):
     queue = runner.subscribe(run.run_id)
 
     event = await asyncio.wait_for(queue.get(), timeout=1.0)
-    while event.get("event") != "step_waiting_for_operator":
+    while event.get("event") != "waiting_for_operator":
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
     assert "Send" in event["prompt"]
 
@@ -290,7 +290,7 @@ async def test_operator_input_rejected_from_wrong_client(dummy_logger):
     queue = runner.subscribe(run.run_id)
 
     event = await asyncio.wait_for(queue.get(), timeout=1.0)
-    while event.get("event") != "step_waiting_for_operator":
+    while event.get("event") != "waiting_for_operator":
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
 
     assert runner.submit_operator_input(run.run_id, "yes", requesting_client_id="someone_else") is False
@@ -323,7 +323,7 @@ async def test_take_over_operator_reassigns_and_notifies_via_event(dummy_logger)
     queue = runner.subscribe(run.run_id)
 
     event = await asyncio.wait_for(queue.get(), timeout=1.0)
-    while event.get("event") != "step_waiting_for_operator":
+    while event.get("event") != "waiting_for_operator":
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
     assert run.operator_client_id == "human1"
 
@@ -369,7 +369,7 @@ async def test_take_over_operator_requires_a_client_id(dummy_logger):
     queue = runner.subscribe(run.run_id)
 
     event = await asyncio.wait_for(queue.get(), timeout=1.0)
-    while event.get("event") != "step_waiting_for_operator":
+    while event.get("event") != "waiting_for_operator":
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
 
     assert runner.take_over_operator(run.run_id, "") is False
@@ -403,7 +403,7 @@ async def test_setup_wizard_walks_through_every_operator_input_kind(dummy_logger
         # Generous timeout: the script has a deliberate expect() timeout step (~5s) between
         # the "flash" and "reboot" phases, which sits between two of these prompts.
         event = await asyncio.wait_for(queue.get(), timeout=8.0)
-        while event.get("event") != "step_waiting_for_operator":
+        while event.get("event") != "waiting_for_operator":
             event = await asyncio.wait_for(queue.get(), timeout=8.0)
         return event
 

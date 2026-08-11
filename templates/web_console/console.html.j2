@@ -55,6 +55,16 @@
             <button id="actionTermClose" class="btn" type="button" title="Close (the run keeps going in the background)">✕</button>
           </div>
         </div>
+        <!-- Optional step/percent progress bar, driven by the script's own session.progress()
+             calls (see docs/design/action_session.md) - hidden entirely for scripts that never
+             call it. Shares the outcome banner's slot: hidden once action_finished arrives, see
+             console.js. The "waiting for input" badge is an overlay, not a step of its own -
+             it does not replace the last-reported step/percent underneath. -->
+        <div id="actionProgressBar" class="action-progress-bar" style="display:none;">
+          <div id="actionProgressFill" class="action-progress-fill"></div>
+          <span id="actionProgressLabel" class="action-progress-label"></span>
+          <span id="actionProgressWaiting" class="action-progress-waiting" style="display:none;" title="Waiting for operator input">⏸</span>
+        </div>
         <!-- Hard-to-miss run outcome banner (GitHub issue feedback: the small header tag alone
              wasn't obvious enough) - shown only once action_finished arrives, see console.js. -->
         <div id="actionResultBanner" class="action-result-banner" style="display:none;"></div>
