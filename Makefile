@@ -324,8 +324,16 @@ deb: clean xterm-assets
 	@# Sync debian/changelog version from pyproject.toml
 	DEB_REVISION=$(DEB_REVISION) DEB_DIST=$(DEB_DIST) DEB_SNAPSHOT=$(DEB_SNAPSHOT) \
 		$(PYTHON) scripts/update_deb_changelog.py --package $(PROJECT_NAME) --message "Automated build"
-	@# Build source package and binary without signing
-	dpkg-buildpackage -us -uc -b
+	@# dpkg-buildpackage always drops the .deb/.changes/.buildinfo in the
+	@# parent of the source tree, which may not be writable (e.g. a checkout
+	@# under /opt owned by root). Build from a scratch copy under dist/
+	@# instead, whose parent is always writable, then move the results up.
+	@rm -rf dist/pkgbuild
+	@mkdir -p dist/pkgbuild/src
+	rsync -a --exclude=.git --filter=':- .gitignore' ./ dist/pkgbuild/src/
+	cd dist/pkgbuild/src && dpkg-buildpackage -us -uc -b
+	@mv dist/pkgbuild/*.deb dist/pkgbuild/*.changes dist/pkgbuild/*.buildinfo dist/ 2>/dev/null || true
+	@rm -rf dist/pkgbuild
 	$(call print_success,".deb built in dist/")
 
 # Run dead code analysis with vulture

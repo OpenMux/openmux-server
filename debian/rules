@@ -11,10 +11,3 @@ override_dh_auto_test:
 override_dh_fixperms:
 	dh_fixperms
 	chmod 0644 debian/openmux/usr/share/openmux/default-config/*.yaml
-
-# Default destdir (..) is the parent of the source tree, which may not be
-# writable (e.g. a checkout under /opt owned by root). Put the .deb in
-# dist/ inside the source tree instead, which is always writable and
-# already gitignored.
-override_dh_builddeb:
-	dh_builddeb --destdir=dist
