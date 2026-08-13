@@ -326,7 +326,7 @@ deb: clean xterm-assets
 		$(PYTHON) scripts/update_deb_changelog.py --package $(PROJECT_NAME) --message "Automated build"
 	@# Build source package and binary without signing
 	dpkg-buildpackage -us -uc -b
-	$(call print_success,".deb built in parent directory (../)")
+	$(call print_success,".deb built in dist/")
 
 # Run dead code analysis with vulture
 VULTURE_ARGS ?= --ignore-names "get_supported_types,get_plugin,get_registry,register_external_plugin,get_logger,authenticate_user,authenticate_key,get_key_permissions,generate_api_key,hash_password,get_server_host,get_server_port,get_serial_ports_config,is_web_server_enabled,get_port_config,save_config,list_consoles,promote_client_to_read_write,get_connection_info,handle_lifecycle_event"
