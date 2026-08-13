@@ -156,7 +156,7 @@ These mirror the pip requirements with Debian-native packages:
 sudo apt-get install -y \
   python3-aiohttp python3-jinja2 python3-websockets \
   python3-cryptography python3-serial python3-serial-asyncio \
-  python3-yaml python3-six
+  python3-yaml python3-six python3-asyncssh
 ```
 
 Note: external authentication is handled by the `openmux-pam-helper` setuid binary

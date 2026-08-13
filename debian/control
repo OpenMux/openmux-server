@@ -13,7 +13,7 @@ Architecture: all
 Depends: adduser, ${python3:Depends}, ${misc:Depends},
  python3-aiohttp, python3-jinja2, python3-websockets,
  python3-cryptography, python3-serial, python3-serial-asyncio,
- python3-yaml, python3-six
+ python3-yaml, python3-six, python3-asyncssh
 Recommends: python3-pam
 Description: Serial port multiplexing server and client
  OpenMux is a serial/console multiplexer and remote access service. It
