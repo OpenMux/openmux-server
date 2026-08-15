@@ -148,6 +148,7 @@ CONTROL_MENU_HELP = (
     "f  Force-take read-write access\r\n"
     "s  Release read-write access (switch to read-only)\r\n"
     "w  Show who holds read-write access\r\n"
+    "u  Show who is viewing this port\r\n"
     "i  Show session info\r\n"
     "v  Show version\r\n"
     "e  Change escape sequence\r\n"
@@ -170,6 +171,11 @@ def format_rw_notice(payload: Dict[str, Any]) -> str:
     Returns:
         str: CRLF-terminated message ready to write directly to the session.
     """
+    if payload.get("type") == "presence":
+        # Presence pushes are ambient/web-only (see the badge in console.js); CLI
+        # sessions stay silent here and query the same data on demand via 'u'.
+        return ""
+
     if payload.get("type") == "rw_holders":
         holders = payload.get("holders") or []
         if holders:
@@ -192,6 +198,25 @@ def format_rw_notice(payload: Dict[str, Any]) -> str:
     return "\r\n[Access mode updated]\r\n"
 
 
+def format_viewers_notice(viewers: List[Dict[str, str]]) -> str:
+    """Render the current per-port viewer list as CRLF-terminated human text.
+
+    Used by the Ctrl+E control menu's "show viewers" ('u') command, the CLI
+    counterpart to the web console's ambient viewer badge (see console.js).
+
+    Args:
+        viewers: Entries as returned by `ConsoleManager.get_viewers_display`,
+            e.g. `[{"username": "alice", "mode": "read-write"}, ...]`.
+
+    Returns:
+        str: CRLF-terminated message ready to write directly to the session.
+    """
+    if not viewers:
+        return "\r\n[No one is currently viewing this port]\r\n"
+    lines = [f"{v.get('username', 'unknown')} ({v.get('mode', 'read-only')})" for v in viewers]
+    return "\r\n--- Viewers on this port ---\r\n" + "\r\n".join(lines) + "\r\n"
+
+
 __all__ = [
     "AclEntry",
     "parse_login",
@@ -202,4 +227,5 @@ __all__ = [
     "feed_escape_byte",
     "CONTROL_MENU_HELP",
     "format_rw_notice",
+    "format_viewers_notice",
 ]

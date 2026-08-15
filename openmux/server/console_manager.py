@@ -196,9 +196,7 @@ class ConsoleManager:
         if port is None:
             return False
         max_rw_users = getattr(port, "max_read_write_users", 1)
-        current_rw_users = sum(
-            1 for client in getattr(port, "connected_clients", []) if client.get("mode") == "read-write"
-        )
+        current_rw_users = sum(1 for client in getattr(port, "connected_clients", []) if client.get("mode") == "read-write")
         return current_rw_users < max_rw_users
 
     def _resolve_access_mode(
@@ -237,9 +235,7 @@ class ConsoleManager:
         if not (rw_groups or ro_groups):
             # Default-allow: no console ACL configured, anyone authenticated competes for slots.
             if self._has_write_slots(port):
-                self.logger.info(
-                    f"Granting read-write access to user {username} for port {port_name} (slot available)"
-                )
+                self.logger.info(f"Granting read-write access to user {username} for port {port_name} (slot available)")
                 return "read-write", None
             self.logger.info(f"Granting read-only access to user {username} for port {port_name}")
             return "read-only", None
@@ -297,9 +293,7 @@ class ConsoleManager:
         success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
         if not success and mode == "read-write":
             mode = "read-only"
-            self.logger.info(
-                f"Read-write slot full for {username} on port {port_name}; falling back to read-only"
-            )
+            self.logger.info(f"Read-write slot full for {username} on port {port_name}; falling back to read-only")
             success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
 
         if not success:
@@ -312,6 +306,14 @@ class ConsoleManager:
         self._ensure_client_forwarding_task(port_name, client_id)
 
         self.logger.info(f"Client {username} ({client_id}) connected to port {port_name} in {mode} mode")
+
+        # Update every already-attached viewer's presence badge; the new client's own
+        # channel isn't registered yet, so the caller sends it an initial snapshot itself
+        # (mirrors the existing initial client_mode frame sent on connect).
+        try:
+            await self.broadcast_presence(port_name)
+        except Exception:
+            self.logger.debug(f"broadcast_presence failed after connect for {port_name}", exc_info=True)
 
         return True, mode, None
 
@@ -339,6 +341,10 @@ class ConsoleManager:
         del self.client_port_map[client_id]
 
         self.logger.info(f"Client {client_id} disconnected from port {port_name}")
+        try:
+            await self.broadcast_presence(port_name)
+        except Exception:
+            self.logger.debug(f"broadcast_presence failed after disconnect for {port_name}", exc_info=True)
         return True
 
     async def promote_client_to_read_write(self, client_id: str, port_name: str) -> bool:
@@ -360,6 +366,10 @@ class ConsoleManager:
 
         if success:
             self.logger.info(f"Client {client_id} promoted to read-write on port {port_name}")
+            try:
+                await self.broadcast_presence(port_name)
+            except Exception:
+                self.logger.debug(f"broadcast_presence failed after promote for {port_name}", exc_info=True)
 
         return success
 
@@ -380,6 +390,10 @@ class ConsoleManager:
 
         if success:
             self.logger.info(f"Client {client_id} demoted to read-only on port {port_name}")
+            try:
+                await self.broadcast_presence(port_name)
+            except Exception:
+                self.logger.debug(f"broadcast_presence failed after demote for {port_name}", exc_info=True)
 
         return success
 
@@ -558,9 +572,7 @@ class ConsoleManager:
             # Capture the queue reference once; task is recreated on reconnect.
             port_wrapper = self.port_manager.get_port(port_name)
             if port_wrapper is None or not hasattr(port_wrapper, "client_queues"):
-                self.logger.error(
-                    f"Port {port_name} has no client_queues; forwarding for {client_id} cannot start"
-                )
+                self.logger.error(f"Port {port_name} has no client_queues; forwarding for {client_id} cannot start")
                 return
             q = port_wrapper.client_queues.get(client_id)
             if q is None:
@@ -585,9 +597,7 @@ class ConsoleManager:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    self.logger.error(
-                        f"Error forwarding data to {client_id} on {port_name}: {e}", exc_info=True
-                    )
+                    self.logger.error(f"Error forwarding data to {client_id} on {port_name}: {e}", exc_info=True)
                     await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
@@ -761,6 +771,45 @@ class ConsoleManager:
             except Exception:
                 pass
         return "unknown"
+
+    def get_viewers_display(self, port_name: str) -> List[Dict[str, str]]:
+        """Return `{"username", "mode", "client_id"}` for every client attached to a port.
+
+        Unlike `get_rw_holders_display`, this includes read-only viewers too (see
+        GitHub issue #48: presence must be visible to every viewer, not just the
+        read-write holder). `client_id` lets a viewer's own UI mark itself as "(me)".
+        """
+        try:
+            port = self.port_manager.ports.get(port_name) if hasattr(self.port_manager, "ports") else None
+        except Exception:
+            port = None
+        if port is None:
+            return []
+        return [
+            {
+                "username": c.get("username", "unknown"),
+                "mode": c.get("mode", "read-only"),
+                "client_id": c.get("client_id", ""),
+            }
+            for c in getattr(port, "connected_clients", [])
+        ]
+
+    async def broadcast_presence(self, port_name: str) -> int:
+        """Broadcast the current viewer list to every client attached to a port.
+
+        Called from the client-attach/detach/promote/demote call sites so the web
+        console's ambient viewer badge (see console.js) stays live with no separate
+        poll loop. CLI adapters (telnet/SSH) render this frame as a no-op and expose
+        the same data on demand instead, via the Ctrl+E "show viewers" command.
+
+        Args:
+            port_name: Port whose current viewers should be broadcast.
+
+        Returns:
+            int: Number of clients the frame was successfully delivered to.
+        """
+        viewers = self.get_viewers_display(port_name)
+        return await self.broadcast_control_frame_to_port(port_name, {"type": "presence", "viewers": viewers})
 
     def get_client_mode(self, client_id: str, port_name: str) -> Optional[str]:
         """Return access mode for a client on a specific port.

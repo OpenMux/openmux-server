@@ -88,7 +88,7 @@ ctrlClose.addEventListener('click', hideCtrlMenu);
 ctrlReqRW.addEventListener('click', () => { try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'request_rw' })); } catch (_) {} });
 ctrlReconnect.addEventListener('click', () => { try { abortSlowPaste('Reconnecting'); if (isConnected()) ws.close(1000, 'Client requested reconnect'); connectSelected(); } catch (_) {} });
 ctrlDisconnect.addEventListener('click', () => { try { abortSlowPaste('Disconnecting'); if (isConnected()) ws.close(1000, 'Client requested disconnect'); } catch (_) {} hideCtrlMenu(); });
-if (menuToggle) menuToggle.addEventListener('click', () => { if (ctrlMenu.style.display === 'none') showCtrlMenu(); else hideCtrlMenu(); });
+if (menuToggle) menuToggle.addEventListener('click', () => { if (ctrlMenu.style.display === 'none') { closeRoMenu(); closeViewersMenu(); showCtrlMenu(); } else hideCtrlMenu(); });
 const ctrlReleaseRW = document.getElementById('ctrlReleaseRW');
 const ctrlForceTake = document.getElementById('ctrlForceTake');
 const roIndicator = document.getElementById('roIndicator');
@@ -114,6 +114,7 @@ function closeRoMenu() { if (roMenu) roMenu.style.display = 'none'; }
 if (roIndicator) roIndicator.addEventListener('click', (e) => {
   e.stopPropagation();
   const opening = roMenu && roMenu.style.display === 'none';
+  if (opening) { hideCtrlMenu(); closeViewersMenu(); }
   if (roMenu) roMenu.style.display = opening ? 'block' : 'none';
   // Refresh holder info from server whenever the dropdown is opened
   if (opening) { try { ws && isConnected() && ws.send('OMXCTRL ' + JSON.stringify({ type: 'query_rw_holders' })); } catch (_) {} }
@@ -123,6 +124,41 @@ const roMenuReqRW = document.getElementById('roMenuReqRW');
 const roMenuForceRW = document.getElementById('roMenuForceRW');
 if (roMenuReqRW) roMenuReqRW.addEventListener('click', () => { closeRoMenu(); try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'request_rw' })); } catch (_) {} });
 if (roMenuForceRW) roMenuForceRW.addEventListener('click', () => { closeRoMenu(); try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'force_promote' })); } catch (_) {} });
+
+// Ambient viewer-presence badge (GitHub issue #48): a small always-visible
+// "N others" chip, driven purely by 'presence' control frames the server
+// broadcasts on attach/detach/promote/demote - no polling, no toasts.
+const viewersBadgeWrap = document.getElementById('viewersBadgeWrap');
+const viewersBadge = document.getElementById('viewersBadge');
+const viewersCount = document.getElementById('viewersCount');
+const viewersMenu = document.getElementById('viewersMenu');
+const viewersMenuList = document.getElementById('viewersMenuList');
+function closeViewersMenu() { if (viewersMenu) viewersMenu.style.display = 'none'; }
+function updateViewersBadge(viewers) {
+  const list = Array.isArray(viewers) ? viewers : [];
+  const others = Math.max(0, list.length - 1);
+  if (viewersBadgeWrap) viewersBadgeWrap.style.display = others > 0 ? '' : 'none';
+  if (viewersCount) viewersCount.textContent = String(others);
+  if (viewersBadge) viewersBadge.title = others === 1 ? '1 other viewer' : `${others} other viewers`;
+  if (viewersMenuList) {
+    viewersMenuList.innerHTML = '';
+    list.forEach((v) => {
+      const row = document.createElement('div');
+      const mine = !!myClientId && v.client_id === myClientId;
+      const label = `${v.username || 'unknown'} (${v.mode === 'read-write' ? 'read-write' : 'read-only'})`;
+      row.textContent = mine ? `${label} (me)` : label;
+      viewersMenuList.appendChild(row);
+    });
+    viewersMenuList.style.display = list.length ? '' : 'none';
+  }
+}
+if (viewersBadge) viewersBadge.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const opening = viewersMenu && viewersMenu.style.display === 'none';
+  if (opening) { hideCtrlMenu(); closeRoMenu(); }
+  if (viewersMenu) viewersMenu.style.display = opening ? 'block' : 'none';
+});
+document.addEventListener('click', () => closeViewersMenu());
 function updateCtrlMenuButtons() {
   const isRW = (clientMode === 'read-write');
   if (ctrlReqRW) ctrlReqRW.style.display = isRW ? 'none' : '';
@@ -1203,6 +1239,7 @@ function connectSelected() {
     try { abortSlowPaste('Disconnected'); } catch (_) {}
     // Clear read-only indicator when disconnected
     clientMode = 'read-only'; document.body.classList.remove('mode-readonly'); if (roIndicatorWrap) roIndicatorWrap.style.display = 'none'; closeRoMenu();
+    updateViewersBadge([]); closeViewersMenu();
     const meta = (ports || []).find(p => p.name === currentConnectedPort) || {};
     const desc = meta.description ? ` - ${meta.description}` : '';
     const origin = meta.origin_server_id ? String(meta.origin_server_id) : 'local';
@@ -1237,6 +1274,11 @@ function connectSelected() {
         const msg = JSON.parse(payload);
         if (msg && msg.type === 'rw_holders') {
           updateRoMenuInfo(msg.holders, msg.max_rw_users);
+          return;
+        }
+        if (msg && msg.type === 'presence') {
+          // Ambient viewer badge (issue #48) - no toast/popup, just a live count/list update.
+          updateViewersBadge(msg.viewers);
           return;
         }
         if (msg && msg.type === 'client_mode') {
@@ -1363,7 +1405,7 @@ Promise.all([fetchActionsCSRF(), loadActionsCatalog()]).then(() => applyActionDe
 // Keyboard shortcut: Ctrl+] then 'r' to request read-write directly from Web UI
 window.addEventListener('keydown', (e) => {
   // Toggle control menu: Ctrl+E
-  if (e.key.toLowerCase() === 'e' && e.ctrlKey) { if (ctrlMenu.style.display === 'none') showCtrlMenu(); else hideCtrlMenu(); e.preventDefault(); return false; }
+  if (e.key.toLowerCase() === 'e' && e.ctrlKey) { if (ctrlMenu.style.display === 'none') { closeRoMenu(); closeViewersMenu(); showCtrlMenu(); } else hideCtrlMenu(); e.preventDefault(); return false; }
   // If ']' is pressed with Control
   if (e.key === ']' && e.ctrlKey) {
     const onKey = (ev) => {

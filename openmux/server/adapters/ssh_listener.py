@@ -31,6 +31,7 @@ from .listener_common import (
     compile_acl,
     feed_escape_byte,
     format_rw_notice,
+    format_viewers_notice,
     ip_allowed,
     parse_login,
     render_port_list,
@@ -648,9 +649,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                 await self.console_manager.write_to_port(session.port_name, payload, session.client_id)
             return True
         except Exception as exc:
-            self.logger.warning(
-                "Failed forwarding data from %s to port %s: %s", session.client_id, session.port_name, exc
-            )
+            self.logger.warning("Failed forwarding data from %s to port %s: %s", session.client_id, session.port_name, exc)
             return False
 
     async def _change_escape_sequence(self, session: SshSession, data: bytes, i: int) -> Tuple[bytes, int]:
@@ -688,6 +687,9 @@ class SshListenerAdapter(BaseGenericAdapter):
         elif cmd == "w":
             holders = cm.get_rw_holders_display(session.port_name) if cm else []
             await self._write_session(session, format_rw_notice({"type": "rw_holders", "holders": holders}))
+        elif cmd == "u":
+            viewers = cm.get_viewers_display(session.port_name) if cm else []
+            await self._write_session(session, format_viewers_notice(viewers))
         elif cmd == "?":
             await self._write_session(session, CONTROL_MENU_HELP)
         elif cmd == "i":

@@ -26,6 +26,7 @@ from .listener_common import (
     compile_acl,
     feed_escape_byte,
     format_rw_notice,
+    format_viewers_notice,
     ip_allowed,
     parse_login,
     render_port_list,
@@ -184,6 +185,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
     async def _start_single_listener(self, spec: ListenerConfig) -> bool:
         """Bind a single listener's server socket. Returns True on success."""
         try:
+
             async def _connection_entry(reader, writer, listener_spec=spec):
                 await self._handle_connection(listener_spec, reader, writer)
 
@@ -193,9 +195,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 spec.bind_port,
             )
             self.servers[spec.name] = server
-            self.logger.info(
-                "Telnet listener '%s' bound to %s", spec.name, self._format_sockname(server.sockets)
-            )
+            self.logger.info("Telnet listener '%s' bound to %s", spec.name, self._format_sockname(server.sockets))
             try:
                 sock = server.sockets[0]
                 if sock:
@@ -470,9 +470,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 await self.console_manager.write_to_port(session.port_name, payload, session.client_id)
             return True
         except Exception as exc:
-            self.logger.warning(
-                "Failed forwarding data from %s to port %s: %s", session.client_id, session.port_name, exc
-            )
+            self.logger.warning("Failed forwarding data from %s to port %s: %s", session.client_id, session.port_name, exc)
             return False
 
     async def _change_escape_sequence(self, session: TelnetSession, data: bytes, i: int) -> Tuple[bytes, int]:
@@ -510,6 +508,9 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         elif cmd == "w":
             holders = cm.get_rw_holders_display(session.port_name) if cm else []
             await self._write_session(session, format_rw_notice({"type": "rw_holders", "holders": holders}))
+        elif cmd == "u":
+            viewers = cm.get_viewers_display(session.port_name) if cm else []
+            await self._write_session(session, format_viewers_notice(viewers))
         elif cmd == "?":
             await self._write_session(session, CONTROL_MENU_HELP)
         elif cmd == "i":
@@ -686,9 +687,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
     ) -> Optional[Tuple[str, Optional[str]]]:
         """Prompt for username/password. Returns (username, embedded_port) or None."""
         if not self.auth_manager:
-            self.logger.error(
-                "Telnet listener '%s' has require_auth set but no auth manager is configured", listener.name
-            )
+            self.logger.error("Telnet listener '%s' has require_auth set but no auth manager is configured", listener.name)
             await self._send_and_close(writer, b"Server misconfigured: authentication unavailable\r\n")
             return None
 

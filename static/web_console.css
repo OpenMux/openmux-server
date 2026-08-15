@@ -184,12 +184,19 @@ body.ws-down header.site { background: #2a1515; border-bottom-color: #6b2f2f; }
 body.port-down header.site { background: #2a2015; border-bottom-color: #6b5a2f; }
 /* status tag removed from header */
 body.mode-readonly header.site { background: #2a2200; border-bottom-color: #6b5a00; }
-.ro-indicator { display:inline-block; padding: 2px 8px; border-radius: 10px; background: #6b5a00; color: #f5d060; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; border: none; font-family: inherit; }
+.ro-indicator { display:inline-block; padding: 2px 8px; border-radius: 10px; background: #6b5a00; color: #f5d060; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; border: none; font-family: inherit; line-height: 16px; }
 .ro-indicator:hover { background: #8a7200; }
 .ro-menu { position: absolute; top: calc(100% + 4px); right: 0; background: var(--bg-card, #1e1e1e); border: 1px solid var(--border, #444); border-radius: 6px; min-width: 190px; z-index: 30; box-shadow: 0 4px 16px rgba(0,0,0,0.4); overflow: hidden; }
 .ro-menu-info { padding: 7px 14px 5px; font-size: 11px; color: var(--text-muted, #888); border-bottom: 1px solid var(--border, #444); }
 .ro-menu-item { display: block; width: 100%; padding: 9px 14px; background: none; border: none; color: var(--text-main, #e0e0e0); cursor: pointer; text-align: left; font: inherit; font-size: 13px; }
 .ro-menu-item:hover { background: var(--bg-hover, #2a2a2a); }
+
+/* Ambient viewer-presence badge (issue #48) - neutral color, distinct from the
+   yellow read-only indicator; same dropdown pattern as .ro-menu. */
+.viewers-badge { background: var(--bg-hover, #333); color: var(--text-main, #e0e0e0); }
+.viewers-badge:hover { background: var(--border-color, #444); }
+#viewersMenuList { max-height: 220px; overflow-y: auto; }
+#viewersMenuList > div { padding: 2px 0; white-space: nowrap; }
 
 /* --- Federation/Multipath hierarchical view --- */
 .peer-card { margin: 8px 0; }

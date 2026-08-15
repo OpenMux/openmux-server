@@ -36,8 +36,10 @@ instead of a plaintext socket.
   `telnet_listener`, including the one-time in-band warning banner on
   attach.
 - **Control Menu (Ctrl+E,c)**: Same in-band Ctrl+E,c control menu as
-  `telnet_listener` (`a`/`f`/`s`/`w`/`i`/`v`/`e`/`.`/`?`), shared via
-  `listener_common.py`'s `EscapeState`/`feed_escape_byte`/`format_rw_notice`.
+  `telnet_listener` (`a`/`f`/`s`/`w`/`u`/`i`/`v`/`e`/`.`/`?`; `u` shows every
+  attached client and its read-write/read-only mode, see GitHub issue #48),
+  shared via `listener_common.py`'s
+  `EscapeState`/`feed_escape_byte`/`format_rw_notice`.
   A force-take from any adapter type notifies this session in-band.
 - **Session Model**: Raw pass-through only. `exec` and subsystem requests
   (e.g. `ssh host command`, SFTP, git-over-ssh) are rejected with an error

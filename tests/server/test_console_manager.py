@@ -108,7 +108,10 @@ async def test_force_promote_cross_notifies_via_client_to_manager(cm, port_manag
 
     assert ok is True
     assert undelivered == []
-    assert other_adapter.received == [{"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}]
+    # Presence broadcasts (issue #48) also land on this channel now; filter down to
+    # the demotion notice this test actually cares about.
+    client_mode_frames = [p for p in other_adapter.received if p.get("type") == "client_mode"]
+    assert client_mode_frames == [{"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}]
 
 
 @pytest.mark.asyncio

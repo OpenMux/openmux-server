@@ -22,9 +22,6 @@
 {% endblock %}
 
 {% block header_actions %}
-  <div class="toolbar-controls">
-    <button class="btn" id="connect">Connect</button>
-  </div>
   <div id="roIndicatorWrap" style="position:relative; display:none">
     <button id="roIndicator" class="ro-indicator" type="button" title="Read-only – click to change access">read-only ▾</button>
     <div id="roMenu" class="ro-menu" style="display:none">
@@ -32,6 +29,17 @@
       <button class="ro-menu-item" id="roMenuReqRW" type="button">Request read-write</button>
       <button class="ro-menu-item" id="roMenuForceRW" type="button">Force take read-write</button>
     </div>
+  </div>
+  <!-- Ambient viewer-presence badge (issue #48): always visible while attached, updated
+       live from server 'presence' control frames - no polling, no join/leave popups. -->
+  <div id="viewersBadgeWrap" style="position:relative; display:none">
+    <button id="viewersBadge" class="ro-indicator viewers-badge" type="button" title="Other viewers of this console">👀 <span id="viewersCount">0</span></button>
+    <div id="viewersMenu" class="ro-menu" style="display:none">
+      <div id="viewersMenuList" class="ro-menu-info" style="display:none"></div>
+    </div>
+  </div>
+  <div class="toolbar-controls">
+    <button class="btn" id="connect">Connect</button>
   </div>
   <button class="btn" id="menuToggle" type="button" title="Open control menu">Menu</button>
   <button class="btn" id="infoToggle" type="button" title="Show port info">Info</button>

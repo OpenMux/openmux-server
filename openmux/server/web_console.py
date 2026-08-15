@@ -970,6 +970,15 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                 await ws.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
             except Exception:
                 pass
+            try:
+                # Initial viewer-presence snapshot for this client's own badge (issue #48);
+                # other already-attached viewers already got this via ConsoleManager's
+                # attach-time broadcast_presence() call.
+                viewers = adapter.console_manager.get_viewers_display(port_name)
+                presence = {"type": "presence", "viewers": viewers}
+                await ws.send_str("OMXCTRL " + json.dumps(presence, separators=(",", ":")))
+            except Exception:
+                pass
 
         # Register this client for event-driven meta pushes on this port
         if want_meta:
