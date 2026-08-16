@@ -894,6 +894,44 @@ class PortManager:
 
         return False
 
+    def add_federation_buffering_hold(self, port_name: str) -> None:
+        """Force a local port to buffer output while a federation peer relays it.
+
+        Without this, `handle_incoming_port_data` only enqueues into
+        `data_queue` when a *local* client is attached (or `always_buffer` is
+        configured), so `_pump_local_port_to_remote` in muxcon.py silently got
+        nothing to send whenever no local console was also open on the port.
+        Ref-counted so multiple federation streams on the same port don't clobber
+        each other's hold when one of them closes.
+
+        Args:
+            port_name: Local port whose output a federation peer is consuming.
+        """
+        if port_name not in self.ports:
+            self._ensure_unified_wrapper(port_name)
+        port = self.ports.get(port_name)
+        if port is None:
+            return
+        count = getattr(port, "_federation_viewer_count", 0) + 1
+        port._federation_viewer_count = count
+        if count == 1:
+            port._federation_saved_always_buffer = getattr(port, "always_buffer", False)
+            port.always_buffer = True
+
+    def remove_federation_buffering_hold(self, port_name: str) -> None:
+        """Release a hold added by `add_federation_buffering_hold`.
+
+        Args:
+            port_name: Local port a federation stream has stopped consuming.
+        """
+        port = self.ports.get(port_name)
+        if port is None:
+            return
+        count = max(0, getattr(port, "_federation_viewer_count", 0) - 1)
+        port._federation_viewer_count = count
+        if count == 0:
+            port.always_buffer = getattr(port, "_federation_saved_always_buffer", False)
+
     async def get_port_data(self, port_name: str) -> Optional[bytes]:
         """Read one item of port data without blocking.
 

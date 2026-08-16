@@ -4373,6 +4373,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             stream_id: Logical stream id targeting a local port consumer.
             port_name: Name of the local port to read from.
         """
+        # PortManager.handle_incoming_port_data only enqueues into data_queue
+        # (which get_port_data reads below) when a local client is attached, or
+        # always_buffer is set. Without this hold, output was only relayed to
+        # the remote peer while a local console happened to also be open.
+        pm = getattr(self, "main_port_manager", None)
+        held = False
+        try:
+            if pm is not None and hasattr(pm, "add_federation_buffering_hold"):
+                pm.add_federation_buffering_hold(port_name)
+                held = True
+        except Exception:
+            self.logger.debug(f"Failed to add federation buffering hold for {port_name}", exc_info=True)
         try:
             # Send via currently selected path dynamically
             # Simple loop until mapping is removed or connection closes
@@ -4399,6 +4411,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     self.logger.debug(f"Pump error for {port_name} on {peer_key}:{stream_id}: {e}", exc_info=True)
                     await asyncio.sleep(0.1)
         finally:
+            if held and pm is not None:
+                try:
+                    pm.remove_federation_buffering_hold(port_name)
+                except Exception:
+                    self.logger.debug(f"Failed to remove federation buffering hold for {port_name}", exc_info=True)
             # Cleanup mapping on exit
             try:
                 if peer_key in self._local_session_map:
