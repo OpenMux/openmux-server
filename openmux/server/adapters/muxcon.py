@@ -337,6 +337,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self._peer_tx_seq: Dict[str, int] = {}
         # peer_key -> { 'expected': int, 'buffer': Dict[int, Tuple[int, bytes]] }
         self._peer_rx_state: Dict[str, Dict[str, Any]] = {}
+        # Peer-scoped stream-id allocator (peer_key -> last allocated id). Every
+        # RemotePortProxy for the same peer must draw from this shared counter;
+        # each proxy previously kept its own counter starting at 1, so two
+        # different federated ports on the same peer connection could open
+        # streams with the same id, corrupting _session_map/_local_session_map
+        # on both ends (one port's stream mapping silently overwrites the
+        # other's, and traffic for one of the two ports stops flowing).
+        self._peer_next_stream_id: Dict[str, int] = {}
         # Tasks/shutdown
         self._tasks: List[asyncio.Task] = []
         self._stop_event = asyncio.Event()
@@ -2123,6 +2131,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         sid = int(stream_id) if stream_id is not None else 0
                     except Exception:  # justification: invalid stream id on OPEN; default to 0
                         sid = 0
+                    existing_port = self._local_session_map[peer_key].get(sid)
+                    if existing_port is not None and existing_port != port_name:
+                        # The peer allocated the same stream id for two different
+                        # ports; overwriting silently stops traffic for whichever
+                        # port loses the mapping. Log loudly so this is diagnosable.
+                        self.logger.warning(
+                            f"[{conn_id}] Stream id {sid} reused for '{port_name}' while still mapped to "
+                            f"'{existing_port}'; traffic for '{existing_port}' will stop flowing"
+                        )
                     self._local_session_map[peer_key][sid] = port_name
                     # Start background pump to send local port data back to remote stream
                     if port_name:
@@ -3726,6 +3743,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         if current_key in self._peer_retx_count:
                             prev = self._peer_retx_count.pop(current_key, 0)
                             self._peer_retx_count[new_key] = prev + self._peer_retx_count.get(new_key, 0)
+                        # Stream-id allocator: keep max to avoid reusing an id
+                        # already handed out under the old peer key.
+                        if current_key in self._peer_next_stream_id:
+                            old_sid = self._peer_next_stream_id.pop(current_key, 0)
+                            self._peer_next_stream_id[new_key] = max(old_sid, self._peer_next_stream_id.get(new_key, 0))
                     except Exception:
                         pass
             # Insert into new group (merge if exists)
@@ -4830,6 +4852,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self._session_map[peer_key] = {}
         self._session_map[peer_key][stream_id] = proxy
 
+    def _alloc_local_stream_id(self, peer_key: str) -> int:
+        """Allocate a stream id unique across every local proxy for one peer.
+
+        All RemotePortProxy instances sharing a peer connection must draw
+        from this single counter (not one counter per proxy/port) so two
+        different federated ports never open a stream with the same id on
+        the same connection.
+        """
+        sid = self._peer_next_stream_id.get(peer_key, 0) + 1
+        self._peer_next_stream_id[peer_key] = sid
+        return sid
+
     # --- Global frame sequencing ---
     def _next_frame_seq(self, conn_id: Optional[str] = None) -> int:
         """Return next sequence number.
@@ -4908,7 +4942,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.data_callback = None  # set by PortManager
             self.port_manager = None
             self._client_sessions: Dict[str, int] = {}
-            self._next_session_id = 1
+            # Stream ids are allocated peer-scoped via adapter._alloc_local_stream_id(),
+            # not per-proxy, so no local counter is kept here (see _ensure_session).
             self.logger = logging.getLogger(f"openmux.unified.remote_proxy.{remote_port_name}")
 
             # Surface required / expected attributes
@@ -5045,8 +5080,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             key = client_id or f"default:{self.remote_port_name}"
             if key in self._client_sessions:
                 return self._client_sessions[key]
-            session_id = self._next_session_id
-            self._next_session_id += 1
+            # Draw from the adapter's peer-scoped allocator, not a per-proxy
+            # counter: multiple RemotePortProxy instances (one per federated
+            # port) share the same underlying peer connection, so a
+            # per-proxy-only counter would let two different ports both open
+            # stream id 1, colliding in the peer's session maps.
+            session_id = self.adapter._alloc_local_stream_id(self.connection_id)
             self.logger.info(f"REMOTE PROXY OPEN stream sid={session_id} port={self.remote_port_name}")
             await self.adapter._send_stream_open_mpath(self.connection_id, session_id, self.remote_port_name)
             self.adapter._map_session(self.connection_id, session_id, self)

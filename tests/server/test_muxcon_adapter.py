@@ -926,6 +926,39 @@ async def test_remote_port_proxy_close_all_streams():
 
 
 @pytest.mark.asyncio
+async def test_stream_ids_do_not_collide_across_ports_on_same_peer():
+    """Two different federated ports on the same peer must get distinct stream ids.
+
+    Regression test: each RemotePortProxy used to keep its own stream-id
+    counter starting at 1, so opening the first stream for two different
+    ports on the same peer connection produced the SAME id on the wire,
+    corrupting both sides' stream-id -> port mappings and silently stopping
+    traffic for one of the two ports.
+    """
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    peer_key = "node:peerQ"
+
+    async def fake_open(pk, sid, port_name):
+        return True
+
+    a._send_stream_open_mpath = fake_open  # type: ignore
+
+    class M:
+        pass
+
+    proxy_a = a.RemotePortProxy(a, peer_key, "portA", M())
+    proxy_b = a.RemotePortProxy(a, peer_key, "portB", M())
+
+    sid_a = await proxy_a._ensure_session("clientA")
+    sid_b = await proxy_b._ensure_session("clientB")
+
+    assert sid_a != sid_b
+    # Both proxies must be independently resolvable via the shared session map.
+    assert a._session_map[peer_key][sid_a] is proxy_a
+    assert a._session_map[peer_key][sid_b] is proxy_b
+
+
+@pytest.mark.asyncio
 async def test_send_local_port_list_uses_first_enabled_listener():
     # First enabled listener port should be used in ServerInfo
     a = UnifiedMuxConAdapter("mx", {"listeners": [{"enabled": False, "port": 7000}, {"enabled": True, "port": 8123}]})
