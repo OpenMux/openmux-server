@@ -4850,6 +4850,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.metadata = metadata
             self.is_connected = True
             self.data_queue: asyncio.Queue = asyncio.Queue()
+            # Per-client delivery queues (issue #36); populated/drained generically by
+            # PortManager.add_client_to_port/remove_client_from_port/handle_incoming_port_data.
+            # Without this, ConsoleManager._forward_data_to_client finds no client_queues
+            # and forwarding to a federated port never starts.
+            self.client_queues: Dict[str, asyncio.Queue] = {}
             self.data_callback = None  # set by PortManager
             self.port_manager = None
             self._client_sessions: Dict[str, int] = {}
