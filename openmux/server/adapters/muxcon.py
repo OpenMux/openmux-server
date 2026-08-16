@@ -543,7 +543,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         tagged with our own `server_id` before going out, so a peer can always
         tell which server a viewer is actually attached to; entries already
         tagged (received from further downstream in a relay chain) pass through
-        unchanged.
+        unchanged. Each destination peer never receives entries tagged with its
+        own `server_id` back - it already knows about its own viewers, and
+        echoing them back double-counted a peer's own viewer on its badge.
         """
         entries = []
         for v in viewers:
@@ -555,14 +557,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     "ip": v.get("ip", "unknown"),
                 }
             )
-        lines = "\n".join(json.dumps(e, separators=(",", ":")) for e in entries)
-        body = f"VIEWERS:{port_name}\n{lines}\nEND:VIEWERS"
         for cid, conn in list(self.connections.items()):
             if cid == exclude_conn_id or not self._is_conn_authenticated(cid):
                 continue
             writer = conn.get("writer")
             if not isinstance(writer, asyncio.StreamWriter):
                 continue
+            peer_server_id = conn.get("server_id")
+            dest_entries = [e for e in entries if not peer_server_id or e["server_id"] != peer_server_id]
+            lines = "\n".join(json.dumps(e, separators=(",", ":")) for e in dest_entries)
+            body = f"VIEWERS:{port_name}\n{lines}\nEND:VIEWERS"
             try:
                 seq = self._next_frame_seq(cid)
                 frame = self.proto.create_control_frame(0, seq, body)
