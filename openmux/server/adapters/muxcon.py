@@ -610,6 +610,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         peer_key = self._derive_peer_key_from_conn_id(conn_id)
         proxy = (self._peer_proxies.get(peer_key) or {}).get(port_name)
         if proxy is None:
+            # No RemotePortProxy for this port at this hop: it may be a port we
+            # actually own locally, being watched by a peer through federation
+            # (e.g. a console opened via muxcon from the far side). Record the
+            # reported viewers on it too, so our own local viewers' badges (via
+            # ConsoleManager) include them, not just the peer's own view.
+            await self._apply_viewers_to_local_port(port_name, viewers)
             return
         try:
             proxy.remote_viewers = viewers
@@ -622,6 +628,29 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             pass
         await self._relay_viewers_upstream(conn_id, port_name, proxy, viewers)
+
+    async def _apply_viewers_to_local_port(self, port_name: str, viewers: List[Dict[str, Any]]) -> None:
+        """Record a peer-reported viewer snapshot on one of our own local ports.
+
+        No-op when `port_name` isn't a genuinely local port on this server (e.g.
+        it's unknown here, or is itself a `RemotePortProxy` for a different peer).
+        """
+        pm = getattr(self, "main_port_manager", None)
+        try:
+            local_port = pm.ports.get(port_name) if pm is not None and hasattr(pm, "ports") else None
+        except Exception:
+            local_port = None
+        if local_port is None or hasattr(local_port, "remote_port_name"):
+            return
+        try:
+            local_port.remote_viewers = viewers
+        except Exception:
+            pass
+        try:
+            if pm and hasattr(pm, "notify_meta_updated"):
+                pm.notify_meta_updated(port_name, {"event": "federated_viewers_updated"})
+        except Exception:
+            pass
 
     async def _relay_viewers_upstream(
         self, conn_id: str, port_name: str, proxy: Any, viewers: List[Dict[str, Any]]

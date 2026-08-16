@@ -44,6 +44,33 @@ class ConsoleManager:
         # Set the global reference to this console manager
         set_console_manager(self)
 
+        # Re-broadcast presence to our own local viewers whenever muxcon learns
+        # of a remote viewer change on one of our ports (see issue: a federated
+        # viewer opening a console on the far side never reached local viewers'
+        # badges here, since only a *local* attach/detach triggered a push).
+        try:
+            if hasattr(self.port_manager, "register_meta_listener"):
+                self.port_manager.register_meta_listener(self._on_federated_viewers_updated)
+        except Exception:
+            self.logger.debug("Failed to register federated-viewers meta listener", exc_info=True)
+
+    async def _on_federated_viewers_updated(self, port_name: str, changes: Optional[Dict[str, Any]]) -> None:
+        """PortManager meta listener: push a fresh presence snapshot on federation viewer changes.
+
+        Triggered by muxcon's `_handle_viewers_frame` after it records an updated
+        remote-viewer list on a `RemotePortProxy` or on one of our own local
+        ports. Ignores our own `presence_changed` events (already broadcast by
+        `broadcast_presence` itself) to avoid redundant frames.
+        """
+        if not isinstance(changes, dict) or changes.get("event") != "federated_viewers_updated":
+            return
+        try:
+            # notify_federation=False: this data just arrived FROM federation; echoing
+            # it straight back out would only feed an unnecessary A<->B broadcast loop.
+            await self.broadcast_presence(port_name, notify_federation=False)
+        except Exception:
+            self.logger.debug(f"Failed to re-broadcast presence for {port_name}", exc_info=True)
+
     async def port_exists(self, port_name: str) -> bool:
         """Return whether a port exists.
 
@@ -801,7 +828,7 @@ class ConsoleManager:
         entries.extend(getattr(port, "remote_viewers", None) or [])
         return entries
 
-    async def broadcast_presence(self, port_name: str) -> int:
+    async def broadcast_presence(self, port_name: str, notify_federation: bool = True) -> int:
         """Broadcast the current viewer list to every client attached to a port.
 
         Called from the client-attach/detach/promote/demote call sites so the web
@@ -811,18 +838,23 @@ class ConsoleManager:
 
         Args:
             port_name: Port whose current viewers should be broadcast.
+            notify_federation: Whether to also notify PortManager's meta-listener
+                bus (muxcon relays this to peers). Pass False when the viewers
+                changed *because* a peer just told us about them, so we don't
+                immediately echo the same data back out over federation.
 
         Returns:
             int: Number of clients the frame was successfully delivered to.
         """
         viewers = self.get_viewers_display(port_name)
-        # Let PortManager's generic meta-listener bus fan this out to interested
-        # adapters too (e.g. muxcon relays it to peers so a federated view of this
-        # port shows our local viewers - see UnifiedMuxConAdapter's VIEWERS frame).
-        try:
-            self.port_manager.notify_meta_updated(port_name, {"event": "presence_changed", "viewers": viewers})
-        except Exception:
-            self.logger.debug(f"notify_meta_updated(presence_changed) failed for {port_name}", exc_info=True)
+        if notify_federation:
+            # Let PortManager's generic meta-listener bus fan this out to interested
+            # adapters too (e.g. muxcon relays it to peers so a federated view of this
+            # port shows our local viewers - see UnifiedMuxConAdapter's VIEWERS frame).
+            try:
+                self.port_manager.notify_meta_updated(port_name, {"event": "presence_changed", "viewers": viewers})
+            except Exception:
+                self.logger.debug(f"notify_meta_updated(presence_changed) failed for {port_name}", exc_info=True)
         return await self.broadcast_control_frame_to_port(port_name, {"type": "presence", "viewers": viewers})
 
     def get_client_mode(self, client_id: str, port_name: str) -> Optional[str]:
