@@ -330,12 +330,9 @@ Identity note:
  - `interface` (alias: `bind_interface`): Bind the listening socket to a specific network interface. macOS uses interface index (IPv4/IPv6); Linux uses `SO_BINDTODEVICE` (requires privileges). If not supported, ignored with a warning.
  - `fwmark` (aliases: `so_mark`, `routing_mark`): Linux-only socket mark applied to the listener. Useful with policy routing; requires CAP_NET_ADMIN/root.
 
-Each `initiators` entry:
+Each `initiators` entry (all keys are at the same level, alongside `host`/`port`):
 - `host` (required): Peer host
 - `port` (required): Peer port
-- `options`: TLS and verification options
-
-`initiators.options` keys (selected):
 - `use_tls`: Enable TLS to peer
 - `ssl_verify`: Verify peer cert (default: true)
 - `ssl_ca_cert`: CA bundle for verification
@@ -372,18 +369,17 @@ muxcon:
   initiators:
     - host: "hub.example.com"
       port: 7822
-      options:
-        use_tls: true
-        ssl_verify: true
-        tls_tofu: true
-        # Prefer the WAN interface even if IP is DHCP-assigned
-        interface: "wan0"         # or `bind_interface`
-        # Alternatively, influence routing via source IP
-        # bind_host: "192.0.2.10"
-        # Bind local port (optional)
-        # bind_port: 0
-        # On Linux: policy routing mark
-        # fwmark: 100
+      use_tls: true
+      ssl_verify: true
+      tls_tofu: true
+      # Prefer the WAN interface even if IP is DHCP-assigned
+      interface: "wan0"         # or `bind_interface`
+      # Alternatively, influence routing via source IP
+      # bind_host: "192.0.2.10"
+      # Bind local port (optional)
+      # bind_port: 0
+      # On Linux: policy routing mark
+      # fwmark: 100
 ```
 
 ## Web Status (`web_status`)

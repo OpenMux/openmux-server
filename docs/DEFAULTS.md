@@ -112,13 +112,13 @@ muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapte
 - initiators[*]:
   - host: localhost (if unspecified)
   - port: 7822 (if unspecified)
-  - options.use_tls: false
-  - options.ssl_verify: true
-  - options.retry_backoff_initial: 2.0 (seconds)
-  - options.retry_backoff_max: 30.0 (seconds)
-  - options.retry_short_session_sec: 5.0 (seconds)
-  - options.tls_tofu: true (Trust-On-First-Use)
-  - options.server_hostname: defaults to host when verification is enabled
+  - use_tls: false
+  - ssl_verify: true
+  - retry_backoff_initial: 2.0 (seconds)
+  - retry_backoff_max: 30.0 (seconds)
+  - retry_short_session_sec: 5.0 (seconds)
+  - tls_tofu: true (Trust-On-First-Use)
+  - server_hostname: defaults to host when verification is enabled
 - heartbeats & timing:
   - heartbeat_interval: 30.0 (seconds)
   - shutdown_grace_timeout_sec: 5.0

@@ -653,22 +653,22 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           share_ports: 'Ports to share with the remote peer (advertise).',
           accept_ports: 'Ports you will accept from the remote peer.',
           request_ports: 'Ports to request from the remote peer.',
-          'options.use_tls': 'Use TLS for the outbound connection.',
-          'options.ssl_verify': 'Verify the server certificate.',
-          'options.ssl_ca_cert': 'CA certificate to trust when verifying.',
-          'options.ssl_cert': 'Client certificate for mTLS.',
-          'options.ssl_key': 'Client private key for mTLS.',
-          'options.server_hostname': 'Override SNI/server hostname for TLS.',
-          'options.tls_pin_fingerprint': 'Pin to a certificate fingerprint.',
-          'options.tls_tofu': 'Trust-On-First-Use: remember initial cert.',
-          'options.bind_host': 'Local address to bind the socket.',
-          'options.bind_port': 'Local port to bind (0 for automatic).',
-          'options.source_ip': 'Source IP for the connection (advanced).',
-          'options.interface': 'Bind to a specific network interface.',
-          'options.fwmark': 'Linux fwmark for policy routing (advanced).',
-          'options.retry_backoff_initial': 'Initial reconnect backoff (seconds).',
-          'options.retry_backoff_max': 'Maximum reconnect backoff (seconds).',
-          'options.retry_short_session_sec': 'Treat sessions shorter than this as failures.'
+          use_tls: 'Use TLS for the outbound connection.',
+          ssl_verify: 'Verify the server certificate.',
+          ssl_ca_cert: 'CA certificate to trust when verifying.',
+          ssl_cert: 'Client certificate for mTLS.',
+          ssl_key: 'Client private key for mTLS.',
+          server_hostname: 'Override SNI/server hostname for TLS.',
+          tls_pin_fingerprint: 'Pin to a certificate fingerprint.',
+          tls_tofu: 'Trust-On-First-Use: remember initial cert.',
+          bind_host: 'Local address to bind the socket.',
+          bind_port: 'Local port to bind (0 for automatic).',
+          source_ip: 'Source IP for the connection (advanced).',
+          interface: 'Bind to a specific network interface.',
+          fwmark: 'Linux fwmark for policy routing (advanced).',
+          retry_backoff_initial: 'Initial reconnect backoff (seconds).',
+          retry_backoff_max: 'Maximum reconnect backoff (seconds).',
+          retry_short_session_sec: 'Treat sessions shorter than this as failures.'
         }
         ,
         'web_console.plugins': {
@@ -704,11 +704,11 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         'muxcon.listeners': { use_tls: true, require_client_cert: false, tls_autogen: true },
         'muxcon.initiators': {
           // Default-safe: TLS on by default for initiators
-          'options.use_tls': true,
-          'options.ssl_verify': true,
-          'options.retry_backoff_initial': 2.0,
-          'options.retry_backoff_max': 30.0,
-          'options.retry_short_session_sec': 5.0,
+          use_tls: true,
+          ssl_verify: true,
+          retry_backoff_initial: 2.0,
+          retry_backoff_max: 30.0,
+          retry_short_session_sec: 5.0,
         }
       };
       // Overlay doc-derived section defaults
@@ -900,23 +900,22 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'share_ports', label:'Share ports', type:'array-string'},
           {key:'accept_ports', label:'Accept ports', type:'array-string'},
           {key:'request_ports', label:'Request ports', type:'array-string'},
-          // Flattened options for easier editing
-          {key:'options.use_tls', label:'Opt: TLS', type:'boolean'},
-          {key:'options.ssl_verify', label:'Opt: Verify', type:'boolean'},
-          {key:'options.ssl_ca_cert', label:'Opt: CA cert', type:'string'},
-          {key:'options.ssl_cert', label:'Opt: SSL cert', type:'string'},
-          {key:'options.ssl_key', label:'Opt: SSL key', type:'string'},
-          {key:'options.server_hostname', label:'Opt: SNI', type:'string'},
-          {key:'options.tls_pin_fingerprint', label:'Opt: Pin', type:'string'},
-          {key:'options.tls_tofu', label:'Opt: TOFU', type:'boolean'},
-          {key:'options.bind_host', label:'Opt: Bind host', type:'string'},
-          {key:'options.bind_port', label:'Opt: Bind port', type:'integer', min:0, max:65535},
-          {key:'options.source_ip', label:'Opt: Source IP', type:'string'},
-          {key:'options.interface', label:'Opt: Interface', type:'string'},
-          {key:'options.fwmark', label:'Opt: fwmark', type:'integer'},
-          {key:'options.retry_backoff_initial', label:'Opt: Retry backoff initial', type:'number', min:0, step:0.1},
-          {key:'options.retry_backoff_max', label:'Opt: Retry backoff max', type:'number', min:0, step:0.1},
-          {key:'options.retry_short_session_sec', label:'Opt: Retry short session', type:'number', min:0, step:0.1}
+          {key:'use_tls', label:'TLS', type:'boolean'},
+          {key:'ssl_verify', label:'Verify', type:'boolean'},
+          {key:'ssl_ca_cert', label:'CA cert', type:'string'},
+          {key:'ssl_cert', label:'SSL cert', type:'string'},
+          {key:'ssl_key', label:'SSL key', type:'string'},
+          {key:'server_hostname', label:'SNI', type:'string'},
+          {key:'tls_pin_fingerprint', label:'Pin', type:'string'},
+          {key:'tls_tofu', label:'TOFU', type:'boolean'},
+          {key:'bind_host', label:'Bind host', type:'string'},
+          {key:'bind_port', label:'Bind port', type:'integer', min:0, max:65535},
+          {key:'source_ip', label:'Source IP', type:'string'},
+          {key:'interface', label:'Interface', type:'string'},
+          {key:'fwmark', label:'fwmark', type:'integer'},
+          {key:'retry_backoff_initial', label:'Retry backoff initial', type:'number', min:0, step:0.1},
+          {key:'retry_backoff_max', label:'Retry backoff max', type:'number', min:0, step:0.1},
+          {key:'retry_short_session_sec', label:'Retry short session', type:'number', min:0, step:0.1}
         ])));
 
         // MuxCon public keys (new schema)
@@ -1040,12 +1039,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         setVal('muxcon.auth_key_id', deepGet(current, 'muxcon.auth_key_id'));
         setVal('muxcon.auth_private_key', deepGet(current, 'muxcon.auth_private_key'));
         tables['muxcon.listeners']._set(deepGet(current, 'muxcon.listeners')||[]);
-        const inits = (deepGet(current, 'muxcon.initiators')||[]).map(it=>{
-          const flat = {...it};
-          if(it && typeof it.options==='object' && it.options){ Object.keys(it.options).forEach(k=>{ flat['options.'+k]=it.options[k]; }); }
-          return flat;
-        });
-        tables['muxcon.initiators']._set(inits);
+        const inits = deepGet(current, 'muxcon.initiators')||[];
+        tables['muxcon.initiators']._set(Array.isArray(inits)? inits: []);
         // MuxCon public keys
         try {
           const mpx = deepGet(current, 'muxcon.public_keys') || [];
@@ -1163,7 +1158,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         const tls = tables['telnet_listener']._get(); if(tls && tls.length>0) deepSet(out,'telnet_listener', tls);
         const shl = tables['ssh_listener']._get(); if(shl && shl.length>0) deepSet(out,'ssh_listener', shl);
         // muxcon
-        const listeners = tables['muxcon.listeners']._get(); const initsFlat = tables['muxcon.initiators']._get(); const inits = (initsFlat||[]).map(it=>{ const {host,port,share_ports,accept_ports,request_ports, ...rest}=it; const opts={}; Object.keys(rest||{}).forEach(k=>{ if(k.startsWith('options.')){ const kk = k.substring('options.'.length); opts[kk] = rest[k]; } }); const obj={}; if(host!==undefined) obj.host=host; if(port!==undefined) obj.port=port; if(Array.isArray(share_ports)) obj.share_ports=share_ports; if(Array.isArray(accept_ports)) obj.accept_ports=accept_ports; if(Array.isArray(request_ports)) obj.request_ports=request_ports; if(Object.keys(opts).length>0) obj.options=opts; return obj; }); const muxcon={}; if(getVal('muxcon.node_name')!==undefined) muxcon.node_name = getVal('muxcon.node_name'); ['heartbeat_interval','mpath_primary_stale_sec','mpath_failover_check_sec','mpath_strategy','mpath_preemptive_promote','mpath_neighbor_idle_drop_sec','federated_cache_enabled','federated_cache_ttl_sec','federated_cache_path','auth_required','auth_key_id','auth_private_key'].forEach(k=>{ const v=getVal('muxcon.'+k); if(v!==undefined) muxcon[k]=v; }); if(listeners && listeners.length>0) muxcon.listeners = listeners; if(inits && inits.length>0) muxcon.initiators = inits; const pkRows = tables['muxcon.public_keys']._get(); if(pkRows && pkRows.length>0) muxcon.public_keys = pkRows.map(r=>{ const m={key_id:r.key_id, public_key:r.public_key}; try{ if(r.advertise_filters){ m.advertise_filters = JSON.parse(r.advertise_filters); } }catch(_e){} try{ if(r.accept_filters){ m.accept_filters = JSON.parse(r.accept_filters); } }catch(_e){} return m; }); if(Object.keys(muxcon).length>0) deepSet(out,'muxcon', muxcon);
+        const listeners = tables['muxcon.listeners']._get(); const inits = tables['muxcon.initiators']._get(); const muxcon={}; if(getVal('muxcon.node_name')!==undefined) muxcon.node_name = getVal('muxcon.node_name'); ['heartbeat_interval','mpath_primary_stale_sec','mpath_failover_check_sec','mpath_strategy','mpath_preemptive_promote','mpath_neighbor_idle_drop_sec','federated_cache_enabled','federated_cache_ttl_sec','federated_cache_path','auth_required','auth_key_id','auth_private_key'].forEach(k=>{ const v=getVal('muxcon.'+k); if(v!==undefined) muxcon[k]=v; }); if(listeners && listeners.length>0) muxcon.listeners = listeners; if(inits && inits.length>0) muxcon.initiators = inits; const pkRows = tables['muxcon.public_keys']._get(); if(pkRows && pkRows.length>0) muxcon.public_keys = pkRows.map(r=>{ const m={key_id:r.key_id, public_key:r.public_key}; try{ if(r.advertise_filters){ m.advertise_filters = JSON.parse(r.advertise_filters); } }catch(_e){} try{ if(r.accept_filters){ m.accept_filters = JSON.parse(r.accept_filters); } }catch(_e){} return m; }); if(Object.keys(muxcon).length>0) deepSet(out,'muxcon', muxcon);
         // web_status
         if(getVal('web_status.host')!==undefined || getVal('web_status.port')!==undefined){ deepSet(out,'web_status',{}); maybeSet('web_status.host','web_status.host'); maybeSet('web_status.port','web_status.port'); maybeSet('web_status.enable_http_api','web_status.enable_http_api'); maybeSet('web_status.cors_enable','web_status.cors_enable'); maybeSet('web_status.enable_fault_injection','web_status.enable_fault_injection'); }
         // web_console
