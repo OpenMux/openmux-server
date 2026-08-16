@@ -334,7 +334,7 @@ This section codifies how MuxCon federation connections establish and expose sta
 ### 16.1 Terminology
 - **server_id**: Stable configured identifier for a node in the federation. Defaults to the host name if not explicitly set. Intended to remain constant across process restarts.
 - **instance_id**: Ephemeral UUID generated at process start. Changes on every restart; used to distinguish old vs new generations of connections from the same `server_id`.
-- **node_name**: Optional user‑friendly alias (also used historically). When present it is treated the same as `server_id` for grouping precedence; both are surfaced using the unified `node:` key prefix for compatibility.
+- **node_name**: Removed. `server_id` is the only identity field; it is surfaced using the unified `node:` key prefix.
 
 ### 16.2 Handshake Fields
 ASCII handshake lines (client → server):
@@ -348,10 +348,9 @@ OK MuxCon/1.0 ID=<server_id> INST=<instance_uuid> [optional capability echo]
 
 ### 16.3 Grouping Algorithm (Multipath)
 Connections are grouped to allow failover / path preference decisions. A **peer key** is derived in the adapter:
-1. If handshake supplies `node_name`: `node:<node_name>`
-2. Else if handshake supplies `server_id`: `node:<server_id>` (note: still prefixed with `node:` – no `srv:` prefix is used)
-3. Else (pre‑handshake inbound) collapse by source host: `host:<ip>` (ephemeral until identity known)
-4. Fallback: `unknown:0`
+1. If handshake supplies `server_id`: `node:<server_id>` (note: still prefixed with `node:` – no `srv:` prefix is used)
+2. Else (pre‑handshake inbound) collapse by source host: `host:<ip>` (ephemeral until identity known)
+3. Fallback: `unknown:0`
 
 After handshake completion the connection is re‑keyed if its provisional key changes (e.g. from `host:1.2.3.4` → `node:alpha`). If a group becomes empty the old placeholder group is removed.
 

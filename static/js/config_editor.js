@@ -136,7 +136,6 @@
         'client_listener.max_connections': 'Maximum simultaneous client sessions allowed.',
         'client_listener.connection_timeout': 'Idle connection timeout (seconds).',
 
-        'muxcon.node_name': 'Deprecated: use server.id for identity.',
         'muxcon.heartbeat_interval': 'Seconds between federation keepalive heartbeats.',
         'muxcon.mpath_primary_stale_sec': 'Mark the current primary path stale after this idle time (seconds).',
         'muxcon.mpath_failover_check_sec': 'Interval to check if failover is needed (seconds).',
@@ -1025,7 +1024,6 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         tables['telnet_listener']._set(deepGet(current, 'telnet_listener')||[]);
         tables['ssh_listener']._set(deepGet(current, 'ssh_listener')||[]);
 
-        setVal('muxcon.node_name', deepGet(current, 'muxcon.node_name'));
         setVal('muxcon.heartbeat_interval', deepGet(current, 'muxcon.heartbeat_interval'));
         setVal('muxcon.mpath_primary_stale_sec', deepGet(current, 'muxcon.mpath_primary_stale_sec'));
         setVal('muxcon.mpath_failover_check_sec', deepGet(current, 'muxcon.mpath_failover_check_sec'));
@@ -1158,7 +1156,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         const tls = tables['telnet_listener']._get(); if(tls && tls.length>0) deepSet(out,'telnet_listener', tls);
         const shl = tables['ssh_listener']._get(); if(shl && shl.length>0) deepSet(out,'ssh_listener', shl);
         // muxcon
-        const listeners = tables['muxcon.listeners']._get(); const inits = tables['muxcon.initiators']._get(); const muxcon={}; if(getVal('muxcon.node_name')!==undefined) muxcon.node_name = getVal('muxcon.node_name'); ['heartbeat_interval','mpath_primary_stale_sec','mpath_failover_check_sec','mpath_strategy','mpath_preemptive_promote','mpath_neighbor_idle_drop_sec','federated_cache_enabled','federated_cache_ttl_sec','federated_cache_path','auth_required','auth_key_id','auth_private_key'].forEach(k=>{ const v=getVal('muxcon.'+k); if(v!==undefined) muxcon[k]=v; }); if(listeners && listeners.length>0) muxcon.listeners = listeners; if(inits && inits.length>0) muxcon.initiators = inits; const pkRows = tables['muxcon.public_keys']._get(); if(pkRows && pkRows.length>0) muxcon.public_keys = pkRows.map(r=>{ const m={key_id:r.key_id, public_key:r.public_key}; try{ if(r.advertise_filters){ m.advertise_filters = JSON.parse(r.advertise_filters); } }catch(_e){} try{ if(r.accept_filters){ m.accept_filters = JSON.parse(r.accept_filters); } }catch(_e){} return m; }); if(Object.keys(muxcon).length>0) deepSet(out,'muxcon', muxcon);
+        const listeners = tables['muxcon.listeners']._get(); const inits = tables['muxcon.initiators']._get(); const muxcon={}; ['heartbeat_interval','mpath_primary_stale_sec','mpath_failover_check_sec','mpath_strategy','mpath_preemptive_promote','mpath_neighbor_idle_drop_sec','federated_cache_enabled','federated_cache_ttl_sec','federated_cache_path','auth_required','auth_key_id','auth_private_key'].forEach(k=>{ const v=getVal('muxcon.'+k); if(v!==undefined) muxcon[k]=v; }); if(listeners && listeners.length>0) muxcon.listeners = listeners; if(inits && inits.length>0) muxcon.initiators = inits; const pkRows = tables['muxcon.public_keys']._get(); if(pkRows && pkRows.length>0) muxcon.public_keys = pkRows.map(r=>{ const m={key_id:r.key_id, public_key:r.public_key}; try{ if(r.advertise_filters){ m.advertise_filters = JSON.parse(r.advertise_filters); } }catch(_e){} try{ if(r.accept_filters){ m.accept_filters = JSON.parse(r.accept_filters); } }catch(_e){} return m; }); if(Object.keys(muxcon).length>0) deepSet(out,'muxcon', muxcon);
         // web_status
         if(getVal('web_status.host')!==undefined || getVal('web_status.port')!==undefined){ deepSet(out,'web_status',{}); maybeSet('web_status.host','web_status.host'); maybeSet('web_status.port','web_status.port'); maybeSet('web_status.enable_http_api','web_status.enable_http_api'); maybeSet('web_status.cors_enable','web_status.cors_enable'); maybeSet('web_status.enable_fault_injection','web_status.enable_fault_injection'); }
         // web_console
