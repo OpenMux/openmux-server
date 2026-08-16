@@ -230,7 +230,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         pks = rec.get("public_key")
                         if not kid or not isinstance(pks, str):
                             continue
-                        pub = self._load_ed25519_public_key(pks)
+                        pub = self._load_ed25519_public_key(pks, kid)
                         if pub:
                             self._auth_pubkeys[kid] = pub
                         # Extract optional per-key filter metadata (either nested under muxcon or flat)
@@ -273,7 +273,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 self._auth_priv = self._load_ed25519_private_key(os.path.expanduser(str(priv_path)))
             if key_id_cfg:
                 self._auth_key_id = str(key_id_cfg)
-        except Exception:
+        except Exception as e:
+            self.logger.warning(f"Failed to load MuxCon auth config: {e}", exc_info=True)
             self._auth_priv = None
             self._auth_key_id = None
 
@@ -403,32 +404,44 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self._conn_filters = {}
 
     # ======== Ed25519 helpers (MuxCon auth) ========
-    def _load_ed25519_public_key(self, key_text: str) -> Optional[Ed25519PublicKey]:
+    def _load_ed25519_public_key(self, key_text: str, key_id: Optional[str] = None) -> Optional[Ed25519PublicKey]:
+        label = f" for key_id '{key_id}'" if key_id else ""
         try:
             if not key_text or not isinstance(key_text, str):
+                self.logger.warning(f"MuxCon public key{label} is empty or not a string; ignoring")
                 return None
             key_text = key_text.strip()
             if key_text.startswith("ssh-ed25519 "):
                 pub = serialization.load_ssh_public_key(key_text.encode("utf-8"))
                 if isinstance(pub, Ed25519PublicKey):
                     return pub
+                self.logger.warning(f"MuxCon public key{label} is a valid SSH key but not Ed25519; ignoring")
                 return None
             # Accept base64 or base64:<data>
             if key_text.startswith("base64:"):
                 key_text = key_text[len("base64:") :]
             raw = base64.b64decode(key_text)
             if len(raw) != 32:
+                self.logger.warning(
+                    f"MuxCon public key{label} decoded to {len(raw)} bytes, expected 32 (raw Ed25519 key) or a "
+                    "full 'ssh-ed25519 AAAA...' line; ignoring"
+                )
                 return None
             return Ed25519PublicKey.from_public_bytes(raw)
-        except Exception:
+        except Exception as e:
+            self.logger.warning(f"Failed to parse MuxCon public key{label}: {e}", exc_info=True)
             return None
 
     def _load_ed25519_private_key(self, path: str) -> Optional[Ed25519PrivateKey]:
+        if not path:
+            return None
         try:
-            if not path:
-                return None
             with open(path, "rb") as f:
                 data = f.read()
+        except OSError as e:
+            self.logger.warning(f"Failed to read MuxCon auth private key file '{path}': {e}")
+            return None
+        try:
             # PEM formats
             if data.startswith(b"-----BEGIN"):
                 try:
@@ -442,6 +455,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             return priv2
                     except Exception:
                         pass
+                    self.logger.warning(f"MuxCon auth private key '{path}' is not an Ed25519 key")
                     return None
                 except Exception:
                     # Try OpenSSH private key format
@@ -451,6 +465,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             return priv
                     except Exception:
                         pass
+                    self.logger.warning(f"Failed to parse MuxCon auth private key '{path}' as PEM or OpenSSH")
                     return None
             # Raw/base64 seed in file
             try:
@@ -459,8 +474,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     return Ed25519PrivateKey.from_private_bytes(raw)
             except Exception:
                 pass
+            self.logger.warning(
+                f"MuxCon auth private key '{path}' is not PEM, OpenSSH, or a raw 32-byte base64 Ed25519 key"
+            )
             return None
-        except Exception:
+        except Exception as e:
+            self.logger.warning(f"Failed to load MuxCon auth private key '{path}': {e}", exc_info=True)
             return None
 
     def _is_conn_authenticated(self, conn_id: str) -> bool:
