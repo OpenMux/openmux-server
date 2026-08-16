@@ -198,6 +198,19 @@ def format_rw_notice(payload: Dict[str, Any]) -> str:
     return "\r\n[Access mode updated]\r\n"
 
 
+def format_viewer_label(viewer: Dict[str, str]) -> str:
+    """Render one viewer entry as `<muxcon-server>/username@<ip>` or `username@<ip>`.
+
+    The `<muxcon-server>/` prefix is only shown for entries reporting a
+    `server_id` (i.e. a viewer attached to a *different*, federated server -
+    see `ConsoleManager.get_viewers_display`); a viewer local to this same
+    server omits it, since it's implied.
+    """
+    who = f"{viewer.get('username', 'unknown')}@{viewer.get('ip', 'unknown')}"
+    server_id = viewer.get("server_id")
+    return f"{server_id}/{who}" if server_id else who
+
+
 def format_viewers_notice(viewers: List[Dict[str, str]]) -> str:
     """Render the current per-port viewer list as CRLF-terminated human text.
 
@@ -206,14 +219,14 @@ def format_viewers_notice(viewers: List[Dict[str, str]]) -> str:
 
     Args:
         viewers: Entries as returned by `ConsoleManager.get_viewers_display`,
-            e.g. `[{"username": "alice", "mode": "read-write"}, ...]`.
+            e.g. `[{"username": "alice", "mode": "read-write", "ip": "10.0.0.5"}, ...]`.
 
     Returns:
         str: CRLF-terminated message ready to write directly to the session.
     """
     if not viewers:
         return "\r\n[No one is currently viewing this port]\r\n"
-    lines = [f"{v.get('username', 'unknown')} ({v.get('mode', 'read-only')})" for v in viewers]
+    lines = [f"{format_viewer_label(v)} ({v.get('mode', 'read-only')})" for v in viewers]
     return "\r\n--- Viewers on this port ---\r\n" + "\r\n".join(lines) + "\r\n"
 
 
@@ -227,5 +240,6 @@ __all__ = [
     "feed_escape_byte",
     "CONTROL_MENU_HELP",
     "format_rw_notice",
+    "format_viewer_label",
     "format_viewers_notice",
 ]

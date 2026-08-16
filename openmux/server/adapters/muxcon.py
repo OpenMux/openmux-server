@@ -292,6 +292,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self._wire_state: Dict[str, Dict[str, Any]] = {}
         self._mpath_groups: Dict[str, Dict[str, Any]] = {}
         self.connections: Dict[str, Dict[str, Any]] = {}
+        # Backing field for the main_port_manager property (see below); registers
+        # this adapter as a meta listener the moment a PortManager is attached, so
+        # local viewer-presence changes (issue #48) can be relayed to peers.
+        self._main_port_manager: Optional[Any] = None
         # Receive ordering diagnostics keyed per connection.
         # Root cause of earlier noisy gap warnings: a single global transmit
         # sequence space was shared across all connections while diagnostics
@@ -477,7 +481,150 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             return True
         return bool(conn.get("auth_ok"))
 
-    # ===================== End __init__ =====================
+    @property
+    def main_port_manager(self) -> Optional[Any]:
+        """Local PortManager reference, set externally by main.py after adapter creation."""
+        return self._main_port_manager
+
+    @main_port_manager.setter
+    def main_port_manager(self, pm: Optional[Any]) -> None:
+        self._main_port_manager = pm
+        # Subscribe once so local viewer-presence changes (ConsoleManager.broadcast_presence)
+        # get relayed to federation peers via a VIEWERS control frame (see below).
+        try:
+            if pm is not None and hasattr(pm, "register_meta_listener"):
+                pm.register_meta_listener(self._on_port_meta_for_viewer_presence)
+        except Exception:
+            self.logger.debug("Failed to register viewer-presence meta listener", exc_info=True)
+
+    async def _on_port_meta_for_viewer_presence(self, port_name: str, changes: Optional[Dict[str, Any]]) -> None:
+        """PortManager meta listener: relay a local viewer-presence change to peers.
+
+        Triggered by `ConsoleManager.broadcast_presence()` for ports local to this
+        server. Ignores federation-originated `federated_viewers_updated` events
+        (those already came FROM a peer via `_handle_viewers_frame`, which relays
+        them onward itself) to avoid an echo loop.
+        """
+        if not isinstance(changes, dict) or changes.get("event") != "presence_changed":
+            return
+        try:
+            await self._broadcast_viewer_presence(port_name, changes.get("viewers") or [])
+        except Exception:
+            self.logger.debug(f"Failed to broadcast VIEWERS presence for {port_name}", exc_info=True)
+
+    async def _broadcast_viewer_presence(
+        self, port_name: str, viewers: List[Dict[str, Any]], exclude_conn_id: Optional[str] = None
+    ) -> None:
+        """Send a full viewer-presence snapshot for a port to every active peer.
+
+        Own dedicated control message (`VIEWERS:<port_name>` ... `END:VIEWERS`),
+        decoupled from the much heavier `PORTS:FEDERATED` full-catalog refresh, so
+        a presence change never waits for/triggers a port-list re-advertisement.
+        Entries missing `server_id` (i.e. genuinely local to this server) are
+        tagged with our own `server_id` before going out, so a peer can always
+        tell which server a viewer is actually attached to; entries already
+        tagged (received from further downstream in a relay chain) pass through
+        unchanged.
+        """
+        entries = []
+        for v in viewers:
+            entries.append(
+                {
+                    "server_id": v.get("server_id") or self.server_id,
+                    "username": v.get("username", "unknown"),
+                    "mode": v.get("mode", "read-only"),
+                    "ip": v.get("ip", "unknown"),
+                }
+            )
+        lines = "\n".join(json.dumps(e, separators=(",", ":")) for e in entries)
+        body = f"VIEWERS:{port_name}\n{lines}\nEND:VIEWERS"
+        for cid, conn in list(self.connections.items()):
+            if cid == exclude_conn_id or not self._is_conn_authenticated(cid):
+                continue
+            writer = conn.get("writer")
+            if not isinstance(writer, asyncio.StreamWriter):
+                continue
+            try:
+                seq = self._next_frame_seq(cid)
+                frame = self.proto.create_control_frame(0, seq, body)
+                await self._send_protocol_frame(writer, frame)
+            except Exception:
+                self.logger.debug(f"[{cid}] Failed to send VIEWERS frame for {port_name}", exc_info=True)
+
+    @staticmethod
+    def _parse_viewers_frame(payload: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+        """Parse a `VIEWERS:<port_name>` ... `END:VIEWERS` payload body.
+
+        Returns (port_name, viewers) or None if the payload is malformed.
+        """
+        lines = payload.split("\n")
+        if not lines or not lines[0].startswith("VIEWERS:"):
+            return None
+        port_name = lines[0][len("VIEWERS:") :]
+        entry_lines: List[str] = []
+        for line in lines[1:]:
+            if line.strip() == "END:VIEWERS":
+                break
+            if line.strip():
+                entry_lines.append(line.strip())
+        return port_name, [json.loads(s) for s in entry_lines]
+
+    async def _handle_viewers_frame(self, conn_id: str, payload: str) -> None:
+        """Handle an inbound `VIEWERS:<port_name>` presence snapshot from a peer.
+
+        Stores the reported entries on the matching `RemotePortProxy.remote_viewers`
+        (merged into `ConsoleManager.get_viewers_display` for that port) and, when
+        this server is itself relaying that same port further upstream, forwards
+        the merged snapshot on - each hop only adds its own genuinely-local
+        viewers, entries already tagged with a `server_id` are passed through
+        as-is, so a multi-hop chain never loses or double-counts a viewer.
+        """
+        try:
+            parsed = self._parse_viewers_frame(payload)
+        except Exception:
+            parsed = None
+        if parsed is None:
+            self.logger.debug(f"[{conn_id}] Malformed VIEWERS frame")
+            return
+        port_name, viewers = parsed
+
+        peer_key = self._derive_peer_key_from_conn_id(conn_id)
+        proxy = (self._peer_proxies.get(peer_key) or {}).get(port_name)
+        if proxy is None:
+            return
+        try:
+            proxy.remote_viewers = viewers
+        except Exception:
+            pass
+        try:
+            pm = getattr(self, "main_port_manager", None)
+            if pm and hasattr(pm, "notify_meta_updated"):
+                pm.notify_meta_updated(port_name, {"event": "federated_viewers_updated"})
+        except Exception:
+            pass
+        await self._relay_viewers_upstream(conn_id, port_name, proxy, viewers)
+
+    async def _relay_viewers_upstream(
+        self, conn_id: str, port_name: str, proxy: Any, viewers: List[Dict[str, Any]]
+    ) -> None:
+        """Forward a received VIEWERS snapshot on, adding any of our own local viewers.
+
+        Covers the multi-hop relay case: viewers attached directly to this proxy
+        at this hop (rare: someone viewing the federated port right here). Their
+        IP isn't resolvable from muxcon alone, so it's reported as "unknown".
+        """
+        try:
+            local_here = [
+                {
+                    "username": c.get("username", "unknown"),
+                    "mode": c.get("mode", "read-only"),
+                    "ip": "unknown",
+                }
+                for c in (getattr(proxy, "connected_clients", None) or [])
+            ]
+            await self._broadcast_viewer_presence(port_name, viewers + local_here, exclude_conn_id=conn_id)
+        except Exception:
+            self.logger.debug(f"Failed relaying VIEWERS for {port_name}", exc_info=True)
 
     # BaseGenericAdapter overrides
     def get_capabilities(self) -> Set[AdapterCapability]:
@@ -3212,6 +3359,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     return
                 await self._handle_ports_federated(conn_id, payload)
                 return
+            if payload.startswith("VIEWERS:"):
+                if not self._is_conn_authenticated(conn_id):
+                    return
+                await self._handle_viewers_frame(conn_id, payload)
+                return
             # Other commands can be added here
         except Exception as e:
             self.logger.error(f"Error processing control command from {conn_id}: {e}", exc_info=True)
@@ -4689,6 +4841,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.name = remote_port_name
             self.description = getattr(metadata, "description", f"Remote port {remote_port_name}")
             self.connected_clients: List[Dict[str, Any]] = []
+            # Viewer entries relayed from the origin/further-downstream hops via the
+            # muxcon VIEWERS presence message (issue #48 federation follow-up); each
+            # entry carries its own "server_id" naming the server it's really attached to.
+            self.remote_viewers: List[Dict[str, Any]] = []
             self.max_read_write_users: int = int(getattr(metadata, "max_rw_users", 5) or 5)
             # Console-group access control (issue #24), propagated from the origin
             # server's PortMetadata so ConsoleManager enforces the same ACL locally.

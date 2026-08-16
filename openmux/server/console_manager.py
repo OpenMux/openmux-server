@@ -773,11 +773,15 @@ class ConsoleManager:
         return "unknown"
 
     def get_viewers_display(self, port_name: str) -> List[Dict[str, str]]:
-        """Return `{"username", "mode", "client_id"}` for every client attached to a port.
+        """Return viewer entries for every client attached to a port, local and federated.
 
         Unlike `get_rw_holders_display`, this includes read-only viewers too (see
         GitHub issue #48: presence must be visible to every viewer, not just the
-        read-write holder). `client_id` lets a viewer's own UI mark itself as "(me)".
+        read-write holder). Local entries carry `{"username", "mode", "client_id",
+        "ip"}` (`client_id` lets a viewer's own UI mark itself as "(me)"); when the
+        port is a federated `remote_muxcon` proxy, entries reported by the remote
+        side (via muxcon's VIEWERS presence relay) are appended too, each carrying
+        an extra `"server_id"` naming the server the viewer is actually attached to.
         """
         try:
             port = self.port_manager.ports.get(port_name) if hasattr(self.port_manager, "ports") else None
@@ -785,14 +789,17 @@ class ConsoleManager:
             port = None
         if port is None:
             return []
-        return [
+        entries = [
             {
                 "username": c.get("username", "unknown"),
                 "mode": c.get("mode", "read-only"),
                 "client_id": c.get("client_id", ""),
+                "ip": self._resolve_client_ip(c.get("client_id", "")),
             }
             for c in getattr(port, "connected_clients", [])
         ]
+        entries.extend(getattr(port, "remote_viewers", None) or [])
+        return entries
 
     async def broadcast_presence(self, port_name: str) -> int:
         """Broadcast the current viewer list to every client attached to a port.
@@ -809,6 +816,13 @@ class ConsoleManager:
             int: Number of clients the frame was successfully delivered to.
         """
         viewers = self.get_viewers_display(port_name)
+        # Let PortManager's generic meta-listener bus fan this out to interested
+        # adapters too (e.g. muxcon relays it to peers so a federated view of this
+        # port shows our local viewers - see UnifiedMuxConAdapter's VIEWERS frame).
+        try:
+            self.port_manager.notify_meta_updated(port_name, {"event": "presence_changed", "viewers": viewers})
+        except Exception:
+            self.logger.debug(f"notify_meta_updated(presence_changed) failed for {port_name}", exc_info=True)
         return await self.broadcast_control_frame_to_port(port_name, {"type": "presence", "viewers": viewers})
 
     def get_client_mode(self, client_id: str, port_name: str) -> Optional[str]:

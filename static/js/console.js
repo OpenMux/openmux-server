@@ -145,7 +145,10 @@ function updateViewersBadge(viewers) {
     list.forEach((v) => {
       const row = document.createElement('div');
       const mine = !!myClientId && v.client_id === myClientId;
-      const label = `${v.username || 'unknown'} (${v.mode === 'read-write' ? 'read-write' : 'read-only'})`;
+      // "<muxcon-server>/username@<ip>" for a federated remote viewer, or just
+      // "username@<ip>" for one local to this server (server_id omitted - implied).
+      const who = `${v.username || 'unknown'}@${v.ip || 'unknown'}`;
+      const label = `${v.server_id ? `${v.server_id}/${who}` : who} (${v.mode === 'read-write' ? 'read-write' : 'read-only'})`;
       row.textContent = mine ? `${label} (me)` : label;
       viewersMenuList.appendChild(row);
     });
