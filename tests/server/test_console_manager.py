@@ -206,6 +206,40 @@ def test_get_rw_holders_display_empty_for_unknown_port(cm):
 
 
 # ---------------------------------------------------------------------------
+# get_viewers_display
+
+
+def test_get_viewers_display_excludes_federated_pseudo_client(cm, port_manager):
+    """Regression test for the viewers-badge double-count/mis-format bug.
+
+    `fed:<peer_key>:<sid>` pseudo-clients are added directly to
+    `connected_clients` by UnifiedMuxConAdapter purely for RW-arbitration/notify
+    routing (issue #52) - they must never appear in `get_viewers_display`, since
+    the SAME remote viewer is already reported (properly formatted, with a real
+    username/ip/server_id) via `remote_viewers` from muxcon's VIEWERS relay.
+    """
+    port = FakePort(
+        [
+            {"client_id": "A", "username": "admin", "mode": "read-write"},
+            {"client_id": "fed:node:mbp:3", "username": "federation:node:mbp", "mode": "read-only"},
+        ]
+    )
+    port.remote_viewers = [{"server_id": "mbp", "username": "admin", "mode": "read-only", "ip": "127.0.0.1"}]
+    port_manager.ports["p1"] = port
+
+    viewers = cm.get_viewers_display("p1")
+
+    assert viewers == [
+        {"username": "admin", "mode": "read-write", "client_id": "A", "ip": "unknown"},
+        {"server_id": "mbp", "username": "admin", "mode": "read-only", "ip": "127.0.0.1"},
+    ]
+
+
+def test_get_viewers_display_empty_for_unknown_port(cm):
+    assert cm.get_viewers_display("does-not-exist") == []
+
+
+# ---------------------------------------------------------------------------
 # broadcast_control_frame_to_port
 
 

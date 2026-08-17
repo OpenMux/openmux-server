@@ -1650,6 +1650,38 @@ async def test_send_control_frame_to_client_handles_peer_key_containing_colons(m
 
 
 @pytest.mark.asyncio
+async def test_relay_viewers_upstream_excludes_federated_pseudo_client(monkeypatch):
+    """Multi-hop sibling of the `get_viewers_display` double-count fix: a
+    `fed:`-prefixed pseudo-client on an intermediate hop's RemotePortProxy is an
+    internal RW-arbitration tracker (issue #52), not a real distinct viewer - it
+    must not be folded into `local_here` when relaying a VIEWERS snapshot on."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+
+    class M:
+        pass
+
+    proxy = a.RemotePortProxy(a, "peerA", "p1", M())
+    proxy.connected_clients = [
+        {"client_id": "C", "username": "carol", "mode": "read-only"},
+        {"client_id": "fed:peerB:9", "username": "federation:peerB", "mode": "read-only"},
+    ]
+    broadcast_calls: List[Any] = []
+
+    async def fake_broadcast(port_name, viewers, exclude_conn_id=None):
+        broadcast_calls.append((port_name, viewers, exclude_conn_id))
+
+    monkeypatch.setattr(a, "_broadcast_viewer_presence", fake_broadcast)
+
+    upstream_viewers = [{"server_id": "origin", "username": "admin", "mode": "read-write", "ip": "1.2.3.4"}]
+    await a._relay_viewers_upstream("conn1", "p1", proxy, upstream_viewers)
+
+    assert len(broadcast_calls) == 1
+    _, forwarded, exclude_conn_id = broadcast_calls[0]
+    assert exclude_conn_id == "conn1"
+    assert forwarded == upstream_viewers + [{"username": "carol", "mode": "read-only", "ip": "unknown"}]
+
+
+@pytest.mark.asyncio
 async def test_handle_fedrw_ack_unmatched_readonly_demotes_local_client(monkeypatch):
     """An unmatched (no pending request of ours) read-only FEDRWACK means the
     origin force-demoted our mirrored holder on behalf of one of ITS OWN

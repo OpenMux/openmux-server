@@ -915,6 +915,14 @@ class ConsoleManager:
         port is a federated `remote_muxcon` proxy, entries reported by the remote
         side (via muxcon's VIEWERS presence relay) are appended too, each carrying
         an extra `"server_id"` naming the server the viewer is actually attached to.
+
+        `connected_clients` entries whose `client_id` starts with `"fed:"` are
+        skipped here: those are internal pseudo-clients muxcon registers on the
+        origin port purely so ConsoleManager's RW-arbitration/notify machinery
+        can reach a federated writer (see issue #52 / commit `818e213`); the
+        SAME remote viewer is already reported properly (real username, ip,
+        `server_id`) via `remote_viewers`. Counting both double-counts that
+        viewer and shows a bogus `federation:<peer_key>@unknown` entry.
         """
         try:
             port = self.port_manager.ports.get(port_name) if hasattr(self.port_manager, "ports") else None
@@ -930,6 +938,7 @@ class ConsoleManager:
                 "ip": self._resolve_client_ip(c.get("client_id", "")),
             }
             for c in getattr(port, "connected_clients", [])
+            if not str(c.get("client_id", "")).startswith("fed:")
         ]
         entries.extend(getattr(port, "remote_viewers", None) or [])
         return entries

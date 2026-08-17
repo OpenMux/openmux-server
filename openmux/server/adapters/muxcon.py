@@ -709,6 +709,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         Covers the multi-hop relay case: viewers attached directly to this proxy
         at this hop (rare: someone viewing the federated port right here). Their
         IP isn't resolvable from muxcon alone, so it's reported as "unknown".
+        Entries with a `"fed:"`-prefixed client_id are internal RW-arbitration
+        pseudo-clients (issue #52), not real distinct viewers - skip them here
+        too, else a further-upstream hop would double-count/mis-format the same
+        viewer already carried in `viewers` (see `ConsoleManager.get_viewers_display`).
         """
         try:
             local_here = [
@@ -718,6 +722,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     "ip": "unknown",
                 }
                 for c in (getattr(proxy, "connected_clients", None) or [])
+                if not str(c.get("client_id", "")).startswith("fed:")
             ]
             await self._broadcast_viewer_presence(port_name, viewers + local_here, exclude_conn_id=conn_id)
         except Exception:
