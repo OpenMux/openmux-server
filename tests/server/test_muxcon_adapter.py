@@ -1571,3 +1571,101 @@ async def test_shutdown_legacy_noop_helpers():
     w = FakeWriter()
     await a._shutdown_grace_timeout_task("x", cast(Any, w))
     await a._schedule_shutdown_end("x", cast(Any, w))
+
+
+# ---------------------------------------------------------------------------
+# Regression: a locally initiated force-take must actually reach a federated
+# ("fed:<peer>:<sid>") read-write holder, not just a genuinely local one.
+
+
+@pytest.mark.asyncio
+async def test_send_control_frame_to_client_relays_client_mode_as_fedrwack(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._local_session_map["peerA"] = {7: "p1"}
+    sent: List[Any] = []
+
+    async def fake_send_control(peer_key, payload):
+        sent.append((peer_key, payload))
+        return True
+
+    monkeypatch.setattr(a, "_send_control_mpath", fake_send_control)
+
+    ok = await a.send_control_frame_to_client(
+        "fed:peerA:7", {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
+    )
+
+    assert ok is True
+    assert sent == [("peerA", "FEDRWACK:p1:7:read-only")]
+
+
+@pytest.mark.asyncio
+async def test_send_control_frame_to_client_ignores_non_client_mode_payloads(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._local_session_map["peerA"] = {7: "p1"}
+    sent: List[Any] = []
+
+    async def fake_send_control(peer_key, payload):
+        sent.append((peer_key, payload))
+        return True
+
+    monkeypatch.setattr(a, "_send_control_mpath", fake_send_control)
+
+    # A port-wide presence broadcast isn't a client_mode notice - must not be
+    # mistranslated into a bogus FEDRWACK telling the peer it's read-only.
+    ok = await a.send_control_frame_to_client("fed:peerA:7", {"type": "presence", "viewers": []})
+
+    assert ok is False
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_send_control_frame_to_client_unknown_stream_returns_false():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    ok = await a.send_control_frame_to_client("fed:peerA:99", {"type": "client_mode", "mode": "read-only"})
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_handle_fedrw_ack_unmatched_readonly_demotes_local_client(monkeypatch):
+    """An unmatched (no pending request of ours) read-only FEDRWACK means the
+    origin force-demoted our mirrored holder on behalf of one of ITS OWN
+    clients - the local client attached to that stream must be demoted and
+    notified too, instead of silently staying stuck showing read-write."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    conn_id = "in:10.0.0.1:5555:1"
+    a.connections[conn_id] = {"writer": FakeWriter()}
+    peer_key = a._derive_peer_key_from_conn_id(conn_id)
+
+    async def fake_open(pk, sid, name):
+        return True
+
+    monkeypatch.setattr(a, "_send_stream_open_mpath", fake_open)
+
+    class M:
+        description = "R"
+        max_rw_users = 2
+
+    proxy = a.RemotePortProxy(a, peer_key, "p1", M())
+    sid = await proxy.open_stream_for_client("local_bob")
+    assert sid is not None
+
+    class FakeConsoleManager:
+        def __init__(self):
+            self.demoted: List[Any] = []
+            self.notified: List[Any] = []
+
+        async def demote_client_to_read_only(self, client_id, port_name):
+            self.demoted.append((client_id, port_name))
+            return True
+
+        async def send_control_frame_to_client(self, client_id, payload):
+            self.notified.append((client_id, payload))
+            return True
+
+    fake_cm = FakeConsoleManager()
+    a.console_manager = fake_cm
+
+    await a._handle_fedrw_ack(conn_id, f"FEDRWACK:p1:{sid}:read-only")
+
+    assert fake_cm.demoted == [("local_bob", "p1")]
+    assert fake_cm.notified == [("local_bob", {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"})]

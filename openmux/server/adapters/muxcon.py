@@ -817,7 +817,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Handle an inbound `FEDRWACK:<port_name>:<stream_id>:<mode>` from the origin.
 
         Resolves the pending Future a `RemotePortProxy.request_read_write_for_client`/
-        `release_read_write_for_client` call is awaiting, if one is still pending.
+        `release_read_write_for_client` call is awaiting, if one is still pending. An
+        unmatched read-only ack means the origin force-demoted our mirrored holder on
+        behalf of one of ITS OWN local (or other-peer) clients - see
+        `send_control_frame_to_client` below, the reverse direction of this same
+        notify gap - so the local client attached to that stream must be told too.
         """
         try:
             _, _port_name, sid_str, mode = payload.split(":", 3)
@@ -829,6 +833,60 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         fut = self._fedrw_pending.pop((peer_key, sid), None)
         if fut is not None and not fut.done():
             fut.set_result(mode)
+            return
+        if mode == "read-only":
+            await self._notify_local_client_of_federated_demotion(peer_key, sid)
+
+    async def _notify_local_client_of_federated_demotion(self, peer_key: str, sid: int) -> None:
+        """Demote and notify whichever local client owns stream `sid` to `peer_key`.
+
+        Called for an unmatched FEDRWACK (no pending request of ours resolved it):
+        the origin force-demoted our mirrored read-write holder, so our own local
+        client's console must be told too, instead of silently staying stuck
+        showing read-write until it reconnects.
+        """
+        try:
+            proxy = self._session_map.get(peer_key, {}).get(sid)
+            if proxy is None:
+                return
+            sessions = getattr(proxy, "_client_sessions", None) or {}
+            local_client_id = next((k for k, v in sessions.items() if v == sid), None)
+            console_manager = getattr(self, "console_manager", None)
+            if not local_client_id or local_client_id.startswith("default:") or console_manager is None:
+                return
+            await console_manager.demote_client_to_read_only(local_client_id, proxy.name)
+            await console_manager.send_control_frame_to_client(
+                local_client_id,
+                {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"},
+            )
+        except Exception:
+            self.logger.debug(
+                f"Failed to notify local client of federated demotion (peer={peer_key}, sid={sid})", exc_info=True
+            )
+
+    async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
+        """Relay an access-mode notice to a federated peer's holder of `client_id`.
+
+        `client_id` is one of this adapter's own "fed:<peer_key>:<stream_id>"
+        pseudo-clients (registered with ConsoleManager at stream-open, see the
+        "O" frame handler above), which represent a peer's mirrored client on
+        this origin server. Only `client_mode` notices are meaningful to relay -
+        anything else (e.g. a port-wide `presence` broadcast) is silently
+        ignored, matching prior behavior before this pseudo-client was made
+        reachable through ConsoleManager's generic notify path.
+        """
+        if payload.get("type") != "client_mode":
+            return False
+        try:
+            _, peer_key, sid_str = client_id.split(":", 2)
+            sid = int(sid_str)
+        except Exception:
+            return False
+        port_name = self._local_session_map.get(peer_key, {}).get(sid)
+        if port_name is None:
+            return False
+        mode = str(payload.get("mode", "read-only"))
+        return await self._send_control_mpath(peer_key, f"FEDRWACK:{port_name}:{sid}:{mode}")
 
     # BaseGenericAdapter overrides
     def get_capabilities(self) -> Set[AdapterCapability]:
@@ -2485,9 +2543,17 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         pm = getattr(self, "main_port_manager", None)
                         if pm is not None:
                             try:
-                                await pm.add_client_to_port(
-                                    port_name, f"fed:{peer_key}:{sid}", f"federation:{peer_key}", "read-only"
-                                )
+                                fed_client_id = f"fed:{peer_key}:{sid}"
+                                await pm.add_client_to_port(port_name, fed_client_id, f"federation:{peer_key}", "read-only")
+                                # Also make this pseudo-client reachable through ConsoleManager's
+                                # generic demote/notify machinery, so a LOCALLY initiated
+                                # force-take against a federated holder actually demotes it
+                                # (and notifies the owning peer) instead of silently no-oping
+                                # (see ConsoleManager.force_promote_client).
+                                console_manager = getattr(self, "console_manager", None)
+                                if console_manager is not None:
+                                    console_manager.register_client_port(fed_client_id, port_name)
+                                    console_manager.register_client_channel(fed_client_id, self)
                             except Exception:
                                 self.logger.debug(
                                     f"[{conn_id}] Failed to register federated client for {port_name}", exc_info=True
@@ -2541,7 +2607,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             pm = getattr(self, "main_port_manager", None)
                             if pm is not None:
                                 try:
-                                    await pm.remove_client_from_port(closed_port_name, f"fed:{peer_key}:{sid}")
+                                    fed_client_id = f"fed:{peer_key}:{sid}"
+                                    await pm.remove_client_from_port(closed_port_name, fed_client_id)
+                                    console_manager = getattr(self, "console_manager", None)
+                                    if console_manager is not None:
+                                        console_manager.unregister_client_port(fed_client_id)
+                                        console_manager.unregister_client_channel(fed_client_id)
                                 except Exception:
                                     self.logger.debug(
                                         f"[{conn_id}] Failed to remove federated client for {closed_port_name}",

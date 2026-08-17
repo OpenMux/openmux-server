@@ -741,6 +741,23 @@ class ConsoleManager:
         except Exception:
             pass
 
+    def register_client_port(self, client_id: str, port_name: str) -> None:
+        """Map a client id to a port, bypassing the full `connect_client_to_port` flow.
+
+        For federated pseudo-clients (muxcon's "fed:<peer_key>:<stream_id>" ids,
+        added directly to PortManager by UnifiedMuxConAdapter, never through
+        `connect_client_to_port`) that still need to be reachable by the same
+        generic `demote_client_to_read_only`/`force_promote_client` machinery
+        every other adapter's real clients go through - otherwise a locally
+        initiated force-take against a federated read-write holder silently
+        fails to actually demote it (see `force_promote_client`).
+        """
+        self.client_port_map[client_id] = port_name
+
+    def unregister_client_port(self, client_id: str) -> None:
+        """Remove a mapping registered via `register_client_port`."""
+        self.client_port_map.pop(client_id, None)
+
     async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
         """Deliver an access-mode control frame to a client via its owning adapter.
 

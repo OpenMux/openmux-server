@@ -115,6 +115,42 @@ async def test_force_promote_cross_notifies_via_client_to_manager(cm, port_manag
 
 
 @pytest.mark.asyncio
+async def test_force_promote_demotes_and_notifies_a_federated_holder(cm, port_manager):
+    """A locally initiated force-take must reach a federated ("fed:") RW holder too.
+
+    Regression test: `fed:<peer_key>:<stream_id>` pseudo-clients are added
+    directly to PortManager by UnifiedMuxConAdapter (never through
+    `connect_client_to_port`), so without `register_client_port`/
+    `register_client_channel` at stream-open, `demote_client_to_read_only`
+    silently no-ops for them (not in `client_port_map`) and the origin's own
+    promote_client then denies the local caller because the port still looks
+    full - a local force-take against a federated holder simply failed.
+    """
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    port.connected_clients.append({"client_id": "fed:peerA:7", "username": "federation:peerA", "mode": "read-write"})
+    cm.register_client_port("fed:peerA:7", "p1")
+    muxcon_adapter = FakeAdapterChannel(accept=True)
+    cm.register_client_channel("fed:peerA:7", muxcon_adapter)
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+    ok, undelivered = await cm.force_promote_client("B", "p1")
+
+    assert ok is True
+    assert undelivered == []
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes["fed:peerA:7"] == "read-only"
+    assert modes["B"] == "read-write"
+    client_mode_frames = [p for p in muxcon_adapter.received if p.get("type") == "client_mode"]
+    assert client_mode_frames == [{"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}]
+
+    cm.unregister_client_port("fed:peerA:7")
+    cm.unregister_client_channel("fed:peerA:7")
+    assert "fed:peerA:7" not in cm.client_port_map
+    assert "fed:peerA:7" not in cm.client_to_manager
+
+
+@pytest.mark.asyncio
 async def test_force_promote_no_other_holders_just_promotes(cm, port_manager):
     port = FakePort()
     port_manager.ports["p1"] = port
