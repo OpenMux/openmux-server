@@ -810,7 +810,25 @@ class ConsoleManager:
             except Exception:
                 pass
 
-        ok = await self.promote_client_to_read_write(client_id, port_name)
+        # A federated port's origin may have OTHER read-write holders this
+        # server can't see (a client local to the origin, or attached via a
+        # different federated peer) - a plain promote request would be denied
+        # once the slot looks full to the origin. Ask it to force-demote
+        # everyone and promote this client in one arbitration (issue #52
+        # follow-up) instead of going through the non-forcing request path.
+        try:
+            port = self.port_manager.get_port(port_name)
+        except Exception:
+            port = None
+        if port is not None and hasattr(port, "force_read_write_for_client"):
+            try:
+                origin_mode = await port.force_read_write_for_client(client_id)
+            except Exception:
+                origin_mode = "read-only"
+                self.logger.debug(f"FEDRW FORCE request failed for {client_id} on {port_name}", exc_info=True)
+            ok = origin_mode == "read-write" and await self.port_manager.promote_client(port_name, client_id)
+        else:
+            ok = await self.promote_client_to_read_write(client_id, port_name)
         undelivered: List[str] = []
         if ok:
             demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}

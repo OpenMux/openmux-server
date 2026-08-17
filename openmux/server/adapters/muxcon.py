@@ -724,7 +724,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.debug(f"Failed relaying VIEWERS for {port_name}", exc_info=True)
 
     async def _handle_fedrw_request(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
-        """Handle an inbound `FEDRW:<port_name>:<stream_id>:<REQUEST|RELEASE>` frame.
+        """Handle an inbound `FEDRW:<port_name>:<stream_id>:<REQUEST|RELEASE|FORCE>` frame.
 
         Arbitrates the shared read-write slot on THIS (origin) server, since only
         the origin has full visibility into every RW holder for a port it owns -
@@ -752,6 +752,21 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await pm.promote_client(port_name, fed_client_id)
         elif action == "RELEASE":
             await pm.demote_client(port_name, fed_client_id)
+        elif action == "FORCE":
+            # Force-take: demote every OTHER current read-write holder this
+            # origin knows about - local clients and other federated peers
+            # alike, not just ones visible to the requesting peer's own
+            # mirrored client list - then promote the requester. This is what
+            # makes force-take work across federation boundaries, unlike a
+            # plain REQUEST which the origin denies once the slot is full.
+            try:
+                port = pm.get_port(port_name)
+                for c in list(getattr(port, "connected_clients", None) or []):
+                    if c.get("mode") == "read-write" and c.get("client_id") != fed_client_id:
+                        await pm.demote_client(port_name, c["client_id"])
+            except Exception:
+                self.logger.debug(f"[{conn_id}] Failed to demote other RW holders on {port_name}", exc_info=True)
+            await pm.promote_client(port_name, fed_client_id)
         else:
             self.logger.debug(f"[{conn_id}] Unknown FEDRW action {action!r} for {port_name}")
             return
@@ -5496,6 +5511,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             regardless of whether this call succeeds.
             """
             return await self._request_fedrw(client_id, "RELEASE", timeout)
+
+        async def force_read_write_for_client(self, client_id: str, timeout: float = 3.0) -> str:
+            """Ask the origin to demote every other read-write holder and promote this client.
+
+            A plain `request_read_write_for_client()` is denied by the origin once
+            the slot is full - it has no notion of "force". This is what makes
+            force-take work across federation: the origin is the only party that
+            can see (and demote) EVERY current holder, including local-to-origin
+            clients or ones attached via a different federated peer, which this
+            proxy's own connected_clients mirror never sees (issue #52 follow-up).
+            """
+            return await self._request_fedrw(client_id, "FORCE", timeout)
 
         async def _request_fedrw(self, client_id: str, action: str, timeout: float) -> str:
             """Send a `FEDRW:<port>:<stream_id>:<action>` request and await the ack."""
