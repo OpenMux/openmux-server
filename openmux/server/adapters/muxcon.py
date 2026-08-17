@@ -281,6 +281,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # on both ends (one port's stream mapping silently overwrites the
         # other's, and traffic for one of the two ports stops flowing).
         self._peer_next_stream_id: Dict[str, int] = {}
+        # Pending origin-arbitrated read-write promotion/release requests
+        # (issue #52): keyed by (peer_key, stream_id) -> Future resolved with
+        # the origin's reported resulting mode ("read-write"/"read-only") when
+        # a FEDRWACK frame arrives. Only ever populated on the requesting
+        # (peer) side; the origin side never awaits one of its own.
+        self._fedrw_pending: Dict[Tuple[str, int], "asyncio.Future"] = {}
         # Tasks/shutdown
         self._tasks: List[asyncio.Task] = []
         self._stop_event = asyncio.Event()
@@ -716,6 +722,71 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await self._broadcast_viewer_presence(port_name, viewers + local_here, exclude_conn_id=conn_id)
         except Exception:
             self.logger.debug(f"Failed relaying VIEWERS for {port_name}", exc_info=True)
+
+    async def _handle_fedrw_request(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
+        """Handle an inbound `FEDRW:<port_name>:<stream_id>:<REQUEST|RELEASE>` frame.
+
+        Arbitrates the shared read-write slot on THIS (origin) server, since only
+        the origin has full visibility into every RW holder for a port it owns -
+        local clients and every federated peer alike (issue #52). Always replies
+        with `FEDRWACK:<port_name>:<stream_id>:<mode>` reporting the resulting
+        mode, so the requesting peer never has to assume success.
+        """
+        try:
+            _, port_name, sid_str, action = payload.split(":", 3)
+            sid = int(sid_str)
+        except Exception:
+            self.logger.debug(f"[{conn_id}] Malformed FEDRW frame: {payload[:120]}")
+            return
+        peer_key = self._derive_peer_key_from_conn_id(conn_id)
+        # Only arbitrate for a stream this peer actually has open to this exact
+        # port - guards against a peer spoofing another port's stream id.
+        if self._local_session_map.get(peer_key, {}).get(sid) != port_name:
+            self.logger.warning(f"[{conn_id}] FEDRW {action} for unmapped stream {sid}->{port_name}; ignoring")
+            return
+        pm = getattr(self, "main_port_manager", None)
+        if pm is None:
+            return
+        fed_client_id = f"fed:{peer_key}:{sid}"
+        if action == "REQUEST":
+            await pm.promote_client(port_name, fed_client_id)
+        elif action == "RELEASE":
+            await pm.demote_client(port_name, fed_client_id)
+        else:
+            self.logger.debug(f"[{conn_id}] Unknown FEDRW action {action!r} for {port_name}")
+            return
+        mode = "read-only"
+        try:
+            port = pm.get_port(port_name)
+            for c in getattr(port, "connected_clients", None) or []:
+                if c.get("client_id") == fed_client_id:
+                    mode = c.get("mode", "read-only")
+                    break
+        except Exception:
+            self.logger.debug(f"[{conn_id}] Failed to resolve resulting mode for {port_name}", exc_info=True)
+        try:
+            seq = self._next_frame_seq(conn_id)
+            frame = self.proto.create_control_frame(0, seq, f"FEDRWACK:{port_name}:{sid}:{mode}")
+            await self._send_protocol_frame(writer, frame)
+        except Exception:
+            self.logger.debug(f"[{conn_id}] Failed to send FEDRWACK for {port_name}", exc_info=True)
+
+    async def _handle_fedrw_ack(self, conn_id: str, payload: str) -> None:
+        """Handle an inbound `FEDRWACK:<port_name>:<stream_id>:<mode>` from the origin.
+
+        Resolves the pending Future a `RemotePortProxy.request_read_write_for_client`/
+        `release_read_write_for_client` call is awaiting, if one is still pending.
+        """
+        try:
+            _, _port_name, sid_str, mode = payload.split(":", 3)
+            sid = int(sid_str)
+        except Exception:
+            self.logger.debug(f"[{conn_id}] Malformed FEDRWACK frame: {payload[:120]}")
+            return
+        peer_key = self._derive_peer_key_from_conn_id(conn_id)
+        fut = self._fedrw_pending.pop((peer_key, sid), None)
+        if fut is not None and not fut.done():
+            fut.set_result(mode)
 
     # BaseGenericAdapter overrides
     def get_capabilities(self) -> Set[AdapterCapability]:
@@ -2353,6 +2424,22 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             f"'{existing_port}'; traffic for '{existing_port}' will stop flowing"
                         )
                     self._local_session_map[peer_key][sid] = port_name
+                    # Register the federated stream as a real, tracked client on this
+                    # (origin) port - defaulting to read-only - so PortManager's normal
+                    # slot accounting/mode checks apply to federated writers exactly like
+                    # local ones (issue #52). A peer must explicitly request promotion
+                    # via a FEDRW frame, arbitrated below in _handle_fedrw_request().
+                    if port_name:
+                        pm = getattr(self, "main_port_manager", None)
+                        if pm is not None:
+                            try:
+                                await pm.add_client_to_port(
+                                    port_name, f"fed:{peer_key}:{sid}", f"federation:{peer_key}", "read-only"
+                                )
+                            except Exception:
+                                self.logger.debug(
+                                    f"[{conn_id}] Failed to register federated client for {port_name}", exc_info=True
+                                )
                     # Start background pump to send local port data back to remote stream
                     if port_name:
                         task = asyncio.create_task(self._pump_local_port_to_remote(peer_key, sid, port_name))
@@ -2391,10 +2478,23 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         sid = 0
                     try:
                         peer_key = self._derive_peer_key_from_conn_id(conn_id)
+                        closed_port_name = self._local_session_map.get(peer_key, {}).get(sid)
                         if peer_key in self._session_map and sid in self._session_map[peer_key]:
                             self._session_map[peer_key].pop(sid, None)
                         if peer_key in self._local_session_map and sid in self._local_session_map[peer_key]:
                             self._local_session_map[peer_key].pop(sid, None)
+                        # Deregister the tracked federated client (issue #52) so its
+                        # slot (read-only or read-write) is freed on this origin port.
+                        if closed_port_name:
+                            pm = getattr(self, "main_port_manager", None)
+                            if pm is not None:
+                                try:
+                                    await pm.remove_client_from_port(closed_port_name, f"fed:{peer_key}:{sid}")
+                                except Exception:
+                                    self.logger.debug(
+                                        f"[{conn_id}] Failed to remove federated client for {closed_port_name}",
+                                        exc_info=True,
+                                    )
                     except Exception:  # justification: session cleanup is best-effort during close
                         pass
                 elif ftype == "HB":
@@ -3654,6 +3754,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if not self._is_conn_authenticated(conn_id):
                     return
                 await self._handle_viewers_frame(conn_id, payload)
+                return
+            if payload.startswith("FEDRW:"):
+                if not self._is_conn_authenticated(conn_id):
+                    return
+                await self._handle_fedrw_request(conn_id, writer, payload)
+                return
+            if payload.startswith("FEDRWACK:"):
+                if not self._is_conn_authenticated(conn_id):
+                    return
+                await self._handle_fedrw_ack(conn_id, payload)
                 return
             # Other commands can be added here
         except Exception as e:
@@ -5364,6 +5474,55 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             except Exception as e:
                 self.logger.error(f"Failed to close stream for client {client_id}: {e}", exc_info=True)
                 return False
+
+        async def request_read_write_for_client(self, client_id: str, timeout: float = 3.0) -> str:
+            """Ask the origin server to promote this client's federated stream to read-write.
+
+            The origin is authoritative for the shared read-write slot (issue #52):
+            it sees every RW holder for this port, local clients and every other
+            federated peer alike, while this proxy only ever sees its own local
+            viewers. Returns the resulting mode the origin reports ("read-write" or
+            "read-only"); falls back to "read-only" on any error, timeout, or an
+            older origin that doesn't understand FEDRW frames - fails safely closed
+            rather than optimistically granting.
+            """
+            return await self._request_fedrw(client_id, "REQUEST", timeout)
+
+        async def release_read_write_for_client(self, client_id: str, timeout: float = 3.0) -> str:
+            """Tell the origin server this client no longer needs read-write access.
+
+            Frees the shared slot on the origin so another local or federated
+            writer can be promoted. Best-effort: local demotion should proceed
+            regardless of whether this call succeeds.
+            """
+            return await self._request_fedrw(client_id, "RELEASE", timeout)
+
+        async def _request_fedrw(self, client_id: str, action: str, timeout: float) -> str:
+            """Send a `FEDRW:<port>:<stream_id>:<action>` request and await the ack."""
+            key = client_id or f"default:{self.remote_port_name}"
+            sid = self._client_sessions.get(key)
+            if sid is None:
+                sid = await self._ensure_session(client_id)
+            loop = asyncio.get_event_loop()
+            fut: "asyncio.Future" = loop.create_future()
+            self.adapter._fedrw_pending[(self.connection_id, sid)] = fut
+            try:
+                ok = await self.adapter._send_control_mpath(
+                    self.connection_id, f"FEDRW:{self.remote_port_name}:{sid}:{action}"
+                )
+                if not ok:
+                    return "read-only"
+                return await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                self.logger.warning(f"FEDRW {action} timed out for client={client_id} port={self.remote_port_name}")
+                return "read-only"
+            except Exception as e:
+                self.logger.debug(
+                    f"FEDRW {action} failed for client={client_id} port={self.remote_port_name}: {e}", exc_info=True
+                )
+                return "read-only"
+            finally:
+                self.adapter._fedrw_pending.pop((self.connection_id, sid), None)
 
         async def close_all_streams(self) -> None:
             """Close all client-associated remote streams for this proxy.

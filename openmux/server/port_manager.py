@@ -840,18 +840,19 @@ class PortManager:
         if port_name in self.ports:
             port = self.ports[port_name]
 
-            # Check if client has write permissions
+            # Check if client has write permissions. A federated stream's
+            # "fed:<peer_key>:<stream_id>" client_id is tracked here like any
+            # other client (see UnifiedMuxConAdapter's "O"/"E" frame handling)
+            # and defaults to read-only - it must be explicitly promoted via
+            # a FEDRW request arbitrated by the origin's own promote_client(),
+            # never trusted unconditionally (issue #52).
             client_has_write = False
             client_mode = None
-            if isinstance(client_id, str) and client_id.startswith("fed:"):
-                client_has_write = True
-                client_mode = "federation"
-            else:
-                for client in getattr(port, "connected_clients", []):
-                    if client.get("client_id") == client_id:
-                        client_mode = client.get("mode")
-                        client_has_write = client_mode == "read-write"
-                        break
+            for client in getattr(port, "connected_clients", []):
+                if client.get("client_id") == client_id:
+                    client_mode = client.get("mode")
+                    client_has_write = client_mode == "read-write"
+                    break
 
             if not client_has_write:
                 self.logger.warning(f"WRITE BLOCKED: client={client_id} mode={client_mode or 'unknown'} port={port_name}")

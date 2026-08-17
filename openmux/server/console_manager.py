@@ -316,6 +316,16 @@ class ConsoleManager:
             self.logger.warning(f"Denying connection for '{username}' to port {port_name}: {reason}")
             return False, None, reason
 
+        # A federated (remote_muxcon) port's origin server is the sole authority on
+        # its shared read-write slot (issue #52) - this proxy's own connected_clients
+        # only reflects clients attached HERE, not on the origin or any other peer.
+        # Always attach read-only first; "read-write" here only means this user is
+        # entitled to try for the slot, not that one is actually free right now.
+        is_federated = hasattr(port, "remote_port_name")
+        entitled_mode = mode
+        if is_federated and mode == "read-write":
+            mode = "read-only"
+
         # Add client to port; if read-write is full, fall back to read-only
         success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
         if not success and mode == "read-write":
@@ -331,6 +341,14 @@ class ConsoleManager:
 
         # Start per-client data forwarding task
         self._ensure_client_forwarding_task(port_name, client_id)
+
+        # Federated port: now that a stream is open to the origin, ask it to
+        # arbitrate promotion to the slot this user is entitled to. Best-effort -
+        # falls back to read-only on any failure/timeout/older-origin, never
+        # optimistically grants read-write across a federation link.
+        if is_federated and entitled_mode == "read-write":
+            if await self._request_federated_promotion(port, port_name, client_id):
+                mode = "read-write"
 
         self.logger.info(f"Client {username} ({client_id}) connected to port {port_name} in {mode} mode")
 
@@ -374,6 +392,27 @@ class ConsoleManager:
             self.logger.debug(f"broadcast_presence failed after disconnect for {port_name}", exc_info=True)
         return True
 
+    async def _request_federated_promotion(self, port: Any, port_name: str, client_id: str) -> bool:
+        """Ask a federated port's origin to arbitrate read-write promotion (issue #52).
+
+        Args:
+            port: The RemotePortProxy instance for this federated port.
+            port_name: Local name of the port, for logging.
+            client_id: Client requesting promotion.
+
+        Returns:
+            True if the origin granted read-write and the local promote_client
+            call succeeded; False on denial, timeout, or any error.
+        """
+        try:
+            origin_mode = await port.request_read_write_for_client(client_id)
+        except Exception:
+            origin_mode = "read-only"
+            self.logger.debug(f"FEDRW promotion request failed for {client_id} on {port_name}", exc_info=True)
+        if origin_mode != "read-write":
+            return False
+        return await self.port_manager.promote_client(port_name, client_id)
+
     async def promote_client_to_read_write(self, client_id: str, port_name: str) -> bool:
         """Promote a client's access to read-write on a port.
 
@@ -387,6 +426,17 @@ class ConsoleManager:
         # Check if client is connected to this port
         if client_id not in self.client_port_map or self.client_port_map[client_id] != port_name:
             return False
+
+        # A federated (remote_muxcon) port's origin server is the sole authority on
+        # its shared read-write slot (issue #52) - ask it before granting locally.
+        try:
+            port = self.port_manager.get_port(port_name)
+        except Exception:
+            port = None
+        if port is not None and hasattr(port, "request_read_write_for_client"):
+            if not await self._request_federated_promotion(port, port_name, client_id):
+                self.logger.info(f"Origin denied read-write promotion for {client_id} on federated port {port_name}")
+                return False
 
         # Promote client
         success = await self.port_manager.promote_client(port_name, client_id)
@@ -416,6 +466,18 @@ class ConsoleManager:
         success = await self.port_manager.demote_client(port_name, client_id)
 
         if success:
+            # Release the shared slot on the origin too (issue #52), so another
+            # local or federated writer can be promoted. Best-effort: the local
+            # demotion above already applies regardless of this call's outcome.
+            try:
+                port = self.port_manager.get_port(port_name)
+            except Exception:
+                port = None
+            if port is not None and hasattr(port, "release_read_write_for_client"):
+                try:
+                    await port.release_read_write_for_client(client_id)
+                except Exception:
+                    self.logger.debug(f"FEDRW release failed for {client_id} on {port_name}", exc_info=True)
             self.logger.info(f"Client {client_id} demoted to read-only on port {port_name}")
             try:
                 await self.broadcast_presence(port_name)
