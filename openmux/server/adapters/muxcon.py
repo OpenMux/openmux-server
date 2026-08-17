@@ -759,13 +759,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # mirrored client list - then promote the requester. This is what
             # makes force-take work across federation boundaries, unlike a
             # plain REQUEST which the origin denies once the slot is full.
-            try:
-                port = pm.get_port(port_name)
-                for c in list(getattr(port, "connected_clients", None) or []):
-                    if c.get("mode") == "read-write" and c.get("client_id") != fed_client_id:
-                        await pm.demote_client(port_name, c["client_id"])
-            except Exception:
-                self.logger.debug(f"[{conn_id}] Failed to demote other RW holders on {port_name}", exc_info=True)
+            await self._force_demote_other_rw_holders(conn_id, pm, port_name, fed_client_id)
             await pm.promote_client(port_name, fed_client_id)
         else:
             self.logger.debug(f"[{conn_id}] Unknown FEDRW action {action!r} for {port_name}")
@@ -785,6 +779,39 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await self._send_protocol_frame(writer, frame)
         except Exception:
             self.logger.debug(f"[{conn_id}] Failed to send FEDRWACK for {port_name}", exc_info=True)
+
+    async def _force_demote_other_rw_holders(self, conn_id: str, pm: Any, port_name: str, fed_client_id: str) -> None:
+        """Demote every current read-write holder on `port_name` except `fed_client_id`.
+
+        Called by `_handle_fedrw_request`'s FORCE action. A genuinely local holder
+        (not another federated peer's mirrored "fed:" client) is routed through
+        ConsoleManager so it also gets a live `client_mode` push - otherwise its
+        own console silently stays showing read-write until it reconnects, since a
+        raw `PortManager.demote_client()` only flips the mode server-side.
+        """
+        try:
+            port = pm.get_port(port_name)
+            console_manager = getattr(self, "console_manager", None)
+            for c in list(getattr(port, "connected_clients", None) or []):
+                other_id = c.get("client_id")
+                if c.get("mode") != "read-write" or other_id == fed_client_id:
+                    continue
+                if console_manager is not None and not str(other_id).startswith("fed:"):
+                    try:
+                        await console_manager.demote_client_to_read_only(other_id, port_name)
+                        await console_manager.send_control_frame_to_client(
+                            other_id,
+                            {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"},
+                        )
+                    except Exception:
+                        self.logger.debug(
+                            f"[{conn_id}] Failed to demote/notify local RW holder {other_id} on {port_name}",
+                            exc_info=True,
+                        )
+                else:
+                    await pm.demote_client(port_name, other_id)
+        except Exception:
+            self.logger.debug(f"[{conn_id}] Failed to demote other RW holders on {port_name}", exc_info=True)
 
     async def _handle_fedrw_ack(self, conn_id: str, payload: str) -> None:
         """Handle an inbound `FEDRWACK:<port_name>:<stream_id>:<mode>` from the origin.
@@ -857,6 +884,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "endpoint": "N/A",
                 "clients": 0,
             }
+
+    def set_console_manager(self, console_manager) -> None:
+        """Wire in the shared ConsoleManager.
+
+        Lets a FEDRW FORCE demotion (see `_handle_fedrw_request`) notify a
+        genuinely local (non-federated) RW holder's own live session, instead
+        of only flipping its mode server-side and leaving its console stuck
+        silently showing read-write until it reconnects (issue #52 follow-up).
+        """
+        self.console_manager = console_manager
 
     def set_auth_manager(self, auth_manager) -> None:
         """Wire in the global AuthManager (no longer used for muxcon keys).
