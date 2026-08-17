@@ -146,58 +146,31 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         super().__init__(name, effective_config)
         self.logger = logging.getLogger(f"openmux.adapter.muxcon.{self.name}")
 
-        # Unified-only listener configuration
-        self._servers: List[asyncio.base_events.Server] = []
+        # Unified-only listener configuration. Keyed by (host, port) so a
+        # reconcile can start/stop an individual listener without touching the
+        # others (see reconcile_ports()).
+        self._servers: Dict[Tuple[str, int], asyncio.base_events.Server] = {}
+        # Outbound initiator dial-loop tasks, keyed by (host, port); kept
+        # separate from self._tasks (heartbeat/multipath/retx/cache loops) so a
+        # reconcile can cancel one peer's loop without touching the others.
+        self._initiator_tasks: Dict[Tuple[str, int], asyncio.Task] = {}
         listeners_list = effective_config.get("listeners") or []
         self.listeners_conf: List[Dict[str, Any]] = []
         for idx, lst in enumerate(listeners_list):
             if not isinstance(lst, dict):
                 self.logger.warning(f"Ignoring non-dict listener entry at index {idx}: {lst}")
                 continue
-            lst_conf = {
-                "enabled": bool(lst.get("enabled", True)),
-                "host": lst.get("host", "0.0.0.0"),
-                "port": int(lst.get("port", 7822)),
-                # Default-safe: enable TLS for listeners unless explicitly disabled
-                "use_tls": bool(lst.get("use_tls", True)),
-                "ssl_cert": lst.get("ssl_cert"),
-                "ssl_key": lst.get("ssl_key"),
-                "ssl_ca_cert": lst.get("ssl_ca_cert"),
-                "require_client_cert": bool(lst.get("require_client_cert", False)),
-                "tls_autogen": bool(lst.get("tls_autogen", True)),
-                "tls_dir": lst.get("tls_dir", "~/.openmux/muxcon"),
-                "tls_known_peers_path": lst.get("tls_known_peers_path"),
-                "path_pref": lst.get("path_pref"),
-                "path_group": lst.get("path_group"),
-                "tags": lst.get("tags", {}),
-                # Listener routing/binding options (optional)
-                "interface": lst.get("interface") or lst.get("bind_interface"),
-                "fwmark": lst.get("fwmark") or lst.get("routing_mark") or lst.get("so_mark"),
-            }
-            self.listeners_conf.append(lst_conf)
-        # Known peers / TLS dir defaults (use first listener's tls_dir when present)
-        if self.listeners_conf:
-            primary = self.listeners_conf[0]
-            self._tls_dir = os.path.expanduser(primary.get("tls_dir", "~/.openmux/muxcon"))
-            kp = primary.get("tls_known_peers_path") or os.path.join(self._tls_dir, "known_peers.yaml")
-            self._known_peers_path = os.path.expanduser(kp)
-        else:
-            self._tls_dir = os.path.expanduser("~/.openmux/muxcon")
-            self._known_peers_path = os.path.expanduser(os.path.join(self._tls_dir, "known_peers.yaml"))
+            self.listeners_conf.append(self._normalize_listener_conf(lst))
+        self._refresh_tls_dir_from_listeners()
 
         # Initiators configuration
         self.peers: List[FederationPeer] = []
         for p in effective_config.get("initiators", []) or []:
-            try:
-                self.peers.append(
-                    FederationPeer(
-                        host=p.get("host", "localhost"),
-                        port=int(p.get("port", 7822)),
-                        options={k: v for k, v in p.items() if k not in {"host", "port"}},
-                    )
-                )
-            except Exception as e:
-                self.logger.warning(f"Invalid initiator config {p}: {e}", exc_info=True)
+            peer = self._normalize_peer(p)
+            if peer is None:
+                self.logger.warning(f"Invalid initiator config {p}; skipping")
+                continue
+            self.peers.append(peer)
         # Identity & protocol
         # Canonical identity comes from top-level server.id, with system hostname as fallback.
         # node_name is deprecated and no longer used.
@@ -219,44 +192,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self._auth_pubkeys: Dict[str, Ed25519PublicKey] = {}
         # Optional per-key muxcon filters loaded from muxcon.public_keys entries
         self._key_filters: Dict[str, Dict[str, Any]] = {}
-        try:
-            # New schema (no backward-compat): expect keys under muxcon.public_keys
-            pk_list = effective_config.get("public_keys")
-            if isinstance(pk_list, list):
-                # Load Ed25519 keys and any per-key filter metadata
-                for rec in pk_list:
-                    try:
-                        kid = str(rec.get("key_id")) if rec.get("key_id") is not None else None
-                        pks = rec.get("public_key")
-                        if not kid or not isinstance(pks, str):
-                            continue
-                        pub = self._load_ed25519_public_key(pks, kid)
-                        if pub:
-                            self._auth_pubkeys[kid] = pub
-                        # Extract optional per-key filter metadata (either nested under muxcon or flat)
-                        mux = rec.get("muxcon") or {}
-                        adv = mux.get("advertise_filters") or rec.get("advertise_filters") or {}
-                        acc = mux.get("accept_filters") or rec.get("accept_filters") or {}
-                        def _norm(d: Dict[str, Any]) -> Dict[str, List[str]]:
-                            if not isinstance(d, dict):
-                                return {}
-                            return {
-                                "include": list(d.get("include") or []),
-                                "exclude": list(d.get("exclude") or []),
-                                "adapter_include": list(d.get("adapter_include") or []),
-                                "adapter_exclude": list(d.get("adapter_exclude") or []),
-                                "server_include": list(d.get("server_include") or []),
-                                "server_exclude": list(d.get("server_exclude") or []),
-                            }
-                        self._key_filters[str(kid)] = {
-                            "advertise_filters": _norm(adv),
-                            "accept_filters": _norm(acc),
-                        }
-                    except Exception:
-                        continue
-        except Exception:
-            # Non-fatal; leave maps empty
-            pass
+        self._load_public_keys(effective_config)
         self._auth_priv: Optional[Ed25519PrivateKey] = None
         self._auth_key_id: Optional[str] = None
         try:
@@ -407,9 +343,108 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # Internal: periodic task for TTL cleanup
         self._cache_cleanup_task: Optional[asyncio.Task] = None
 
-        # Per-key filter metadata and per-connection overrides
-        self._key_filters = {}
+        # Per-connection filter overrides (set once a connection authenticates)
         self._conn_filters = {}
+
+    @staticmethod
+    def _normalize_listener_conf(lst: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize one raw `muxcon.listeners[]` entry to its internal shape.
+
+        Shared by `__init__` and `reconcile_ports()` so both build listener
+        config dicts identically (and so reconcile can diff old vs new by
+        equality).
+        """
+        return {
+            "enabled": bool(lst.get("enabled", True)),
+            "host": lst.get("host", "0.0.0.0"),
+            "port": int(lst.get("port", 7822)),
+            # Default-safe: enable TLS for listeners unless explicitly disabled
+            "use_tls": bool(lst.get("use_tls", True)),
+            "ssl_cert": lst.get("ssl_cert"),
+            "ssl_key": lst.get("ssl_key"),
+            "ssl_ca_cert": lst.get("ssl_ca_cert"),
+            "require_client_cert": bool(lst.get("require_client_cert", False)),
+            "tls_autogen": bool(lst.get("tls_autogen", True)),
+            "tls_dir": lst.get("tls_dir", "~/.openmux/muxcon"),
+            "tls_known_peers_path": lst.get("tls_known_peers_path"),
+            "path_pref": lst.get("path_pref"),
+            "path_group": lst.get("path_group"),
+            "tags": lst.get("tags", {}),
+            # Listener routing/binding options (optional)
+            "interface": lst.get("interface") or lst.get("bind_interface"),
+            "fwmark": lst.get("fwmark") or lst.get("routing_mark") or lst.get("so_mark"),
+        }
+
+    def _refresh_tls_dir_from_listeners(self) -> None:
+        """Recompute tls_dir/known_peers_path from the first configured listener."""
+        if self.listeners_conf:
+            primary = self.listeners_conf[0]
+            self._tls_dir = os.path.expanduser(primary.get("tls_dir", "~/.openmux/muxcon"))
+            kp = primary.get("tls_known_peers_path") or os.path.join(self._tls_dir, "known_peers.yaml")
+            self._known_peers_path = os.path.expanduser(kp)
+        else:
+            self._tls_dir = os.path.expanduser("~/.openmux/muxcon")
+            self._known_peers_path = os.path.expanduser(os.path.join(self._tls_dir, "known_peers.yaml"))
+
+    def _normalize_peer(self, p: Dict[str, Any]) -> Optional["FederationPeer"]:
+        """Build a `FederationPeer` from one raw `muxcon.initiators[]` entry."""
+        try:
+            return FederationPeer(
+                host=p.get("host", "localhost"),
+                port=int(p.get("port", 7822)),
+                options={k: v for k, v in p.items() if k not in {"host", "port"}},
+            )
+        except Exception as e:
+            self.logger.warning(f"Invalid initiator config {p}: {e}", exc_info=True)
+            return None
+
+    def _load_public_keys(self, effective_config: Dict[str, Any]) -> None:
+        """(Re)load `muxcon.public_keys` into `_auth_pubkeys`/`_key_filters`.
+
+        Always replaces both maps wholesale (never merges) - safe to call
+        repeatedly since public keys/filters are only consulted at
+        handshake-time for new connections, never for already-established
+        ones. Used by both `__init__` and `reconcile_ports()`.
+        """
+        self._auth_pubkeys: Dict[str, Ed25519PublicKey] = {}
+        self._key_filters: Dict[str, Dict[str, Any]] = {}
+        try:
+            pk_list = effective_config.get("public_keys")
+            if isinstance(pk_list, list):
+                for rec in pk_list:
+                    try:
+                        kid = str(rec.get("key_id")) if rec.get("key_id") is not None else None
+                        pks = rec.get("public_key")
+                        if not kid or not isinstance(pks, str):
+                            continue
+                        pub = self._load_ed25519_public_key(pks, kid)
+                        if pub:
+                            self._auth_pubkeys[kid] = pub
+                        mux = rec.get("muxcon") or {}
+                        adv = mux.get("advertise_filters") or rec.get("advertise_filters") or {}
+                        acc = mux.get("accept_filters") or rec.get("accept_filters") or {}
+                        self._key_filters[str(kid)] = {
+                            "advertise_filters": self._normalize_filter_set(adv),
+                            "accept_filters": self._normalize_filter_set(acc),
+                        }
+                    except Exception:
+                        continue
+        except Exception:
+            # Non-fatal; leave maps empty
+            pass
+
+    @staticmethod
+    def _normalize_filter_set(d: Dict[str, Any]) -> Dict[str, List[str]]:
+        if not isinstance(d, dict):
+            return {}
+        return {
+            "include": list(d.get("include") or []),
+            "exclude": list(d.get("exclude") or []),
+            "adapter_include": list(d.get("adapter_include") or []),
+            "adapter_exclude": list(d.get("adapter_exclude") or []),
+            "server_include": list(d.get("server_include") or []),
+            "server_exclude": list(d.get("server_exclude") or []),
+        }
 
     # ======== Ed25519 helpers (MuxCon auth) ========
     def _load_ed25519_public_key(self, key_text: str, key_id: Optional[str] = None) -> Optional[Ed25519PublicKey]:
@@ -482,9 +517,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     return Ed25519PrivateKey.from_private_bytes(raw)
             except Exception:
                 pass
-            self.logger.warning(
-                f"MuxCon auth private key '{path}' is not PEM, OpenSSH, or a raw 32-byte base64 Ed25519 key"
-            )
+            self.logger.warning(f"MuxCon auth private key '{path}' is not PEM, OpenSSH, or a raw 32-byte base64 Ed25519 key")
             return None
         except Exception as e:
             self.logger.warning(f"Failed to load MuxCon auth private key '{path}': {e}", exc_info=True)
@@ -664,9 +697,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             pass
 
-    async def _relay_viewers_upstream(
-        self, conn_id: str, port_name: str, proxy: Any, viewers: List[Dict[str, Any]]
-    ) -> None:
+    async def _relay_viewers_upstream(self, conn_id: str, port_name: str, proxy: Any, viewers: List[Dict[str, Any]]) -> None:
         """Forward a received VIEWERS snapshot on, adding any of our own local viewers.
 
         Covers the multi-hop relay case: viewers attached directly to this proxy
@@ -755,7 +786,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self._auth_manager = None
         # Prefer local muxcon.public_keys; if none configured, import from AuthManager for backward compatibility in tests
         try:
-            if (not getattr(self, "_auth_pubkeys", None)) and auth_manager and hasattr(auth_manager, "get_ed25519_pubkeys_for_use"):
+            if (
+                (not getattr(self, "_auth_pubkeys", None))
+                and auth_manager
+                and hasattr(auth_manager, "get_ed25519_pubkeys_for_use")
+            ):
                 imported = auth_manager.get_ed25519_pubkeys_for_use("muxcon") or {}
                 if isinstance(imported, dict) and imported:
                     for kid, pub in imported.items():
@@ -777,6 +812,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         mux = rec.get("muxcon") or {}
                         adv = mux.get("advertise_filters") or rec.get("advertise_filters") or {}
                         acc = mux.get("accept_filters") or rec.get("accept_filters") or {}
+
                         def _norm(d: Dict[str, Any]) -> Dict[str, List[str]]:
                             if not isinstance(d, dict):
                                 return {}
@@ -788,6 +824,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 "server_include": list(d.get("server_include") or []),
                                 "server_exclude": list(d.get("server_exclude") or []),
                             }
+
                         kf[kid] = {"advertise_filters": _norm(adv), "accept_filters": _norm(acc)}
                     except Exception:
                         continue
@@ -901,71 +938,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
 
             # Start listeners (multi or single)
             started_any = False
-            for idx, lconf in enumerate(self.listeners_conf):
+            for lconf in self.listeners_conf:
                 if not lconf.get("enabled"):
                     continue
-                host = lconf.get("host", "0.0.0.0")
-                port = int(lconf.get("port", 7822))
-                use_tls = bool(lconf.get("use_tls", False))
-                ssl_cert = lconf.get("ssl_cert")
-                ssl_key = lconf.get("ssl_key")
-                # Autogenerate if requested and missing
-                tls_autogen = bool(lconf.get("tls_autogen", True))
-                if use_tls and tls_autogen and (not ssl_cert or not ssl_key):
-                    try:
-                        cert_path, key_path = await self._ensure_autogen_cert(lconf)
-                        lconf["ssl_cert"], lconf["ssl_key"] = cert_path, key_path
-                        ssl_cert, ssl_key = cert_path, key_path
-                        self.logger.info(f"MuxCon listener[{idx}] TLS autogen cert ready at {cert_path}")
-                    except Exception as e:
-                        self.logger.error(f"TLS autogen failed for listener[{idx}] {host}:{port}: {e}", exc_info=True)
-                        use_tls = False
-                        lconf["use_tls"] = False
-                server_ssl_ctx = None
-                if use_tls:
-                    server_ssl_ctx = await self._create_server_ssl_context(lconf)
-                # Optional interface/fwmark binding for listeners
-                l_iface = lconf.get("interface")
-                l_fwmark = None
-                try:
-                    fm_val = lconf.get("fwmark")
-                    if fm_val is not None:
-                        l_fwmark = int(fm_val)
-                except Exception:
-                    l_fwmark = None
-
-                if l_iface or l_fwmark is not None:
-                    try:
-                        lsock = self._make_listen_socket(host, port, interface=l_iface, fwmark=l_fwmark)
-                        server = await asyncio.start_server(self._accept_client, sock=lsock, ssl=server_ssl_ctx)
-                    except Exception as e:
-                        self.logger.error(
-                            f"Failed to bind listener {host}:{port} with interface/fwmark (iface={l_iface}, mark={l_fwmark}): {e}",
-                            exc_info=True,
-                        )
-                        raise
-                else:
-                    server = await asyncio.start_server(self._accept_client, host, port, ssl=server_ssl_ctx)
-                await server.start_serving()
-                self._servers.append(server)
-                started_any = True
-                # Compose optional routing/bind suffix
-                _suffix_parts = []
-                if l_iface:
-                    _suffix_parts.append(f"iface={l_iface}")
-                if l_fwmark is not None:
-                    _suffix_parts.append(f"fwmark={l_fwmark}")
-                _suffix = (" " + " ".join(_suffix_parts)) if _suffix_parts else ""
-                self.logger.info(
-                    f"MuxCon listener[{idx}] started on {host}:{port}{' TLS' if use_tls else ''} path_pref={lconf.get('path_pref')} path_group={lconf.get('path_group')}{_suffix}"
-                )
+                key = (lconf.get("host", "0.0.0.0"), int(lconf.get("port", 7822)))
+                if await self._start_single_listener(key, lconf):
+                    started_any = True
             if not started_any:
                 self.logger.warning("No listeners actually started (check configuration)")
 
             # Start initiators
             for peer in self.peers:
-                task = asyncio.create_task(self._initiator_loop(peer))
-                self._tasks.append(task)
+                self._start_single_initiator(peer)
 
             # Start heartbeat loop if enabled
             if self.heartbeat_interval and self.heartbeat_interval > 0:
@@ -1000,6 +984,228 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.is_running = False
             return False
 
+    async def _prepare_listener_tls(self, host: str, port: int, lconf: Dict[str, Any]) -> Tuple[bool, Optional[Any]]:
+        """Resolve TLS-autogen + build the server SSL context for one listener.
+
+        Returns:
+            Tuple[bool, Optional[ssl.SSLContext]]: (use_tls, server_ssl_ctx). May
+            mutate `lconf` in place (autogen'd cert/key paths, or disabling TLS on
+            autogen failure) - callers already treat `lconf` as owned/mutable.
+        """
+        use_tls = bool(lconf.get("use_tls", False))
+        tls_autogen = bool(lconf.get("tls_autogen", True))
+        if use_tls and tls_autogen and (not lconf.get("ssl_cert") or not lconf.get("ssl_key")):
+            try:
+                cert_path, key_path = await self._ensure_autogen_cert(lconf)
+                lconf["ssl_cert"], lconf["ssl_key"] = cert_path, key_path
+                self.logger.info(f"MuxCon listener {host}:{port} TLS autogen cert ready at {cert_path}")
+            except Exception as e:
+                self.logger.error(f"TLS autogen failed for listener {host}:{port}: {e}", exc_info=True)
+                use_tls = False
+                lconf["use_tls"] = False
+        server_ssl_ctx = await self._create_server_ssl_context(lconf) if use_tls else None
+        return use_tls, server_ssl_ctx
+
+    @staticmethod
+    def _listener_bind_options(lconf: Dict[str, Any]) -> Tuple[Optional[str], Optional[int]]:
+        """Parse a listener's optional `interface`/`fwmark` bind options."""
+        l_iface = lconf.get("interface")
+        try:
+            fm_val = lconf.get("fwmark")
+            l_fwmark = int(fm_val) if fm_val is not None else None
+        except Exception:
+            l_fwmark = None
+        return l_iface, l_fwmark
+
+    async def _start_single_listener(self, key: Tuple[str, int], lconf: Dict[str, Any]) -> bool:
+        """Bind and start one muxcon listener socket, storing it in `self._servers[key]`.
+
+        Shared by `start()` and `reconcile_ports()` so a hot-reload can add/replace
+        a single listener without touching any other listener or connection.
+
+        Returns:
+            bool: True if the listener was bound and is now serving.
+        """
+        host, port = key
+        use_tls, server_ssl_ctx = await self._prepare_listener_tls(host, port, lconf)
+        l_iface, l_fwmark = self._listener_bind_options(lconf)
+        try:
+            if l_iface or l_fwmark is not None:
+                lsock = self._make_listen_socket(host, port, interface=l_iface, fwmark=l_fwmark)
+                server = await asyncio.start_server(self._accept_client, sock=lsock, ssl=server_ssl_ctx)
+            else:
+                server = await asyncio.start_server(self._accept_client, host, port, ssl=server_ssl_ctx)
+            await server.start_serving()
+        except Exception as e:
+            self.logger.error(
+                f"Failed to bind muxcon listener {host}:{port} (iface={l_iface}, mark={l_fwmark}): {e}",
+                exc_info=True,
+            )
+            return False
+        self._servers[key] = server
+        _suffix_parts = []
+        if l_iface:
+            _suffix_parts.append(f"iface={l_iface}")
+        if l_fwmark is not None:
+            _suffix_parts.append(f"fwmark={l_fwmark}")
+        _suffix = (" " + " ".join(_suffix_parts)) if _suffix_parts else ""
+        self.logger.info(
+            f"MuxCon listener started on {host}:{port}{' TLS' if use_tls else ''} "
+            f"path_pref={lconf.get('path_pref')} path_group={lconf.get('path_group')}{_suffix}"
+        )
+        return True
+
+    async def _stop_single_listener(self, key: Tuple[str, int]) -> None:
+        """Close one listener's server socket, leaving all other listeners untouched."""
+        server = self._servers.pop(key, None)
+        if server is None:
+            return
+        host, port = key
+        try:
+            server.close()
+            await server.wait_closed()
+            self.logger.info(f"MuxCon listener {host}:{port} stopped")
+        except Exception:
+            self.logger.warning(f"Error stopping muxcon listener {host}:{port}", exc_info=True)
+
+    def _start_single_initiator(self, peer: "FederationPeer") -> None:
+        """Start one initiator's dial loop task, tracked by `(host, port)`."""
+        key = (peer.host, peer.port)
+        task = asyncio.create_task(self._initiator_loop(peer))
+        self._initiator_tasks[key] = task
+
+    async def _stop_single_initiator(self, key: Tuple[str, int]) -> None:
+        """Cancel one initiator's dial loop task, leaving other peers untouched.
+
+        Does not close any already-established connection to that peer -
+        the connection (if any) keeps running until it naturally drops or is
+        closed via `stop()`/`_close_connection()`; only the reconnect loop
+        that would dial it again is stopped.
+        """
+        task = self._initiator_tasks.pop(key, None)
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
+        """Incrementally reconcile muxcon listeners/initiators/public_keys.
+
+        Adds, removes, or restarts individual listener sockets and initiator
+        dial loops in place, without disturbing unrelated already-established
+        connections or the shared background loops (heartbeat/multipath/
+        retransmission/cache cleanup) started once in `start()`. Public keys
+        and per-key filters are always safe to replace wholesale since they
+        are only consulted at handshake time for brand-new connections, never
+        for ones already authenticated.
+
+        Args:
+            new_config: Raw muxcon section - a dict (optionally wrapped as
+                `{"muxcon": {...}}`), or None/{} to mean "remove everything".
+
+        Returns:
+            Dict[str, Any]: Summary with `listeners`/`initiators` add/remove/
+            update/unchanged key lists (as `"host:port"` strings) plus a
+            before/after public key count.
+        """
+        effective = self._unwrap_reconcile_config(new_config)
+
+        new_listeners: Dict[Tuple[str, int], Dict[str, Any]] = {}
+        for lst in effective.get("listeners") or []:
+            if isinstance(lst, dict):
+                conf = self._normalize_listener_conf(lst)
+                new_listeners[(conf["host"], conf["port"])] = conf
+        listeners_summary = await self._reconcile_listeners(new_listeners)
+
+        new_peers: Dict[Tuple[str, int], FederationPeer] = {}
+        for p in effective.get("initiators") or []:
+            if isinstance(p, dict):
+                peer = self._normalize_peer(p)
+                if peer is not None:
+                    new_peers[(peer.host, peer.port)] = peer
+        initiators_summary = await self._reconcile_initiators(new_peers)
+
+        # Public keys / per-key filters are always safe to replace wholesale.
+        keys_before = len(self._auth_pubkeys)
+        self._load_public_keys(effective)
+
+        self.is_running = True
+        summary = {
+            "listeners": listeners_summary,
+            "initiators": initiators_summary,
+            "public_keys": {"before": keys_before, "after": len(self._auth_pubkeys)},
+        }
+        self.logger.info(f"MuxCon adapter {self.name} reconcile: {summary}")
+        return summary
+
+    @staticmethod
+    def _unwrap_reconcile_config(new_config: Any) -> Dict[str, Any]:
+        """Unwrap a raw muxcon reconcile config (dict, wrapped, or None) to a plain dict."""
+        if not isinstance(new_config, dict):
+            return {}
+        if "muxcon" in new_config and "listeners" not in new_config and "initiators" not in new_config:
+            effective = new_config.get("muxcon") or {}
+        else:
+            effective = new_config
+        return effective if isinstance(effective, dict) else {}
+
+    @staticmethod
+    def _diff_keys(old_keys: Set[Any], new_keys: Set[Any]) -> Tuple[List[Any], List[Any], List[Any]]:
+        """Return sorted (removed, added, common) key lists between two key sets."""
+        return (
+            sorted(old_keys - new_keys),
+            sorted(new_keys - old_keys),
+            sorted(old_keys & new_keys),
+        )
+
+    async def _reconcile_listeners(self, new_listeners: Dict[Tuple[str, int], Dict[str, Any]]) -> Dict[str, Any]:
+        """Diff+apply `self.listeners_conf` against `new_listeners`, keyed by (host, port)."""
+        old_by_key = {(c["host"], c["port"]): c for c in self.listeners_conf}
+        removed, added, common = self._diff_keys(set(old_by_key.keys()), set(new_listeners.keys()))
+        updated = [k for k in common if old_by_key[k] != new_listeners[k]]
+        unchanged = [k for k in common if k not in updated]
+
+        for key in removed + updated:
+            await self._stop_single_listener(key)
+        start_failed = []
+        for key in added + updated:
+            conf = new_listeners[key]
+            if conf.get("enabled") and not await self._start_single_listener(key, conf):
+                start_failed.append(f"{key[0]}:{key[1]}")
+
+        self.listeners_conf = [new_listeners[k] for k in sorted(new_listeners.keys())]
+        self._refresh_tls_dir_from_listeners()
+
+        return {
+            "added": [f"{h}:{p}" for h, p in added],
+            "removed": [f"{h}:{p}" for h, p in removed],
+            "updated": [f"{h}:{p}" for h, p in updated],
+            "unchanged": [f"{h}:{p}" for h, p in unchanged],
+            "start_failed": start_failed,
+        }
+
+    async def _reconcile_initiators(self, new_peers: Dict[Tuple[str, int], "FederationPeer"]) -> Dict[str, Any]:
+        """Diff+apply `self.peers` against `new_peers`, keyed by (host, port)."""
+        old_peers_by_key = {(p.host, p.port): p for p in self.peers}
+        removed, added, common = self._diff_keys(set(old_peers_by_key.keys()), set(new_peers.keys()))
+        updated = [k for k in common if old_peers_by_key[k].options != new_peers[k].options]
+        unchanged = [k for k in common if k not in updated]
+
+        for key in removed + updated:
+            await self._stop_single_initiator(key)
+        for key in added + updated:
+            self._start_single_initiator(new_peers[key])
+
+        self.peers = list(new_peers.values())
+
+        return {
+            "added": [f"{h}:{p}" for h, p in added],
+            "removed": [f"{h}:{p}" for h, p in removed],
+            "updated": [f"{h}:{p}" for h, p in updated],
+            "unchanged": [f"{h}:{p}" for h, p in unchanged],
+        }
+
     async def stop(self) -> None:
         """Stop adapter: cancel tasks, close listeners, and active connections."""
         try:
@@ -1011,8 +1217,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
 
+            # Cancel initiator dial loops
+            for t in self._initiator_tasks.values():
+                t.cancel()
+            await asyncio.gather(*self._initiator_tasks.values(), return_exceptions=True)
+            self._initiator_tasks.clear()
+
             # Close servers
-            for srv in self._servers:
+            for srv in list(self._servers.values()):
                 try:
                     srv.close()
                     await srv.wait_closed()
@@ -2596,7 +2808,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             pass
                         try:
                             if pm and hasattr(pm, "notify_meta_updated"):
-                                pm.notify_meta_updated(pname, {"event": "federated_cached_offline", "peer_key": peer_key, "connected": False, "last_seen": getattr(proxy, "last_seen", None)})
+                                pm.notify_meta_updated(
+                                    pname,
+                                    {
+                                        "event": "federated_cached_offline",
+                                        "peer_key": peer_key,
+                                        "connected": False,
+                                        "last_seen": getattr(proxy, "last_seen", None),
+                                    },
+                                )
                         except Exception:
                             pass
                 except Exception:
@@ -2702,6 +2922,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 try:
                                     if hasattr(pm, "unregister_federated_port"):
                                         import inspect, asyncio
+
                                         fn = getattr(pm, "unregister_federated_port")
                                         if inspect.iscoroutinefunction(fn):
                                             try:
@@ -2804,6 +3025,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             ServerInfo,
                             ServerType,
                         )
+
                         origin_id = rec.get("origin_server_id") or "remote"
                         server_info = ServerInfo(
                             server_id=str(origin_id),
