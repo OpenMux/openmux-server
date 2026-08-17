@@ -854,7 +854,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             console_manager = getattr(self, "console_manager", None)
             if not local_client_id or local_client_id.startswith("default:") or console_manager is None:
                 return
-            await console_manager.demote_client_to_read_only(local_client_id, proxy.name)
+            # notify_origin=False: the origin already performed this demotion
+            # itself (that's why this unsolicited FEDRWACK arrived) - a normal
+            # demote's own FEDRW RELEASE round-trip would otherwise be sent back
+            # over this very connection, whose read loop (running this handler)
+            # is what would have to receive its reply, self-deadlocking for the
+            # full request timeout before the local client gets notified.
+            await console_manager.demote_client_to_read_only(local_client_id, proxy.name, notify_origin=False)
             await console_manager.send_control_frame_to_client(
                 local_client_id,
                 {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"},
@@ -878,7 +884,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         if payload.get("type") != "client_mode":
             return False
         try:
-            _, peer_key, sid_str = client_id.split(":", 2)
+            # Split from the right: `peer_key` itself commonly contains a colon
+            # (e.g. "node:<server_id>" from `_derive_peer_key_from_conn_id`), so
+            # a naive `client_id.split(":", 2)` mis-parses it and always fails.
+            prefix, sid_str = client_id.rsplit(":", 1)
+            if not prefix.startswith("fed:"):
+                raise ValueError(f"not a federated pseudo-client id: {client_id!r}")
+            peer_key = prefix[len("fed:") :]
             sid = int(sid_str)
         except Exception:
             return False

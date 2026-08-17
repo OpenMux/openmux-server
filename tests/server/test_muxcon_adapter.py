@@ -1626,6 +1626,30 @@ async def test_send_control_frame_to_client_unknown_stream_returns_false():
 
 
 @pytest.mark.asyncio
+async def test_send_control_frame_to_client_handles_peer_key_containing_colons(monkeypatch):
+    """`_derive_peer_key_from_conn_id` commonly returns keys like "node:<server_id>"
+    that themselves contain a colon - a naive `client_id.split(":", 2)` mis-parses
+    "fed:node:peerB:7" as peer_key="node", sid_str="peerB:7" (int() fails), so
+    the notice is silently dropped. Must split from the right instead."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._local_session_map["node:peerB"] = {7: "p1"}
+    sent: List[Any] = []
+
+    async def fake_send_control(peer_key, payload):
+        sent.append((peer_key, payload))
+        return True
+
+    monkeypatch.setattr(a, "_send_control_mpath", fake_send_control)
+
+    ok = await a.send_control_frame_to_client(
+        "fed:node:peerB:7", {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
+    )
+
+    assert ok is True
+    assert sent == [("node:peerB", "FEDRWACK:p1:7:read-only")]
+
+
+@pytest.mark.asyncio
 async def test_handle_fedrw_ack_unmatched_readonly_demotes_local_client(monkeypatch):
     """An unmatched (no pending request of ours) read-only FEDRWACK means the
     origin force-demoted our mirrored holder on behalf of one of ITS OWN
@@ -1654,8 +1678,8 @@ async def test_handle_fedrw_ack_unmatched_readonly_demotes_local_client(monkeypa
             self.demoted: List[Any] = []
             self.notified: List[Any] = []
 
-        async def demote_client_to_read_only(self, client_id, port_name):
-            self.demoted.append((client_id, port_name))
+        async def demote_client_to_read_only(self, client_id, port_name, notify_origin=True):
+            self.demoted.append((client_id, port_name, notify_origin))
             return True
 
         async def send_control_frame_to_client(self, client_id, payload):
@@ -1667,5 +1691,140 @@ async def test_handle_fedrw_ack_unmatched_readonly_demotes_local_client(monkeypa
 
     await a._handle_fedrw_ack(conn_id, f"FEDRWACK:p1:{sid}:read-only")
 
-    assert fake_cm.demoted == [("local_bob", "p1")]
+    # notify_origin=False: the origin already performed this demotion itself,
+    # so no redundant FEDRW RELEASE round-trip should be sent back to it (that
+    # would self-deadlock the very read loop handling this ack).
+    assert fake_cm.demoted == [("local_bob", "p1", False)]
     assert fake_cm.notified == [("local_bob", {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"})]
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_local_force_take_notifies_federated_peers_own_client():
+    """Full two-adapter, real-socket regression for the live bug report: after
+    a genuinely local client on the origin force-takes read-write, the
+    federated peer's OWN local client (a stand-in for its web console) must
+    be notified live over the real wire - not just have its bookkeeping
+    flipped server-side, requiring a refresh/reconnect to notice."""
+    from openmux.server.port_manager import PortManager
+    from openmux.server.console_manager import ConsoleManager
+
+    server_side: Dict[str, Any] = {}
+
+    async def handle(reader, writer):
+        server_side["reader"] = reader
+        server_side["writer"] = writer
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    host, port = server.sockets[0].getsockname()[:2]
+    b_reader, b_writer = await asyncio.open_connection(host, port)
+    while "reader" not in server_side:
+        await asyncio.sleep(0)
+    a_reader, a_writer = server_side["reader"], server_side["writer"]
+
+    ad_a = UnifiedMuxConAdapter("origin", {"listeners": [], "auth_required": False})
+    ad_b = UnifiedMuxConAdapter("peer", {"listeners": [], "auth_required": False})
+
+    conn_a = "in:127.0.0.1:1:1"
+    conn_b = "out:127.0.0.1:1:1"
+    ad_a.connections[conn_a] = {"reader": a_reader, "writer": a_writer, "server_id": "peerB", "opened_at": time.time()}
+    ad_a._wire_state[conn_a] = {"send_next": 1}
+    ad_a._register_mpath_connection(conn_a)
+    ad_b.connections[conn_b] = {"reader": b_reader, "writer": b_writer, "server_id": "peerA", "opened_at": time.time()}
+    ad_b._wire_state[conn_b] = {"send_next": 1}
+    ad_b._register_mpath_connection(conn_b)
+
+    class _FakePort:
+        def __init__(self, max_read_write_users=1):
+            self.connected_clients: List[Dict[str, Any]] = []
+            self.max_read_write_users = max_read_write_users
+            self.client_queues: Dict[str, Any] = {}
+
+    pm_a = PortManager({})
+    pm_a.ports["p1"] = _FakePort(max_read_write_users=1)
+    cm_a = ConsoleManager(pm_a, None)
+    ad_a.main_port_manager = pm_a
+    ad_a.console_manager = cm_a
+
+    pm_b = PortManager({})
+    cm_b = ConsoleManager(pm_b, None)
+    ad_b.main_port_manager = pm_b
+    ad_b.console_manager = cm_b
+
+    read_task_a = asyncio.create_task(ad_a._read_loop(conn_a))
+    read_task_b = asyncio.create_task(ad_b._read_loop(conn_b))
+
+    try:
+
+        class M:
+            description = "R"
+            max_rw_users = 2
+
+        peer_key_b = ad_b._derive_peer_key_from_conn_id(conn_b)
+        proxy = ad_b.RemotePortProxy(ad_b, peer_key_b, "p1", M())
+        pm_b.ports["p1"] = proxy
+
+        class FakeBrowserChannel:
+            def __init__(self):
+                self.received: List[Dict[str, Any]] = []
+
+            async def send_control_frame_to_client(self, client_id, payload):
+                self.received.append(payload)
+                return True
+
+        browser = FakeBrowserChannel()
+        cm_b.client_port_map["browser1"] = "p1"
+        cm_b.register_client_channel("browser1", browser)
+
+        # Attach the browser client for real: sends a genuine "O" (STREAM_OPEN)
+        # frame over the wire, processed by ad_a's real read loop.
+        assert await pm_b.add_client_to_port("p1", "browser1", "browser_user", "read-only")
+
+        for _ in range(100):
+            if any(c.get("client_id", "").startswith("fed:") for c in pm_a.ports["p1"].connected_clients):
+                break
+            await asyncio.sleep(0.02)
+        fed_clients = [c for c in pm_a.ports["p1"].connected_clients if c.get("client_id", "").startswith("fed:")]
+        assert len(fed_clients) == 1
+        fed_client_id = fed_clients[0]["client_id"]
+
+        # The peer's client was already granted read-write earlier (the
+        # REQUEST/ACK grant handshake itself is covered by other tests) -
+        # reflect that on both the origin's tracked fed: entry and the peer's
+        # own local mirror.
+        fed_clients[0]["mode"] = "read-write"
+        proxy.connected_clients.append({"client_id": "browser1", "username": "browser_user", "mode": "read-write"})
+
+        # A genuinely local origin client force-takes read-write.
+        cm_a.client_port_map["human1"] = "p1"
+        pm_a.ports["p1"].connected_clients.append({"client_id": "human1", "username": "human1", "mode": "read-only"})
+
+        ok, undelivered = await cm_a.force_promote_client("human1", "p1")
+        assert ok is True
+
+        # Origin-side bookkeeping demoted the federated holder...
+        assert next(c for c in pm_a.ports["p1"].connected_clients if c["client_id"] == fed_client_id)["mode"] == "read-only"
+
+        # ...and, crucially, that demotion must reach the peer's ACTUAL client
+        # live, over the real wire, with zero refresh/reconnect.
+        for _ in range(100):
+            if browser.received:
+                break
+            await asyncio.sleep(0.02)
+        assert browser.received, f"Peer's own local client was never notified live of the federated demotion - undelivered={undelivered!r}"
+        assert browser.received[-1]["mode"] == "read-only"
+        assert browser.received[-1]["reason"] == "demoted"
+    finally:
+        read_task_a.cancel()
+        read_task_b.cancel()
+        for t in (read_task_a, read_task_b):
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        for w in (a_writer, b_writer):
+            try:
+                w.close()
+            except Exception:
+                pass
+        server.close()
+        await server.wait_closed()

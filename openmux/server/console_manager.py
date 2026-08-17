@@ -450,12 +450,20 @@ class ConsoleManager:
 
         return success
 
-    async def demote_client_to_read_only(self, client_id: str, port_name: str) -> bool:
+    async def demote_client_to_read_only(self, client_id: str, port_name: str, notify_origin: bool = True) -> bool:
         """Demote a client's access to read-only on a port.
 
         Args:
             client_id: Identifier of the client to demote.
             port_name: Port on which to demote the client.
+            notify_origin: Whether to also ask a federated port's origin to
+                release the client's shared read-write slot. Must be False when
+                the caller already knows the origin performed this demotion
+                itself (e.g. `UnifiedMuxConAdapter._notify_local_client_of_federated_demotion`
+                reacting to an unsolicited FEDRWACK) - otherwise the resulting
+                FEDRW RELEASE round-trip blocks on the very same connection
+                whose read loop is currently awaiting it, self-deadlocking for
+                the full request timeout before this method can return.
 
         Returns:
             bool: True if demotion succeeded.
@@ -469,15 +477,16 @@ class ConsoleManager:
             # Release the shared slot on the origin too (issue #52), so another
             # local or federated writer can be promoted. Best-effort: the local
             # demotion above already applies regardless of this call's outcome.
-            try:
-                port = self.port_manager.get_port(port_name)
-            except Exception:
-                port = None
-            if port is not None and hasattr(port, "release_read_write_for_client"):
+            if notify_origin:
                 try:
-                    await port.release_read_write_for_client(client_id)
+                    port = self.port_manager.get_port(port_name)
                 except Exception:
-                    self.logger.debug(f"FEDRW release failed for {client_id} on {port_name}", exc_info=True)
+                    port = None
+                if port is not None and hasattr(port, "release_read_write_for_client"):
+                    try:
+                        await port.release_read_write_for_client(client_id)
+                    except Exception:
+                        self.logger.debug(f"FEDRW release failed for {client_id} on {port_name}", exc_info=True)
             self.logger.info(f"Client {client_id} demoted to read-only on port {port_name}")
             try:
                 await self.broadcast_presence(port_name)
