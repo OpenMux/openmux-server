@@ -1187,8 +1187,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         Returns:
             Tuple[bool, Optional[ssl.SSLContext]]: (use_tls, server_ssl_ctx). May
-            mutate `lconf` in place (autogen'd cert/key paths, or disabling TLS on
-            autogen failure) - callers already treat `lconf` as owned/mutable.
+            mutate `lconf` in place (autogen'd cert/key paths) - callers already
+            treat `lconf` as owned/mutable.
+
+        Raises:
+            ValueError: If this listener requested TLS but no usable cert or SSL
+                context could be produced. The caller must not start the listener
+                in plaintext in that case (fail-closed).
         """
         use_tls = bool(lconf.get("use_tls", False))
         tls_autogen = bool(lconf.get("tls_autogen", True))
@@ -1199,9 +1204,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 self.logger.info(f"MuxCon listener {host}:{port} TLS autogen cert ready at {cert_path}")
             except Exception as e:
                 self.logger.error(f"TLS autogen failed for listener {host}:{port}: {e}", exc_info=True)
-                use_tls = False
-                lconf["use_tls"] = False
+                raise ValueError(f"TLS autogen failed for listener {host}:{port}; not starting a plaintext listener") from e
+        if use_tls and (not lconf.get("ssl_cert") or not lconf.get("ssl_key")):
+            raise ValueError(f"Listener {host}:{port} has TLS enabled but no cert/key and tls_autogen is disabled")
         server_ssl_ctx = await self._create_server_ssl_context(lconf) if use_tls else None
+        if use_tls and server_ssl_ctx is None:
+            # `_create_server_ssl_context` already logged the underlying error.
+            raise ValueError(f"Server TLS unavailable for listener {host}:{port}; not starting a plaintext listener")
         return use_tls, server_ssl_ctx
 
     @staticmethod
@@ -1221,13 +1230,20 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         Shared by `start()` and `reconcile_ports()` so a hot-reload can add/replace
         a single listener without touching any other listener or connection.
 
+        Fail-closed: if this listener has TLS enabled but TLS setup fails (autogen
+        error, bad cert/key, context build error), the listener is not started.
+        Other listeners are unaffected.
+
         Returns:
             bool: True if the listener was bound and is now serving.
         """
         host, port = key
-        use_tls, server_ssl_ctx = await self._prepare_listener_tls(host, port, lconf)
-        l_iface, l_fwmark = self._listener_bind_options(lconf)
+        use_tls = False
+        server_ssl_ctx: Optional[Any] = None
+        l_iface, l_fwmark = None, None
         try:
+            use_tls, server_ssl_ctx = await self._prepare_listener_tls(host, port, lconf)
+            l_iface, l_fwmark = self._listener_bind_options(lconf)
             if l_iface or l_fwmark is not None:
                 lsock = self._make_listen_socket(host, port, interface=l_iface, fwmark=l_fwmark)
                 server = await asyncio.start_server(self._accept_client, sock=lsock, ssl=server_ssl_ctx)
@@ -1236,7 +1252,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await server.start_serving()
         except Exception as e:
             self.logger.error(
-                f"Failed to bind muxcon listener {host}:{port} (iface={l_iface}, mark={l_fwmark}): {e}",
+                f"Failed to start muxcon listener {host}:{port} (iface={l_iface}, mark={l_fwmark}): {e}",
                 exc_info=True,
             )
             return False
@@ -1589,7 +1605,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             if ca:
                 try:
                     ctx.load_verify_locations(cafile=ca)
-                except Exception:  # justification: connection close writer wait best-effort during shutdown
+                except Exception:  # justification: CA file is only for optional client-cert checks; TLS can still be served
                     pass
             if bool(lconf.get("require_client_cert", False)):
                 ctx.verify_mode = ssl.CERT_REQUIRED
@@ -1943,7 +1959,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 # Build client SSL context if requested
                 # Default-safe: enable TLS for initiators unless explicitly disabled
                 use_tls = bool(peer.options.get("use_tls", True))
-                ssl_ctx = await self._create_client_ssl_context(peer) if use_tls else None
+                ssl_ctx = None
+                if use_tls:
+                    ssl_ctx = await self._create_client_ssl_context(peer)
+                    if ssl_ctx is None:
+                        # Fail closed: retry after backoff instead of dialing in plaintext
+                        raise OSError(f"Client TLS unavailable for {peer.host}:{peer.port}; refusing plaintext dial")
                 # If verification is enabled, pass server_hostname for SNI/verification
                 server_hostname = None
                 try:

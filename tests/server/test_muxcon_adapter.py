@@ -176,6 +176,78 @@ async def test_tls_context_builders_and_autogen(tmp_path):
     assert os.path.exists(c) and os.path.exists(k)
 
 
+@pytest.mark.asyncio
+async def test_listener_tls_setup_failure_is_fail_closed(tmp_path, monkeypatch):
+    # TLS requested + autogen failure: listener must not start, and must not
+    # silently downgrade to plaintext.
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+
+    async def boom(lconf):
+        raise RuntimeError("autogen failed on purpose")
+
+    monkeypatch.setattr(a, "_ensure_autogen_cert", boom)
+    lconf = {"use_tls": True, "tls_autogen": True, "tls_dir": str(tmp_path)}
+    key = ("127.0.0.1", 0)
+    assert await a._start_single_listener(key, lconf) is False
+    assert key not in a._servers
+    # The old fail-open bug mutated the config to disable TLS; that must not happen.
+    assert lconf["use_tls"] is True
+
+
+@pytest.mark.asyncio
+async def test_listener_tls_without_cert_or_autogen_is_fail_closed(tmp_path):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    lconf = {"use_tls": True, "tls_autogen": False}
+    key = ("127.0.0.1", 0)
+    assert await a._start_single_listener(key, lconf) is False
+    assert key not in a._servers
+
+
+@pytest.mark.asyncio
+async def test_listener_tls_autogen_still_starts(tmp_path):
+    # Positive control: with autogen working, TLS listener still binds.
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    lconf = {"use_tls": True, "tls_autogen": True, "tls_dir": str(tmp_path)}
+    key = ("127.0.0.1", 0)
+    try:
+        assert await a._start_single_listener(key, lconf) is True
+        assert key in a._servers
+    finally:
+        await a._stop_single_listener(key)
+
+
+@pytest.mark.asyncio
+async def test_initiator_tls_unavailable_never_dials_plaintext(monkeypatch):
+    # If the client SSL context cannot be built, the dial attempt must be
+    # aborted (and retried with backoff), never issued in plaintext.
+    a = UnifiedMuxConAdapter("mx", {"initiators": []})
+
+    async def no_ctx(peer):
+        return None
+
+    monkeypatch.setattr(a, "_create_client_ssl_context", no_ctx)
+
+    dials = []
+
+    async def fake_open(*args, **kwargs):
+        dials.append((args, kwargs))
+        raise AssertionError("initiator dialed without a TLS context")
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+
+    peer = FederationPeer(
+        "127.0.0.1",
+        1,
+        options={"use_tls": True, "retry_backoff_initial": 0.0, "retry_backoff_max": 0.0},
+    )
+    task = asyncio.create_task(a._initiator_loop(peer))
+    await asyncio.sleep(0.05)
+    a._stop_event.set()
+    await task
+    assert dials == []
+    assert a.connections == {}
+
+
 def test_known_peers_load_save_and_fingerprint(tmp_path):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     a._known_peers_path = str(tmp_path / "known.yaml")
