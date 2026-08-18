@@ -309,6 +309,7 @@ Federates multiple OpenMux servers. Can both listen for peers and initiate outbo
 
 Top-level keys:
 - `heartbeat_interval`: Seconds between HB pings (0 to disable; default: 30)
+- `auth_required`: Require the Ed25519 challenge/response from inbound peers (default: true). When false, each started listener logs a warning.
 - `listeners`: List of listener configurations
 - `initiators`: List of outbound peers
 
@@ -316,10 +317,10 @@ Identity note:
 - The node identity is derived from `server.id` at the top level
 
 `listeners` item keys:
-- `enabled`: Enable inbound listener (default: false)
+- `enabled`: Enable inbound listener (default: true)
 - `host`: Bind address (default: `0.0.0.0`)
 - `port`: TCP port (default: 7822)
-- `use_tls`: Enable TLS (default: false)
+- `use_tls`: Enable TLS (default: true)
 - `ssl_cert`: Path to server certificate (PEM)
 - `ssl_key`: Path to server private key (PEM)
 - `ssl_ca_cert`: CA for client cert verification (optional)
@@ -333,7 +334,7 @@ Identity note:
 Each `initiators` entry (all keys are at the same level, alongside `host`/`port`):
 - `host` (required): Peer host
 - `port` (required): Peer port
-- `use_tls`: Enable TLS to peer
+- `use_tls`: Enable TLS to the peer (default: true)
 - `ssl_verify`: Verify peer cert (default: true)
 - `ssl_ca_cert`: CA bundle for verification
 - `ssl_cert`/`ssl_key`: Client cert/key (mutual TLS)
@@ -354,6 +355,28 @@ Platform notes for routing selection:
   - `interface`: Attempts `IP_BOUND_IF`/`IPV6_BOUND_IF` if supported; otherwise ignored.
 - All platforms: `bind_host`/`bind_port` are portable and can be used when the local address is known and stable.
 
+### Certificate verification (initiators)
+
+Each initiator resolves one verification mode per peer. The first match wins:
+
+1. `ssl_verify: false` — "off": no TLS-level check.
+2. `ssl_ca_cert` — "ca": full chain and hostname check against this CA.
+3. `tls_pin_fingerprint` — "pin": exact `sha256:<hex>` fingerprint check after the handshake.
+4. `tls_tofu: true` (default) — "tofou": pin on first use (Trust-On-First-Use).
+5. Otherwise — "system": strict check against the system trust store. This fails for a self-signed peer by design.
+
+In the "pin", "tofou", and "off" modes the TLS-level check is relaxed (`CERT_NONE`). The post-handshake fingerprint gate protects the link. This is what lets a default initiator reach a default listener, whose autogen cert is self-signed.
+
+Behavior:
+- ToFU stores `host:port` to `sha256:<hex>` in the known peers file (default `<tls_dir>/known_peers.yaml`; override with `tls_known_peers_path`). The first connect is unverified and is logged at WARNING. After the first connect, a different certificate is rejected.
+- A pin requires an exact fingerprint match (case-insensitive).
+- A peer that presents no certificate is rejected while a pin or ToFU is active.
+- `ssl_verify: false` disables only the TLS-level check. A configured pin or ToFU gate still protects the link.
+- The autogen cert has a CN of the node's `server.id` and no SAN. For a strict "ca" or "system" check, set `server_hostname` to the peer's `server.id`.
+- To graduate a ToFU peer to an explicit pin, copy the logged fingerprint into `tls_pin_fingerprint`.
+
+The server logs the effective mode once per peer at connect time. An initiator with `use_tls: true` that cannot build its TLS context fails closed: it retries after backoff instead of dialing in plaintext.
+
 Example:
 ```yaml
 muxcon:
@@ -372,6 +395,10 @@ muxcon:
       use_tls: true
       ssl_verify: true
       tls_tofu: true
+      # Explicit pin instead of ToFU (graduate from the logged fingerprint):
+      # tls_pin_fingerprint: "sha256:..."
+      # For strict checks the name must match the peer's server.id (autogen CN):
+      # server_hostname: "hub"
       # Prefer the WAN interface even if IP is DHCP-assigned
       interface: "wan0"         # or `bind_interface`
       # Alternatively, influence routing via source IP

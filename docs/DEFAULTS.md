@@ -98,13 +98,14 @@ command_ports (per-port) (schema defaults)
 - read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
 
 muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapters/muxcon.py)
+- auth_required: true (inbound peers must pass the Ed25519 challenge; the listener logs a warning when false)
 - listeners[*]:
   - enabled: true
   - host: 0.0.0.0
   - port: 7822
-  - use_tls: false (schema default)
-  - require_client_cert: false (schema default)
-  - tls_autogen: true (schema default)
+  - use_tls: true
+  - require_client_cert: false
+  - tls_autogen: true
   - tls_dir: ~/.openmux/muxcon
   - tls_known_peers_path: <tls_dir>/known_peers.yaml
   - interface, fwmark: unset by default
@@ -112,13 +113,14 @@ muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapte
 - initiators[*]:
   - host: localhost (if unspecified)
   - port: 7822 (if unspecified)
-  - use_tls: false
+  - use_tls: true
   - ssl_verify: true
   - retry_backoff_initial: 2.0 (seconds)
   - retry_backoff_max: 30.0 (seconds)
   - retry_short_session_sec: 5.0 (seconds)
   - tls_tofu: true (Trust-On-First-Use)
-  - server_hostname: defaults to host when verification is enabled
+  - verification mode: `ssl_verify: false` > `ssl_ca_cert` > `tls_pin_fingerprint` > `tls_tofu` > system store, first match wins (see configuration/adapters.md, "Certificate verification")
+  - server_hostname: defaults to host (sent as SNI in every TLS mode)
 - heartbeats & timing:
   - heartbeat_interval: 30.0 (seconds)
   - shutdown_grace_timeout_sec: 5.0
