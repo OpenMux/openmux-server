@@ -88,7 +88,7 @@ properties:
     type: object
     additionalProperties: false
     properties:
-      auth_required: { type: boolean }
+      auth_required: { type: boolean, default: true }
       federated_cache_enabled: { type: boolean }
       federated_cache_ttl_sec: { type: number, minimum: 0 }
       federated_cache_path: { type: string }
@@ -107,25 +107,52 @@ properties:
           type: object
           additionalProperties: false
           properties:
-            enabled: { type: boolean }
+            enabled: { type: boolean, default: true }
             interface: { type: string }
-            host: { type: string }
-            port: { type: integer, minimum: 1, maximum: 65535 }
-            use_tls: { type: boolean }
-            tls_autogen: { type: boolean }
-            tls_dir: { type: string }
+            host: { type: string, default: "0.0.0.0" }
+            port: { type: integer, minimum: 1, maximum: 65535, default: 7822 }
+            use_tls: { type: boolean, default: true }
+            tls_autogen: { type: boolean, default: true }
+            tls_dir: { type: string, default: "~/.openmux/muxcon" }
             ssl_cert: { type: string }
             ssl_key: { type: string }
             ssl_ca_cert: { type: string }
-            require_client_cert: { type: boolean }
+            require_client_cert: { type: boolean, default: false }
             tls_known_peers_path: { type: string }
             path_pref: { type: integer }
             path_group: { type: string }
             tags: { type: object, additionalProperties: true }
-            # Tags are now constrained (no arbitrary keys) for strictness.
-            tags: { type: object, additionalProperties: false }
             fwmark: { type: integer }
           required: [enabled, port]
+        uniqueItems: true
+      initiators:
+        # Outbound federation peers. Known options are typed below with their
+        # runtime defaults; any other key is passed through to the adapter, so
+        # items intentionally stay open (additionalProperties: true).
+        type: array
+        items:
+          type: object
+          additionalProperties: true
+          required: [host, port]
+          properties:
+            host: { type: string }
+            port: { type: integer, minimum: 1, maximum: 65535, default: 7822 }
+            use_tls: { type: boolean, default: true }
+            ssl_verify: { type: boolean, default: true }
+            tls_tofu: { type: boolean, default: true }
+            tls_pin_fingerprint: { type: string }
+            ssl_ca_cert: { type: string }
+            ssl_cert: { type: string }
+            ssl_key: { type: string }
+            server_hostname: { type: string }
+            bind_host: { type: string }
+            bind_port: { type: integer, minimum: 0 }
+            interface: { type: string }
+            fwmark: { type: integer }
+            path_pref: { type: integer }
+            retry_backoff_initial: { type: number, minimum: 0 }
+            retry_backoff_max: { type: number, minimum: 0 }
+            retry_short_session_sec: { type: number, minimum: 0 }
         uniqueItems: true
       public_keys:
         type: array
