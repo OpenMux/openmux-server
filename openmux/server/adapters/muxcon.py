@@ -309,6 +309,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self._shutdown_state: Dict[str, Dict[str, Any]] = {}
         # Fault injection state (used by WebStatus /api/fault)
         self._fault_state = {}
+        # One-time logging of the effective TLS verification mode per peer
+        # (keyed "host:port"); the dial loop rebuilds the SSL context on every
+        # retry, so announce state must outlive a single dial attempt.
+        self._tls_mode_announced: Dict[str, str] = {}
 
         # --- Federated port filters (configurable include/exclude globs) ---
         try:
@@ -1267,6 +1271,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             f"MuxCon listener started on {host}:{port}{' TLS' if use_tls else ''} "
             f"path_pref={lconf.get('path_pref')} path_group={lconf.get('path_group')}{_suffix}"
         )
+        if not self._auth_required:
+            self.logger.warning(
+                f"MuxCon listener {host}:{port} is running with auth_required=false; "
+                "inbound federation connections are not checked for a valid Ed25519 identity"
+            )
         return True
 
     async def _stop_single_listener(self, key: Tuple[str, int]) -> None:
@@ -1587,6 +1596,63 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception as e:
             self.logger.debug(f"Heartbeat loop exited with error: {e}", exc_info=True)
 
+    @staticmethod
+    def _resolve_verify_mode(peer: "FederationPeer") -> str:
+        """Resolve the TLS verification mode for one outbound peer.
+
+        Resolution order (first match wins):
+        1. `ssl_verify: false` (explicit) -> "off": no TLS-level checks.
+           Pin/ToFU post-handshake checks still apply per their own flags.
+        2. `ssl_ca_cert` -> "ca": full chain and hostname verification
+           against the given CA (plus any post-handshake gate).
+        3. `tls_pin_fingerprint` -> "pin": the TLS-level check is relaxed so
+           the fingerprint pin can gate the connection; this is what lets a
+           pin protect a self-signed (e.g. autogen) peer cert.
+        4. `tls_tofu` (default true) -> "tofou": the TLS-level check is
+           relaxed so the pin-on-first-use check can gate the connection.
+        5. Otherwise -> "system": strict verification against the system
+           trust store (fails for self-signed peers by design).
+
+        Returns:
+            str: One of "off", "ca", "pin", "tofou", "system".
+        """
+        opts = peer.options or {}
+        if not opts.get("ssl_verify", True):
+            return "off"
+        if opts.get("ssl_ca_cert"):
+            return "ca"
+        if opts.get("tls_pin_fingerprint"):
+            return "pin"
+        if opts.get("tls_tofu", True):
+            return "tofou"
+        return "system"
+
+    def _announce_verify_mode(self, peer: "FederationPeer", mode: str) -> None:
+        """Log once per peer the effective TLS verification mode.
+
+        Warns when the link has no verification at all (no TLS-level check
+        and no pin/ToFU post-handshake gate), and notes when a post-handshake
+        gate relaxes the TLS-level check.
+        """
+        key = f"{peer.host}:{peer.port}"
+        if self._tls_mode_announced.get(key) == mode:
+            return
+        self._tls_mode_announced[key] = mode
+        opts = peer.options or {}
+        gated = bool(opts.get("tls_pin_fingerprint") or opts.get("tls_tofu", True))
+        if mode == "plain":
+            self.logger.warning(f"MuxCon peer {key}: connecting in plaintext (use_tls is false)")
+        elif mode == "off" and not gated:
+            self.logger.warning(f"MuxCon peer {key}: TLS verification disabled and no pin or ToFU gate is active")
+        elif mode == "off":
+            self.logger.info(f"MuxCon peer {key}: TLS-level verification disabled; a post-handshake gate protects the link")
+        elif mode == "pin":
+            self.logger.info(f"MuxCon peer {key}: TLS-level check relaxed; a fixed fingerprint pin protects the link")
+        elif mode == "tofou":
+            self.logger.info(
+                f"MuxCon peer {key}: TLS-level check relaxed; trust-on-first-use gates the link (first connect is unverified)"
+            )
+
     async def _create_server_ssl_context(self, lconf: Dict[str, Any]) -> Optional[ssl.SSLContext]:
         """Build listener TLS context if configured.
 
@@ -1620,6 +1686,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
     async def _create_client_ssl_context(self, peer: FederationPeer) -> Optional[ssl.SSLContext]:
         """Build client TLS context for an outbound peer.
 
+        TLS-level verification follows `_resolve_verify_mode`: modes "pin",
+        "tofou", and "off" relax the TLS-level check (CERT_NONE) so the
+        post-handshake fingerprint check (or an explicit opt-out) is the gate
+        - this is what lets a default initiator reach a default listener that
+        serves a self-signed autogen cert. Mode "ca" verifies the chain and
+        hostname against the configured CA; mode "system" verifies against
+        the system trust store. A client cert/key, when configured, loads in
+        every mode (mutual TLS).
+
         Args:
             peer: Peer configuration.
 
@@ -1628,9 +1703,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         try:
             opts = peer.options or {}
-            verify = opts.get("ssl_verify", True)
+            mode = self._resolve_verify_mode(peer)
             ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-            if opts.get("ssl_ca_cert"):
+            if mode in ("pin", "tofou", "off"):
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            if mode == "ca":
                 try:
                     ctx.load_verify_locations(cafile=opts.get("ssl_ca_cert"))
                 except Exception as e:
@@ -1642,9 +1720,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     ctx.load_cert_chain(str(cert_file), str(key_file))
                 except Exception as e:
                     self.logger.warning(f"Failed to load client cert/key for {peer.host}:{peer.port}: {e}", exc_info=True)
-            if not verify:
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
+            self._announce_verify_mode(peer, mode)
             return ctx
         except Exception as e:
             self.logger.error(f"Failed to create client SSL context: {e}", exc_info=True)
@@ -1799,24 +1875,28 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             - tls_pin_fingerprint -> require exact fingerprint.
             - tls_tofu (default True) -> record on first sight, then enforce.
 
+        When a policy is active and the peer presents no certificate, the
+        connection is rejected - a missing cert is not a valid match.
+
         Args:
             peer: Peer configuration containing TLS policy options.
             writer: Stream writer with active TLS transport.
         """
-        sslobj = writer.get_extra_info("ssl_object")
-        if not sslobj:
-            return
-        der = sslobj.getpeercert(True)
-        if not der:
-            return
-        fp = self._compute_fingerprint(der)
         opts = peer.options or {}
         pin = opts.get("tls_pin_fingerprint")
+        tofu = bool(opts.get("tls_tofu", True))
+        sslobj = writer.get_extra_info("ssl_object")
+        der = sslobj.getpeercert(True) if sslobj else None
+        if not der:
+            if pin or tofu:
+                raise ValueError("peer presented no certificate while fingerprint verification is active")
+            return
+        fp = self._compute_fingerprint(der)
         if pin and fp.lower() != str(pin).lower():
             raise ValueError(f"fingerprint mismatch (got {fp}, expected {pin})")
         if pin:
             return
-        if not opts.get("tls_tofu", True):
+        if not tofu:
             return
         key = f"{peer.host}:{peer.port}"
         mapping = self._load_known_peers()
@@ -1826,7 +1906,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             return
         mapping[key] = fp
         self._save_known_peers(mapping)
-        self.logger.info(f"TOFU stored fingerprint for {key}: {fp}")
+        self.logger.warning(
+            f"TOFU stored fingerprint for {key}: {fp} (first connect is unverified; "
+            "set tls_pin_fingerprint to this value to pin the cert explicitly)"
+        )
 
     # Dynamic ports (not used in MVP yet)
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
@@ -1965,14 +2048,17 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if ssl_ctx is None:
                         # Fail closed: retry after backoff instead of dialing in plaintext
                         raise OSError(f"Client TLS unavailable for {peer.host}:{peer.port}; refusing plaintext dial")
-                # If verification is enabled, pass server_hostname for SNI/verification
+                else:
+                    self._announce_verify_mode(peer, "plain")
+                # SNI/verification hostname: sent in every TLS mode. In "ca" and
+                # "system" modes it is also the name verification checks; in
+                # "pin", "tofou", and "off" modes the TLS-level check is relaxed.
                 server_hostname = None
-                try:
-                    verify = peer.options.get("ssl_verify", True)
-                    if ssl_ctx and verify:
-                        server_hostname = peer.options.get("server_hostname", peer.host)
-                except Exception:  # justification: derive SNI/hostname fallback; safe default to peer.host
-                    server_hostname = peer.host
+                if ssl_ctx is not None:
+                    try:
+                        server_hostname = peer.options.get("server_hostname") or peer.host
+                    except Exception:  # justification: derive SNI/hostname fallback; safe default to peer.host
+                        server_hostname = peer.host
                 # Optional local bind to influence routing via source address
                 local_addr = None
                 try:
@@ -2015,19 +2101,21 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         server_hostname=server_hostname,
                         local_addr=local_addr,
                     )
-                # TOFU / Pin verification
-                try:
-                    await self._verify_peer_fingerprint(peer, writer)
-                except Exception as e:
-                    self.logger.warning(
-                        f"Peer fingerprint verification failed for {peer.host}:{peer.port}: {e}", exc_info=True
-                    )
+                # Fingerprint gate (pin / ToFU). Runs only on TLS connections:
+                # a plaintext peer has no certificate to check.
+                if use_tls:
                     try:
-                        writer.close()
-                        await writer.wait_closed()
-                    except Exception:  # justification: writer close best-effort after fingerprint failure
-                        pass
-                    raise
+                        await self._verify_peer_fingerprint(peer, writer)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Peer fingerprint verification failed for {peer.host}:{peer.port}: {e}", exc_info=True
+                        )
+                        try:
+                            writer.close()
+                            await writer.wait_closed()
+                        except Exception:  # justification: writer close best-effort after fingerprint failure
+                            pass
+                        raise
                 conn_id = f"out:{peer.host}:{peer.port}:{int(time.time())}"
                 session_start = time.time()
                 await self._perform_client_handshake(reader, writer, conn_id)

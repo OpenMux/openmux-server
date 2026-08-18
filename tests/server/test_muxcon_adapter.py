@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import logging
 import os
 import ssl
 import tempfile
@@ -246,6 +247,135 @@ async def test_initiator_tls_unavailable_never_dials_plaintext(monkeypatch):
     await task
     assert dials == []
     assert a.connections == {}
+
+
+def test_verify_mode_resolution_matrix():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    # Default (no optional keys): ToFU gate with relaxed TLS-level check
+    assert a._resolve_verify_mode(FederationPeer("h", 1, options={"use_tls": True})) == "tofou"
+    # Explicit ssl_verify off always wins
+    assert a._resolve_verify_mode(FederationPeer("h", 1, options={"ssl_verify": False})) == "off"
+    assert a._resolve_verify_mode(FederationPeer("h", 1, options={"ssl_verify": False, "ssl_ca_cert": "ca.pem"})) == "off"
+    # A configured CA gives full verification
+    assert a._resolve_verify_mode(FederationPeer("h", 1, options={"ssl_ca_cert": "ca.pem"})) == "ca"
+    # CA wins over pin (pin still applies as an extra post-handshake check)
+    assert (
+        a._resolve_verify_mode(FederationPeer("h", 1, options={"ssl_ca_cert": "ca.pem", "tls_pin_fingerprint": "sha256:aa"}))
+        == "ca"
+    )
+    # Pin gates the link when no CA
+    assert a._resolve_verify_mode(FederationPeer("h", 1, options={"tls_pin_fingerprint": "sha256:aa"})) == "pin"
+    # ToFU off and nothing else: strict system trust verification
+    assert a._resolve_verify_mode(FederationPeer("h", 1, options={"tls_tofu": False})) == "system"
+    # Pin wins over ToFU when both are set
+    assert (
+        a._resolve_verify_mode(FederationPeer("h", 1, options={"tls_pin_fingerprint": "sha256:aa", "tls_tofu": False}))
+        == "pin"
+    )
+
+
+@pytest.mark.asyncio
+async def test_client_ssl_context_by_mode(tmp_path):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    # Default peer: relaxed TLS-level check (ToFU gates the link)
+    ctx = await a._create_client_ssl_context(FederationPeer("h", 1, options={"use_tls": True}))
+    assert ctx.verify_mode == ssl.CERT_NONE and ctx.check_hostname is False
+    # Pin mode: relaxed TLS-level check
+    ctx = await a._create_client_ssl_context(
+        FederationPeer("h", 1, options={"use_tls": True, "tls_pin_fingerprint": "sha256:aa"})
+    )
+    assert ctx.verify_mode == ssl.CERT_NONE and ctx.check_hostname is False
+    # System mode (ToFU off, no CA, no pin): strict
+    ctx = await a._create_client_ssl_context(FederationPeer("h", 1, options={"use_tls": True, "tls_tofu": False}))
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
+    # CA mode with a loadable CA file: strict against that CA
+    ca, _ = await a._ensure_autogen_cert({"tls_dir": str(tmp_path)})
+    ctx = await a._create_client_ssl_context(FederationPeer("h", 1, options={"use_tls": True, "ssl_ca_cert": ca}))
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_gate_fails_without_peer_cert(tmp_path):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._known_peers_path = str(tmp_path / "known.json")
+    w = FakeWriter()  # no ssl_object: peer presented no certificate
+    # Default ToFU gate active -> reject
+    with pytest.raises(ValueError):
+        await a._verify_peer_fingerprint(FederationPeer("h", 1, options={"use_tls": True}), cast(Any, w))
+    # Pin gate active -> reject
+    with pytest.raises(ValueError):
+        await a._verify_peer_fingerprint(
+            FederationPeer("h", 1, options={"use_tls": True, "tls_tofu": False, "tls_pin_fingerprint": "sha256:aa"}),
+            cast(Any, w),
+        )
+    # No gate at all (ToFU off, no pin): nothing to check, pass
+    await a._verify_peer_fingerprint(FederationPeer("h", 1, options={"use_tls": True, "tls_tofu": False}), cast(Any, w))
+
+
+@pytest.mark.asyncio
+async def test_tofu_first_sight_warns_with_fingerprint(tmp_path, caplog):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._known_peers_path = str(tmp_path / "known.json")
+
+    class SslObj:
+        def getpeercert(self, binary_mode):
+            return b"DER1"
+
+    w = FakeWriter()
+    w._extra["ssl_object"] = SslObj()
+    with caplog.at_level(logging.WARNING, logger="openmux.adapter.muxcon.mx"):
+        await a._verify_peer_fingerprint(FederationPeer("h", 1, options={"use_tls": True}), cast(Any, w))
+    assert "TOFU stored fingerprint" in caplog.text
+    stored = a._load_known_peers()["h:1"]
+    assert stored in caplog.text
+    # Second sight: enforced, no re-store warning
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="openmux.adapter.muxcon.mx"):
+        await a._verify_peer_fingerprint(FederationPeer("h", 1, options={"use_tls": True}), cast(Any, w))
+    assert "TOFU stored fingerprint" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_ssl_verify_false_still_applies_tofu_gate(tmp_path):
+    # Back-compat: explicit ssl_verify false relaxes TLS-level checks but the
+    # ToFU post-handshake gate still records and enforces the fingerprint.
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._known_peers_path = str(tmp_path / "known.json")
+
+    class SslObj:
+        def getpeercert(self, binary_mode):
+            return b"DER1"
+
+    w = FakeWriter()
+    w._extra["ssl_object"] = SslObj()
+    peer = FederationPeer("h", 1, options={"use_tls": True, "ssl_verify": False})
+    await a._verify_peer_fingerprint(peer, cast(Any, w))
+    assert a._load_known_peers()
+    ctx = await a._create_client_ssl_context(peer)
+    assert ctx.verify_mode == ssl.CERT_NONE
+
+
+@pytest.mark.asyncio
+async def test_verify_mode_announce_warns_once_when_unverified(tmp_path, caplog):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    peer = FederationPeer("h", 1, options={"use_tls": True, "ssl_verify": False, "tls_tofu": False})
+    with caplog.at_level(logging.WARNING, logger="openmux.adapter.muxcon.mx"):
+        await a._create_client_ssl_context(peer)
+        await a._create_client_ssl_context(peer)
+    assert caplog.text.count("TLS verification disabled and no pin or ToFU gate is active") == 1
+
+
+@pytest.mark.asyncio
+async def test_listener_warns_when_auth_not_required(tmp_path, caplog):
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": False})
+    lconf = a._normalize_listener_conf({"host": "127.0.0.1", "port": 0, "use_tls": False, "tls_dir": str(tmp_path)})
+    key = (lconf["host"], lconf["port"])
+    try:
+        with caplog.at_level(logging.WARNING, logger="openmux.adapter.muxcon.mx"):
+            assert await a._start_single_listener(key, lconf) is True
+        assert "auth_required=false" in caplog.text
+    finally:
+        await a._stop_single_listener(key)
 
 
 def test_known_peers_load_save_and_fingerprint(tmp_path):
@@ -1932,3 +2062,57 @@ async def test_end_to_end_local_force_take_notifies_federated_peers_own_client()
                 pass
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_default_initiator_reaches_default_listener_over_tls(tmp_path):
+    """Interop regression for the safe-defaults gap: an initiator with all
+    safe defaults (use_tls, ssl_verify, ToFU) must complete TLS against a
+    default listener's self-signed autogen cert - which strict system CA
+    verification could never do. Auth is disabled on both sides so this test
+    isolates the TLS behavior (Ed25519 identity has its own tests)."""
+    listener_cfg = UnifiedMuxConAdapter._normalize_listener_conf(
+        {"host": "127.0.0.1", "port": 0, "tls_dir": str(tmp_path / "a")}
+    )
+    ad_a = UnifiedMuxConAdapter("a", {"listeners": [listener_cfg], "auth_required": False})
+    ad_a.server_id = "node-a"
+
+    started = await ad_a.start()
+    assert started is True
+    try:
+        real_port = ad_a._servers[("127.0.0.1", 0)].sockets[0].getsockname()[1]
+
+        # Node B: all safe defaults; the disabled listener entry only gives it
+        # a test-local tls_dir so the ToFU store never touches the real home dir.
+        ad_b = UnifiedMuxConAdapter(
+            "b",
+            {
+                "listeners": [{"host": "127.0.0.1", "port": 0, "enabled": False, "tls_dir": str(tmp_path / "b")}],
+                "initiators": [{"host": "127.0.0.1", "port": real_port}],
+                "auth_required": False,
+            },
+        )
+        ad_b.server_id = "node-b"
+        assert await ad_b.start() is True
+        try:
+            deadline = time.time() + 5.0
+            while not ad_a.connections or not ad_b.connections:
+                if time.time() > deadline:
+                    raise TimeoutError("default-configured nodes never connected")
+                await asyncio.sleep(0.02)
+
+            conn_a = next(iter(ad_a.connections.values()))
+            conn_b = next(iter(ad_b.connections.values()))
+            assert conn_a["role"] == "server" and conn_b["role"] == "client"
+            # Both sides really are on TLS
+            assert conn_a["writer"].get_extra_info("ssl_object") is not None
+            assert conn_b["writer"].get_extra_info("ssl_object") is not None
+            # The ToFU gate pinned the listener's autogen cert on first sight
+            stored = ad_b._load_known_peers().get(f"127.0.0.1:{real_port}")
+            assert stored and stored.startswith("sha256:")
+            # Peer identity flowed through the handshake
+            assert conn_b["server_id"] == "node-a"
+        finally:
+            await ad_b.stop()
+    finally:
+        await ad_a.stop()
