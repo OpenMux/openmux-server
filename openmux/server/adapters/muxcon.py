@@ -1090,7 +1090,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 port = lst.get("port", 7822)
                 if not isinstance(port, int) or not (1 <= port <= 65535):
                     raise ValueError(f"listeners[{i}].port must be 1-65535")
-                use_tls = bool(lst.get("use_tls", False))
+                # Default must match _normalize_listener_conf (use_tls on) so
+                # validation and runtime see the same effective TLS setting.
+                use_tls = bool(lst.get("use_tls", True))
                 if use_tls:
                     if (not lst.get("ssl_cert") or not lst.get("ssl_key")) and not bool(lst.get("tls_autogen", True)):
                         raise ValueError(f"listeners[{i}] TLS enabled but missing cert/key and tls_autogen disabled")
