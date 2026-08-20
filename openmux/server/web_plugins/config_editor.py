@@ -564,7 +564,7 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
     """Return a JSON Schema describing the config shape for UI form building.
 
     Attempts to load the authoritative YAML-formatted JSON Schema from the
-    repository (docs/to_check/openmux_config_schema.yaml). If unavailable or
+    repository (config_schema/openmux_config_schema.yaml). If unavailable or
     invalid, falls back to a permissive minimal schema. Server-side validation
     via ConfigManager remains the source of truth.
     """
@@ -584,15 +584,15 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
         candidates = []
         if env_path:
             candidates.append(Path(env_path))
-        # Repo root relative to this file: openmux/server/web_plugins/ -> repo_root/docs/to_check/...
+        # Repo root relative to this file: openmux/server/web_plugins/ -> repo_root/config_schema/...
         try:
             repo_root = Path(__file__).resolve().parents[3]
-            candidates.append(repo_root / "docs" / "to_check" / "openmux_config_schema.yaml")
+            candidates.append(repo_root / "config_schema" / "openmux_config_schema.yaml")
         except Exception:
             pass
         # Also check current working directory mirror path (when running from repo root)
         try:
-            candidates.append(Path.cwd() / "docs" / "to_check" / "openmux_config_schema.yaml")
+            candidates.append(Path.cwd() / "config_schema" / "openmux_config_schema.yaml")
         except Exception:
             pass
 

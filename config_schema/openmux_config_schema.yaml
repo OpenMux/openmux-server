@@ -1,11 +1,12 @@
 "$schema": "https://json-schema.org/draft/2020-12/schema"
 "$id": "https://openmux.org/schema/server-config"
-title: OpenMux Server Configuration Schema (Simplified)
+title: OpenMux Server Configuration Schema
 description: >
-  Validates core OpenMux configuration. This simplified schema covers common
-  sections and defaults and is compatible with loopback and web demos.
+  Validates the core OpenMux server configuration (server.yaml).
+  Authentication credentials live in authentication.yaml (see
+  openmux_authentication_schema.yaml) and are not part of server.yaml.
 type: object
-required: [server, authentication]
+required: [server]
 additionalProperties: false
 properties:
   server:
@@ -16,67 +17,7 @@ properties:
       description: { type: string }
       control_socket: { type: string, default: logs/openmux.sock }
       pidfile: { type: string, default: logs/openmux.pid }
-  authentication:
-    type: object
-    additionalProperties: false
-    properties:
-      users:
-        type: array
-        items:
-          type: object
-          additionalProperties: false
-          required: [username, password_hash]
-          properties:
-            username: { type: string }
-            password_hash: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
-            permissions: { type: string, enum: [admin, read-write, read-only] }
-      api_keys:
-        type: array
-        items:
-          type: object
-          additionalProperties: false
-          required: [key]
-          properties:
-            name: { type: string }
-            key: { type: string }
-            permissions: { type: string, enum: [admin, read-write, read-only] }
-      public_keys:
-        type: array
-        items:
-          type: object
-          additionalProperties: false
-          required: [key_id, public_key]
-          properties:
-            username: { type: string }
-            key_id: { type: string }
-            public_key: { type: string }
-            allowed_uses:
-              type: array
-              items: { type: string, enum: [client, muxcon] }
-              uniqueItems: true
-      pam:
-        type: object
-        additionalProperties: false
-        properties:
-          enabled: { type: boolean, default: false }
-          service_name: { type: string, default: login }
-          allow_root: { type: boolean, default: false }
-          allowed_users:
-            type: array
-            items: { type: string }
-            uniqueItems: true
-          groups:
-            type: object
-            additionalProperties: false
-            properties:
-              admin_group: { type: string, default: openmux_admin }
-              write_group: { type: string, default: openmux_write }
-              read_group: { type: string, default: openmux_read }
-    anyOf:
-      - required: [users]
-      - required: [api_keys]
-      - required: [public_keys]
-      - required: [pam]
+      fail_fast_adapters: { type: boolean, default: true }
   logging:
     type: object
     additionalProperties: false
@@ -167,6 +108,7 @@ properties:
         description: { type: string }
         buffer_size: { type: integer, minimum: 1, default: 1024 }
         echo_delay: { type: number, minimum: 0, default: 0.0 }
+        sanitize_control: { type: boolean, default: true }
         max_read_write_users: { type: integer, minimum: 1, default: 5 }
         scrollback_size: { type: integer, minimum: 0, default: 0 }
         read_write_groups:
@@ -191,6 +133,8 @@ properties:
         max_read_write_users: { type: integer, minimum: 1, default: 1 }
         interactive: { type: boolean }
         always_buffer: { type: boolean }
+        normalize_newlines: { type: boolean }
+        use_pty: { type: boolean }
         scrollback_size: { type: integer, minimum: 0, default: 0 }
         read_write_groups:
           type: array
@@ -282,6 +226,20 @@ properties:
       mpath_strategy: { type: string, enum: [best_pref] }
       mpath_preemptive_promote: { type: boolean }
       mpath_neighbor_idle_drop_sec: { type: number, minimum: 0 }
+      auth:
+        type: object
+        additionalProperties: false
+        description: >
+          Ed25519 client authentication (nested form). The flat top-level keys
+          auth_key_id and auth_private_key are equivalent and also accepted.
+        properties:
+          required: { type: boolean }
+          private_key: { type: string }
+          private_key_path: { type: string }
+          key_id: { type: string }
+      auth_key_id: { type: string }
+      auth_private_key: { type: string }
+      auth_private_key_path: { type: string }
       listeners:
         type: array
         items:
@@ -383,7 +341,18 @@ properties:
       template_dir: { type: string }
       plugins:
         type: array
-        items: { type: string }
+        items:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+              anyOf:
+                - required: [module]
+                - required: [name]
+              properties:
+                module: { type: string }
+                name: { type: string }
+                enabled: { type: boolean, default: true }
   web_status:
     type: object
     additionalProperties: false

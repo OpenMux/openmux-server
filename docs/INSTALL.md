@@ -308,7 +308,7 @@ Example minimal config is provided at `config/loopback_test.yaml`.
 - Control socket permission denied:
   - The socket is created with 0600; run `openmuxctl` as the same user that started the server, or change the path to a root-owned directory only if you also run the server as root.
 - Schema/UI in the web console not loading:
-  - The server falls back to a permissive schema if the YAML schema isn’t found. Ensure `docs/to_check/openmux_config_schema.yaml` exists when running from the repo.
+  - The server falls back to a permissive schema if the YAML schema isn’t found. Ensure `config_schema/openmux_config_schema.yaml` exists when running from the repo.
 
 ---
 

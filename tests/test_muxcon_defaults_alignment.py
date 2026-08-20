@@ -18,10 +18,7 @@ import yaml
 from openmux.server.adapters.muxcon import UnifiedMuxConAdapter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_PATHS = (
-    REPO_ROOT / "config_schema" / "openmux_config_schema.yaml",
-    REPO_ROOT / "docs" / "to_check" / "openmux_config_schema.yaml",
-)
+SCHEMA_PATH = REPO_ROOT / "config_schema" / "openmux_config_schema.yaml"
 
 
 def _muxcon_schema(path: Path) -> dict:
@@ -54,9 +51,8 @@ def test_normalize_listener_defaults_are_safe():
     assert conf["tls_dir"] == "~/.openmux/muxcon"
 
 
-@pytest.mark.parametrize("schema_path", SCHEMA_PATHS, ids=["config_schema", "docs/to_check"])
-def test_schema_muxcon_defaults_match_runtime(schema_path: Path):
-    props = _muxcon_schema(schema_path)["properties"]
+def test_schema_muxcon_defaults_match_runtime():
+    props = _muxcon_schema(SCHEMA_PATH)["properties"]
     li = props["listeners"]["items"]["properties"]
     ini = props["initiators"]["items"]["properties"]
     # Every schema default below must equal the runtime default in muxcon.py.
@@ -74,9 +70,8 @@ def test_schema_muxcon_defaults_match_runtime(schema_path: Path):
     assert ini["tls_tofu"]["default"] is True
 
 
-@pytest.mark.parametrize("schema_path", SCHEMA_PATHS, ids=["config_schema", "docs/to_check"])
-def test_schema_muxcon_initiators_present_and_single_tags(schema_path: Path):
-    mx = _muxcon_schema(schema_path)
+def test_schema_muxcon_initiators_present_and_single_tags():
+    mx = _muxcon_schema(SCHEMA_PATH)
     # 'initiators' must exist: the muxcon object sets additionalProperties:
     # false, so an absent 'initiators' key rejects every real config that
     # dials a peer.
@@ -84,10 +79,7 @@ def test_schema_muxcon_initiators_present_and_single_tags(schema_path: Path):
     assert mx["properties"]["initiators"]["items"]["required"] == ["host", "port"]
     # Listener 'tags' must be defined exactly once and allow tag keys
     # (a duplicated key made the strict definition win and rejected all tags).
-    assert schema_path.read_text()[schema_path.read_text().index("muxcon:") :].count("tags:") == 1
+    raw = SCHEMA_PATH.read_text()
+    assert raw[raw.index("muxcon:") :].count("tags:") == 1
     tags = mx["properties"]["listeners"]["items"]["properties"]["tags"]
     assert tags["additionalProperties"] is True
-
-
-def test_schema_copies_muxcon_sections_in_sync():
-    assert _muxcon_schema(SCHEMA_PATHS[0]) == _muxcon_schema(SCHEMA_PATHS[1])

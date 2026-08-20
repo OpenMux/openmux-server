@@ -361,7 +361,7 @@ clean:
 
 # Default config and schema paths (override with `make validate-config CONFIG=...`)
 CONFIG ?= config/server.yaml
-SCHEMA ?= docs/openmux_config_schema.yaml
+SCHEMA ?= config_schema/openmux_config_schema.yaml
 
 validate-config: venv-dev
 	$(call print_status,"Validating configuration $(CONFIG) against $(SCHEMA)...")
@@ -369,21 +369,8 @@ validate-config: venv-dev
 	$(call print_success,"Configuration $(CONFIG) is valid")
 
 validate-all-configs: venv-dev
-	$(call print_status,"Validating all configuration files in ./config against $(SCHEMA)...")
-	set -e; \
-	fail=0; \
-	for f in config/*.yaml; do \
-		echo "--- $$f"; \
-		if ! $(PYTHON_VENV) scripts/validate_config.py --config "$$f" --schema $(SCHEMA); then \
-			fail=1; \
-		fi; \
-	done; \
-	if [ $$fail -ne 0 ]; then \
-		echo "$(COLOR_RED)One or more configurations failed validation$(COLOR_RESET)"; \
-		exit 1; \
-	else \
-		echo "$(COLOR_GREEN)All configurations passed validation$(COLOR_RESET)"; \
-	fi
+	$(call print_status,"Validating all configuration files in ./config against their schemas...")
+	$(PYTHON_VENV) scripts/validate_schema.py
 
 # ============================================================================
 # Runtime Targets

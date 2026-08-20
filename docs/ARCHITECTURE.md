@@ -19,10 +19,10 @@ This document gives a precise, implementation‑oriented map of how the OpenMux 
 
 ---
 ## 2. Configuration Model (Strict Schema)
-The authoritative schema is `docs/openmux_config_schema.yaml`. Minimal required top‑level keys:
-- `server`: identifiers and metadata.
-- `authentication`: at least one of `users` or `api_keys`.
-- At least one runtime provider section present: one or more of (`client_listener`, `serial_ports`, `loopback_ports`, `command_ports`, `muxcon`, `web_status`).
+The authoritative schemas live in `config_schema/`, one per config file. Minimal required top‑level keys:
+- `server.yaml` (schema `openmux_config_schema.yaml`): `server` (identifiers and metadata). At least one runtime provider section present: one or more of (`client_listener`, `serial_ports`, `loopback_ports`, `command_ports`, `muxcon`, `web_status`).
+- `authentication.yaml` (schema `openmux_authentication_schema.yaml`): at least one of `users`, `api_keys`, `public_keys`, or `external_auth`.
+- `security.yaml` (schema `openmux_security_schema.yaml`): optional allow‑lists and rate limits.
 
 Only per‑section configuration is supported. Each top‑level section maps directly to a specific adapter plugin (e.g., `loopback_ports`, `serial_ports`, `client_listener`, `muxcon`). The factory instantiates adapters from the sections present in the config.
 
@@ -194,7 +194,7 @@ class MyAdapter(BaseGenericAdapter):
 ## 13. Fast Onboarding Tasks
 1. Read `openmux/server/adapters/base_adapter.py` and `lifecycle.py`.
 2. Inspect an existing simple adapter (e.g., `loopback.py`).
-3. Run `make validate-config` on a sample config; study `docs/openmux_config_schema.yaml`.
+3. Run `make validate-config` on a sample config; study `config_schema/openmux_config_schema.yaml`.
 4. Add a trivial adapter (copy skeleton) and register it; confirm it appears in server startup logs under "Available Plugin Types".
 
 ---
