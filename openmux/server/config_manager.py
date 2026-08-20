@@ -187,15 +187,19 @@ class ConfigManager:
     def _validate_authentication_config(self):
         """Validate the ``authentication`` section.
 
-        Ensures that at least one of ``users``, ``api_keys``, ``public_keys``, or ``pam`` is present.
+        Ensures that at least one of ``users``, ``api_keys``, ``public_keys``,
+        or ``external_auth`` is present.
 
         Raises:
-            ValueError: If neither users nor api_keys is defined.
+            ValueError: If no authentication method is defined.
         """
         assert self.config is not None  # Type narrowing
         auth = self.config["authentication"]
-        if not ("users" in auth or "api_keys" in auth or "public_keys" in auth or "pam" in auth):
-            raise ValueError("Authentication section must contain 'users', 'api_keys', 'public_keys', or 'pam'")
+        auth_methods = ("users", "api_keys", "public_keys", "external_auth")
+        if not any(method in auth for method in auth_methods):
+            raise ValueError(
+                "Authentication section must contain 'users', 'api_keys', 'public_keys', or 'external_auth'"
+            )
 
     def _validate_serial_ports_config(self):
         """Validate the ``serial_ports`` section (if present).

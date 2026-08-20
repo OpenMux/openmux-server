@@ -171,14 +171,17 @@
         'web_console.tls_dir': 'Directory to store autogen TLS artifacts.',
         'web_console.base_path': 'Base URL path prefix for the web console (e.g., /openmux). Use "/" for root.',
         'web_console.respect_forwarded_prefix': 'Honor X-Forwarded-Prefix header from reverse proxies to derive base path per request.',
-        // PAM help
-        'auth.pam.enabled': 'Enable UNIX PAM for username/password authentication.',
-        'auth.pam.service_name': 'PAM service name to use (login/system-auth/etc).',
-        'auth.pam.allow_root': 'Allow root to authenticate via PAM (default: off).',
-        'auth.pam.allowed_users': 'Optional allowlist: only listed users are accepted for PAM.',
-        'auth.pam.groups.admin_group': 'System group name granting admin role.',
-        'auth.pam.groups.write_group': 'System group name granting read-write role.',
-        'auth.pam.groups.read_group': 'System group name granting read-only role.',
+        // External auth help
+        'auth.extauth.enabled': 'Enable external authentication via the auth helper binary (UNIX accounts and groups).',
+        'auth.extauth.service': 'Service name passed to the auth helper (default: openmux).',
+        'auth.extauth.helper': 'Path to the auth helper binary. Multi-element helper lists must be edited in YAML.',
+        'auth.extauth.timeout': 'Seconds before a helper response is treated as failure (default: 10).',
+        'auth.extauth.allow_root': 'Allow root to authenticate via external auth (default: off).',
+        'auth.extauth.allowed_users': 'Optional allowlist: only listed users are accepted for external auth.',
+        'auth.extauth.groups.admin_group': 'System group name granting admin role.',
+        'auth.extauth.groups.write_group': 'System group name granting read-write role.',
+        'auth.extauth.groups.read_group': 'System group name granting read-only role.',
+        'auth.extauth.default_permission': 'Fallback role for authenticated users with no group mapping.',
       };
 
       // Merge defaults parsed from docs/DEFAULTS.md
@@ -215,13 +218,14 @@
         // Paths below are relative to the server working directory by default
         'web_console.static_dir': 'static',
         'web_console.template_dir': 'templates/web_console',
-        // PAM UI default hints
-        'auth.pam.enabled': false,
-        'auth.pam.service_name': 'login',
-        'auth.pam.allow_root': false,
-        'auth.pam.groups.admin_group': 'openmux_admin',
-        'auth.pam.groups.write_group': 'openmux_write',
-        'auth.pam.groups.read_group': 'openmux_read',
+        // External auth UI default hints
+        'auth.extauth.enabled': false,
+        'auth.extauth.service': 'openmux',
+        'auth.extauth.timeout': 10,
+        'auth.extauth.allow_root': false,
+        'auth.extauth.groups.admin_group': 'openmux_admin',
+        'auth.extauth.groups.write_group': 'openmux_write',
+        'auth.extauth.groups.read_group': 'openmux_read',
       };
       // Overlay doc-derived defaults for simple fields
       const FIELD_DEFAULTS = (function(){ const out = {...FIELD_DEFAULTS_BASE}; try { const m = DEFAULTS_DOC.dot||{}; Object.keys(m).forEach(k=>{ out[k]=m[k]; }); }catch(_e){} return out; })();
@@ -972,14 +976,21 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         tables['auth.users']._set(deepGet(current, 'authentication.users')||[]);
         tables['auth.api_keys']._set(deepGet(current, 'authentication.api_keys')||[]);
         tables['auth.public_keys']._set(deepGet(current, 'authentication.public_keys')||[]);
-        // PAM populate
-        setVal('auth.pam.enabled', deepGet(current, 'authentication.pam.enabled'));
-        setVal('auth.pam.service_name', deepGet(current, 'authentication.pam.service_name'));
-        setVal('auth.pam.allow_root', deepGet(current, 'authentication.pam.allow_root'));
-        try { const au = deepGet(current, 'authentication.pam.allowed_users'); if(Array.isArray(au)) setVal('auth.pam.allowed_users', au.join(',')); }catch(_e){}
-        setVal('auth.pam.groups.admin_group', deepGet(current, 'authentication.pam.groups.admin_group'));
-        setVal('auth.pam.groups.write_group', deepGet(current, 'authentication.pam.groups.write_group'));
-        setVal('auth.pam.groups.read_group', deepGet(current, 'authentication.pam.groups.read_group'));
+        // External auth populate
+        setVal('auth.extauth.enabled', deepGet(current, 'authentication.external_auth.enabled'));
+        setVal('auth.extauth.service', deepGet(current, 'authentication.external_auth.service'));
+        try {
+          const helper = deepGet(current, 'authentication.external_auth.helper');
+          if(typeof helper === 'string') setVal('auth.extauth.helper', helper);
+          else if(Array.isArray(helper)) setVal('auth.extauth.helper', helper.join(' '));
+        }catch(_e){}
+        setVal('auth.extauth.timeout', deepGet(current, 'authentication.external_auth.timeout'));
+        setVal('auth.extauth.allow_root', deepGet(current, 'authentication.external_auth.allow_root'));
+        try { const au = deepGet(current, 'authentication.external_auth.allowed_users'); if(Array.isArray(au)) setVal('auth.extauth.allowed_users', au.join(',')); }catch(_e){}
+        setVal('auth.extauth.groups.admin_group', deepGet(current, 'authentication.external_auth.groups.admin_group'));
+        setVal('auth.extauth.groups.write_group', deepGet(current, 'authentication.external_auth.groups.write_group'));
+        setVal('auth.extauth.groups.read_group', deepGet(current, 'authentication.external_auth.groups.read_group'));
+        setVal('auth.extauth.default_permission', deepGet(current, 'authentication.external_auth.default_permission'));
 
         setVal('logging.level', deepGet(current, 'logging.level'));
         setVal('logging.console', deepGet(current, 'logging.console'));
@@ -1098,19 +1109,22 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         maybeSet('server.id', 'server.id'); maybeSet('server.description', 'server.description'); maybeSet('server.control_socket', 'server.control_socket'); maybeSet('server.pidfile', 'server.pidfile');
         // auth
         const users = tables['auth.users']._get(); const api_keys = tables['auth.api_keys']._get(); const pub_keys = tables['auth.public_keys']._get(); if(users && users.length>0) deepSet(out, 'authentication.users', users); if(api_keys && api_keys.length>0) deepSet(out, 'authentication.api_keys', api_keys); if(pub_keys && pub_keys.length>0) deepSet(out, 'authentication.public_keys', pub_keys);
-        // PAM save: include pam block only if enabled toggle is true
-        const pamEnabled = getVal('auth.pam.enabled');
-        const pam = {};
-        if(pamEnabled!==undefined){ pam.enabled = pamEnabled===true; }
-        const svc = getVal('auth.pam.service_name'); if(svc!==undefined) pam.service_name = svc;
-        const allowRoot = getVal('auth.pam.allow_root'); if(allowRoot!==undefined) pam.allow_root = allowRoot;
-        const au = getVal('auth.pam.allowed_users'); if(typeof au==='string' && au.trim().length>0){ pam.allowed_users = au.split(',').map(s=>s.trim()).filter(s=>s.length>0); }
-        const groups = {};
-        const gAdmin = getVal('auth.pam.groups.admin_group'); if(gAdmin!==undefined) groups.admin_group = gAdmin;
-        const gWrite = getVal('auth.pam.groups.write_group'); if(gWrite!==undefined) groups.write_group = gWrite;
-        const gRead = getVal('auth.pam.groups.read_group'); if(gRead!==undefined) groups.read_group = gRead;
-        if(Object.keys(groups).length>0) pam.groups = groups;
-        if(Object.keys(pam).length>0) deepSet(out, 'authentication.pam', pam);
+        // External auth save: always write the block with the enabled flag
+        const eaEnabled = getVal('auth.extauth.enabled');
+        const extauth = {};
+        if(eaEnabled!==undefined){ extauth.enabled = eaEnabled===true; }
+        const eaSvc = getVal('auth.extauth.service'); if(eaSvc!==undefined) extauth.service = eaSvc;
+        const eaHelper = getVal('auth.extauth.helper'); if(eaHelper!==undefined) extauth.helper = eaHelper;
+        const eaTimeout = getVal('auth.extauth.timeout'); if(eaTimeout!==undefined) extauth.timeout = eaTimeout;
+        const eaAllowRoot = getVal('auth.extauth.allow_root'); if(eaAllowRoot!==undefined) extauth.allow_root = eaAllowRoot;
+        const eaAu = getVal('auth.extauth.allowed_users'); if(typeof eaAu==='string' && eaAu.trim().length>0){ extauth.allowed_users = eaAu.split(',').map(s=>s.trim()).filter(s=>s.length>0); }
+        const eaGroups = {};
+        const eaAdmin = getVal('auth.extauth.groups.admin_group'); if(eaAdmin!==undefined) eaGroups.admin_group = eaAdmin;
+        const eaWrite = getVal('auth.extauth.groups.write_group'); if(eaWrite!==undefined) eaGroups.write_group = eaWrite;
+        const eaRead = getVal('auth.extauth.groups.read_group'); if(eaRead!==undefined) eaGroups.read_group = eaRead;
+        if(Object.keys(eaGroups).length>0) extauth.groups = eaGroups;
+        const eaDefault = getVal('auth.extauth.default_permission'); if(eaDefault!==undefined) extauth.default_permission = eaDefault;
+        deepSet(out, 'authentication.external_auth', extauth);
         // logging
         maybeSet('logging.level','logging.level'); maybeSet('logging.console','logging.console'); maybeSet('logging.file','logging.file'); maybeSet('logging.log_dir','logging.log_dir'); maybeSet('logging.max_log_size','logging.max_log_size'); maybeSet('logging.log_backup_count','logging.log_backup_count');
         // client_listener: explicit enabled flag

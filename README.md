@@ -29,7 +29,7 @@ python -m openmux.client server.example.com
 OpenMux now keeps credentials and security policy in dedicated sidecar files so they can be managed independently of the main server config:
 
 - `config/server.yaml` – core server metadata plus adapter sections (serial, loopback, tcp initiator, muxcon, etc.).
-- `config/authentication.yaml` – users, API keys, public keys, and PAM settings.
+- `config/authentication.yaml` – users, API keys, public keys, and external authentication settings.
 - `config/security.yaml` – adapter/module allow-lists, Config Editor writable sections, and authentication rate-limit overrides.
 
 When starting the server manually, pass all three paths so reloads and the Config Editor stay in sync:
@@ -194,8 +194,8 @@ pip install -e .
 # For web interface support
 pip install -e ".[web]"
 
-# For PAM authentication support (and web together)
-pip install -e ".[web,pam]"
+# External authentication uses the openmux-pam-helper or an other external authentication script/binary;
+# no Python dependency is required (see docs/INSTALL.md).
 ```
 
 ## Configuration
@@ -268,8 +268,10 @@ api_keys:
   - name: lab-agent
     key: <REPLACE_WITH_RANDOM_SECRET>
     permissions: read-only
-pam:
+external_auth:
   enabled: false
+  service: openmux
+  timeout: 10
 ```
 
 ### Security Policy (`config/security.yaml`)

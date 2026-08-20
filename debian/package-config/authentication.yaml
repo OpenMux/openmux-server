@@ -1,11 +1,12 @@
-pam:
+external_auth:
   allow_root: false
   enabled: false
   groups:
     admin_group: openmux_admin
     read_group: openmux_read
     write_group: openmux_write
-  service_name: login
+  service: openmux
+  timeout: 10
 # `users[].password_hash` must be a SHA-256 hex digest of the plaintext password.
 # Example generation commands:
 #   python3 -c 'import hashlib; print(hashlib.sha256("your-password".encode()).hexdigest())'

@@ -64,23 +64,16 @@ class TestLoadExtAuthConfig:
         am = _auth({"helper": ["sudo", "/usr/bin/my_helper"]})
         assert am._ext_auth_helper == ["sudo", "/usr/bin/my_helper"]
 
-    def test_deprecated_pam_key_migrated(self):
+    def test_pam_key_is_ignored(self):
         am = AuthManager({"pam": {"enabled": True, "service_name": "ssh"}})
-        assert am._ext_auth_enabled is True
-        assert am._ext_auth_service == "ssh"
+        assert am._ext_auth_enabled is False
+        assert am._ext_auth_service == "openmux"
 
-    def test_deprecated_pam_key_logs_warning(self, caplog):
+    def test_pam_key_logs_warning(self, caplog):
         import logging
         with caplog.at_level(logging.WARNING, logger="openmux.auth"):
             AuthManager({"pam": {"enabled": True}})
-        assert any("deprecated" in r.message.lower() for r in caplog.records)
-
-    def test_external_auth_takes_precedence_over_pam(self):
-        am = AuthManager({
-            "external_auth": {"enabled": True, "service": "ext"},
-            "pam": {"enabled": False, "service_name": "pam"},
-        })
-        assert am._ext_auth_service == "ext"
+        assert any("no longer supported" in r.message for r in caplog.records)
 
     def test_allowed_users_list(self):
         am = _auth({"allowed_users": ["alice", "bob"]})

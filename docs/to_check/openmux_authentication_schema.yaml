@@ -57,9 +57,13 @@ properties:
     properties:
       enabled: { type: boolean, default: false }
       helper:
-        type: string
+        oneOf:
+          - type: string
+          - type: array
+            items: { type: string }
         description: >
-          Path to the auth helper binary. Defaults to openmux-pam-helper on
+          Path to the auth helper binary, or a list of argv elements passed
+          directly to the subprocess. Defaults to openmux-pam-helper on
           PATH, then /usr/lib/openmux/openmux-pam-helper.
       service: { type: string, default: openmux }
       timeout: { type: number, default: 10, description: "Seconds before treating no response as failure" }
@@ -75,13 +79,13 @@ properties:
           admin_group: { type: string, default: openmux_admin }
           write_group: { type: string, default: openmux_write }
           read_group: { type: string, default: openmux_read }
-  pam:
-    type: object
-    description: "Deprecated alias for external_auth. Use external_auth instead."
-    additionalProperties: true
+      default_permission:
+        type: string
+        description: >
+          Fallback role (admin/read-write/read-only) for authenticated users
+          when no group mapping resolves. Optional.
 anyOf:
   - required: [users]
   - required: [api_keys]
   - required: [public_keys]
   - required: [external_auth]
-  - required: [pam]

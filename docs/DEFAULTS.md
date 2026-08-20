@@ -29,7 +29,7 @@ authentication
   - authentication.external_auth.groups.read_group: openmux_read
   - authentication.external_auth.allow_root: false
   - authentication.external_auth.allowed_users: unset (optional allowlist; if set, only listed users can log in)
-  Note: the deprecated `pam:` key is still accepted and mapped automatically with a warning.
+  Note: the former `pam:` key is not supported; its presence logs a warning. Use `external_auth`.
 
 logging (runtime defaults from openmux/server/logging_manager.py)
 - logging.log_level: INFO (key name is log_level in code)

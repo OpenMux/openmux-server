@@ -95,7 +95,7 @@
   <div id="view-auth" class="config-view" style="display:none">
 
   <div class="config-section" data-config-section="authentication">
-    <div class="section-header"><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and PAM</span></div>
+    <div class="section-header"><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and external authentication</span></div>
     <div id="authSection">
       <div class="legend"><div class="title">Users</div><div class="desc">Basic-auth accounts</div></div>
       <div id="auth.users"></div>
@@ -103,18 +103,21 @@
       <div id="auth.api_keys"></div>
       <div class="legend" style="margin-top:10px"><div class="title">Public Keys</div><div class="desc">Ed25519 keys with allowed_uses</div></div>
       <div id="auth.public_keys"></div>
-      <div class="legend" style="margin-top:10px"><div class="title">PAM (System Auth)</div><div class="desc">Use UNIX accounts and groups</div></div>
+      <div class="legend" style="margin-top:10px"><div class="title">External Authentication</div><div class="desc">Username/password via an auth helper binary (UNIX accounts and groups)</div></div>
       <div class="section">
-      <div class="field"><label for="auth.pam.enabled">Enable PAM</label><input id="auth.pam.enabled" type="checkbox" /></div>
-      <div class="field"><label for="auth.pam.service_name">Service name</label><input id="auth.pam.service_name" type="text" placeholder="login" /><span class="help">PAM service to use (e.g., login, system-auth)</span></div>
-      <div class="field"><label for="auth.pam.allow_root">Allow root</label><input id="auth.pam.allow_root" type="checkbox" /><span class="help">If unchecked, root user cannot log in via PAM</span></div>
-      <div class="field"><label for="auth.pam.allowed_users">Allowed users</label><input id="auth.pam.allowed_users" type="text" placeholder="comma,separated,users" /><span class="help">Optional allowlist: only these users can authenticate via PAM</span></div>
-      <div class="legend" style="margin-top:10px"><div class="title">PAM Groups</div><div class="desc">Map system groups to roles</div></div>
+      <div class="field"><label for="auth.extauth.enabled">Enable external auth</label><input id="auth.extauth.enabled" type="checkbox" /></div>
+      <div class="field"><label for="auth.extauth.service">Service name</label><input id="auth.extauth.service" type="text" placeholder="openmux" /><span class="help">Service name passed to the auth helper</span></div>
+      <div class="field"><label for="auth.extauth.helper">Helper binary</label><input id="auth.extauth.helper" type="text" placeholder="/usr/lib/openmux/openmux-pam-helper" /><span class="help">Optional. Path to the auth helper binary. If blank, resolved from PATH.</span></div>
+      <div class="field"><label for="auth.extauth.timeout">Timeout (seconds)</label><input id="auth.extauth.timeout" type="number" min="1" step="1" placeholder="10" /><span class="help">Seconds before a helper response is treated as failure</span></div>
+      <div class="field"><label for="auth.extauth.allow_root">Allow root</label><input id="auth.extauth.allow_root" type="checkbox" /><span class="help">If unchecked, root cannot log in via external auth</span></div>
+      <div class="field"><label for="auth.extauth.allowed_users">Allowed users</label><input id="auth.extauth.allowed_users" type="text" placeholder="comma,separated,users" /><span class="help">Optional allowlist: only these users can authenticate externally</span></div>
+      <div class="legend" style="margin-top:10px"><div class="title">External Auth Groups</div><div class="desc">Map system groups to roles</div></div>
       <div class="section">
-          <div class="field"><label for="auth.pam.groups.admin_group">Admin group</label><input id="auth.pam.groups.admin_group" type="text" placeholder="openmux_admin" /></div>
-          <div class="field"><label for="auth.pam.groups.write_group">Write group</label><input id="auth.pam.groups.write_group" type="text" placeholder="openmux_write" /></div>
-          <div class="field"><label for="auth.pam.groups.read_group">Read group</label><input id="auth.pam.groups.read_group" type="text" placeholder="openmux_read" /></div>
+          <div class="field"><label for="auth.extauth.groups.admin_group">Admin group</label><input id="auth.extauth.groups.admin_group" type="text" placeholder="openmux_admin" /></div>
+          <div class="field"><label for="auth.extauth.groups.write_group">Write group</label><input id="auth.extauth.groups.write_group" type="text" placeholder="openmux_write" /></div>
+          <div class="field"><label for="auth.extauth.groups.read_group">Read group</label><input id="auth.extauth.groups.read_group" type="text" placeholder="openmux_read" /></div>
       </div>
+      <div class="field"><label for="auth.extauth.default_permission">Default permission</label><input id="auth.extauth.default_permission" type="text" placeholder="read-write" /><span class="help">Optional fallback role for authenticated users with no group mapping</span></div>
       </div>
     </div>
   </div>
@@ -183,7 +186,7 @@
       <div class="field">
         <label>Soft reload</label>
         <button class="btn" id="softReloadBtn" type="button">Soft Reload</button>
-        <span class="help">Reloads YAML, updates authentication (users/API keys/PAM/public keys), and reconciles Serial/Loopback/Command/TCP-initiator/Telnet-listener ports without restarting listeners.</span>
+        <span class="help">Reloads YAML, updates authentication (users/API keys/external auth/public keys), and reconciles Serial/Loopback/Command/TCP-initiator/Telnet-listener ports without restarting listeners.</span>
       </div>
       <div class="field">
         <label>Full reload</label>
@@ -198,7 +201,7 @@
     <div class="section-header"><span class="title">Guidance</span> <span class="desc">When to use what</span></div>
     <div class="section">
       <ul style="margin:0 0 0 18px; padding:0;">
-        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/PAM), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports.</li>
+        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports.</li>
         <li>Use <b>Full Reload</b> for: Client listener enable/host/port changes, muxcon listeners/initiators, TLS enable/certs/TOFU settings, and other adapter-wide options.</li>
         <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>
       </ul>

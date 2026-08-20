@@ -44,7 +44,6 @@ class AuthManager:
         # allowed_uses is a list of contexts this key may be used for, e.g., ["client"], ["muxcon"], ["ssh"], ["client","muxcon"]
         self.public_keys = self._normalize_public_keys(config.get("public_keys", []))
         # External authentication via helper binary (config key: external_auth)
-        # Deprecated alias: pam (mapped automatically with a warning)
         self._load_ext_auth_config(config)
         # Active pubkey challenges: (username, key_id) -> {nonce_raw, pubkey, expires_at}
         self._pk_challenges = {}
@@ -76,7 +75,7 @@ class AuthManager:
         self.users = new_config.get("users", [])  # noqa: Vulture (dynamic update)
         self.api_keys = new_config.get("api_keys", [])  # noqa: Vulture (dynamic update)
         self.public_keys = self._normalize_public_keys(new_config.get("public_keys", []))
-        # Reload external auth config (supports both external_auth: and deprecated pam: key)
+        # Reload external auth config
         self._load_ext_auth_config(new_config)
         # Clear cache when config changes
         self.auth_cache = {}
@@ -108,29 +107,13 @@ class AuthManager:
             self._base_lock_seconds = base
 
     def _load_ext_auth_config(self, config: Dict[str, Any]) -> None:
-        """Populate external-auth fields from config.
-
-        Reads ``external_auth:`` first. If absent, falls back to the
-        deprecated ``pam:`` key and emits a one-time warning so operators
-        know to migrate their config.
-        """
-        ext_cfg = config.get("external_auth")
-        if ext_cfg is None:
-            # Deprecated alias: pam -> external_auth
-            pam_cfg = config.get("pam")
-            if pam_cfg:
-                self.logger.warning(
-                    "Config key 'pam' is deprecated; rename to 'external_auth'. "
-                    "Also rename 'service_name' to 'service'."
-                )
-                # Map old pam keys to new external_auth shape
-                ext_cfg = dict(pam_cfg)
-                if "service_name" in ext_cfg and "service" not in ext_cfg:
-                    ext_cfg["service"] = ext_cfg.pop("service_name")
-            else:
-                ext_cfg = {}
-
-        ext_cfg = ext_cfg or {}
+        """Populate external-auth fields from the ``external_auth:`` config key."""
+        if config.get("pam"):
+            self.logger.warning(
+                "Config key 'pam' is no longer supported and is ignored. "
+                "Rename it to 'external_auth' ('service_name' becomes 'service')."
+            )
+        ext_cfg = config.get("external_auth") or {}
         self._ext_auth_enabled: bool = bool(ext_cfg.get("enabled", False))
         self._ext_auth_service: str = str(ext_cfg.get("service", "openmux"))
         # helper may be a string (path to execute) or a list (passed directly to subprocess)
