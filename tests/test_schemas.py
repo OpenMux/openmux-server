@@ -33,7 +33,9 @@ def _load_validate_schema_module():
 validate_schema = _load_validate_schema_module()
 
 SCHEMA_FILES = sorted(SCHEMA_DIR.glob("openmux_*.yaml"))
-CONFIG_FILES = sorted(CONFIG_DIR.glob("*.yaml"))
+# `*.local.yaml` files (e.g. internal-tool credentials) are gitignored local
+# files, not OpenMux configs - exclude them from the config inventory.
+CONFIG_FILES = sorted(p for p in CONFIG_DIR.glob("*.yaml") if not p.name.endswith(".local.yaml"))
 
 
 def test_all_schema_files_exist_and_are_valid():

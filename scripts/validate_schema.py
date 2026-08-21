@@ -60,7 +60,9 @@ def detect_schema(config_file: Path) -> Tuple[Optional[str], str]:
 
 def main() -> int:
     ok = True
-    configs = sorted((ROOT / "config").glob("*.yaml"))
+    # `*.local.yaml` files (e.g. internal-tool credentials) are gitignored local
+    # files, not OpenMux configs - exclude them from the config inventory.
+    configs = sorted(p for p in (ROOT / "config").glob("*.yaml") if not p.name.endswith(".local.yaml"))
     if not configs:
         print(f"No config files found in {ROOT / 'config'}")
         return 1
