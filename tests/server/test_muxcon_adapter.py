@@ -1,22 +1,21 @@
 import asyncio
 import base64
+import json
 import logging
 import os
+import socket
 import ssl
+import sys
 import tempfile
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 import pytest
-import json
-import sys
-import socket
-
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openmux.server.adapters.muxcon import FederationPeer, UnifiedMuxConAdapter
-from collections import OrderedDict
 
 
 class FakeReader:
@@ -122,6 +121,7 @@ def test_validate_config_listener_and_initiators():
 
 def test_auth_helpers_and_filters_merge():
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
+
     # Merge keys from auth manager when adapter has none
     class AM:
         def get_ed25519_pubkeys_for_use(self, use: str):
@@ -395,15 +395,24 @@ def test_key_loaders_public_and_private(tmp_path):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     # Public key: ssh-ed25519 and base64
     priv = Ed25519PrivateKey.generate()
-    pub_ssh = priv.public_key().public_bytes(
-        encoding=serialization.Encoding.OpenSSH,
-        format=serialization.PublicFormat.OpenSSH,
-    ).decode()
+    pub_ssh = (
+        priv.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.OpenSSH,
+            format=serialization.PublicFormat.OpenSSH,
+        )
+        .decode()
+    )
     assert a._load_ed25519_public_key(pub_ssh) is not None
-    pub_b64 = "base64:" + base64.b64encode(priv.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )).decode()
+    pub_b64 = (
+        "base64:"
+        + base64.b64encode(
+            priv.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode()
+    )
     assert a._load_ed25519_public_key(pub_b64) is not None
 
     # Private key: PEM
@@ -417,11 +426,15 @@ def test_key_loaders_public_and_private(tmp_path):
     assert a._load_ed25519_private_key(str(pem_path)) is not None
     # Private key: raw base64 seed
     seed_path = tmp_path / "seed.key"
-    seed_path.write_bytes(base64.b64encode(priv.private_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PrivateFormat.Raw,
-        encryption_algorithm=serialization.NoEncryption(),
-    )))
+    seed_path.write_bytes(
+        base64.b64encode(
+            priv.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+    )
     assert a._load_ed25519_private_key(str(seed_path)) is not None
 
 
@@ -433,6 +446,7 @@ async def test_verify_peer_fingerprint_tofu_and_pin(tmp_path):
     class SslObj:
         def __init__(self, der: bytes):
             self._der = der
+
         def getpeercert(self, binary_mode):
             return self._der
 
@@ -564,15 +578,20 @@ async def test_control_auth_challenge_and_response_and_ports_advertise(monkeypat
     a2._auth_pubkeys[kid] = priv2.public_key()
     conn_id2 = "in:1:2:3"
     w2 = FakeWriter()
-    a2.connections[conn_id2] = {"writer": w2, "auth_state": {"type": "pk", "key_id": kid, "nonce": b"abcd", "expires_at": time.time() + 60}}
+    a2.connections[conn_id2] = {
+        "writer": w2,
+        "auth_state": {"type": "pk", "key_id": kid, "nonce": b"abcd", "expires_at": time.time() + 60},
+    }
     a2._wire_state[conn_id2] = {"send_next": 1}
     a2.main_port_manager = FakePM()
     called = {"adv": False}
+
     async def fake_maybe_adv(cid):
         called["adv"] = True
         # mimic side effect
         if cid in a2.connections:
             a2.connections[cid]["ports_advertised"] = True
+
     monkeypatch.setattr(a2, "_maybe_advertise_local_ports", fake_maybe_adv)
     sig = base64.b64encode(priv2.sign(b"abcd")).decode()
     await a2._process_control_command(conn_id2, cast(Any, w2), f"AUTH:PK:RESPONSE:{kid}:{sig}")
@@ -639,6 +658,7 @@ async def test_ports_federated_register_and_stale_removal_and_routing():
     class Proxy:
         def __init__(self):
             self.payloads: List[bytes] = []
+
         async def trigger_data_received(self, data: bytes):
             self.payloads.append(data)
 
@@ -732,6 +752,7 @@ async def test_close_connection_marks_proxies_disconnected():
             self.is_connected = True
             self.data_queue: asyncio.Queue = asyncio.Queue()
             self._disconnect_called = False
+
         async def disconnect(self):
             self._disconnect_called = True
 
@@ -830,8 +851,10 @@ def test_derive_peer_key_and_generation_rollover(monkeypatch):
 
     # Rollover: retire older instance for same server_id
     closed: List[str] = []
+
     def fake_close(cid):
         closed.append(cid)
+
     a._close_connection = fake_close  # type: ignore
     now = time.time()
     a.connections.clear()
@@ -887,12 +910,14 @@ def test_filter_helpers_and_advertise_list(monkeypatch):
     # Set adapter-level advertise filters to exclude name pattern
     a._adv_name_exc = ["local*"]
     pm = FakePM()
+
     # Override PM to return two ports, with one excluded by name
     async def fake_list():
         return [
             {"name": "local1", "adapter_type": "loopback", "connected": True, "max_rw_users": 1, "description": "d"},
             {"name": "remote1", "adapter_type": "loopback", "connected": True, "max_rw_users": 1, "description": "d"},
         ]
+
     pm.get_port_list_with_federation = fake_list  # type: ignore
     a.main_port_manager = pm
     conn_id = "in:2.2.2.2:9999:1"
@@ -925,7 +950,11 @@ async def test_accept_filters_drop_registration():
     a._acc_name_exc = ["*"]
     conn_id = "in:9.9.9.9:1111:1"
     a.connections[conn_id] = {"writer": FakeWriter()}
-    payload = "PORTS:FEDERATED:1\n" + json.dumps({"name": "p1", "adapter_type": "loopback", "origin_server": {"server_id": "s"}}) + "\nEND:PORTS"
+    payload = (
+        "PORTS:FEDERATED:1\n"
+        + json.dumps({"name": "p1", "adapter_type": "loopback", "origin_server": {"server_id": "s"}})
+        + "\nEND:PORTS"
+    )
     await a._handle_ports_federated(conn_id, payload)
     peer_key = a._derive_peer_key_from_conn_id(conn_id)
     assert a._peer_proxies.get(peer_key, {}) == {}
@@ -940,9 +969,11 @@ async def test_client_auth_ok_applies_key_filters(monkeypatch):
     conn_id = "out:1.2.3.4:1000:77"
     a.connections[conn_id] = {"writer": FakeWriter(), "role": "client", "auth_ok": False}
     a._wire_state[conn_id] = {"send_next": 1}
+
     # Avoid sending actual advertise frames
     async def fake_maybe(cid):
         return None
+
     monkeypatch.setattr(a, "_maybe_advertise_local_ports", fake_maybe)
     await a._process_control_command(conn_id, cast(Any, a.connections[conn_id]["writer"]), "AUTH:OK")
     assert a.connections[conn_id]["auth_ok"] is True
@@ -954,13 +985,17 @@ async def test_auth_expired_and_bad_signature_paths(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": True})
     # Configure server with a known public key
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     priv = Ed25519PrivateKey.generate()
     kid = "kX"
     a._auth_pubkeys[kid] = priv.public_key()
     # Expired challenge case
     conn_id = "in:exp:1"
     w = FakeWriter()
-    a.connections[conn_id] = {"writer": w, "auth_state": {"type": "pk", "key_id": kid, "nonce": b"n", "expires_at": time.time() - 1}}
+    a.connections[conn_id] = {
+        "writer": w,
+        "auth_state": {"type": "pk", "key_id": kid, "nonce": b"n", "expires_at": time.time() - 1},
+    }
     a._wire_state[conn_id] = {"send_next": 1}
     await a._process_control_command(conn_id, cast(Any, w), f"AUTH:PK:RESPONSE:{kid}:{base64.b64encode(b'X').decode()}")
     # Should send AUTH:ERROR:expired and close
@@ -968,10 +1003,15 @@ async def test_auth_expired_and_bad_signature_paths(monkeypatch):
     # Bad signature case
     conn_id2 = "in:bad:1"
     w2 = FakeWriter()
-    a.connections[conn_id2] = {"writer": w2, "auth_state": {"type": "pk", "key_id": kid, "nonce": b"n2", "expires_at": time.time() + 60}}
+    a.connections[conn_id2] = {
+        "writer": w2,
+        "auth_state": {"type": "pk", "key_id": kid, "nonce": b"n2", "expires_at": time.time() + 60},
+    }
     a._wire_state[conn_id2] = {"send_next": 1}
     # Send invalid sig
-    await a._process_control_command(conn_id2, cast(Any, w2), f"AUTH:PK:RESPONSE:{kid}:{base64.b64encode(b'invalid').decode()}")
+    await a._process_control_command(
+        conn_id2, cast(Any, w2), f"AUTH:PK:RESPONSE:{kid}:{base64.b64encode(b'invalid').decode()}"
+    )
     assert b"AUTH:ERROR:bad_signature" in w2.buffer and conn_id2 not in a.connections
 
 
@@ -995,14 +1035,18 @@ async def test_data_plane_buffering_and_ack_and_routing(monkeypatch):
     a.connections[conn_id] = {"writer": w, "reader": object(), "role": "server", "opened_at": time.time(), "auth_ok": True}
     # Make FakeWriter pass isinstance(StreamWriter) checks in module
     import openmux.server.adapters.muxcon as muxmod
+
     monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
     # Route through proxy
     peer_key = a._derive_peer_key_from_conn_id(conn_id)
+
     class P:
         def __init__(self):
             self.received: List[Tuple[int, bytes]] = []
+
         async def trigger_data_received(self, data: bytes):
             self.received.append((len(data), data))
+
     p = P()
     a._session_map[peer_key] = {1: p}
     # Prepare frames out of order: seq 1 (sid 1), seq 3, then seq 2
@@ -1012,9 +1056,11 @@ async def test_data_plane_buffering_and_ack_and_routing(monkeypatch):
         {"frame_type": "D", "stream_id": 1, "payload": b"B", "seq": 2},
         None,
     ]
+
     async def fake_read_frame(reader):
         await asyncio.sleep(0)
         return frames.pop(0)
+
     monkeypatch.setattr(a, "_read_frame", fake_read_frame)
     await a._read_loop(conn_id)
     # Verify in-order delivery (A, B, C)
@@ -1031,13 +1077,18 @@ async def test_retx_loop_resend_and_rto_adjustment(monkeypatch):
     w = FakeWriter()
     a.connections[conn_id] = {"writer": w}
     key = a._derive_peer_key_from_conn_id(conn_id)
-    a._mpath_groups[key] = {"conns": OrderedDict({conn_id: {"opened_at": time.time(), "last_rx_seen": time.time()}}), "primary": conn_id, "rr_index": 0}
+    a._mpath_groups[key] = {
+        "conns": OrderedDict({conn_id: {"opened_at": time.time(), "last_rx_seen": time.time()}}),
+        "primary": conn_id,
+        "rr_index": 0,
+    }
     # Preload send buffer with an old entry to trigger resend
     a._peer_sendbuf[key] = {5: (conn_id, 1, b"D", time.time() - 10)}
     # Seed hb state with a RTT to allow RTO adjustment path
     a._hb_state[conn_id] = {"last_req_ts": time.time() - 0.1, "last_ack_ts": time.time(), "missed": 0, "rtt_ms": 50}
     # Make FakeWriter pass isinstance(StreamWriter)
     import openmux.server.adapters.muxcon as muxmod
+
     monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
     # Speed retx loop by minimizing sleeps; we'll stop it after one iteration
     orig_sleep = asyncio.sleep
@@ -1089,7 +1140,11 @@ async def test_ports_federated_ignored_when_not_authenticated():
     a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": True})
     conn_id = "in:unauth:1"
     a.connections[conn_id] = {"writer": FakeWriter(), "role": "server", "auth_ok": False}
-    payload = "PORTS:FEDERATED:1\n" + json.dumps({"name": "px", "adapter_type": "loopback", "origin_server": {"server_id": "s"}}) + "\nEND:PORTS"
+    payload = (
+        "PORTS:FEDERATED:1\n"
+        + json.dumps({"name": "px", "adapter_type": "loopback", "origin_server": {"server_id": "s"}})
+        + "\nEND:PORTS"
+    )
     await a._process_control_command(conn_id, cast(Any, a.connections[conn_id]["writer"]), payload)
     peer_key = a._derive_peer_key_from_conn_id(conn_id)
     assert a._peer_proxies.get(peer_key, {}) == {}
@@ -1111,12 +1166,17 @@ async def test_remote_port_proxy_close_all_streams():
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     peer_key = "node:peerZ"
     # Spy send close
-    sent: List[Tuple[int,int]] = []
+    sent: List[Tuple[int, int]] = []
+
     async def fake_close(pk, sid, reason):
         sent.append((sid, len(reason)))
         return True
+
     a._send_stream_close_mpath = fake_close  # type: ignore
-    class M: pass
+
+    class M:
+        pass
+
     p = a.RemotePortProxy(a, peer_key, "R", M())
     # Create sessions
     await p._ensure_session("c1")
@@ -1181,9 +1241,14 @@ async def test_tofu_change_detection_raises(monkeypatch, tmp_path):
     a._known_peers_path = str(tmp_path / "known.json")
     m = {"h:1": a._compute_fingerprint(b"A")}
     a._save_known_peers(m)
+
     class SslObj:
-        def __init__(self, der: bytes): self._der = der
-        def getpeercert(self, binary_mode): return self._der
+        def __init__(self, der: bytes):
+            self._der = der
+
+        def getpeercert(self, binary_mode):
+            return self._der
+
     w = FakeWriter()
     w._extra["ssl_object"] = SslObj(b"B")  # different cert
     peer = FederationPeer("h", 1, options={"use_tls": True})
@@ -1196,21 +1261,50 @@ async def test_connect_with_fwmark_on_linux(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     # Pretend platform is linux to go down SO_MARK path
     monkeypatch.setattr(sys, "platform", "linux")
+
     # Fake getaddrinfo
     async def fake_gai(host, port, type):
-        return [ (socket.AF_INET, socket.SOCK_STREAM, 0, '', ("127.0.0.1", 0)) ]
-    monkeypatch.setattr(asyncio.get_event_loop(), "getaddrinfo", lambda *args, **kwargs: asyncio.get_event_loop().create_task(fake_gai(*args, **kwargs)))
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(
+        asyncio.get_event_loop(),
+        "getaddrinfo",
+        lambda *args, **kwargs: asyncio.get_event_loop().create_task(fake_gai(*args, **kwargs)),
+    )
+
     class DummySock:
-        def __init__(self, *args, **kwargs): self._opts = []
-        def setsockopt(self, level, opt, val): self._opts.append((level, opt, val))
-        def bind(self, addr): pass
-        def setblocking(self, b): pass
-        def close(self): pass
+        def __init__(self, *args, **kwargs):
+            self._opts = []
+
+        def setsockopt(self, level, opt, val):
+            self._opts.append((level, opt, val))
+
+        def bind(self, addr):
+            pass
+
+        def setblocking(self, b):
+            pass
+
+        def close(self):
+            pass
+
     monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: DummySock())
-    async def fake_sock_connect(sock, sockaddr): return None
-    monkeypatch.setattr(asyncio.get_event_loop(), "sock_connect", lambda sock, sockaddr: asyncio.get_event_loop().create_task(fake_sock_connect(sock, sockaddr)))
-    async def fake_open_connection(**kwargs): return cast(Any, FakeReader([])), cast(Any, FakeWriter())
-    monkeypatch.setattr(asyncio, "open_connection", lambda **kwargs: asyncio.get_event_loop().create_task(fake_open_connection(**kwargs)))
+
+    async def fake_sock_connect(sock, sockaddr):
+        return None
+
+    monkeypatch.setattr(
+        asyncio.get_event_loop(),
+        "sock_connect",
+        lambda sock, sockaddr: asyncio.get_event_loop().create_task(fake_sock_connect(sock, sockaddr)),
+    )
+
+    async def fake_open_connection(**kwargs):
+        return cast(Any, FakeReader([])), cast(Any, FakeWriter())
+
+    monkeypatch.setattr(
+        asyncio, "open_connection", lambda **kwargs: asyncio.get_event_loop().create_task(fake_open_connection(**kwargs))
+    )
     # Call with fwmark option
     r, w = await a._connect_with_routing_options("h", 1, None, None, None, interface=None, fwmark=42)
     assert r is not None and w is not None
@@ -1222,7 +1316,11 @@ def test_mpath_rekey_migrates_peer_state():
     conn_id = "in:10.0.0.3:4000:1"
     a.connections[conn_id] = {"opened_at": time.time(), "handshake": None}
     host_key = a._derive_peer_key_from_conn_id(conn_id)
-    a._mpath_groups[host_key] = {"conns": OrderedDict({conn_id: {"opened_at": time.time()}}), "primary": conn_id, "rr_index": 0}
+    a._mpath_groups[host_key] = {
+        "conns": OrderedDict({conn_id: {"opened_at": time.time()}}),
+        "primary": conn_id,
+        "rr_index": 0,
+    }
     a._peer_sendbuf[host_key] = {7: (conn_id, 1, b"X", time.time())}
     a._peer_rx_state[host_key] = {"expected": 3, "buffer": {}}
     a._peer_tx_seq[host_key] = 12
@@ -1251,7 +1349,12 @@ def test_mpath_unregister_clears_group_and_maps():
     a._peer_retx_count[key] = 3
     a._unregister_mpath_connection(conn_id)
     assert key not in a._mpath_groups
-    assert key not in a._peer_sendbuf and key not in a._peer_rx_state and key not in a._peer_tx_seq and key not in a._peer_retx_count
+    assert (
+        key not in a._peer_sendbuf
+        and key not in a._peer_rx_state
+        and key not in a._peer_tx_seq
+        and key not in a._peer_retx_count
+    )
 
 
 def test_allow_advertise_port_helper():
@@ -1297,12 +1400,17 @@ async def test_mpath_send_helpers_true_path(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     # Create a connection with a FakeWriter that is treated as StreamWriter
     import openmux.server.adapters.muxcon as muxmod
+
     monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
     conn_id = "out:hs:9000:1"
     w = FakeWriter()
     a.connections[conn_id] = {"writer": w, "opened_at": time.time()}
     key = a._derive_peer_key_from_conn_id(conn_id)
-    a._mpath_groups[key] = {"conns": OrderedDict({conn_id: {"opened_at": time.time(), "last_rx_seen": time.time(), "pref": 0}}), "primary": conn_id, "rr_index": 0}
+    a._mpath_groups[key] = {
+        "conns": OrderedDict({conn_id: {"opened_at": time.time(), "last_rx_seen": time.time(), "pref": 0}}),
+        "primary": conn_id,
+        "rr_index": 0,
+    }
     ok1 = await a._send_control_mpath(key, "TEST")
     ok2 = await a._send_stream_open_mpath(key, 11, "port")
     ok3 = await a._send_stream_close_mpath(key, 11, "bye")
@@ -1321,19 +1429,25 @@ async def test_pump_local_port_to_remote_sends_and_stops(monkeypatch):
     port_name = "loc"
     # Map session so loop runs
     a._local_session_map[peer_key] = {stream_id: port_name}
+
     # Fake PM returning one chunk then none
     class PM:
-        def __init__(self): self.calls = 0
+        def __init__(self):
+            self.calls = 0
+
         async def get_port_data(self, name):
             self.calls += 1
             return b"abc" if self.calls == 1 else b""
+
     a.main_port_manager = PM()
-    sent: List[Tuple[str,int,bytes]] = []
+    sent: List[Tuple[str, int, bytes]] = []
+
     async def fake_send(pk, sid, data):
         sent.append((pk, sid, data))
         # Stop loop by removing mapping after first send
         a._local_session_map[peer_key].pop(stream_id, None)
         return True
+
     a._send_data_mpath = fake_send  # type: ignore
     # Run pump
     await a._pump_local_port_to_remote(peer_key, stream_id, port_name)
@@ -1343,18 +1457,24 @@ async def test_pump_local_port_to_remote_sends_and_stops(monkeypatch):
 @pytest.mark.asyncio
 async def test_register_remote_port_duplicate_guard():
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
+
     # Prepare PortManager with existing port of same name and origin server id
     class Meta:
         def __init__(self, sid):
             self.origin_server = type("S", (), {"server_id": sid})()
+
     class Existing:
         def __init__(self, sid):
             self.metadata = Meta(sid)
+
     class PM:
-        def __init__(self): self.ports = {"dup": Existing("srvD")}
+        def __init__(self):
+            self.ports = {"dup": Existing("srvD")}
+
         async def register_federated_port(self, meta, proxy):
             self.ports[meta.name] = proxy
             return meta.name
+
     a.main_port_manager = PM()
     conn_id = "in:dup:1"
     a.connections[conn_id] = {"writer": FakeWriter()}
@@ -1370,13 +1490,21 @@ async def test_force_close_and_reset_connection(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     # Setup connection with a writer that has a transport.abort to exercise reset
     w = FakeWriter()
+
     class T:
-        def __init__(self): self.aborted = False
-        def abort(self): self.aborted = True
+        def __init__(self):
+            self.aborted = False
+
+        def abort(self):
+            self.aborted = True
+
     w.transport = T()  # type: ignore[attr-defined]
     a.connections["c"] = {"writer": w}
     closed = {"ids": []}
-    async def fake_close(cid): closed["ids"].append(cid)
+
+    async def fake_close(cid):
+        closed["ids"].append(cid)
+
     a._close_connection = fake_close  # type: ignore
     ok1 = await a.force_close_connection("c", linger=0)
     a.connections["c2"] = {"writer": w}
@@ -1391,6 +1519,7 @@ async def test_ack_removes_sendbuf_entry(monkeypatch):
     w = FakeWriter()
     a.connections[conn_id] = {"writer": w, "reader": object()}
     import openmux.server.adapters.muxcon as muxmod
+
     monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
     peer_key = a._derive_peer_key_from_conn_id(conn_id)
     a._peer_sendbuf[peer_key] = {42: (conn_id, 1, b"xx", time.time())}
@@ -1399,9 +1528,11 @@ async def test_ack_removes_sendbuf_entry(monkeypatch):
         {"frame_type": "A", "stream_id": 0, "payload": b"42", "seq": 2},
         None,
     ]
+
     async def fake_read_frame(reader):
         await asyncio.sleep(0)
         return frames.pop(0)
+
     monkeypatch.setattr(a, "_read_frame", fake_read_frame)
     await a._read_loop(conn_id)
     assert 42 not in a._peer_sendbuf.get(peer_key, {})
@@ -1428,16 +1559,24 @@ async def test_server_ssl_context_ca_error():
 @pytest.mark.asyncio
 async def test_accept_client_sets_listener_path_metadata(monkeypatch):
     # Disable auth to avoid immediate close on missing PKID; focus on path metadata
-    a = UnifiedMuxConAdapter("mx", {"listeners": [{"enabled": True, "host": "127.0.0.1", "port": 5000, "path_pref": 5, "path_group": "G"}], "auth_required": False})
+    a = UnifiedMuxConAdapter(
+        "mx",
+        {
+            "listeners": [{"enabled": True, "host": "127.0.0.1", "port": 5000, "path_pref": 5, "path_group": "G"}],
+            "auth_required": False,
+        },
+    )
     # Reader writes a valid HELLO line
     r = FakeReader([b"HELLO MuxCon/1.0 TYPE=regular_client CAPS=a ID=R INST=I\n"])
     w = FakeWriter()
     # Provide peername and sockname to match listener
     w._extra["peername"] = ("1.2.3.4", 40000)
     w._extra["sockname"] = ("127.0.0.1", 5000)
+
     # Monkeypatch to avoid starting read loop after accept
     async def fake_read_loop(cid):
         return None
+
     monkeypatch.setattr(a, "_read_loop", fake_read_loop)
     await a._accept_client(cast(Any, r), cast(Any, w))
     # Find the created connection id (prefix in:)
@@ -1506,10 +1645,13 @@ async def test_auth_ok_advertise_idempotent(monkeypatch):
     a.main_port_manager = FakePM()
     # Make FakeWriter pass isinstance(StreamWriter) checks in module
     import openmux.server.adapters.muxcon as muxmod
+
     monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
     calls = {"n": 0}
+
     async def fake_send(conn_id2, writer2):
         calls["n"] += 1
+
     monkeypatch.setattr(a, "_send_local_port_list", fake_send)
     # First AUTH:OK triggers advertise; mark advertised immediately to emulate it having happened
     await a._process_control_command(cid, cast(Any, w), "AUTH:OK")
@@ -1524,34 +1666,56 @@ async def test_connect_with_routing_options_on_darwin(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     # Monkeypatch platform as darwin for interface binding path safely
     monkeypatch.setattr(sys, "platform", "darwin")
+
     # Fake getaddrinfo
     async def fake_gai(host, port, type):
-        return [ (socket.AF_INET, socket.SOCK_STREAM, 0, '', ("127.0.0.1", 0)) ]
-    monkeypatch.setattr(asyncio.get_event_loop(), "getaddrinfo", lambda *args, **kwargs: asyncio.get_event_loop().create_task(fake_gai(*args, **kwargs)))
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(
+        asyncio.get_event_loop(),
+        "getaddrinfo",
+        lambda *args, **kwargs: asyncio.get_event_loop().create_task(fake_gai(*args, **kwargs)),
+    )
+
     # Fake low-level socket operations via monkeypatching socket.socket
     class DummySock:
         def __init__(self, *args, **kwargs):
             self._opts = []
             self._blocking = True
+
         def setsockopt(self, level, opt, val):
             self._opts.append((level, opt, val))
+
         def bind(self, addr):
             pass
+
         def setblocking(self, b):
             self._blocking = b
+
         def close(self):
             pass
+
     monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: DummySock())
     # if_nametoindex for lo0
     monkeypatch.setattr(socket, "if_nametoindex", lambda name: 1)
+
     # Fake sock_connect
     async def fake_sock_connect(sock, sockaddr):
         return None
-    monkeypatch.setattr(asyncio.get_event_loop(), "sock_connect", lambda sock, sockaddr: asyncio.get_event_loop().create_task(fake_sock_connect(sock, sockaddr)))
+
+    monkeypatch.setattr(
+        asyncio.get_event_loop(),
+        "sock_connect",
+        lambda sock, sockaddr: asyncio.get_event_loop().create_task(fake_sock_connect(sock, sockaddr)),
+    )
+
     # Fake open_connection accepting sock
     async def fake_open_connection(**kwargs):
         return cast(Any, FakeReader([])), cast(Any, FakeWriter())
-    monkeypatch.setattr(asyncio, "open_connection", lambda **kwargs: asyncio.get_event_loop().create_task(fake_open_connection(**kwargs)))
+
+    monkeypatch.setattr(
+        asyncio, "open_connection", lambda **kwargs: asyncio.get_event_loop().create_task(fake_open_connection(**kwargs))
+    )
     r, w = await a._connect_with_routing_options("h", 1, None, None, None, interface="lo0", fwmark=None)
     assert r is not None and w is not None
 
@@ -1572,9 +1736,6 @@ def test_mpath_select_promotes_on_stale():
     a._mpath_groups[key]["conns"][c2]["last_rx_seen"] = time.time()
     sel = a._select_mpath_connection(key)
     assert sel == c2
-
-
-    
 
 
 @pytest.mark.asyncio
@@ -1606,6 +1767,7 @@ async def test_heartbeat_loop_sends_hb_and_updates(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": [], "heartbeat_interval": 0.1})
     # One active connection with writer recognized as StreamWriter
     import openmux.server.adapters.muxcon as muxmod
+
     monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
     cid = "out:hb:loop:1"
     w = FakeWriter()
@@ -1613,11 +1775,13 @@ async def test_heartbeat_loop_sends_hb_and_updates(monkeypatch):
     # Speed up loop and stop after first iteration
     orig_sleep = asyncio.sleep
     calls = {"n": 0}
+
     async def fast_sleep(d):
         calls["n"] += 1
         if calls["n"] > 2:
             a._stop_event.set()
         await orig_sleep(0)
+
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
     await a._heartbeat_loop()
     # Expect HB request sent
@@ -1633,10 +1797,16 @@ async def test_mpath_failover_ttl_prunes_idle_and_closes(monkeypatch):
     w = FakeWriter()
     a.connections[cid] = {"writer": w}
     a._hb_state[cid] = {"last_req_ts": 0.0, "last_ack_ts": 0.0}
-    a._mpath_groups[key] = {"conns": OrderedDict({cid: {"opened_at": time.time(), "last_rx_seen": time.time() - 999}}), "primary": cid, "rr_index": 0}
+    a._mpath_groups[key] = {
+        "conns": OrderedDict({cid: {"opened_at": time.time(), "last_rx_seen": time.time() - 999}}),
+        "primary": cid,
+        "rr_index": 0,
+    }
     closed = {"ids": []}
+
     async def fake_close(x):
         closed["ids"].append(x)
+
     a._close_connection = fake_close  # type: ignore
     # Speed loop and stop after one pass
     orig_sleep = asyncio.sleep
@@ -1653,6 +1823,7 @@ async def test_mpath_failover_ttl_prunes_idle_and_closes(monkeypatch):
 async def test_read_loop_open_close_paths(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     import openmux.server.adapters.muxcon as muxmod
+
     monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
     cid = "in:oec:1"
     w = FakeWriter()
@@ -1663,13 +1834,17 @@ async def test_read_loop_open_close_paths(monkeypatch):
         {"frame_type": "E", "stream_id": 7, "payload": b"", "seq": 2},
         None,
     ]
+
     async def fake_read_frame(reader):
         await asyncio.sleep(0)
         return frames.pop(0)
+
     monkeypatch.setattr(a, "_read_frame", fake_read_frame)
+
     # Avoid starting actual pump
     async def fake_pump(peer_key2, sid, pname):
         return None
+
     monkeypatch.setattr(a, "_pump_local_port_to_remote", fake_pump)
     await a._read_loop(cid)
     # After E frame, mapping should be removed
@@ -1738,27 +1913,37 @@ def test_make_listen_socket_interface_fwmark_linux(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     # Mimic linux platform
     monkeypatch.setattr(sys, "platform", "linux")
+
     # Stub socket with tracking of setsockopt
     class DummySock:
         def __init__(self, af, st, pr):
             self._opts = []
             self._bound = False
             self._blocking = True
+
         def setsockopt(self, level, opt, val):
             self._opts.append((level, opt, val))
+
         def bind(self, sockaddr):
             self._bound = True
+
         def listen(self):
             pass
+
         def setblocking(self, b):
             self._blocking = b
+
         def fileno(self):
             return 3
+
         def close(self):
             pass
+
     monkeypatch.setattr(socket, "socket", lambda af, st, pr: DummySock(af, st, pr))
     # Force getaddrinfo to deterministic tuple
-    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, type: [(socket.AF_INET, socket.SOCK_STREAM, 0, '', ("127.0.0.1", 0))])
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda host, port, type: [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 0))]
+    )
     s = a._make_listen_socket("127.0.0.1", 0, interface="eth0", fwmark=7)
     try:
         assert s.fileno() == 3
@@ -1939,8 +2124,8 @@ async def test_end_to_end_local_force_take_notifies_federated_peers_own_client()
     federated peer's OWN local client (a stand-in for its web console) must
     be notified live over the real wire - not just have its bookkeeping
     flipped server-side, requiring a refresh/reconnect to notice."""
-    from openmux.server.port_manager import PortManager
     from openmux.server.console_manager import ConsoleManager
+    from openmux.server.port_manager import PortManager
 
     server_side: Dict[str, Any] = {}
 
@@ -2044,7 +2229,9 @@ async def test_end_to_end_local_force_take_notifies_federated_peers_own_client()
             if browser.received:
                 break
             await asyncio.sleep(0.02)
-        assert browser.received, f"Peer's own local client was never notified live of the federated demotion - undelivered={undelivered!r}"
+        assert (
+            browser.received
+        ), f"Peer's own local client was never notified live of the federated demotion - undelivered={undelivered!r}"
         assert browser.received[-1]["mode"] == "read-only"
         assert browser.received[-1]["reason"] == "demoted"
     finally:

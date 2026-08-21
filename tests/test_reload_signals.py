@@ -2,6 +2,7 @@ import asyncio
 import os
 import textwrap
 import types
+
 import pytest
 
 from openmux.server.main import OpenMuxServer
@@ -61,6 +62,7 @@ async def test_soft_reload_method(monkeypatch, tmp_path):
     # Monkeypatch auth_manager.update_config to be a no-op coroutine
     async def _noop_update(cfg):
         return True
+
     monkeypatch.setattr(server.auth_manager, "update_config", _noop_update, raising=True)
 
     # Call soft reload and check the shape of the result
@@ -88,4 +90,3 @@ async def test_full_reload_method(monkeypatch, tmp_path):
     assert "stopped" in res
     assert "started" in res
     assert "errors" in res
-

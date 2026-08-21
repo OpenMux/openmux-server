@@ -81,7 +81,7 @@ def test_get_security_policy_reads_disabled_config_editor_sections(tmp_path):
 
 def test_get_security_policy_caches_until_next_load_config(tmp_path):
     security_path = tmp_path / "security.yaml"
-    security_path.write_text('adapters:\n  disabled: []\n')
+    security_path.write_text("adapters:\n  disabled: []\n")
     manager = ConfigManager(_write_server_config(tmp_path))
     manager.load_config()
 

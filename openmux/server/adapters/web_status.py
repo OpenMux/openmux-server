@@ -806,7 +806,7 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
                             "opened_at": opened_at,
                             "last_seen": last_seen,
                             "age_sec": (now - opened_at) if opened_at else None,
-                            "idle_sec": (now - (last_activity or last_seen) ) if (last_activity or last_seen) else None,
+                            "idle_sec": (now - (last_activity or last_seen)) if (last_activity or last_seen) else None,
                             "stale": is_stale,
                             "is_primary": cid == primary,
                             "server_id": server_id,

@@ -7,13 +7,13 @@ from typing import List, Tuple
 from .base import TcpProtocolHandler
 
 # Telnet special byte values (RFC 854)
-_IAC = 0xFF   # Interpret As Command
-_SB  = 0xFA   # Start of subnegotiation (250)
-_SE  = 0xF0   # End of subnegotiation   (240)
+_IAC = 0xFF  # Interpret As Command
+_SB = 0xFA  # Start of subnegotiation (250)
+_SE = 0xF0  # End of subnegotiation   (240)
 # Option-command bytes that consume one further option byte
 _WILL = 0xFB
 _WONT = 0xFC
-_DO   = 0xFD
+_DO = 0xFD
 _DONT = 0xFE
 
 _OPTION_CMDS = {_WILL, _WONT, _DO, _DONT}
@@ -48,7 +48,7 @@ class TelnetIacStripper:
 
             elif self._iac_state == "iac":
                 if b == _IAC:
-                    out.append(_IAC)          # IAC IAC → literal 0xFF
+                    out.append(_IAC)  # IAC IAC → literal 0xFF
                     self._iac_state = "data"
                 elif b == _SB:
                     self._iac_state = "subneg"

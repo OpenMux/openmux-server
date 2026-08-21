@@ -291,9 +291,7 @@ class ActionRunner:
                     client_id=run.client_id,
                 )
             except Exception:
-                logger.error(
-                    "Failed to record action event %r for run %s", event.get("event"), run_id, exc_info=True
-                )
+                logger.error("Failed to record action event %r for run %s", event.get("event"), run_id, exc_info=True)
         for queue in list(self._subscribers.get(run_id, [])):
             try:
                 queue.put_nowait(event)

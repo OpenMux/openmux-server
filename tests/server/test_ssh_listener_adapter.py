@@ -358,9 +358,7 @@ async def test_public_key_auth_wrong_key_rejected(tmp_path, monkeypatch):
     port = adapter.listeners[0].effective_port
     try:
         with pytest.raises(asyncssh.PermissionDenied):
-            await asyncssh.connect(
-                "127.0.0.1", port=port, username="alice", client_keys=[client_key], known_hosts=None
-            )
+            await asyncssh.connect("127.0.0.1", port=port, username="alice", client_keys=[client_key], known_hosts=None)
     finally:
         await adapter.stop()
 
@@ -557,9 +555,7 @@ async def test_escape_menu_version_and_info(tmp_path, monkeypatch):
 async def test_escape_menu_request_rw_promotes_and_enables_writes(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
-    adapter = await make_running_adapter(
-        tmp_path, monkeypatch, entry, ["loopback1"], auth, console_mode="read-only"
-    )
+    adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth, console_mode="read-only")
     port = adapter.listeners[0].effective_port
     try:
         async with asyncssh.connect(
@@ -634,11 +630,14 @@ async def test_escape_menu_force_take_demotes_other_session(tmp_path, monkeypatc
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
     port = adapter.listeners[0].effective_port
     try:
-        async with asyncssh.connect(
-            "127.0.0.1", port=port, username="alice", password="secret", known_hosts=None, client_keys=None
-        ) as conn1, asyncssh.connect(
-            "127.0.0.1", port=port, username="bob", password="secret", known_hosts=None, client_keys=None
-        ) as conn2:
+        async with (
+            asyncssh.connect(
+                "127.0.0.1", port=port, username="alice", password="secret", known_hosts=None, client_keys=None
+            ) as conn1,
+            asyncssh.connect(
+                "127.0.0.1", port=port, username="bob", password="secret", known_hosts=None, client_keys=None
+            ) as conn2,
+        ):
             p1 = await conn1.create_process(encoding=None)
             p2 = await conn2.create_process(encoding=None)
             console = adapter.console_manager

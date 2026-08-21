@@ -470,12 +470,26 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
     adapter = CommandAdapter("cmd", {"command_ports": []})
 
     class PortA:
-        command = "echo a"; shell = False; cwd = None; env = None; auto_restart = False
-        max_read_write_users = 1; interactive = False; always_buffer = False; scrollback_size = 0
+        command = "echo a"
+        shell = False
+        cwd = None
+        env = None
+        auto_restart = False
+        max_read_write_users = 1
+        interactive = False
+        always_buffer = False
+        scrollback_size = 0
 
     class PortB:
-        command = "echo b"; shell = False; cwd = None; env = None; auto_restart = False
-        max_read_write_users = 1; interactive = False; always_buffer = False; scrollback_size = 0
+        command = "echo b"
+        shell = False
+        cwd = None
+        env = None
+        auto_restart = False
+        max_read_write_users = 1
+        interactive = False
+        always_buffer = False
+        scrollback_size = 0
 
     adapter.ports["a"] = PortA()  # type: ignore[assignment]
     adapter.ports["b"] = PortB()  # type: ignore[assignment]
@@ -493,11 +507,13 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
     monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
     monkeypatch.setattr(adapter, "create_port", fake_create)
 
-    summary = await adapter.reconcile_ports([
-        {"name": "a", "command": "echo a"},      # unchanged
-        {"name": "b", "command": "echo b_new"},  # updated (command changed)
-        {"name": "c", "command": "echo c"},      # added
-    ])
+    summary = await adapter.reconcile_ports(
+        [
+            {"name": "a", "command": "echo a"},  # unchanged
+            {"name": "b", "command": "echo b_new"},  # updated (command changed)
+            {"name": "c", "command": "echo c"},  # added
+        ]
+    )
     assert summary["unchanged"] == ["a"]
     assert summary["updated"] == ["b"]
     assert summary["added"] == ["c"]

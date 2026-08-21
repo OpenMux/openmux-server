@@ -240,7 +240,16 @@ async def test_register_federated_and_enrichment():
         def __init__(self, name):
             self.name = name
 
-    meta = type("Meta", (), {"name": "rf", "origin_server": proxy.metadata.origin_server, "server_chain": proxy.metadata.server_chain, "federation_type": proxy.metadata.federation_type})
+    meta = type(
+        "Meta",
+        (),
+        {
+            "name": "rf",
+            "origin_server": proxy.metadata.origin_server,
+            "server_chain": proxy.metadata.server_chain,
+            "federation_type": proxy.metadata.federation_type,
+        },
+    )
 
     name = await pm.register_federated_port(meta, proxy)
     assert name == "rf"

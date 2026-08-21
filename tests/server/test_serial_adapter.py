@@ -1,4 +1,5 @@
 """Unit tests for SerialAdapter.reconcile_ports change-detection logic."""
+
 from types import SimpleNamespace
 
 import pytest
@@ -66,9 +67,13 @@ async def test_reconcile_ports_unchanged():
     adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0", baudrate=9600)  # type: ignore
 
     # YAML with same material values — only description differs (non-material)
-    summary = await adapter.reconcile_ports({"serial_ports": [
-        {"name": "a", "device": "/dev/ttyUSB0", "baudrate": 9600, "description": "new"},
-    ]})
+    summary = await adapter.reconcile_ports(
+        {
+            "serial_ports": [
+                {"name": "a", "device": "/dev/ttyUSB0", "baudrate": 9600, "description": "new"},
+            ]
+        }
+    )
 
     assert summary["unchanged"] == ["a"], f"Expected unchanged, got: {summary}"
     assert summary["updated"] == []
@@ -82,9 +87,13 @@ async def test_reconcile_ports_optional_fields_default():
     adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0", baudrate=115200)  # type: ignore
 
     # New YAML omits optional fields entirely — must still be unchanged
-    summary = await adapter.reconcile_ports({"serial_ports": [
-        {"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200},
-    ]})
+    summary = await adapter.reconcile_ports(
+        {
+            "serial_ports": [
+                {"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200},
+            ]
+        }
+    )
 
     assert summary["unchanged"] == ["a"], f"Expected unchanged, got: {summary}"
     assert summary["updated"] == []
@@ -97,9 +106,13 @@ async def test_reconcile_ports_detects_baudrate_change():
     adapter.serial_ports.clear()
     adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0", baudrate=9600)  # type: ignore
 
-    summary = await adapter.reconcile_ports({"serial_ports": [
-        {"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200},  # changed
-    ]})
+    summary = await adapter.reconcile_ports(
+        {
+            "serial_ports": [
+                {"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200},  # changed
+            ]
+        }
+    )
 
     assert summary["updated"] == ["a"]
     assert summary["unchanged"] == []
@@ -114,10 +127,14 @@ async def test_reconcile_ports_add_remove():
     adapter.serial_ports["b"] = _make_spw(device="/dev/ttyUSB1")  # type: ignore
 
     # Keep 'a', remove 'b', add 'c'
-    summary = await adapter.reconcile_ports({"serial_ports": [
-        {"name": "a", "device": "/dev/ttyUSB0"},
-        {"name": "c", "device": "/dev/ttyUSB2"},
-    ]})
+    summary = await adapter.reconcile_ports(
+        {
+            "serial_ports": [
+                {"name": "a", "device": "/dev/ttyUSB0"},
+                {"name": "c", "device": "/dev/ttyUSB2"},
+            ]
+        }
+    )
 
     assert summary["unchanged"] == ["a"]
     assert summary["removed"] == ["b"]
@@ -144,10 +161,14 @@ async def test_reconcile_ports_uses_overridable_destroy_and_create(monkeypatch):
     monkeypatch.setattr(SerialAdapter, "destroy_port", fake_destroy_port)
     monkeypatch.setattr(SerialAdapter, "create_port", fake_create_port)
 
-    summary = await adapter.reconcile_ports({"serial_ports": [
-        {"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200},  # changed -> destroy+create
-        {"name": "c", "device": "/dev/ttyUSB2"},  # added -> create only
-    ]})
+    summary = await adapter.reconcile_ports(
+        {
+            "serial_ports": [
+                {"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200},  # changed -> destroy+create
+                {"name": "c", "device": "/dev/ttyUSB2"},  # added -> create only
+            ]
+        }
+    )
 
     assert summary["updated"] == ["a"]
     assert summary["removed"] == ["b"]

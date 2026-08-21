@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -89,12 +90,10 @@ import socket
 import ssl
 import sys
 import time
-import contextlib
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
-from openmux.server.port_utils import safe_get_port
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -105,6 +104,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from cryptography.x509.oid import NameOID
+
+from openmux.server.port_utils import safe_get_port
 
 from ...common.federation_types import (
     ClientType,
@@ -3272,7 +3273,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 pm = self.main_port_manager
                                 try:
                                     if hasattr(pm, "unregister_federated_port"):
-                                        import inspect, asyncio
+                                        import asyncio
+                                        import inspect
 
                                         fn = getattr(pm, "unregister_federated_port")
                                         if inspect.iscoroutinefunction(fn):

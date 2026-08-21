@@ -2,8 +2,8 @@ from typing import Any, Dict, List, Optional, Set
 
 import pytest
 
-from openmux.server.adapters.factory import AdapterPlugin, GenericAdapterFactory, PluginRegistry
 from openmux.server.adapters.base_adapter import AdapterCapability, BaseGenericAdapter
+from openmux.server.adapters.factory import AdapterPlugin, GenericAdapterFactory, PluginRegistry
 
 
 class DummyAdapter(BaseGenericAdapter):

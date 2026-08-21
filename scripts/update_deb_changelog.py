@@ -13,6 +13,7 @@ Environment:
 
 The script writes debian/changelog compatible with dpkg-buildpackage.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -54,7 +55,13 @@ def git_snapshot_suffix() -> str | None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
         # If git exists and we're in a repo, prefer describe info
         try:
-            subprocess.run(["git", "rev-parse", "--git-dir"], cwd=REPO_ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=REPO_ROOT,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             desc = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_ROOT).decode().strip()
             return f"git{ts}.{desc}"
         except Exception:
@@ -69,11 +76,13 @@ def rfc2822_now() -> str:
 
 
 def write_changelog(pkg: str, version: str, dist: str, message: str, maint: str, dry_run: bool) -> None:
-    body = (
-        f"{pkg} ({version}) {dist}; urgency=medium\n\n"
-        f"  * {message}\n\n"
-        f" -- {maint}  {rfc2822_now()}\n\n"
-    )
+    body = f"""{pkg} ({version}) {dist}; urgency=medium
+
+  * {message}
+
+ -- {maint}  {rfc2822_now()}
+
+"""
     if dry_run:
         sys.stdout.write(body)
         return

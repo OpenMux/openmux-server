@@ -5,7 +5,6 @@ import time
 from typing import Any, Dict
 
 import pytest
-
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -24,7 +23,7 @@ def test_normalize_public_keys_defaults_and_allowed_uses():
             {"public_key": "base64:" + base64.b64encode(b"y" * 32).decode()},
             {"username": "bob", "public_key": "base64:" + base64.b64encode(b"z" * 32).decode(), "allowed_uses": "CLIENT"},
             {"public_key": "base64:" + base64.b64encode(b"w" * 32).decode(), "allowed_uses": ["MUXCON", "Client"]},
-        ]
+        ],
     }
     am = AuthManager(cfg)
     # Defaults: with username -> [client]; without username -> [muxcon]
@@ -82,11 +81,7 @@ def test_public_key_loading_and_pk_challenge_verify_openssh():
         encoding=serialization.Encoding.OpenSSH,
         format=serialization.PublicFormat.OpenSSH,
     ).decode()
-    cfg = {
-        "public_keys": [
-            {"username": "alice", "key_id": "k1", "public_key": pub_ssh, "allowed_uses": ["client"]}
-        ]
-    }
+    cfg = {"public_keys": [{"username": "alice", "key_id": "k1", "public_key": pub_ssh, "allowed_uses": ["client"]}]}
     am = AuthManager(cfg)
     # ed25519 map should contain our key_id
     m = am.get_ed25519_pubkeys_for_use("client")
@@ -142,7 +137,13 @@ def test_get_public_keys_for_use_filters():
     cfg = {
         "public_keys": [
             {"username": "u1", "key_id": "a", "public_key": "invalid", "allowed_uses": ["client"]},
-            {"username": "u1", "key_id": "b", "public_key": "base64:" + base64.b64encode(b"x" * 32).decode(), "allowed_uses": ["client"], "disabled": True},
+            {
+                "username": "u1",
+                "key_id": "b",
+                "public_key": "base64:" + base64.b64encode(b"x" * 32).decode(),
+                "allowed_uses": ["client"],
+                "disabled": True,
+            },
             {"key_id": "c", "public_key": "base64:" + base64.b64encode(b"y" * 32).decode(), "allowed_uses": ["muxcon"]},
         ]
     }
@@ -157,12 +158,16 @@ def test_get_public_keys_for_use_filters():
 def test_get_ed25519_pubkeys_for_user_and_use_filters_by_username():
     priv_alice = Ed25519PrivateKey.generate()
     priv_bob = Ed25519PrivateKey.generate()
-    ssh_alice = priv_alice.public_key().public_bytes(
-        encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH
-    ).decode()
-    ssh_bob = priv_bob.public_key().public_bytes(
-        encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH
-    ).decode()
+    ssh_alice = (
+        priv_alice.public_key()
+        .public_bytes(encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
+    ssh_bob = (
+        priv_bob.public_key()
+        .public_bytes(encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
     cfg = {
         "public_keys": [
             {"username": "alice", "key_id": "a1", "public_key": ssh_alice, "allowed_uses": ["ssh"]},
@@ -183,26 +188,33 @@ def test_get_ed25519_pubkeys_for_user_and_use_filters_by_username():
 # get_user_groups (console access groups, issue #24)
 # ---------------------------------------------------------------------------
 
+
 class TestGetUserGroups:
 
     def test_static_user_explicit_groups_plus_implicit_user(self):
-        am = AuthManager({
-            "users": [
-                {"username": "alice", "password_hash": "x", "permissions": "read-write", "groups": ["ops", "net"]},
-            ],
-        })
+        am = AuthManager(
+            {
+                "users": [
+                    {"username": "alice", "password_hash": "x", "permissions": "read-write", "groups": ["ops", "net"]},
+                ],
+            }
+        )
         assert am.get_user_groups("alice") == {"user", "ops", "net"}
 
     def test_static_user_no_groups_gets_implicit_user_only(self):
-        am = AuthManager({
-            "users": [{"username": "bob", "password_hash": "x", "permissions": "read-write"}],
-        })
+        am = AuthManager(
+            {
+                "users": [{"username": "bob", "password_hash": "x", "permissions": "read-write"}],
+            }
+        )
         assert am.get_user_groups("bob") == {"user"}
 
     def test_api_key_groups(self):
-        am = AuthManager({
-            "api_keys": [{"key": "K1", "name": "automation", "permissions": "read-write", "groups": ["ci"]}],
-        })
+        am = AuthManager(
+            {
+                "api_keys": [{"key": "K1", "name": "automation", "permissions": "read-write", "groups": ["ci"]}],
+            }
+        )
         assert am.get_user_groups("automation") == {"user", "ci"}
 
     def test_unknown_user_returns_empty_set(self):
@@ -218,9 +230,11 @@ class TestGetUserGroups:
         assert am.get_user_groups("carol") == {"user", "openmux_admin", "field-techs"}
 
     def test_read_only_permission_deprecation_warning_logged_once(self, caplog):
-        am = AuthManager({
-            "users": [{"username": "viewer", "password_hash": "x", "permissions": "read-only"}],
-        })
+        am = AuthManager(
+            {
+                "users": [{"username": "viewer", "password_hash": "x", "permissions": "read-only"}],
+            }
+        )
         with caplog.at_level("WARNING"):
             assert am.get_user_permissions("viewer") == "read-only"
             assert am.get_user_permissions("viewer") == "read-only"

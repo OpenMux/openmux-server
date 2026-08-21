@@ -1,14 +1,15 @@
-import re
 import base64
-import hmac
 import hashlib
+import hmac
 import json
+import re
 import time
-from aiohttp import web, ClientSession, ClientTimeout
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlsplit
+
+from aiohttp import ClientSession, ClientTimeout, web
 
 from . import ADAPTER_APP_KEY
-from urllib.parse import urlsplit
 
 # Federated admin proxy plugin (skeleton). Proxies selected admin endpoints to
 # other known nodes via existing federation. For now, provide a read-only list
@@ -40,16 +41,19 @@ async def _handle_list(request: web.Request) -> web.StreamResponse:
                     sid = None
                     inst = None
                     peer = None
-                conns.append({
-                    "connection_id": cid,
-                    "role": role,
-                    "server_id": sid,
-                    "instance_id": inst,
-                    "peer": peer,
-                })
+                conns.append(
+                    {
+                        "connection_id": cid,
+                        "role": role,
+                        "server_id": sid,
+                        "instance_id": inst,
+                        "peer": peer,
+                    }
+                )
         except Exception:
             pass
     import json
+
     return web.Response(body=json.dumps({"connections": conns}).encode("utf-8"), content_type="application/json")
 
 
@@ -69,7 +73,16 @@ def _norm_base_path(v: Optional[str]) -> str:
         return ""
 
 
-_HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
+_HOP_BY_HOP = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+}
 
 
 def _is_ui_allowed_path(tail: str) -> bool:
@@ -96,14 +109,18 @@ def _inject_remote_banner(body: bytes, node: str) -> bytes:
         text = body.decode("utf-8", errors="ignore")
         banner = (
             '<div class="proxy-remote-banner" style="background:#fff3cd;color:#664d03;border:1px solid #ffe69c;padding:8px 12px;margin:8px 0;">'
-            + 'Viewing remote node: <strong>' + (node or '?') + '</strong>' +
-            '</div>'
+            + "Viewing remote node: <strong>"
+            + (node or "?")
+            + "</strong>"
+            + "</div>"
         )
         if "<body" in text:
             # insert right after the opening <body...>
             import re as _re
+
             def _ins(m):
                 return m.group(0) + banner
+
             new = _re.sub(r"<body[^>]*>", _ins, text, count=1)
             return new.encode("utf-8")
         if "<main" in text:
@@ -124,7 +141,7 @@ def _resolve_upstream(adapter, node: str, tail: str, request: web.Request) -> Op
         muxcon = adapter._find_muxcon_adapter() if hasattr(adapter, "_find_muxcon_adapter") else None
         if not muxcon:
             return None
-        conns = (getattr(muxcon, "connections", {}) or {})
+        conns = getattr(muxcon, "connections", {}) or {}
         target = None
         for _cid, c in conns.items():
             try:
@@ -163,7 +180,7 @@ def _rewrite_location(loc: str, upstream_base: str, proxied_prefix: str) -> str:
             return loc
         # Absolute to upstream base -> replace prefix
         if upstream_base and loc.startswith(upstream_base):
-            rest = loc[len(upstream_base):]
+            rest = loc[len(upstream_base) :]
             if rest and not rest.startswith("/"):
                 rest = "/" + rest
             return proxied_prefix + rest
@@ -182,6 +199,7 @@ def _rewrite_set_cookie(cookie_value: str, proxied_prefix: str) -> str:
     try:
         if not cookie_value:
             return cookie_value
+
         # If Path attribute present and absolute, rewrite to proxied prefix + original
         def _sub(m: re.Match) -> str:
             path = m.group(2).strip()
@@ -206,6 +224,7 @@ def _rewrite_html_root_links(body: bytes, proxied_prefix: str, node: str) -> byt
         # Avoid double-prefixing already proxied links
         pp = proxied_prefix.rstrip("/")
         import re as _re
+
         # Only rewrite attributes that begin with "/" and not "//"
         def _prefix_attr(m: _re.Match) -> str:
             attr = m.group(1)
@@ -214,7 +233,7 @@ def _rewrite_html_root_links(body: bytes, proxied_prefix: str, node: str) -> byt
                 return m.group(0)  # protocol-relative; leave
             if val.startswith(pp + "/"):
                 return m.group(0)  # already prefixed
-            return f"{attr}=\"{pp}{val}\""
+            return f'{attr}="{pp}{val}"'
 
         text = _re.sub(r"(?i)\b(href|src|action)\s*=\s*\"(/[^\"]*)\"", _prefix_attr, text)
         text = _re.sub(r"(?i)\b(href|src|action)\s*=\s*'(/[^']*)'", _prefix_attr, text)
@@ -239,7 +258,11 @@ async def _handle_proxy(request: web.Request) -> web.StreamResponse:
     username = request.get("username")
     if not username:
         # For browsers/tools, advertise Basic so non-session clients can auth
-        return web.Response(status=401, text="Unauthorized\n", headers={"WWW-Authenticate": f'Basic realm="{getattr(adapter, "realm", "OpenMux")}"'})
+        return web.Response(
+            status=401,
+            text="Unauthorized\n",
+            headers={"WWW-Authenticate": f'Basic realm="{getattr(adapter, "realm", "OpenMux")}"'},
+        )
     try:
         perms = adapter.auth_manager.get_user_permissions(username) if getattr(adapter, "auth_manager", None) else None
         if perms not in ("admin",):

@@ -4,10 +4,10 @@ import json
 import pytest
 
 from openmux.server.adapters.loopback import LoopbackAdapter
-from openmux.server.web_console import WebConsoleAdapter
 from openmux.server.auth_manager import AuthManager
 from openmux.server.console_manager import ConsoleManager
 from openmux.server.port_manager import PortManager
+from openmux.server.web_console import WebConsoleAdapter
 
 
 @pytest.mark.asyncio
@@ -47,9 +47,11 @@ async def test_meta_broadcast_loopback_connected_true(monkeypatch):
 
     # Inject a fake websocket client subscribed to meta
     cid = "ws:test"
+
     class DummyWS:
         def __init__(self):
             self.sent = []
+
         async def send_str(self, s):
             self.sent.append(s)
 
@@ -63,7 +65,7 @@ async def test_meta_broadcast_loopback_connected_true(monkeypatch):
     # Last sent payload should be an OMXCTRL meta with connected:true
     payload = ws.sent[-1]
     assert payload.startswith("OMXCTRL ")
-    meta = json.loads(payload[len("OMXCTRL "):])
+    meta = json.loads(payload[len("OMXCTRL ") :])
     assert meta.get("type") == "meta"
     assert meta.get("name") == "L2"
     assert meta.get("connected") is True

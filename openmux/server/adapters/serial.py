@@ -99,7 +99,12 @@ class SerialPortWrapper:
         data_callback: Callback set by PortManager; called with (port_name, data).
     """
 
-    def __init__(self, config: SerialPortConfig, logger: logging.Logger, meta_notify: Optional[Callable[[str, Dict[str, Any]], None]] = None):
+    def __init__(
+        self,
+        config: SerialPortConfig,
+        logger: logging.Logger,
+        meta_notify: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ):
         self.config = config
         self.name = config.name  # Add name attribute for port manager compatibility
         self.description = config.description
@@ -219,10 +224,8 @@ class SerialPortWrapper:
                     self.max_reconnect_attempts == 0 or self.reconnect_attempts < self.max_reconnect_attempts
                 ):
                     self.reconnect_attempts += 1
-                    self.logger.debug(
-                        f"Attempting to reconnect to {self.config.device} "
-                        f"(attempt {self.reconnect_attempts})"
-                    )
+                    reconnect_msg = f"Attempting to reconnect to {self.config.device} (attempt {self.reconnect_attempts})"
+                    self.logger.debug(reconnect_msg)
                     await asyncio.sleep(self.reconnect_delay)
                 else:
                     break
@@ -244,6 +247,7 @@ class SerialPortWrapper:
             # Check if device exists
             if not os.path.exists(self.config.device):
                 import time as _time
+
                 now = _time.monotonic()
                 if self._last_missing_warn_ts is None or (now - self._last_missing_warn_ts) >= 3600:
                     self.logger.warning(f"Serial device {self.config.device} does not exist")
@@ -530,6 +534,7 @@ class SerialAdapter(BaseGenericAdapter):
 
     def _make_notifier(self) -> Callable[[str, Dict[str, Any]], None]:
         """Return a meta-notify callback bound to this adapter's port manager."""
+
         def _notif(pname: str, payload: Dict[str, Any], _self=self) -> None:
             try:
                 mpm = getattr(_self, "main_port_manager", None)
@@ -537,6 +542,7 @@ class SerialAdapter(BaseGenericAdapter):
                     mpm.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
             except Exception:
                 pass
+
         return _notif
 
     def _parse_port_configs(self) -> None:
@@ -748,7 +754,9 @@ class SerialAdapter(BaseGenericAdapter):
             return 0
 
         try:
-            self.logger.debug(f"Writing {len(data)} bytes to serial port {port_name}: {data.decode('utf-8', errors='replace')}")
+            self.logger.debug(
+                f"Writing {len(data)} bytes to serial port {port_name}: {data.decode('utf-8', errors='replace')}"
+            )
             bytes_written = await port_wrapper.write_data(data)
             self.logger.debug(f"Successfully wrote {bytes_written} bytes to serial port {port_name}")
             return bytes_written

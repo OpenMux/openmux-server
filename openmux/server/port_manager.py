@@ -14,13 +14,15 @@ how unified adapters are wrapped to present a legacy interface surface.
 """
 
 import asyncio
+import inspect
 import logging
 import time
-from typing import Any, Dict, List, Optional, Union, Callable
-import inspect
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from openmux.server.data_logger import DataLogger
 from openmux.server.port_utils import natural_sort_key
+
+
 class PortManager:
     """Manages ports across legacy and unified adapters."""
 
@@ -106,7 +108,6 @@ class PortManager:
         # Set a reference to the main port manager in each adapter for data callbacks
         for adapter in unified_adapters:
             adapter.main_port_manager = self
-
 
     def get_port(self, name: str) -> Optional[Any]:
         """Return a port by name, creating a unified wrapper on-demand.
@@ -351,7 +352,6 @@ class PortManager:
         """
         return [port.get_status() for port in self.ports.values()]
 
-
     # Methods for compatibility with ConsoleManager interface
 
     def port_exists(self, port_name: str) -> bool:
@@ -480,14 +480,17 @@ class PortManager:
                 if unified is not None and isinstance(adapter_type, str) and adapter_type.lower() == "serial":
                     cfg = getattr(getattr(unified, "config", None), "__dict__", None)
                     if cfg:
-                        port_info.setdefault("serial_config", {
-                            "device": cfg.get("device"),
-                            "baudrate": cfg.get("baudrate"),
-                            "bytesize": cfg.get("bytesize"),
-                            "parity": cfg.get("parity"),
-                            "stopbits": cfg.get("stopbits"),
-                            "flow_control": cfg.get("flow_control"),
-                        })
+                        port_info.setdefault(
+                            "serial_config",
+                            {
+                                "device": cfg.get("device"),
+                                "baudrate": cfg.get("baudrate"),
+                                "bytesize": cfg.get("bytesize"),
+                                "parity": cfg.get("parity"),
+                                "stopbits": cfg.get("stopbits"),
+                                "flow_control": cfg.get("flow_control"),
+                            },
+                        )
                     get_ls = getattr(unified, "get_line_status", None)
                     if callable(get_ls):
                         try:
@@ -552,9 +555,7 @@ class PortManager:
 
             # Enforce read-write slot limit; read-only clients are always allowed through
             if mode == "read-write":
-                current_rw = sum(
-                    1 for c in port.connected_clients if c.get("mode") == "read-write"
-                )
+                current_rw = sum(1 for c in port.connected_clients if c.get("mode") == "read-write")
                 if current_rw >= port.max_read_write_users:
                     self.logger.warning(
                         f"Port {port_name} is at maximum read-write capacity ({current_rw}/{port.max_read_write_users})"
@@ -748,10 +749,7 @@ class PortManager:
         port = self.ports[port_name]
 
         # Enforce the read-write slot limit; skip check if client is already read-write
-        already_rw = any(
-            c["client_id"] == client_id and c.get("mode") == "read-write"
-            for c in port.connected_clients
-        )
+        already_rw = any(c["client_id"] == client_id and c.get("mode") == "read-write" for c in port.connected_clients)
         if not already_rw:
             current_rw = sum(1 for c in port.connected_clients if c.get("mode") == "read-write")
             if current_rw >= port.max_read_write_users:
@@ -1052,9 +1050,7 @@ class PortManager:
                                 q.get_nowait()
                                 q.put_nowait(data)
                                 port.dropped_chunks = getattr(port, "dropped_chunks", 0) + 1
-                                self.logger.debug(
-                                    f"Queue full for {port_name}:{cid}; dropped oldest chunk"
-                                )
+                                self.logger.debug(f"Queue full for {port_name}:{cid}; dropped oldest chunk")
                             except Exception:
                                 self.logger.warning(
                                     f"Data queue contention for {port_name}:{cid}; dropping data",
@@ -1077,9 +1073,7 @@ class PortManager:
                     if should_enqueue and port.data_queue is not None:
                         try:
                             port.data_queue.put_nowait(data)
-                            self.logger.debug(
-                                f"Queued {len(data)} bytes for port {port_name} to {len(client_list)} clients"
-                            )
+                            self.logger.debug(f"Queued {len(data)} bytes for port {port_name} to {len(client_list)} clients")
                         except asyncio.QueueFull:
                             try:
                                 port.data_queue.get_nowait()

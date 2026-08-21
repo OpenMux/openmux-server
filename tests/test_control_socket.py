@@ -1,8 +1,9 @@
 import asyncio
 import json
 import os
-import pytest
 import textwrap
+
+import pytest
 
 from openmux.server.main import OpenMuxServer
 

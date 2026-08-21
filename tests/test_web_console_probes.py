@@ -7,10 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 from aiohttp import ClientSession, TCPConnector, WSMsgType
 
-from openmux.server.web_console import WebConsoleAdapter
 from openmux.server.auth_manager import AuthManager
 from openmux.server.console_manager import ConsoleManager
 from openmux.server.port_manager import PortManager
+from openmux.server.web_console import WebConsoleAdapter
 
 
 @pytest.mark.asyncio
@@ -187,6 +187,7 @@ async def test_websocket_connect_and_send(tmp_path):
             assert getattr(dummy, "last_write", None) == b"hello"
 
     await adapter.stop()
+
 
 @pytest.mark.asyncio
 async def test_websocket_transport_failure_prunes_delivery_channel_only():

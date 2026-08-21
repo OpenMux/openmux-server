@@ -187,9 +187,7 @@ class TcpInitiatorPort:
                 f"(protocol: {self.config.get('protocol', {}).get('type', 'plain')}, "
                 f"TLS: {self.use_tls})"
             )
-            self.reader, self.writer = await self._protocol_handler.establish(
-                self.host, self.port, self.config
-            )
+            self.reader, self.writer = await self._protocol_handler.establish(self.host, self.port, self.config)
             self.is_connected = True
             self.logger.info(f"Successfully connected to {self.host}:{self.port}")
             # Reset so the next disconnect logs immediately
@@ -213,6 +211,7 @@ class TcpInitiatorPort:
     def _log_connect_attempt(self, message: str) -> None:
         """Log a connection-attempt message at INFO first time, DEBUG while in known-bad state."""
         import time as _time
+
         now = _time.monotonic()
         if self._last_failed_warn_ts is None or (now - self._last_failed_warn_ts) >= 3600:
             self.logger.info(message)
@@ -222,6 +221,7 @@ class TcpInitiatorPort:
     def _log_connect_failure(self, message: str) -> None:
         """Log a connection-failure message, rate-limited to once per hour."""
         import time as _time
+
         now = _time.monotonic()
         if self._last_failed_warn_ts is None or (now - self._last_failed_warn_ts) >= 3600:
             self.logger.warning(message)
@@ -336,9 +336,7 @@ class TcpInitiatorPort:
 
         if count > 0:
             # Trigger connection if not already running
-            if not self.is_connected and (
-                self.reconnect_task is None or self.reconnect_task.done()
-            ):
+            if not self.is_connected and (self.reconnect_task is None or self.reconnect_task.done()):
                 self.logger.info(f"Port {self.name}: user connected, starting on-demand connection")
                 self.reconnect_task = asyncio.create_task(self._connection_manager())
         else:
@@ -351,9 +349,7 @@ class TcpInitiatorPort:
         try:
             await asyncio.sleep(self.idle_disconnect_delay)
             if self._active_clients == 0:
-                self.logger.info(
-                    f"Port {self.name}: disconnecting after {self.idle_disconnect_delay}s idle"
-                )
+                self.logger.info(f"Port {self.name}: disconnecting after {self.idle_disconnect_delay}s idle")
                 if self.reconnect_task and not self.reconnect_task.done():
                     self.reconnect_task.cancel()
                     try:
@@ -452,6 +448,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
 
     def _make_notifier(self) -> Callable[[str, Dict[str, Any]], None]:
         """Return a meta-notify callback bound to this adapter's port manager."""
+
         def _notif(pname: str, payload: Dict[str, Any], _self=self) -> None:
             try:
                 mpm = getattr(_self, "main_port_manager", None)
@@ -459,6 +456,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                     mpm.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
             except Exception:
                 pass
+
         return _notif
 
     @classmethod
@@ -498,11 +496,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                     return False
             # For compat sections (openmux_client_ports), inject protocol sub-key
             # before delegating to the handler's validate_config
-            validate_item = (
-                cls._inject_openmux_protocol(item)
-                if is_openmux_compat and "protocol" not in item
-                else item
-            )
+            validate_item = cls._inject_openmux_protocol(item) if is_openmux_compat and "protocol" not in item else item
             prot = validate_item.get("protocol", {})
             ptype = (prot.get("type", "") or "plain").lower()
             handler_cls = PROTOCOL_HANDLERS.get(ptype)

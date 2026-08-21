@@ -20,64 +20,66 @@ from tests.support.protocol_handler import OpenMuxProtocolHandler as ClientManag
 @pytest.fixture
 def sample_config():
     """Return a sample configuration for testing"""
-    return copy.deepcopy({
-        "server": {"host": "127.0.0.1", "port": 8023},
-        "authentication": {
-            "users": [
+    return copy.deepcopy(
+        {
+            "server": {"host": "127.0.0.1", "port": 8023},
+            "authentication": {
+                "users": [
+                    {
+                        "username": "admin",
+                        "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
+                        "permissions": "admin",
+                    },
+                    {
+                        "username": "user",
+                        "password_hash": "e606e38b0d8c19b24cf0ee3808183162ea7cd63ff7912dbb22b5e803286b4446",
+                        "permissions": "read-write",
+                    },
+                ],
+                "api_keys": [
+                    {
+                        "name": "test_key",
+                        "key": "12345abcde",
+                        "permissions": "read-only",
+                    }
+                ],
+            },
+            "serial_ports": [
                 {
-                    "username": "admin",
-                    "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
-                    "permissions": "admin",
-                },
-                {
-                    "username": "user",
-                    "password_hash": "e606e38b0d8c19b24cf0ee3808183162ea7cd63ff7912dbb22b5e803286b4446",
-                    "permissions": "read-write",
-                },
-            ],
-            "api_keys": [
-                {
-                    "name": "test_key",
-                    "key": "12345abcde",
-                    "permissions": "read-only",
+                    "name": "console1",
+                    "description": "Test Console 1",
+                    "adapter": "serial",
+                    "device": "/dev/ttyS0",
+                    "baudrate": 9600,
+                    "bytesize": 8,
+                    "parity": "N",
+                    "stopbits": 1,
+                    "max_read_write_users": 1,
                 }
             ],
-        },
-        "serial_ports": [
-            {
-                "name": "console1",
-                "description": "Test Console 1",
-                "adapter": "serial",
-                "device": "/dev/ttyS0",
-                "baudrate": 9600,
-                "bytesize": 8,
-                "parity": "N",
-                "stopbits": 1,
-                "max_read_write_users": 1,
-            }
-        ],
-        "logging": {
-            "level": "INFO",
-            "directory": "/tmp/openmux_logs",
-            "max_size": 10485760,  # 10 MB
-            "backup_count": 5,
-        },
-        "metrics": {
-            "enabled": True,
-            "collection_interval": 60,  # seconds
-            "retention_period": 86400,  # 1 day
-        },
-        "monitoring": {
-            "enabled": True,
-            "health_check_interval": 300,  # 5 minutes
-            "snmp_traps": {
-                "enabled": False,
-                "destination": "127.0.0.1",
-                "port": 162,
-                "community": "public",
+            "logging": {
+                "level": "INFO",
+                "directory": "/tmp/openmux_logs",
+                "max_size": 10485760,  # 10 MB
+                "backup_count": 5,
             },
-        },
-    })
+            "metrics": {
+                "enabled": True,
+                "collection_interval": 60,  # seconds
+                "retention_period": 86400,  # 1 day
+            },
+            "monitoring": {
+                "enabled": True,
+                "health_check_interval": 300,  # 5 minutes
+                "snmp_traps": {
+                    "enabled": False,
+                    "destination": "127.0.0.1",
+                    "port": 162,
+                    "community": "public",
+                },
+            },
+        }
+    )
 
 
 def _write_server_and_auth_config(tmp_path, config):

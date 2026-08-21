@@ -74,27 +74,19 @@ class OpenMuxHandler(TcpProtocolHandler):
         if self._api_key:
             auth_ok = await conn.authenticate_with_key(self._api_key)
         else:
-            auth_ok = await conn.authenticate_with_password(
-                self._username, self._password
-            )
+            auth_ok = await conn.authenticate_with_password(self._username, self._password)
         if not auth_ok:
             await conn.close()
             method = "api_key" if self._api_key else "username/password"
-            raise ConnectionError(
-                f"Authentication failed to OpenMux {host}:{port} using {method}"
-            )
+            raise ConnectionError(f"Authentication failed to OpenMux {host}:{port} using {method}")
 
         port_ok = await conn.connect_to_port(self._remote_port)
         if not port_ok:
             await conn.close()
-            raise ConnectionError(
-                f"Failed to connect to remote port '{self._remote_port}' on {host}:{port}"
-            )
+            raise ConnectionError(f"Failed to connect to remote port '{self._remote_port}' on {host}:{port}")
 
         # Handshake complete — return the raw streams for direct use.
         # TcpClientAdapter.reader/writer are plain asyncio streams at this point.
         if conn.reader is None or conn.writer is None:
-            raise ConnectionError(
-                f"OpenMux handshake succeeded but streams are unavailable for {host}:{port}"
-            )
+            raise ConnectionError(f"OpenMux handshake succeeded but streams are unavailable for {host}:{port}")
         return conn.reader, conn.writer

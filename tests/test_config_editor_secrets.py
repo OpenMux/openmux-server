@@ -78,9 +78,7 @@ def test_restore_masked_secrets_preserves_explicit_edits():
 def test_restore_masked_secrets_clears_mask_for_new_entries():
     current = _sample_config()
     payload = _mask_config_secrets(current)
-    payload["authentication"]["users"].append(
-        {"username": "carol", "password_hash": _SECRET_MASK, "permissions": "read-only"}
-    )
+    payload["authentication"]["users"].append({"username": "carol", "password_hash": _SECRET_MASK, "permissions": "read-only"})
 
     _restore_masked_secrets(payload, current)
 

@@ -35,10 +35,10 @@ import sys
 import time
 from typing import Optional
 
-
 # ---------------------------------------------------------------------------
 # ESC-sequence sanitizer (ported verbatim from loopback.py LoopbackPort)
 # ---------------------------------------------------------------------------
+
 
 class _EscSanitizer:
     """Stateful sanitizer: converts control/escape bytes to readable tokens.
@@ -73,64 +73,111 @@ class _EscSanitizer:
         while i < n:
             b = data[i]
 
-            if b in (0x0A, 0x0D):           # CR / LF
-                out.append(b); i += 1; continue
+            if b in (0x0A, 0x0D):  # CR / LF
+                out.append(b)
+                i += 1
+                continue
 
-            if 0x20 <= b <= 0x7E:           # printable ASCII
-                out.append(b); i += 1; continue
+            if 0x20 <= b <= 0x7E:  # printable ASCII
+                out.append(b)
+                i += 1
+                continue
 
-            if b == 0x7F:                   # DEL
-                out.extend(b"[DEL]"); i += 1; continue
+            if b == 0x7F:  # DEL
+                out.extend(b"[DEL]")
+                i += 1
+                continue
 
-            if b == 0x1B:                   # ESC
+            if b == 0x1B:  # ESC
                 if i + 1 >= n:
-                    self._esc_buf.extend(data[i:]); break
+                    self._esc_buf.extend(data[i:])
+                    break
                 second = data[i + 1]
 
-                if second == ord("["):       # CSI  ESC [
+                if second == ord("["):  # CSI  ESC [
                     if i + 2 >= n:
-                        self._esc_buf.extend(data[i:]); break
+                        self._esc_buf.extend(data[i:])
+                        break
                     third = data[i + 2]
-                    if third == ord("A"): out.extend(b"[UP]");    i += 3; continue
-                    if third == ord("B"): out.extend(b"[DOWN]");  i += 3; continue
-                    if third == ord("C"): out.extend(b"[RIGHT]"); i += 3; continue
-                    if third == ord("D"): out.extend(b"[LEFT]");  i += 3; continue
-                    if third == ord("H"): out.extend(b"[HOME]");  i += 3; continue
-                    if third == ord("F"): out.extend(b"[END]");   i += 3; continue
+                    if third == ord("A"):
+                        out.extend(b"[UP]")
+                        i += 3
+                        continue
+                    if third == ord("B"):
+                        out.extend(b"[DOWN]")
+                        i += 3
+                        continue
+                    if third == ord("C"):
+                        out.extend(b"[RIGHT]")
+                        i += 3
+                        continue
+                    if third == ord("D"):
+                        out.extend(b"[LEFT]")
+                        i += 3
+                        continue
+                    if third == ord("H"):
+                        out.extend(b"[HOME]")
+                        i += 3
+                        continue
+                    if third == ord("F"):
+                        out.extend(b"[END]")
+                        i += 3
+                        continue
                     if ord("0") <= third <= ord("9"):
                         j = i + 2
                         digits = bytearray()
                         while j < n and ord("0") <= data[j] <= ord("9"):
-                            digits.append(data[j]); j += 1
+                            digits.append(data[j])
+                            j += 1
                         if j >= n:
-                            self._esc_buf.extend(data[i:]); break
+                            self._esc_buf.extend(data[i:])
+                            break
                         if data[j] == ord("~") and digits:
                             code = int(digits.decode("ascii"))
                             tag = {
-                                1: b"[HOME]", 2: b"[INSERT]", 3: b"[DEL]",
-                                4: b"[END]",  5: b"[PGUP]",   6: b"[PGDN]",
+                                1: b"[HOME]",
+                                2: b"[INSERT]",
+                                3: b"[DEL]",
+                                4: b"[END]",
+                                5: b"[PGUP]",
+                                6: b"[PGDN]",
                             }.get(code, b"[CSI-" + digits + b"~]")
-                            out.extend(tag); i = j + 1; continue
-                    out.extend(b"[ESC]"); i += 1; continue
+                            out.extend(tag)
+                            i = j + 1
+                            continue
+                    out.extend(b"[ESC]")
+                    i += 1
+                    continue
 
-                if second == ord("O"):      # SS3  ESC O  (some terminals for arrows)
+                if second == ord("O"):  # SS3  ESC O  (some terminals for arrows)
                     if i + 2 >= n:
-                        self._esc_buf.extend(data[i:]); break
+                        self._esc_buf.extend(data[i:])
+                        break
                     third = data[i + 2]
                     arrow = {
-                        ord("A"): b"[UP]", ord("B"): b"[DOWN]",
-                        ord("C"): b"[RIGHT]", ord("D"): b"[LEFT]",
+                        ord("A"): b"[UP]",
+                        ord("B"): b"[DOWN]",
+                        ord("C"): b"[RIGHT]",
+                        ord("D"): b"[LEFT]",
                     }.get(third)
                     if arrow:
-                        out.extend(arrow); i += 3; continue
-                    out.extend(b"[ESC]"); i += 1; continue
+                        out.extend(arrow)
+                        i += 3
+                        continue
+                    out.extend(b"[ESC]")
+                    i += 1
+                    continue
 
-                out.extend(b"[ESC]"); i += 1; continue  # bare ESC
+                out.extend(b"[ESC]")
+                i += 1
+                continue  # bare ESC
 
-            if b == 0x09:                   # TAB
-                out.extend(b"[TAB]"); i += 1; continue
+            if b == 0x09:  # TAB
+                out.extend(b"[TAB]")
+                i += 1
+                continue
 
-            if b < 0x20:                    # other C0 controls
+            if b < 0x20:  # other C0 controls
                 if b == 0x00:
                     out.extend(b"[NUL]")
                 else:
@@ -138,9 +185,11 @@ class _EscSanitizer:
                         out.extend(b"[CTRL-" + bytes([b + 64]) + b"]")
                     except Exception:
                         out.extend(b"[CTRL]")
-                i += 1; continue
+                i += 1
+                continue
 
-            out.append(b); i += 1          # non-ASCII pass-through
+            out.append(b)
+            i += 1  # non-ASCII pass-through
 
         return bytes(out)
 
@@ -148,6 +197,7 @@ class _EscSanitizer:
 # ---------------------------------------------------------------------------
 # Runtime statistics
 # ---------------------------------------------------------------------------
+
 
 class _Stats:
     """Mutable runtime counters, shared between coroutines (no lock needed:
@@ -157,7 +207,7 @@ class _Stats:
     def __init__(self) -> None:
         self.bytes_in: int = 0
         self.bytes_out: int = 0
-        self.chars_in: int = 0       # printable ASCII characters received
+        self.chars_in: int = 0  # printable ASCII characters received
         self.reconnect_count: int = 0
         self.start_time: float = time.monotonic()
 
@@ -171,6 +221,7 @@ class _Stats:
 # ---------------------------------------------------------------------------
 # Control line helpers
 # ---------------------------------------------------------------------------
+
 
 def _read_control_lines(serial_obj) -> dict:
     """Read all control line states from a pyserial Serial object.
@@ -252,6 +303,7 @@ def _build_summary(args: argparse.Namespace, stats: _Stats, serial_obj) -> bytes
 # Shared write helper (serialises all writes via a lock)
 # ---------------------------------------------------------------------------
 
+
 async def _write(writer: asyncio.StreamWriter, lock: asyncio.Lock, data: bytes) -> int:
     """Write *data* under *lock* and drain.  Returns number of bytes written."""
     async with lock:
@@ -264,6 +316,7 @@ async def _write(writer: asyncio.StreamWriter, lock: asyncio.Lock, data: bytes) 
 # Control line monitor coroutine
 # ---------------------------------------------------------------------------
 
+
 async def _monitor_lines_loop(
     writer: asyncio.StreamWriter,
     lock: asyncio.Lock,
@@ -275,10 +328,7 @@ async def _monitor_lines_loop(
     try:
         serial_obj = writer.transport.serial  # type: ignore[attr-defined]
     except AttributeError:
-        log.warning(
-            "Control line monitoring unavailable "
-            "(transport.serial not accessible on this platform/driver)"
-        )
+        log.warning("Control line monitoring unavailable " "(transport.serial not accessible on this platform/driver)")
         return
 
     prev = _read_control_lines(serial_obj)
@@ -307,6 +357,7 @@ async def _monitor_lines_loop(
 # ---------------------------------------------------------------------------
 # Echo loop
 # ---------------------------------------------------------------------------
+
 
 async def _echo_loop(
     reader: asyncio.StreamReader,
@@ -375,6 +426,7 @@ async def _echo_loop(
 # Single connection lifecycle
 # ---------------------------------------------------------------------------
 
+
 async def _one_connection(
     args: argparse.Namespace,
     stats: _Stats,
@@ -388,10 +440,7 @@ async def _one_connection(
     try:
         import serial_asyncio  # type: ignore
     except ImportError:
-        log.error(
-            "pyserial-asyncio is not installed. "
-            "Install it with:  pip install pyserial-asyncio"
-        )
+        log.error("pyserial-asyncio is not installed. " "Install it with:  pip install pyserial-asyncio")
         return False
 
     if not os.path.exists(args.port):
@@ -408,7 +457,11 @@ async def _one_connection(
 
     log.info(
         "Connecting: %s  %dbps  %s%s%s  flow=%s",
-        args.port, args.baud, args.bytesize, args.parity, args.stopbits,
+        args.port,
+        args.baud,
+        args.bytesize,
+        args.parity,
+        args.stopbits,
         args.flow_control,
     )
 
@@ -431,14 +484,10 @@ async def _one_connection(
     sanitizer = _EscSanitizer()
     lock = asyncio.Lock()
 
-    echo_task = asyncio.create_task(
-        _echo_loop(reader, writer, lock, args, stats, sanitizer, log)
-    )
+    echo_task = asyncio.create_task(_echo_loop(reader, writer, lock, args, stats, sanitizer, log))
     monitor_task: Optional[asyncio.Task] = None
     if args.monitor_lines:
-        monitor_task = asyncio.create_task(
-            _monitor_lines_loop(writer, lock, args.monitor_interval, log, args)
-        )
+        monitor_task = asyncio.create_task(_monitor_lines_loop(writer, lock, args.monitor_interval, log, args))
 
     try:
         await echo_task
@@ -467,6 +516,7 @@ async def _one_connection(
 # Supervisor (reconnect loop)
 # ---------------------------------------------------------------------------
 
+
 async def _supervisor(
     args: argparse.Namespace,
     stats: _Stats,
@@ -490,7 +540,8 @@ async def _supervisor(
             if last_missing_warn is None or (now - last_missing_warn) >= 3600:
                 log.warning(
                     "Device %s not found; will retry every %.0fs",
-                    args.port, args.reconnect_delay,
+                    args.port,
+                    args.reconnect_delay,
                 )
                 last_missing_warn = now
             try:
@@ -554,6 +605,7 @@ async def _supervisor(
 # Argument parsing
 # ---------------------------------------------------------------------------
 
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="serial_loopback",
@@ -568,58 +620,64 @@ def _parse_args() -> argparse.Namespace:
     )
 
     grp = p.add_argument_group("Serial port")
-    grp.add_argument("-p", "--port", required=True, metavar="DEVICE",
-                     help="Serial device path, e.g. /dev/ttyUSB0 or /dev/pts/3")
-    grp.add_argument("-n", "--name", default=None, metavar="NAME",
-                     help="Human-friendly port name shown in the summary and event messages. "
-                          "Defaults to the basename of the device path.")
-    grp.add_argument("-b", "--baud", type=int, default=9600, metavar="RATE",
-                     help="Baud rate")
-    grp.add_argument("--bytesize", type=int, default=8, choices=[5, 6, 7, 8],
-                     help="Number of data bits")
-    grp.add_argument("--parity", default="N", choices=["N", "E", "O", "M", "S"],
-                     help="Parity: N=None  E=Even  O=Odd  M=Mark  S=Space")
-    grp.add_argument("--stopbits", type=float, default=1.0,
-                     help="Stop bits: 1, 1.5, or 2")
-    grp.add_argument("--timeout", type=float, default=1.0,
-                     help="Serial read timeout in seconds")
-    grp.add_argument("--flow-control", default="none",
-                     choices=["none", "rts-cts", "xon-xoff"],
-                     help="Flow control mode")
+    grp.add_argument(
+        "-p", "--port", required=True, metavar="DEVICE", help="Serial device path, e.g. /dev/ttyUSB0 or /dev/pts/3"
+    )
+    grp.add_argument(
+        "-n",
+        "--name",
+        default=None,
+        metavar="NAME",
+        help="Human-friendly port name shown in the summary and event messages. "
+        "Defaults to the basename of the device path.",
+    )
+    grp.add_argument("-b", "--baud", type=int, default=9600, metavar="RATE", help="Baud rate")
+    grp.add_argument("--bytesize", type=int, default=8, choices=[5, 6, 7, 8], help="Number of data bits")
+    grp.add_argument(
+        "--parity", default="N", choices=["N", "E", "O", "M", "S"], help="Parity: N=None  E=Even  O=Odd  M=Mark  S=Space"
+    )
+    grp.add_argument("--stopbits", type=float, default=1.0, help="Stop bits: 1, 1.5, or 2")
+    grp.add_argument("--timeout", type=float, default=1.0, help="Serial read timeout in seconds")
+    grp.add_argument("--flow-control", default="none", choices=["none", "rts-cts", "xon-xoff"], help="Flow control mode")
 
     grp = p.add_argument_group("Echo behaviour")
-    grp.add_argument("--echo-delay", type=float, default=0.0, metavar="SECS",
-                     help="Artificial delay before echoing each received chunk")
-    grp.add_argument("--no-sanitize", action="store_true",
-                     help="Echo raw bytes; skip control-character sanitization")
-    grp.add_argument("--no-banner", action="store_true",
-                     help="Suppress the [ENTER] annotation on newline bytes")
+    grp.add_argument(
+        "--echo-delay", type=float, default=0.0, metavar="SECS", help="Artificial delay before echoing each received chunk"
+    )
+    grp.add_argument("--no-sanitize", action="store_true", help="Echo raw bytes; skip control-character sanitization")
+    grp.add_argument("--no-banner", action="store_true", help="Suppress the [ENTER] annotation on newline bytes")
 
     grp = p.add_argument_group("Monitoring")
     grp.add_argument(
-        "--summary-key", default="\x14", metavar="CHAR",
+        "--summary-key",
+        default="\x14",
+        metavar="CHAR",
         help=(
             "Single character that triggers the status summary page when received "
             "from the remote end.  Default is Ctrl+T (\\x14).  The key is consumed "
             "and not echoed back."
         ),
     )
-    grp.add_argument("--monitor-lines", action="store_true",
-                     help="Print a notice on the serial link whenever a control line changes state")
-    grp.add_argument("--monitor-interval", type=float, default=0.1, metavar="SECS",
-                     help="Polling interval for control line state monitoring")
+    grp.add_argument(
+        "--monitor-lines", action="store_true", help="Print a notice on the serial link whenever a control line changes state"
+    )
+    grp.add_argument(
+        "--monitor-interval",
+        type=float,
+        default=0.1,
+        metavar="SECS",
+        help="Polling interval for control line state monitoring",
+    )
 
     grp = p.add_argument_group("Connection")
-    grp.add_argument("--no-reconnect", action="store_true",
-                     help="Exit on disconnect instead of attempting to reconnect")
-    grp.add_argument("--reconnect-delay", type=float, default=5.0, metavar="SECS",
-                     help="Seconds to wait between reconnection attempts")
+    grp.add_argument("--no-reconnect", action="store_true", help="Exit on disconnect instead of attempting to reconnect")
+    grp.add_argument(
+        "--reconnect-delay", type=float, default=5.0, metavar="SECS", help="Seconds to wait between reconnection attempts"
+    )
 
     grp = p.add_argument_group("Logging")
-    grp.add_argument("-v", "--verbose", action="store_true",
-                     help="Enable DEBUG-level logging")
-    grp.add_argument("-q", "--quiet", action="store_true",
-                     help="Suppress all output except errors")
+    grp.add_argument("-v", "--verbose", action="store_true", help="Enable DEBUG-level logging")
+    grp.add_argument("-q", "--quiet", action="store_true", help="Suppress all output except errors")
 
     args = p.parse_args()
 
@@ -639,14 +697,11 @@ def _parse_args() -> argparse.Namespace:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     args = _parse_args()
 
-    level = (
-        logging.DEBUG if args.verbose else
-        logging.ERROR if args.quiet else
-        logging.INFO
-    )
+    level = logging.DEBUG if args.verbose else logging.ERROR if args.quiet else logging.INFO
     logging.basicConfig(
         format="%(asctime)s %(levelname)-8s %(message)s",
         datefmt="%H:%M:%S",
@@ -660,12 +715,20 @@ def main() -> None:
 
     log.info(
         "Serial loopback: name=%s  port=%s  baud=%d  format=%s%s%s  flow=%s",
-        args.name, args.port, args.baud, args.bytesize, args.parity, args.stopbits,
+        args.name,
+        args.port,
+        args.baud,
+        args.bytesize,
+        args.parity,
+        args.stopbits,
         args.flow_control,
     )
     log.info(
         "Echo: sanitize=%s  banner=%s  delay=%.3fs  summary-key=%s",
-        not args.no_sanitize, not args.no_banner, args.echo_delay, key_name,
+        not args.no_sanitize,
+        not args.no_banner,
+        args.echo_delay,
+        key_name,
     )
     if args.monitor_lines:
         log.info("Control line monitoring: enabled (interval=%.2fs)", args.monitor_interval)

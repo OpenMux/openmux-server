@@ -134,9 +134,7 @@ class ConserverHandler(TcpProtocolHandler):
         try:
             return int(response.strip())
         except ValueError:
-            raise ConnectionError(
-                f"Unexpected response to 'call {self._console_name}': {response!r}"
-            )
+            raise ConnectionError(f"Unexpected response to 'call {self._console_name}': {response!r}")
 
     async def _group_handshake(
         self,
@@ -155,9 +153,7 @@ class ConserverHandler(TcpProtocolHandler):
         response = await self._read_line(reader, timeout)
 
         if not response.startswith("["):
-            raise ConnectionError(
-                f"Conserver attach failed for '{self._console_name}': {response!r}"
-            )
+            raise ConnectionError(f"Conserver attach failed for '{self._console_name}': {response!r}")
         # response is e.g. "[attached]", "[spy]", "[read-only -- initializing]"
 
     async def _login(
@@ -172,9 +168,7 @@ class ConserverHandler(TcpProtocolHandler):
 
         if response.startswith("passwd?"):
             if not self._password:
-                raise ConnectionError(
-                    "Conserver requires a password but none is configured"
-                )
+                raise ConnectionError("Conserver requires a password but none is configured")
             await self._send_line(writer, self._password)
             response = await self._read_line(reader, timeout)
 

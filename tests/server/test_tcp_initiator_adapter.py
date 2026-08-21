@@ -47,8 +47,6 @@ class KeepAliveReader:
         await asyncio.sleep(100)
         return b""  # never reached in normal tests
 
-
-
     adapter = TcpInitiatorAdapter("ti", {})
     with pytest.raises(ValueError):
         TcpInitiatorPort("p1", {"port": 123}, adapter)  # missing host
@@ -116,8 +114,10 @@ async def test_port_write_direct_and_error(monkeypatch):
     # Simulate write error by patching writer.write to raise
     assert port.writer is not None
     orig_write = port.writer.write
+
     def raising_write(data: bytes) -> None:  # type: ignore[override]
         raise RuntimeError("boom")
+
     port.writer.write = raising_write  # type: ignore[assignment]
     n2 = await port.write_data(b"x")
     assert n2 == 0
@@ -161,11 +161,15 @@ async def test_port_batched_write_and_flush(monkeypatch):
 @pytest.mark.asyncio
 async def test_port_flush_error_when_writer_none(monkeypatch):
     wr = FakeWriter()
+
     async def fake_open_connection(host, port, ssl=None):  # type: ignore[override]
         return FakeReader([b"\n", b""]), wr
+
     monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
     adapter = TcpInitiatorAdapter("ti", {})
-    port = TcpInitiatorPort("p1", {"host": "h", "port": 1, "auto_reconnect": False, "enable_batching": True, "batch_timeout": 0.001}, adapter)
+    port = TcpInitiatorPort(
+        "p1", {"host": "h", "port": 1, "auto_reconnect": False, "enable_batching": True, "batch_timeout": 0.001}, adapter
+    )
     await port._connect()
     await port.write_data(b"x")
     # Force writer to None to exercise error branch in flush loop
@@ -226,12 +230,15 @@ async def test_adapter_create_start_stop_and_write(monkeypatch):
     monkeypatch.setattr(TcpInitiatorPort, "start", fake_start, raising=True)
 
     adapter = TcpInitiatorAdapter("ti", {"tcp_initiator_ports": [{"name": "p1", "host": "h", "port": 1}]})
+
     # Provide port manager hooks (async) so adapter.create_port can await them
     class PM:
         async def register_unified_port(self, *a, **k):
             return None
+
         async def unregister_unified_port(self, *a, **k):
             return None
+
     adapter.main_port_manager = PM()
     ok = await adapter.start()
     assert ok is True
@@ -251,6 +258,7 @@ async def test_adapter_create_start_stop_and_write(monkeypatch):
             self.port = 1
             self.use_tls = False
             self.auto_reconnect = True
+
         async def write_data(self, data: bytes) -> int:
             self.called += 1
             return len(data)
@@ -285,6 +293,7 @@ async def test_adapter_handle_port_data_routes_to_port_manager():
 @pytest.mark.asyncio
 async def test_adapter_reconcile_ports(monkeypatch):
     adapter = TcpInitiatorAdapter("ti", {"tcp_initiator_ports": [{"name": "a", "host": "h1", "port": 1}]})
+
     # Seed existing port 'a' with materialized config (all fields tracked by old_cfg)
     class PortObj:
         host = "h1"
@@ -319,7 +328,15 @@ async def test_adapter_reconcile_ports(monkeypatch):
     # New config: keep 'a' unchanged (with a description change) and add 'b'; remove 'c' if present
     new_cfg = {
         "tcp_initiator_ports": [
-            {"name": "a", "host": "h1", "port": 1, "use_tls": False, "timeout": 10.0, "auto_reconnect": True, "description": "updated desc"},
+            {
+                "name": "a",
+                "host": "h1",
+                "port": 1,
+                "use_tls": False,
+                "timeout": 10.0,
+                "auto_reconnect": True,
+                "description": "updated desc",
+            },
             {"name": "b", "host": "h2", "port": 2},
         ]
     }
@@ -335,6 +352,7 @@ async def test_adapter_reconcile_ports(monkeypatch):
 
 # ─── connect_on_demand tests ─────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_connect_on_demand_does_not_connect_on_start(monkeypatch):
     """Port with connect_on_demand=True should stay disconnected after start."""
@@ -347,9 +365,7 @@ async def test_connect_on_demand_does_not_connect_on_start(monkeypatch):
     monkeypatch.setattr(asyncio, "open_connection", fake_open)
 
     adapter = TcpInitiatorAdapter("ti", {})
-    port = TcpInitiatorPort(
-        "p", {"host": "h", "port": 1, "connect_on_demand": True}, adapter
-    )
+    port = TcpInitiatorPort("p", {"host": "h", "port": 1, "connect_on_demand": True}, adapter)
     await port.start()
     await asyncio.sleep(0.02)
     assert port.is_connected is False
@@ -360,6 +376,7 @@ async def test_connect_on_demand_does_not_connect_on_start(monkeypatch):
 @pytest.mark.asyncio
 async def test_connect_on_demand_connects_when_user_arrives(monkeypatch):
     """First user arriving should trigger the outbound connection."""
+
     async def fake_open(host, port, ssl=None):
         return KeepAliveReader(), FakeWriter()
 
@@ -367,7 +384,8 @@ async def test_connect_on_demand_connects_when_user_arrives(monkeypatch):
 
     adapter = TcpInitiatorAdapter("ti", {})
     port = TcpInitiatorPort(
-        "p", {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": False},
+        "p",
+        {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": False},
         adapter,
     )
     await port.start()
@@ -397,8 +415,7 @@ async def test_connect_on_demand_no_reconnect_without_users(monkeypatch):
     adapter = TcpInitiatorAdapter("ti", {})
     port = TcpInitiatorPort(
         "p",
-        {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": True,
-         "reconnect_delay": 0.0},
+        {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": True, "reconnect_delay": 0.0},
         adapter,
     )
     await port.start()
@@ -417,6 +434,7 @@ async def test_connect_on_demand_no_reconnect_without_users(monkeypatch):
 @pytest.mark.asyncio
 async def test_disconnect_when_idle_disconnects_after_delay(monkeypatch):
     """Port should disconnect after idle_disconnect_delay once last user leaves."""
+
     async def fake_open(host, port, ssl=None):
         return KeepAliveReader(), FakeWriter()
 
@@ -425,8 +443,14 @@ async def test_disconnect_when_idle_disconnects_after_delay(monkeypatch):
     adapter = TcpInitiatorAdapter("ti", {})
     port = TcpInitiatorPort(
         "p",
-        {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": False,
-         "disconnect_when_idle": True, "idle_disconnect_delay": 0.05},
+        {
+            "host": "h",
+            "port": 1,
+            "connect_on_demand": True,
+            "auto_reconnect": False,
+            "disconnect_when_idle": True,
+            "idle_disconnect_delay": 0.05,
+        },
         adapter,
     )
     await port.start()
@@ -452,6 +476,7 @@ async def test_disconnect_when_idle_disconnects_after_delay(monkeypatch):
 @pytest.mark.asyncio
 async def test_disconnect_when_idle_cancelled_by_new_user(monkeypatch):
     """Idle-disconnect timer should be cancelled when a new user arrives."""
+
     async def fake_open(host, port, ssl=None):
         return KeepAliveReader(), FakeWriter()
 
@@ -460,8 +485,14 @@ async def test_disconnect_when_idle_cancelled_by_new_user(monkeypatch):
     adapter = TcpInitiatorAdapter("ti", {})
     port = TcpInitiatorPort(
         "p",
-        {"host": "h", "port": 1, "connect_on_demand": True, "auto_reconnect": False,
-         "disconnect_when_idle": True, "idle_disconnect_delay": 0.1},
+        {
+            "host": "h",
+            "port": 1,
+            "connect_on_demand": True,
+            "auto_reconnect": False,
+            "disconnect_when_idle": True,
+            "idle_disconnect_delay": 0.1,
+        },
         adapter,
     )
     await port.start()
@@ -473,9 +504,9 @@ async def test_disconnect_when_idle_cancelled_by_new_user(monkeypatch):
     assert port.is_connected is True
 
     port.on_client_count_changed(0)  # start idle timer
-    await asyncio.sleep(0.02)        # well before 0.1s delay
+    await asyncio.sleep(0.02)  # well before 0.1s delay
     port.on_client_count_changed(1)  # new user arrives — cancels timer
-    await asyncio.sleep(0.15)        # past original idle delay
+    await asyncio.sleep(0.15)  # past original idle delay
 
     # Should still be connected because timer was cancelled
     assert port.is_connected is True
@@ -491,9 +522,7 @@ async def test_scrollback_size_from_config_is_replayable():
         {"tcp_initiator_ports": [{"name": "p1", "host": "h", "port": 1, "scrollback_size": 32, "auto_reconnect": False}]},
     )
     adapter.main_port_manager = pm
-    port = TcpInitiatorPort(
-        "p1", {"host": "h", "port": 1, "scrollback_size": 32, "auto_reconnect": False}, adapter
-    )
+    port = TcpInitiatorPort("p1", {"host": "h", "port": 1, "scrollback_size": 32, "auto_reconnect": False}, adapter)
     adapter.ports["p1"] = port
     assert await pm.register_unified_port("p1", port, adapter) is True
 

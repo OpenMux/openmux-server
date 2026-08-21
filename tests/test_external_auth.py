@@ -15,10 +15,10 @@ import pytest
 
 from openmux.server.auth_manager import AuthManager
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_proc(returncode: int = 0, stdout: Any = None, stderr: bytes = b""):
     """Return a mock subprocess.CompletedProcess-like object."""
@@ -37,6 +37,7 @@ def _auth(cfg: dict) -> AuthManager:
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
+
 
 class TestLoadExtAuthConfig:
     def test_defaults_when_absent(self):
@@ -71,6 +72,7 @@ class TestLoadExtAuthConfig:
 
     def test_pam_key_logs_warning(self, caplog):
         import logging
+
         with caplog.at_level(logging.WARNING, logger="openmux.auth"):
             AuthManager({"pam": {"enabled": True}})
         assert any("no longer supported" in r.message for r in caplog.records)
@@ -91,9 +93,7 @@ class TestLoadExtAuthConfig:
 
     def test_update_config_reloads(self):
         am = _auth({"enabled": False})
-        asyncio.get_event_loop().run_until_complete(
-            am.update_config({"external_auth": {"enabled": True, "service": "new"}})
-        )
+        asyncio.get_event_loop().run_until_complete(am.update_config({"external_auth": {"enabled": True, "service": "new"}}))
         assert am._ext_auth_enabled is True
         assert am._ext_auth_service == "new"
 
@@ -122,9 +122,11 @@ class TestExternalAuthenticate:
     def _run(self, proc_mock, am=None, username="alice", password="pw"):
         if am is None:
             am = _auth({"enabled": True, "helper": HELPER_PATH, "service": "openmux"})
-        with patch("subprocess.run", return_value=proc_mock) as mock_run, \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc_mock) as mock_run,
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             result = am._external_authenticate(username, password)
         return result, mock_run
 
@@ -146,9 +148,11 @@ class TestExternalAuthenticate:
     def test_groups_cached_on_success(self):
         am = _auth({"enabled": True, "helper": HELPER_PATH, "service": "openmux"})
         proc = _make_proc(0, {"ok": True, "groups": ["openmux_admin", "users"]})
-        with patch("subprocess.run", return_value=proc), \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc),
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             am._external_authenticate("alice", "pw")
         assert "alice" in am._ext_auth_groups_cache
         assert am._ext_auth_groups_cache["alice"]["groups"] == ["openmux_admin", "users"]
@@ -156,18 +160,22 @@ class TestExternalAuthenticate:
     def test_groups_not_cached_on_failure(self):
         am = _auth({"enabled": True, "helper": HELPER_PATH, "service": "openmux"})
         proc = _make_proc(1, {"ok": False, "groups": ["openmux_admin"]})
-        with patch("subprocess.run", return_value=proc), \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc),
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             am._external_authenticate("alice", "pw")
         assert "alice" not in am._ext_auth_groups_cache
 
     def test_stdin_contains_username_and_password(self):
         proc = _make_proc(0, {"ok": True})
         am = _auth({"enabled": True, "helper": HELPER_PATH, "service": "openmux"})
-        with patch("subprocess.run", return_value=proc) as mock_run, \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc) as mock_run,
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             am._external_authenticate("alice", "secret")
         call_kwargs = mock_run.call_args
         assert call_kwargs.kwargs["input"] == b"alice\nsecret\n"
@@ -175,9 +183,11 @@ class TestExternalAuthenticate:
     def test_service_appended_as_argument(self):
         proc = _make_proc(0, {"ok": True})
         am = _auth({"enabled": True, "helper": HELPER_PATH, "service": "myservice"})
-        with patch("subprocess.run", return_value=proc) as mock_run, \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc) as mock_run,
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             am._external_authenticate("alice", "pw")
         cmd = mock_run.call_args.args[0]
         assert cmd[-1] == "myservice"
@@ -186,9 +196,11 @@ class TestExternalAuthenticate:
     def test_list_helper_passed_directly(self):
         proc = _make_proc(0, {"ok": True})
         am = _auth({"enabled": True, "helper": ["sudo", HELPER_PATH], "service": "svc"})
-        with patch("subprocess.run", return_value=proc) as mock_run, \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc) as mock_run,
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             am._external_authenticate("alice", "pw")
         cmd = mock_run.call_args.args[0]
         assert cmd[0] == "sudo"
@@ -197,17 +209,18 @@ class TestExternalAuthenticate:
 
     def test_helper_not_found_returns_false(self):
         am = _auth({"enabled": True, "helper": "/nonexistent/helper"})
-        with patch("os.path.isfile", return_value=False), \
-             patch("shutil.which", return_value=None):
+        with patch("os.path.isfile", return_value=False), patch("shutil.which", return_value=None):
             result = am._external_authenticate("alice", "pw")
         assert result is False
 
     def test_auto_resolve_from_path(self):
         proc = _make_proc(0, {"ok": True})
         am = _auth({"enabled": True})  # no helper configured
-        with patch("subprocess.run", return_value=proc) as mock_run, \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value="/usr/bin/openmux-pam-helper"):
+        with (
+            patch("subprocess.run", return_value=proc) as mock_run,
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value="/usr/bin/openmux-pam-helper"),
+        ):
             result = am._external_authenticate("alice", "pw")
         assert result is True
         cmd = mock_run.call_args.args[0]
@@ -215,25 +228,29 @@ class TestExternalAuthenticate:
 
     def test_timeout_returns_false(self):
         import subprocess
+
         am = _auth({"enabled": True, "helper": HELPER_PATH, "timeout": 1})
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=HELPER_PATH, timeout=1)), \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=HELPER_PATH, timeout=1)),
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             result = am._external_authenticate("alice", "pw")
         assert result is False
 
     def test_subprocess_exception_returns_false(self):
         am = _auth({"enabled": True, "helper": HELPER_PATH})
-        with patch("subprocess.run", side_effect=OSError("permission denied")), \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", side_effect=OSError("permission denied")),
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             result = am._external_authenticate("alice", "pw")
         assert result is False
 
     def test_root_denied_by_default(self):
         am = _auth({"enabled": True, "helper": HELPER_PATH, "allow_root": False})
-        with patch("subprocess.run") as mock_run, \
-             patch("os.path.isfile", return_value=True):
+        with patch("subprocess.run") as mock_run, patch("os.path.isfile", return_value=True):
             result = am._external_authenticate("root", "pw")
         mock_run.assert_not_called()
         assert result is False
@@ -241,16 +258,17 @@ class TestExternalAuthenticate:
     def test_root_allowed_when_configured(self):
         proc = _make_proc(0, {"ok": True})
         am = _auth({"enabled": True, "helper": HELPER_PATH, "allow_root": True})
-        with patch("subprocess.run", return_value=proc), \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc),
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             result = am._external_authenticate("root", "pw")
         assert result is True
 
     def test_allowed_users_blocks_unlisted(self):
         am = _auth({"enabled": True, "helper": HELPER_PATH, "allowed_users": ["alice"]})
-        with patch("subprocess.run") as mock_run, \
-             patch("os.path.isfile", return_value=True):
+        with patch("subprocess.run") as mock_run, patch("os.path.isfile", return_value=True):
             result = am._external_authenticate("bob", "pw")
         mock_run.assert_not_called()
         assert result is False
@@ -258,9 +276,11 @@ class TestExternalAuthenticate:
     def test_allowed_users_permits_listed(self):
         proc = _make_proc(0, {"ok": True})
         am = _auth({"enabled": True, "helper": HELPER_PATH, "allowed_users": ["alice", "bob"]})
-        with patch("subprocess.run", return_value=proc), \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc),
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             result = am._external_authenticate("alice", "pw")
         assert result is True
 
@@ -268,9 +288,11 @@ class TestExternalAuthenticate:
         proc = _make_proc(0)
         proc.stdout = b"not json {"
         am = _auth({"enabled": True, "helper": HELPER_PATH})
-        with patch("subprocess.run", return_value=proc), \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc),
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             result = am._external_authenticate("alice", "pw")
         assert result is True  # exit 0 is enough
 
@@ -278,6 +300,7 @@ class TestExternalAuthenticate:
 # ---------------------------------------------------------------------------
 # _ext_auth_group_permissions
 # ---------------------------------------------------------------------------
+
 
 class TestExtAuthGroupPermissions:
 
@@ -307,35 +330,33 @@ class TestExtAuthGroupPermissions:
 
     def test_no_matching_group_returns_none_without_default(self):
         am = self._am_with_cache("bob", ["staff", "users"])
-        with patch("pwd.getpwnam", side_effect=KeyError), \
-             patch("grp.getgrall", return_value=[]):
+        with patch("pwd.getpwnam", side_effect=KeyError), patch("grp.getgrall", return_value=[]):
             assert am._ext_auth_group_permissions("bob") is None
 
     def test_expired_cache_skipped(self):
         am = self._am_with_cache("alice", ["openmux_admin"], expired=True)
-        with patch("pwd.getpwnam", side_effect=KeyError), \
-             patch("grp.getgrall", return_value=[]):
+        with patch("pwd.getpwnam", side_effect=KeyError), patch("grp.getgrall", return_value=[]):
             result = am._ext_auth_group_permissions("alice")
         assert result is None  # expired cache not used, Unix lookup also fails
 
     def test_default_permission_fallback(self):
         am = _auth({"enabled": True, "default_permission": "read-only"})
-        with patch("pwd.getpwnam", side_effect=KeyError), \
-             patch("grp.getgrall", return_value=[]):
+        with patch("pwd.getpwnam", side_effect=KeyError), patch("grp.getgrall", return_value=[]):
             result = am._ext_auth_group_permissions("unknown_user")
         assert result == "read-only"
 
     def test_no_default_returns_none(self):
         am = _auth({"enabled": True})
-        with patch("pwd.getpwnam", side_effect=KeyError), \
-             patch("grp.getgrall", return_value=[]):
+        with patch("pwd.getpwnam", side_effect=KeyError), patch("grp.getgrall", return_value=[]):
             assert am._ext_auth_group_permissions("unknown_user") is None
 
     def test_custom_group_names(self):
-        am = _auth({
-            "enabled": True,
-            "groups": {"admin_group": "wheel", "write_group": "staff", "read_group": "guests"},
-        })
+        am = _auth(
+            {
+                "enabled": True,
+                "groups": {"admin_group": "wheel", "write_group": "staff", "read_group": "guests"},
+            }
+        )
         am._ext_auth_groups_cache["charlie"] = {
             "groups": ["wheel"],
             "expires": time.time() + 300,
@@ -347,27 +368,34 @@ class TestExtAuthGroupPermissions:
 # get_user_permissions integration
 # ---------------------------------------------------------------------------
 
+
 class TestGetUserPermissions:
 
     def test_static_user_takes_precedence(self):
-        am = AuthManager({
-            "users": [{"username": "admin", "password_hash": "x", "permissions": "admin"}],
-            "external_auth": {"enabled": True},
-        })
+        am = AuthManager(
+            {
+                "users": [{"username": "admin", "password_hash": "x", "permissions": "admin"}],
+                "external_auth": {"enabled": True},
+            }
+        )
         # admin is a static user — external auth groups should not be consulted
         assert am.get_user_permissions("admin") == "admin"
 
     def test_static_user_without_explicit_permissions_defaults_read_write(self):
-        am = AuthManager({
-            "users": [{"username": "admin", "password_hash": "x"}],
-        })
+        am = AuthManager(
+            {
+                "users": [{"username": "admin", "password_hash": "x"}],
+            }
+        )
         assert am.get_user_permissions("admin") == "read-write"
 
     def test_external_user_gets_permission_from_cached_groups(self):
-        am = AuthManager({
-            "users": [{"username": "admin", "password_hash": "x", "permissions": "admin"}],
-            "external_auth": {"enabled": True},
-        })
+        am = AuthManager(
+            {
+                "users": [{"username": "admin", "password_hash": "x", "permissions": "admin"}],
+                "external_auth": {"enabled": True},
+            }
+        )
         am._ext_auth_groups_cache["alice"] = {
             "groups": ["openmux_admin"],
             "expires": time.time() + 300,
@@ -375,20 +403,22 @@ class TestGetUserPermissions:
         assert am.get_user_permissions("alice") == "admin"
 
     def test_external_user_no_group_no_default_returns_none(self):
-        am = AuthManager({
-            "users": [{"username": "admin", "password_hash": "x"}],
-            "external_auth": {"enabled": True},
-        })
-        with patch("pwd.getpwnam", side_effect=KeyError), \
-             patch("grp.getgrall", return_value=[]):
+        am = AuthManager(
+            {
+                "users": [{"username": "admin", "password_hash": "x"}],
+                "external_auth": {"enabled": True},
+            }
+        )
+        with patch("pwd.getpwnam", side_effect=KeyError), patch("grp.getgrall", return_value=[]):
             assert am.get_user_permissions("bob") is None
 
     def test_external_user_gets_default_permission(self):
-        am = AuthManager({
-            "external_auth": {"enabled": True, "default_permission": "read-write"},
-        })
-        with patch("pwd.getpwnam", side_effect=KeyError), \
-             patch("grp.getgrall", return_value=[]):
+        am = AuthManager(
+            {
+                "external_auth": {"enabled": True, "default_permission": "read-write"},
+            }
+        )
+        with patch("pwd.getpwnam", side_effect=KeyError), patch("grp.getgrall", return_value=[]):
             assert am.get_user_permissions("bob") == "read-write"
 
 
@@ -396,53 +426,66 @@ class TestGetUserPermissions:
 # Full authenticate() flow
 # ---------------------------------------------------------------------------
 
+
 class TestAuthenticateFlow:
 
     def test_local_user_bypasses_external_auth(self):
         import hashlib
+
         pw_hash = hashlib.sha256(b"secret").hexdigest()
-        am = AuthManager({
-            "users": [{"username": "admin", "password_hash": pw_hash, "permissions": "admin"}],
-            "external_auth": {"enabled": True, "helper": HELPER_PATH},
-        })
-        with patch("subprocess.run") as mock_run, \
-             patch("os.path.isfile", return_value=True):
+        am = AuthManager(
+            {
+                "users": [{"username": "admin", "password_hash": pw_hash, "permissions": "admin"}],
+                "external_auth": {"enabled": True, "helper": HELPER_PATH},
+            }
+        )
+        with patch("subprocess.run") as mock_run, patch("os.path.isfile", return_value=True):
             result = am.authenticate("admin", "secret")
         mock_run.assert_not_called()
         assert result is True
 
     def test_external_auth_called_when_local_fails(self):
         import hashlib
+
         pw_hash = hashlib.sha256(b"secret").hexdigest()
-        am = AuthManager({
-            "users": [{"username": "admin", "password_hash": pw_hash}],
-            "external_auth": {"enabled": True, "helper": HELPER_PATH},
-        })
+        am = AuthManager(
+            {
+                "users": [{"username": "admin", "password_hash": pw_hash}],
+                "external_auth": {"enabled": True, "helper": HELPER_PATH},
+            }
+        )
         proc = _make_proc(0, {"ok": True, "groups": ["openmux_admin"]})
-        with patch("subprocess.run", return_value=proc), \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc),
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             result = am.authenticate("alice", "alicepw")
         assert result is True
 
     def test_external_auth_not_called_when_disabled(self):
-        am = AuthManager({
-            "external_auth": {"enabled": False, "helper": HELPER_PATH},
-        })
-        with patch("subprocess.run") as mock_run, \
-             patch("os.path.isfile", return_value=True):
+        am = AuthManager(
+            {
+                "external_auth": {"enabled": False, "helper": HELPER_PATH},
+            }
+        )
+        with patch("subprocess.run") as mock_run, patch("os.path.isfile", return_value=True):
             result = am.authenticate("alice", "pw")
         mock_run.assert_not_called()
         assert result is False
 
     def test_auth_cache_prevents_duplicate_helper_calls(self):
-        am = AuthManager({
-            "external_auth": {"enabled": True, "helper": HELPER_PATH},
-        })
+        am = AuthManager(
+            {
+                "external_auth": {"enabled": True, "helper": HELPER_PATH},
+            }
+        )
         proc = _make_proc(0, {"ok": True})
-        with patch("subprocess.run", return_value=proc) as mock_run, \
-             patch("os.path.isfile", return_value=True), \
-             patch("shutil.which", return_value=None):
+        with (
+            patch("subprocess.run", return_value=proc) as mock_run,
+            patch("os.path.isfile", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
             am.authenticate("alice", "pw")
             am.authenticate("alice", "pw")  # second call: should use cache
         assert mock_run.call_count == 1

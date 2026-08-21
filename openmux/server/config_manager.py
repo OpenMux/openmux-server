@@ -197,9 +197,7 @@ class ConfigManager:
         auth = self.config["authentication"]
         auth_methods = ("users", "api_keys", "public_keys", "external_auth")
         if not any(method in auth for method in auth_methods):
-            raise ValueError(
-                "Authentication section must contain 'users', 'api_keys', 'public_keys', or 'external_auth'"
-            )
+            raise ValueError("Authentication section must contain 'users', 'api_keys', 'public_keys', or 'external_auth'")
 
     def _validate_serial_ports_config(self):
         """Validate the ``serial_ports`` section (if present).

@@ -41,6 +41,7 @@ async def test_unified_port_lifecycle_and_io(monkeypatch):
     pm = PortManager([])
     # Create a unified loopback adapter with one port and register it
     from openmux.server.adapters.loopback import LoopbackAdapter
+
     adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "p1", "max_read_write_users": 2}]})
     adapter.main_port_manager = pm
     pm.set_unified_adapters([adapter])

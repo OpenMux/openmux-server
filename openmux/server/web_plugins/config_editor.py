@@ -1,9 +1,11 @@
-from aiohttp import web
-from typing import Any, Dict, List, Optional, Set, Tuple
 import time
 import uuid
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from aiohttp import web
 
 from openmux.server.config_manager import ConfigManager
+
 from . import ADAPTER_APP_KEY
 
 
@@ -212,6 +214,7 @@ def _enforce_writable_sections(cm: ConfigManager, payload: Dict[str, Any]) -> Se
         return modified
     return {section for section in modified if section not in writable}
 
+
 # Minimal config editor plugin with read-only GET and guarded POST apply.
 # Requires admin permissions for write operations and CSRF token for session-auth requests.
 
@@ -234,13 +237,18 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
         env = getattr(adapter, "_jinja_env", None)
         if env:
             tmpl = env.get_template("config_editor.html.j2")
-            plugin_nav = adapter._get_allowed_plugin_nav(username, request=request) if hasattr(adapter, "_get_allowed_plugin_nav") else []
-            
+            plugin_nav = (
+                adapter._get_allowed_plugin_nav(username, request=request)
+                if hasattr(adapter, "_get_allowed_plugin_nav")
+                else []
+            )
+
             ports = adapter._get_ports_snapshot() if hasattr(adapter, "_get_ports_snapshot") else []
             current_port = request.query.get("port")
 
             # Attempt to load defaults from docs/DEFAULTS.md for UI hinting
             import json as _json
+
             defaults_doc = _read_defaults_doc()
             # Compute effective base path for links/assets in the template
             try:
@@ -274,6 +282,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
         config = {}
         writable_sections, writable_enforced = [], False
     import json
+
     return web.Response(
         body=json.dumps(
             {
@@ -306,6 +315,7 @@ async def _handle_data(request: web.Request) -> web.StreamResponse:
         config = {}
         writable_sections, writable_enforced = [], False
     import json
+
     return web.Response(
         body=json.dumps(
             {
@@ -487,7 +497,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
             "origin": "config-editor",
             "remote": request.remote or "?",
             "user": username or "?",
-            "web_adapter_name": getattr(adapter, 'name', None) or 'web_console',
+            "web_adapter_name": getattr(adapter, "name", None) or "web_console",
         }
         summary = await server.reload_adapters_full(context=ctx)
         adapter.logger.info(f"[reload-full:{req_id}] Completed in {time.time()-start:.3f}s summary={summary}")
@@ -577,6 +587,7 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
     try:
         import os
         from pathlib import Path
+
         import yaml  # type: ignore
 
         # Optional override via environment variable
@@ -634,7 +645,10 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
         }
 
     import json
-    return web.Response(body=json.dumps({"schema": schema, "authoritative": loaded}).encode("utf-8"), content_type="application/json")
+
+    return web.Response(
+        body=json.dumps({"schema": schema, "authoritative": loaded}).encode("utf-8"), content_type="application/json"
+    )
 
 
 def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -663,8 +677,8 @@ def _read_defaults_doc() -> Dict[str, Any]:
     Parsing is best-effort and based on known headings in the DEFAULTS.md file.
     """
     try:
-        from pathlib import Path
         import re
+        from pathlib import Path
 
         # Locate docs/DEFAULTS.md relative to repo root
         # repo_root: openmux/server/web_plugins/ -> repo_root

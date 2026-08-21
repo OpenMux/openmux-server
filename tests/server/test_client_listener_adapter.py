@@ -101,15 +101,19 @@ async def test_handle_client_protocol_anonymous_then_quit():
 async def test_auth_hmac_success_then_quit(monkeypatch):
     adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
     # Build input: HMAC auth then response, then QUIT for command phase
-    reader = FakeReader(make_line_chars("AUTH:USER:HMAC:alice") + make_line_chars("AUTH:RESPONSE:deadb64") + make_line_chars("QUIT"))
+    reader = FakeReader(
+        make_line_chars("AUTH:USER:HMAC:alice") + make_line_chars("AUTH:RESPONSE:deadb64") + make_line_chars("QUIT")
+    )
     writer = FakeWriter()
     client = ClientSession("c1", "127.0.0.1", cast(Any, reader), cast(Any, writer), adapter.logger)
 
     class AM:
         def is_user_locked(self, u, ip):
             return False
+
         def start_password_hmac_challenge(self, username):
             return "nonceB64"
+
         def verify_password_hmac(self, username, hmac_b64, src_ip=None):
             return True
 
@@ -129,6 +133,7 @@ async def test_auth_pubkey_failure():
     class AM:
         def start_pubkey_challenge(self, username, key_id):
             return {"key_id": "key1", "nonce": "xyz"}
+
         def verify_pubkey_response(self, username, key_id, sig):
             return False
 
@@ -147,6 +152,7 @@ async def test_handle_list_ports_success_and_timeout(monkeypatch):
     class PM1:
         async def get_port_list_with_federation(self):
             return [{"name": "p1"}]
+
     adapter.console_manager = type("CM", (), {"port_manager": PM1()})()
     await adapter.handle_list_ports_request(client)
     payload = parse_last_list_payload(writer)
@@ -158,11 +164,13 @@ async def test_handle_list_ports_success_and_timeout(monkeypatch):
         async def get_port_list_with_federation(self):
             await asyncio.sleep(1.1)
             return []
+
         # Fallback snapshot source
         def __init__(self):
             class Port:
                 def get_status(self):
                     return {"name": "snap"}
+
             self.ports = {"snap": Port()}
 
     writer2 = FakeWriter()
@@ -187,15 +195,20 @@ async def test_connect_disconnect_and_forwarding():
             self.channels = []
             self.unreg = []
             self.port_manager = type("PM", (), {"write_to_port": self.write_to_port})()
+
         async def connect_client_to_port(self, cid, port, user):
             self.connected.append((cid, port, user))
             return True, "read-write", None
+
         async def disconnect_client_from_port(self, cid, port):
             self.disconnected.append((cid, port))
+
         def register_client_channel(self, cid, adapter_ref):
             self.channels.append(cid)
+
         def unregister_client_channel(self, cid):
             self.unreg.append(cid)
+
         async def write_to_port(self, pname, data, cid):
             self.last_write = (pname, data, cid)
             return True
@@ -226,7 +239,9 @@ async def test_handle_client_protocol_malformed_auth_lines():
 
     # 1) Malformed PK INIT (missing username)
     w1 = FakeWriter()
-    c1 = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader(make_line_chars("AUTH:PK:INIT"))), cast(Any, w1), adapter.logger)
+    c1 = ClientSession(
+        "c1", "127.0.0.1", cast(Any, FakeReader(make_line_chars("AUTH:PK:INIT"))), cast(Any, w1), adapter.logger
+    )
     await adapter.handle_client_protocol(c1)
     out1 = w1.buffer.decode()
     assert "Authentication required" in out1
@@ -234,7 +249,9 @@ async def test_handle_client_protocol_malformed_auth_lines():
 
     # 2) Malformed HMAC (missing username)
     w2 = FakeWriter()
-    c2 = ClientSession("c2", "127.0.0.1", cast(Any, FakeReader(make_line_chars("AUTH:USER:HMAC:"))), cast(Any, w2), adapter.logger)
+    c2 = ClientSession(
+        "c2", "127.0.0.1", cast(Any, FakeReader(make_line_chars("AUTH:USER:HMAC:"))), cast(Any, w2), adapter.logger
+    )
     await adapter.handle_client_protocol(c2)
     out2 = w2.buffer.decode()
     assert "AUTH:FAILED:Authentication failed" in out2
@@ -243,9 +260,12 @@ async def test_handle_client_protocol_malformed_auth_lines():
     class AM:
         def is_user_locked(self, u, ip):
             return False
+
     adapter.set_auth_manager(AM())
     w3 = FakeWriter()
-    c3 = ClientSession("c3", "127.0.0.1", cast(Any, FakeReader(make_line_chars("AUTH:USER:alice"))), cast(Any, w3), adapter.logger)
+    c3 = ClientSession(
+        "c3", "127.0.0.1", cast(Any, FakeReader(make_line_chars("AUTH:USER:alice"))), cast(Any, w3), adapter.logger
+    )
     await adapter.handle_client_protocol(c3)
     out3 = w3.buffer.decode()
     assert "AUTH:FAILED:Plaintext password auth disabled" in out3
@@ -269,13 +289,17 @@ async def test_process_client_command_forwards_unknown_when_attached():
     class CM:
         def __init__(self):
             self.last = None
+
             class PM:
                 def __init__(self, outer):
                     self._outer = outer
+
                 async def write_to_port(self, pname, data, cid):
                     self._outer.last = (pname, data, cid)
                     return True
+
             self.port_manager = PM(self)
+
     cm = CM()
     adapter.set_console_manager(cm)
 
@@ -298,8 +322,10 @@ async def test_forward_data_to_port_loopback_echo_and_errors():
             class PM:
                 def __init__(self, okv: bool):
                     self._ok = okv
+
                 async def write_to_port(self, pname, data, cid):
                     return self._ok
+
             self.port_manager = PM(ok)
 
     # Success path: echoes non-newline bytes immediately
@@ -338,12 +364,15 @@ async def test_destroy_port_disconnects_clients():
     client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
     adapter.clients["c1"] = client
     adapter.port_clients["p1"] = ["c1"]
+
     # Minimal console manager for disconnect
     class CM:
         async def disconnect_client_from_port(self, cid, port):
             return None
+
         def unregister_client_channel(self, cid):
             return None
+
     adapter.set_console_manager(CM())
     await adapter.destroy_port("p1")
     assert client.connected_port is None
@@ -357,10 +386,13 @@ async def test_server_start_and_stop(monkeypatch):
         def __init__(self):
             self.started = False
             self.closed = False
+
         async def start_serving(self):
             self.started = True
+
         def close(self):
             self.closed = True
+
         async def wait_closed(self):
             await asyncio.sleep(0)
 

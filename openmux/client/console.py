@@ -532,15 +532,21 @@ class ConsoleUI:
 
             elif command == "a":
                 # Request read-write access from the server
-                await self._request_access_mode("request_read_write", "[Read-write access is not supported by this connection]")
+                await self._request_access_mode(
+                    "request_read_write", "[Read-write access is not supported by this connection]"
+                )
 
             elif command == "s":
                 # Release read-write access; switch to read-only (spy) mode
-                await self._request_access_mode("release_read_write", "[Release read-write is not supported by this connection]")
+                await self._request_access_mode(
+                    "release_read_write", "[Release read-write is not supported by this connection]"
+                )
 
             elif command == "f":
                 # Force-take read-write access, demoting the current holder(s)
-                await self._request_access_mode("force_read_write", "[Force-take read-write is not supported by this connection]")
+                await self._request_access_mode(
+                    "force_read_write", "[Force-take read-write is not supported by this connection]"
+                )
 
             elif command == "i":
                 # Information dump
@@ -814,4 +820,3 @@ class ConsoleUI:
             sys.stdout.flush()
         # If sent, the server's asynchronous rw_holders response is displayed
         # by _read_from_server() when it arrives.
-

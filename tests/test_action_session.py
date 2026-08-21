@@ -261,9 +261,7 @@ async def test_wait_for_input_publishes_text_kind_with_no_choices(pm):
 @pytest.mark.asyncio
 async def test_prompt_passes_color_to_on_input_wait(pm):
     seen = []
-    session = ActionSession(
-        pm, "p1", "c1", on_input_wait=lambda text, kind, choices, step, color: seen.append(color)
-    )
+    session = ActionSession(pm, "p1", "c1", on_input_wait=lambda text, kind, choices, step, color: seen.append(color))
     session.submit_operator_input("hello")
     await session.prompt("say something", timeout=1.0)
     session.submit_operator_input("hi")

@@ -19,6 +19,7 @@ import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Set
+
 from openmux.server.port_utils import resolve_port_connected_state, safe_get_port
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
@@ -203,12 +204,20 @@ class TcpServerAdapter(BaseGenericAdapter):
                     if is_up is None:
                         is_up = True
                     # If reconnection occurred, inform clients
-                    if is_up and isinstance(changes, dict) and (
-                        changes.get("event") in (
-                            "federated_port_registered", "client_connected", "port_registered",
-                            "serial_connected", "tcp_connected",
+                    if (
+                        is_up
+                        and isinstance(changes, dict)
+                        and (
+                            changes.get("event")
+                            in (
+                                "federated_port_registered",
+                                "client_connected",
+                                "port_registered",
+                                "serial_connected",
+                                "tcp_connected",
+                            )
+                            or changes.get("connected") is True
                         )
-                        or changes.get("connected") is True
                     ):
                         self._emit_notice_to_port_clients(port_name, "\r\n[Reconnected]\r\n")
         except Exception:
@@ -618,7 +627,7 @@ class TcpServerAdapter(BaseGenericAdapter):
 
         port_name = client.connected_port
         try:
-            line = data[len(CTRL_MARKER):].split(b"\n", 1)[0]
+            line = data[len(CTRL_MARKER) :].split(b"\n", 1)[0]
             req = json.loads(line.decode("utf-8", errors="ignore"))
         except Exception:
             return True  # Malformed control frame; swallow rather than leak to the port
@@ -654,7 +663,9 @@ class TcpServerAdapter(BaseGenericAdapter):
                         other_client = self.clients.get(other_id)
                         if other_client is not None:
                             try:
-                                await other_client.send_raw_data(CTRL_MARKER + json.dumps(demotion, separators=(",", ":")).encode("utf-8") + b"\n")
+                                await other_client.send_raw_data(
+                                    CTRL_MARKER + json.dumps(demotion, separators=(",", ":")).encode("utf-8") + b"\n"
+                                )
                                 other_client.mode = "read-only"
                             except Exception:
                                 pass
@@ -910,10 +921,15 @@ class TcpServerAdapter(BaseGenericAdapter):
                     except Exception:
                         continue
             # Filter by name and origin
-            cands = [p for p in ports if p.get("name") == port_name and (
-                (server_id.lower() in ("local", "LOCAL") and not p.get("origin_server_id")) or
-                (p.get("origin_server_id") == server_id)
-            )]
+            cands = [
+                p
+                for p in ports
+                if p.get("name") == port_name
+                and (
+                    (server_id.lower() in ("local", "LOCAL") and not p.get("origin_server_id"))
+                    or (p.get("origin_server_id") == server_id)
+                )
+            ]
             if len(cands) == 1:
                 return cands[0].get("name")
             return None

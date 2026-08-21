@@ -35,7 +35,9 @@ async def test_tcp_initiator_write_data_returns_len(monkeypatch):
 async def test_openmux_write_data_returns_len(monkeypatch):
     """TcpInitiatorPort with openmux protocol writes via writer and returns byte count."""
     cfg = {
-        "host": "h", "port": 1, "enable_batching": False,
+        "host": "h",
+        "port": 1,
+        "enable_batching": False,
         "protocol": {"type": "openmux", "remote_port": "r", "api_key": "k"},
     }
     port = TcpInitiatorPort("p", cfg, adapter=types.SimpleNamespace())  # type: ignore[arg-type]
@@ -44,8 +46,10 @@ async def test_openmux_write_data_returns_len(monkeypatch):
     class _Writer:
         def __init__(self):
             self.buf = bytearray()
+
         def write(self, d):
             self.buf.extend(d)
+
         async def drain(self):
             return
 

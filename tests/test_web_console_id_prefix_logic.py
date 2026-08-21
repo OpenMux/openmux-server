@@ -1,9 +1,9 @@
 import pytest
 
-from openmux.server.web_console import WebConsoleAdapter
 from openmux.server.auth_manager import AuthManager
 from openmux.server.console_manager import ConsoleManager
 from openmux.server.port_manager import PortManager
+from openmux.server.web_console import WebConsoleAdapter
 
 
 def test_snapshot_composite_id_derivation_local():
@@ -18,6 +18,7 @@ def test_snapshot_composite_id_derivation_local():
     class Dummy:
         def __init__(self, name):
             self.name = name
+
         def get_status(self):
             return {"name": self.name, "adapter": "loopback", "is_running": True}
 

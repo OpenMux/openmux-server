@@ -22,7 +22,7 @@ import asyncio
 import json
 import os
 import sys
-from typing import Any, Optional, List
+from typing import Any, List, Optional
 
 
 async def send_command(sock_path: str, payload: dict) -> int:

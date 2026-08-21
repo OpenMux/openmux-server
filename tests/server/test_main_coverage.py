@@ -1,19 +1,19 @@
 import asyncio
 import os
 import sys
-import yaml
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, cast
 
 import pytest
+import yaml
 
+from openmux.server.adapters.base_adapter import AdapterCapability, BaseGenericAdapter
 from openmux.server.main import (
     OpenMuxServer,
     _find_config_file,
     _parse_arguments,
     _setup_basic_logging,
 )
-from openmux.server.adapters.base_adapter import AdapterCapability, BaseGenericAdapter
 
 
 class FakeAdapter(BaseGenericAdapter):
@@ -101,7 +101,12 @@ class FakeSerialAdapter(FakeAdapter):
     async def reconcile_ports(self, config: Dict[str, Any]) -> Dict[str, Any]:
         self._last_reconcile = dict(config)
         # Pretend nothing changed for simplicity
-        return {"added": [], "removed": [], "updated": [], "unchanged": [p.get("name") for p in config.get("serial_ports", [])]}
+        return {
+            "added": [],
+            "removed": [],
+            "updated": [],
+            "unchanged": [p.get("name") for p in config.get("serial_ports", [])],
+        }
 
 
 def write_temp_config(tmp_path) -> str:
@@ -202,10 +207,13 @@ async def test_start_all_adapters_with_mixed_states(tmp_path):
 async def test_log_server_status_does_not_crash(tmp_path, caplog):
     cfg_path = write_temp_config(tmp_path)
     srv = OpenMuxServer(cfg_path, log_level="INFO")
-    srv.unified_adapters = cast(Any, [
-        FakeAdapter("c1", adapter_type="tcp", capabilities={AdapterCapability.ACCEPTS_CONNECTIONS}, is_running=True),
-        FakeAdapter("p1", adapter_type="loopback", capabilities={AdapterCapability.PROVIDES_PORTS}, is_running=True),
-    ])
+    srv.unified_adapters = cast(
+        Any,
+        [
+            FakeAdapter("c1", adapter_type="tcp", capabilities={AdapterCapability.ACCEPTS_CONNECTIONS}, is_running=True),
+            FakeAdapter("p1", adapter_type="loopback", capabilities={AdapterCapability.PROVIDES_PORTS}, is_running=True),
+        ],
+    )
     srv._log_server_status()
     # Check some expected markers were logged
     messages = " ".join([r.getMessage() for r in caplog.records])
@@ -231,11 +239,14 @@ async def test_run_server_loop_cancel():
         "server": {"host": "127.0.0.1", "port": 0},
         "authentication": {"users": []},
     }
+
     class DummyCM:
         def __init__(self, cfg):
             self.config = cfg
+
         def load_config(self):
             return self.config
+
         def get_authentication_config(self):
             return {"users": []}
 

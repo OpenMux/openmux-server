@@ -273,7 +273,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 # Intercept control/meta frames from server
                 if isinstance(data, str) and data.startswith("OMXCTRL "):
                     try:
-                        payload = data[len("OMXCTRL "):]
+                        payload = data[len("OMXCTRL ") :]
                         info = json.loads(payload)
                         if isinstance(info, dict) and info.get("type") in ("client_mode", "rw_holders"):
                             _msg_type, message = format_control_response(self, info)

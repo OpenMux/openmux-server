@@ -22,10 +22,7 @@ SCHEMA_FILES = sorted(SCHEMA_DIR.glob("openmux_*.yaml"))
 
 def _schema_key_sets() -> Dict[str, Set[str]]:
     """Top-level keys accepted by each schema in config_schema/."""
-    return {
-        path.name: set(yaml.safe_load(path.read_text())["properties"].keys())
-        for path in SCHEMA_FILES
-    }
+    return {path.name: set(yaml.safe_load(path.read_text())["properties"].keys()) for path in SCHEMA_FILES}
 
 
 def detect_schema(config_file: Path) -> Tuple[Optional[str], str]:
@@ -52,10 +49,8 @@ def detect_schema(config_file: Path) -> Tuple[Optional[str], str]:
 
     best_name, best_keys = min(key_sets.items(), key=lambda item: len(keys - item[1]))
     uncovered = sorted(keys - best_keys)
-    return None, (
-        f"no schema covers {config_file.name}: uncovered top-level keys {uncovered} "
-        f"(closest: {best_name})"
-    )
+    detail = f"no schema covers {config_file.name}: uncovered top-level keys {uncovered} (closest: {best_name})"
+    return None, detail
 
 
 def main() -> int:

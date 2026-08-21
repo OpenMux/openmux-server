@@ -76,13 +76,13 @@ class TestTcpInitiatorOpenmux:
 
     @pytest.fixture
     def user_pass_cfg(self):
-        return _openmux_cfg("test_port", "remote.example.com", 8080, "test_device",
-                            username="admin", password="secret", timeout=10.0)
+        return _openmux_cfg(
+            "test_port", "remote.example.com", 8080, "test_device", username="admin", password="secret", timeout=10.0
+        )
 
     @pytest.fixture
     def api_key_cfg(self):
-        return _openmux_cfg("api_port", "secure.example.com", 8443, "secure_device",
-                            api_key="test-api-key-123", timeout=15.0)
+        return _openmux_cfg("api_port", "secure.example.com", 8443, "secure_device", api_key="test-api-key-123", timeout=15.0)
 
     def test_adapter_initialization(self, user_pass_cfg):
         adapter = self._create_adapter("om_client", [user_pass_cfg])

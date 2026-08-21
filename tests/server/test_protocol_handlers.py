@@ -14,10 +14,10 @@ from openmux.server.adapters.protocols.conserver import ConserverHandler
 from openmux.server.adapters.protocols.openmux_handler import OpenMuxHandler
 from openmux.server.adapters.protocols.plain import PlainHandler
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Registry
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_protocol_registry_keys():
     assert set(PROTOCOL_HANDLERS.keys()) == {"plain", "openmux", "conserver"}
@@ -51,6 +51,7 @@ def test_get_handler_empty_string_falls_back_to_plain():
 # ─────────────────────────────────────────────────────────────────────────────
 # PlainHandler — encode / decode
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestPlainHandlerPassthrough:
     def test_encode_is_passthrough(self):
@@ -167,12 +168,14 @@ async def test_plain_handler_establish_tls(monkeypatch):
     h = PlainHandler({})
     await h.establish("host", 443, {"use_tls": True, "ssl_verify": True, "timeout": 5.0})
     import ssl as _ssl
+
     assert isinstance(captured["ssl"], _ssl.SSLContext)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ConserverHandler — validate_config
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestConserverValidateConfig:
     def test_valid(self):
@@ -197,6 +200,7 @@ class TestConserverValidateConfig:
 # ─────────────────────────────────────────────────────────────────────────────
 # ConserverHandler — decode / encode
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestConserverByteTransforms:
     def test_plain_data_passthrough(self):
@@ -245,6 +249,7 @@ class TestConserverByteTransforms:
 # ConserverHandler — establish (mocked network)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _make_conserver_mock_streams(lines: list):
     """Return (reader, writer) mocks for a conserver session."""
     encoded = [ln.encode() + b"\n" for ln in lines]
@@ -271,13 +276,9 @@ async def test_conserver_establish_full_flow(monkeypatch):
     connections = []
 
     # Master: ok → login admin → ok → call blade1 → 7782
-    master_r, master_w = _make_conserver_mock_streams(
-        ["ok", "ok", "7782"]
-    )
+    master_r, master_w = _make_conserver_mock_streams(["ok", "ok", "7782"])
     # Group: ok → login admin → ok → call blade1 → [attached]
-    group_r, group_w = _make_conserver_mock_streams(
-        ["ok", "ok", "[attached]"]
-    )
+    group_r, group_w = _make_conserver_mock_streams(["ok", "ok", "[attached]"])
 
     async def fake_open(host, port, ssl=None):
         conn = (MagicMock(), MagicMock())
@@ -305,12 +306,8 @@ async def test_conserver_establish_full_flow(monkeypatch):
 @pytest.mark.asyncio
 async def test_conserver_establish_with_password(monkeypatch):
     """Master requires a password challenge."""
-    master_r, master_w = _make_conserver_mock_streams(
-        ["ok", "passwd? conserver.local", "ok", "7782"]
-    )
-    group_r, group_w = _make_conserver_mock_streams(
-        ["ok", "ok", "[spy]"]
-    )
+    master_r, master_w = _make_conserver_mock_streams(["ok", "passwd? conserver.local", "ok", "7782"])
+    group_r, group_w = _make_conserver_mock_streams(["ok", "ok", "[spy]"])
 
     async def fake_open(host, port, ssl=None):
         if port == 782:
@@ -353,9 +350,7 @@ async def test_conserver_establish_bad_greeting_raises(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_conserver_establish_remote_redirect_raises(monkeypatch):
-    master_r, master_w = _make_conserver_mock_streams(
-        ["ok", "ok", "@other-conserver.local"]
-    )
+    master_r, master_w = _make_conserver_mock_streams(["ok", "ok", "@other-conserver.local"])
 
     async def fake_open(host, port, ssl=None):
         return master_r, master_w
@@ -374,9 +369,7 @@ async def test_conserver_establish_remote_redirect_raises(monkeypatch):
 @pytest.mark.asyncio
 async def test_conserver_establish_attach_failed_raises(monkeypatch):
     master_r, master_w = _make_conserver_mock_streams(["ok", "ok", "7782"])
-    group_r, group_w = _make_conserver_mock_streams(
-        ["ok", "ok", "unknown console 'blade1'"]
-    )
+    group_r, group_w = _make_conserver_mock_streams(["ok", "ok", "unknown console 'blade1'"])
 
     async def fake_open(host, port, ssl=None):
         if port == 782:
@@ -397,6 +390,7 @@ async def test_conserver_establish_attach_failed_raises(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenMuxHandler — validate_config
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestOpenMuxValidateConfig:
     def test_valid_with_api_key(self):
@@ -427,6 +421,7 @@ class TestOpenMuxValidateConfig:
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenMuxHandler — encode / decode (passthrough)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_openmux_encode_passthrough():
     h = OpenMuxHandler({})

@@ -269,11 +269,13 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
     monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
     monkeypatch.setattr(adapter, "create_port", fake_create)
 
-    summary = await adapter.reconcile_ports([
-        {"name": "a"},                       # unchanged (defaults)
-        {"name": "b", "buffer_size": 2048},  # updated (was 512)
-        {"name": "c"},                       # added
-    ])
+    summary = await adapter.reconcile_ports(
+        [
+            {"name": "a"},  # unchanged (defaults)
+            {"name": "b", "buffer_size": 2048},  # updated (was 512)
+            {"name": "c"},  # added
+        ]
+    )
     assert summary["unchanged"] == ["a"]
     assert summary["updated"] == ["b"]
     assert summary["added"] == ["c"]
@@ -287,9 +289,7 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
 async def test_scrollback_size_from_config_is_replayable():
     """A loopback port with scrollback_size buffers echoed data for replay."""
     pm = PortManager([])
-    adapter = LoopbackAdapter(
-        "loop", {"loopback_ports": [{"name": "p1", "scrollback_size": 32, "sanitize_control": False}]}
-    )
+    adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "p1", "scrollback_size": 32, "sanitize_control": False}]})
     adapter.main_port_manager = pm
     pm.set_unified_adapters([adapter])
     assert await adapter.start() is True

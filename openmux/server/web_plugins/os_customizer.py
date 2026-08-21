@@ -1,5 +1,6 @@
-from aiohttp import web
 from typing import Any, Dict, Optional
+
+from aiohttp import web
 
 from . import ADAPTER_APP_KEY
 
@@ -14,12 +15,14 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
         raise web.HTTPUnauthorized()
     # Expose minimal host facts; avoid reading sensitive files.
     import platform
+
     facts = {
         "system": platform.system(),
         "release": platform.release(),
         "machine": platform.machine(),
     }
     import json
+
     return web.Response(body=json.dumps({"facts": facts}).encode("utf-8"), content_type="application/json")
 
 

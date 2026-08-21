@@ -428,7 +428,7 @@ class TcpClientAdapter(BaseClientAdapter):
             client, e.g. the shutdown-message detection).
         """
         try:
-            line = data[len(CTRL_MARKER):].split(b"\n", 1)[0]
+            line = data[len(CTRL_MARKER) :].split(b"\n", 1)[0]
             payload = json.loads(line.decode("utf-8", errors="ignore"))
         except Exception:
             return b""

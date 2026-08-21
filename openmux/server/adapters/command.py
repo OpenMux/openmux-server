@@ -102,9 +102,7 @@ class CommandPort:
         # spawn_mode may be one of: "shared_eager" (default), "shared_on_demand".
         # For backward compatibility, also honor boolean flag spawn_on_demand.
         spawn_mode = str(config.get("spawn_mode", "")).strip().lower()
-        self.spawn_on_demand: bool = bool(
-            config.get("spawn_on_demand", False) or spawn_mode == "shared_on_demand"
-        )
+        self.spawn_on_demand: bool = bool(config.get("spawn_on_demand", False) or spawn_mode == "shared_on_demand")
         # Idle stop: when last client disconnects, stop the process after this many seconds (>0).
         # 0 or missing => never auto-stop on idle.
         try:
@@ -202,8 +200,10 @@ class CommandPort:
         """Schedule emission of a notice chunk via the centralized path."""
         if not payload:
             return
+
         async def _do_emit():
             await self._emit_output_chunk(payload, require_clients=False)
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -244,9 +244,7 @@ class CommandPort:
                     self.logger.error("Failed to trigger on-demand start for %s", self.name, exc_info=True)
             if (not self.process_active) and not self._stopped_notice_sent:
                 hint = "spawn" if getattr(self, "spawn_on_demand", False) else "respawn"
-                notice = (
-                    f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
-                )
+                notice = f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
                 self._stopped_notice_sent = True
                 self._schedule_notice_emit(notice)
         elif old > 0 and count == 0:
@@ -256,6 +254,7 @@ class CommandPort:
             if self.idle_timeout_sec and self.idle_timeout_sec > 0:
                 # Guard: don't schedule multiple timers
                 if self._idle_stop_task is None or self._idle_stop_task.done():
+
                     async def _idle_stop_after_delay():
                         try:
                             await asyncio.sleep(self.idle_timeout_sec)
@@ -1151,9 +1150,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                         await self.main_port_manager.register_unified_port(port_name, command_port, self)
                 except Exception:
                     self.logger.warning(f"Failed to register unified command port {port_name}")
-                self.logger.info(
-                    f"Created command port (on-demand): {port_name} (will spawn on first client attach)"
-                )
+                self.logger.info(f"Created command port (on-demand): {port_name} (will spawn on first client attach)")
                 return command_port
             else:
                 if await command_port.start():

@@ -520,8 +520,7 @@ class OpenMuxClient:
                     pass
                 if examples:
                     print_client_info(
-                        "Duplicate port names detected. Use server_id::name to disambiguate, e.g.: "
-                        + ", ".join(examples)
+                        "Duplicate port names detected. Use server_id::name to disambiguate, e.g.: " + ", ".join(examples)
                     )
         else:
             # Fallback: plain names
