@@ -367,7 +367,10 @@ properties:
     type: object
     additionalProperties: false
     properties:
-      actions_dir: { type: string }
+      actions_dir:
+        oneOf:
+          - { type: string }
+          - { type: array, items: { type: string }, minItems: 1 }
       action_ports:
         type: object
         additionalProperties:

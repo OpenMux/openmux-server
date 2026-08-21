@@ -6,7 +6,13 @@ top of the `openmux.server.actions` package. Enable the plugin's routes under
 config section (a sibling of `web_console`, not nested under it):
 
     port_actions:
-      actions_dir: openmux/server/actions/examples
+      # One directory, or a list of directories, holding action scripts
+      # (e.g. a site-local directory of internal scripts next to the standard ones).
+      # Each directory is also put on sys.path so a script can import sibling
+      # helper modules (e.g. a shared client for an internal provisioning system):
+      actions_dir:
+        - openmux/server/actions/examples
+        - custom_actions
       action_ports:
         echo_probe: [loopback1]
         health_check: ["*"]
@@ -29,9 +35,10 @@ import asyncio
 import contextlib
 import json
 import logging
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Final, List, Optional
+from typing import Any, Dict, Final, List, Optional, Set
 
 from aiohttp import WSMsgType, web
 
@@ -48,44 +55,112 @@ class _PortActionsState:
     catalog: Dict[str, ActionScript] = field(default_factory=dict)
     action_ports: Dict[str, List[str]] = field(default_factory=dict)
     runner: Optional[ActionRunner] = None
-    actions_dir: Optional[str] = None
+    # Normalized list of action-script directories (see `_normalize_action_dirs()`).
+    actions_dir: Optional[List[str]] = None
     # action id -> script file mtime as of its last (re)load; drives _refresh_catalog().
     catalog_mtimes: Dict[str, float] = field(default_factory=dict)
+
+
+def _normalize_action_dirs(value: Any) -> List[str]:
+    """Normalize the `actions_dir` config value to a list of directory paths.
+
+    Accepts a single path or a list of paths (so, for example, a site-local
+    directory of internal scripts can be loaded next to the standard examples
+    directory). Blank entries are dropped and duplicates removed; non-string
+    entries are ignored with a warning.
+    """
+    if value is None:
+        return []
+    items: List[Any] = [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple)) else []
+    if not isinstance(value, (str, list, tuple)):
+        logger.warning("port_actions actions_dir must be a path or a list of paths; ignoring %r value", type(value).__name__)
+        return []
+    dirs: List[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            logger.warning("Ignoring non-string actions_dir entry: %r", item)
+            continue
+        item = item.strip()
+        if item and item not in dirs:
+            dirs.append(item)
+    return dirs
+
+
+def _is_catalog_skipped(filename: str) -> bool:
+    """Whether a `.py` file in an actions directory is not an action script.
+
+    Files starting with `_` (helpers) or `test_` (test modules co-located with
+    the scripts they test) are skipped, so a directory can hold both actions
+    and their tests without the catalog trying to load the tests as actions.
+    """
+    return filename.startswith("_") or filename.startswith("test_")
+
+
+# Action-script directories this plugin inserted into `sys.path` (see
+# `_sync_action_paths()`). Kept module-level so a `register_plugin()` re-run on
+# a full config reload removes directories the plugin itself added earlier.
+_ADDED_SYS_PATH_DIRS: Set[str] = set()
+
+
+def _sync_action_paths(actions_dirs: Optional[List[str]]) -> None:
+    """Put the configured action-script directories on `sys.path`.
+
+    Each existing directory is inserted at the front of `sys.path` so an action
+    script can import helper modules from its own directory (for example a
+    shared client for an internal system, next to several action scripts).
+    Entries are added idempotently and are removed again once a directory is
+    no longer configured. A directory already on `sys.path` by other means is
+    used as-is and never removed by this plugin.
+    """
+    wanted: Set[str] = set()
+    for directory in actions_dirs or []:
+        base = Path(directory)
+        if base.is_dir():
+            wanted.add(str(base.resolve()))
+    for old in list(_ADDED_SYS_PATH_DIRS):
+        if old not in wanted:
+            _ADDED_SYS_PATH_DIRS.discard(old)
+            if old in sys.path:
+                sys.path.remove(old)
+    for new in sorted(wanted):
+        if new in _ADDED_SYS_PATH_DIRS or new in sys.path:
+            continue
+        sys.path.insert(0, new)
+        _ADDED_SYS_PATH_DIRS.add(new)
 
 
 STATE_APP_KEY: Final = web.AppKey("openmux_port_actions_state", _PortActionsState)
 
 
-def _load_catalog(actions_dir: Optional[str], mtimes: Optional[Dict[str, float]] = None) -> Dict[str, ActionScript]:
+def _load_catalog(actions_dirs: Optional[List[str]], mtimes: Optional[Dict[str, float]] = None) -> Dict[str, ActionScript]:
     catalog: Dict[str, ActionScript] = {}
-    if not actions_dir:
-        return catalog
-    base = Path(actions_dir)
-    if not base.is_dir():
-        logger.warning("port_actions actions_dir %s is not a directory; no actions loaded", actions_dir)
-        return catalog
-    for path in sorted(base.glob("*.py")):
-        if path.name.startswith("_"):
+    for base in (Path(d) for d in (actions_dirs or [])):
+        if not base.is_dir():
+            logger.warning("port_actions actions_dir %s is not a directory; no actions loaded from it", base)
             continue
-        try:
-            action = load_action_from_file(str(path))
-        except ActionValidationError as exc:
-            logger.error("Skipping invalid action script %s: %s", path, exc)
-            continue
-        catalog[action.id] = action
-        if mtimes is not None:
+        for path in sorted(base.glob("*.py")):
+            if _is_catalog_skipped(path.name):
+                continue
             try:
-                mtimes[action.id] = path.stat().st_mtime
-            except OSError:
-                pass
+                action = load_action_from_file(str(path))
+            except ActionValidationError as exc:
+                logger.error("Skipping invalid action script %s: %s", path, exc)
+                continue
+            catalog[action.id] = action
+            if mtimes is not None:
+                try:
+                    mtimes[action.id] = path.stat().st_mtime
+                except OSError:
+                    pass
     return catalog
 
 
 def _refresh_catalog(state: _PortActionsState) -> None:
     """Reload any action script whose file changed since it was last loaded.
 
-    Cheap when nothing changed: this only `stat()`s each file in `actions_dir` and
-    re-imports (`load_action_from_file`) just the ones whose mtime moved. Also picks
+    Cheap when nothing changed: this only `stat()`s each file in the configured
+    actions directories and re-imports (`load_action_from_file`) just the ones whose
+    mtime moved. Also picks
     up added/removed script files. Called before serving the catalog and before
     launching a run, so editing a script's ACTION metadata or run() body takes
     effect on its very next use - no server reload needed. A script with a syntax
@@ -93,35 +168,41 @@ def _refresh_catalog(state: _PortActionsState) -> None:
     """
     if not state.actions_dir:
         return
-    base = Path(state.actions_dir)
-    if not base.is_dir():
-        return
+    # A directory created after startup becomes importable (and loadable) on
+    # its next use, without a server reload.
+    _sync_action_paths(state.actions_dir)
+    bases = [Path(d) for d in state.actions_dir]
     seen_ids = set()
-    for path in sorted(base.glob("*.py")):
-        if path.name.startswith("_"):
+    for base in bases:
+        if not base.is_dir():
+            logger.warning("port_actions actions_dir %s is not a directory; skipping", base)
             continue
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        existing_id = next((aid for aid, a in state.catalog.items() if a.module_path == str(path)), None)
-        if existing_id is not None and state.catalog_mtimes.get(existing_id) == mtime:
-            seen_ids.add(existing_id)
-            continue
-        try:
-            action = load_action_from_file(str(path))
-        except ActionValidationError as exc:
-            logger.error("Skipping invalid action script %s: %s", path, exc)
-            continue
-        if existing_id is not None and existing_id != action.id:
-            state.catalog.pop(existing_id, None)
-            state.catalog_mtimes.pop(existing_id, None)
-        state.catalog[action.id] = action
-        state.catalog_mtimes[action.id] = mtime
-        seen_ids.add(action.id)
-        logger.info("Reloaded action script %s (id=%s)", path.name, action.id)
+        for path in sorted(base.glob("*.py")):
+            if _is_catalog_skipped(path.name):
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            existing_id = next((aid for aid, a in state.catalog.items() if a.module_path == str(path)), None)
+            if existing_id is not None and state.catalog_mtimes.get(existing_id) == mtime:
+                seen_ids.add(existing_id)
+                continue
+            try:
+                action = load_action_from_file(str(path))
+            except ActionValidationError as exc:
+                logger.error("Skipping invalid action script %s: %s", path, exc)
+                continue
+            if existing_id is not None and existing_id != action.id:
+                state.catalog.pop(existing_id, None)
+                state.catalog_mtimes.pop(existing_id, None)
+            state.catalog[action.id] = action
+            state.catalog_mtimes[action.id] = mtime
+            seen_ids.add(action.id)
+            logger.info("Reloaded action script %s (id=%s)", path.name, action.id)
 
-    stale = [aid for aid, a in state.catalog.items() if Path(a.module_path).parent == base and aid not in seen_ids]
+    base_set = set(bases)
+    stale = [aid for aid, a in state.catalog.items() if Path(a.module_path).parent in base_set and aid not in seen_ids]
     for aid in stale:
         del state.catalog[aid]
         state.catalog_mtimes.pop(aid, None)
@@ -309,8 +390,11 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     state = _PortActionsState(
         action_ports={k: list(v) for k, v in (section.get("action_ports") or {}).items()},
         runner=ActionRunner(port_manager, console_manager=console_manager) if port_manager is not None else None,
-        actions_dir=section.get("actions_dir"),
+        actions_dir=_normalize_action_dirs(section.get("actions_dir")),
     )
+    # Before the first catalog load, so a script's `import` of a sibling
+    # helper module resolves (see `_sync_action_paths()`).
+    _sync_action_paths(state.actions_dir)
     state.catalog = _load_catalog(state.actions_dir, state.catalog_mtimes)
     if state.runner is None:
         logger.warning("port_actions plugin registered without a PortManager; actions will not be runnable")

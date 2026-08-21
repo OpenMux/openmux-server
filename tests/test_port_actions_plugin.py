@@ -23,6 +23,7 @@ async def _start_console(
     action_ports: dict,
     enable_ui: bool = False,
     max_read_write_users: int = 1,
+    actions_dir=None,
 ):
     pm = PortManager([])
     loop_adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "p1", "max_read_write_users": max_read_write_users}]})
@@ -35,7 +36,7 @@ async def _start_console(
 
     config = {
         "port_actions": {
-            "actions_dir": ACTIONS_DIR,
+            "actions_dir": actions_dir if actions_dir is not None else ACTIONS_DIR,
             "action_ports": action_ports,
         },
         "web_console": {
@@ -536,6 +537,151 @@ async def test_cancel_run_ws_round_trip_stops_a_running_action():
                         break
 
             assert events[-1]["status"] == "cancelled"
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+def _write_action(dir_path: Path, action_id: str) -> Path:
+    """Write a minimal valid action script named `<action_id>.py` into `dir_path`."""
+    path = dir_path / f"{action_id}.py"
+    path.write_text(
+        f'ACTION = {{\n    "id": "{action_id}",\n    "name": "{action_id}",\n    "description": "test action",\n    "timeout": 10.0,\n    "params": [],\n}}\n\n\nasync def run(session, params, log):\n    log("done")\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_normalize_action_dirs_accepts_string_or_list() -> None:
+    from openmux.server.web_plugins.port_actions import _normalize_action_dirs
+
+    assert _normalize_action_dirs(None) == []
+    assert _normalize_action_dirs("") == []
+    assert _normalize_action_dirs("openmux/server/actions/examples") == ["openmux/server/actions/examples"]
+    assert _normalize_action_dirs(["a", "b", "a", "  "]) == ["a", "b"]
+    assert _normalize_action_dirs(("a", 5, "b")) == ["a", "b"]
+    assert _normalize_action_dirs({"x": 1}) == []
+
+
+def test_load_catalog_reads_multiple_directories_and_skips_non_actions(tmp_path: Path) -> None:
+    from openmux.server.web_plugins.port_actions import _load_catalog
+
+    dir_a = tmp_path / "examples"
+    dir_b = tmp_path / "custom"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    _write_action(dir_a, "act_a")
+    _write_action(dir_b, "act_b")
+    (dir_b / "test_act_b.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    (dir_b / "_helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    catalog = _load_catalog([str(dir_a), str(dir_b)])
+    assert set(catalog) == {"act_a", "act_b"}
+    # A fresh load from one directory sees only that directory's actions.
+    assert set(_load_catalog([str(dir_a)])) == {"act_a"}
+    # A directory that does not exist is skipped without failing the load.
+    assert set(_load_catalog([str(dir_a), str(tmp_path / "missing")])) == {"act_a"}
+
+
+@pytest.mark.asyncio
+async def test_actions_load_from_multiple_directories(tmp_path: Path):
+    """`actions_dir` as a list: actions from a custom site-local directory are served
+    alongside the standard examples (each still gated by its `action_ports` grant)."""
+    dir_custom = tmp_path / "custom_actions"
+    dir_custom.mkdir()
+    _write_action(dir_custom, "custom_action")
+
+    web_adapter, pm, loop_adapter = await _start_console(
+        8967, {"echo_probe": ["p1"], "custom_action": ["p1"]}, actions_dir=[ACTIONS_DIR, str(dir_custom)]
+    )
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get("http://127.0.0.1:8967/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+                assert {a["id"] for a in data["actions"]} == {"echo_probe", "custom_action"}
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+def test_sync_action_paths_adds_and_removes_dirs(tmp_path: Path) -> None:
+    import sys as sys_module
+
+    from openmux.server.web_plugins.port_actions import _ADDED_SYS_PATH_DIRS, _sync_action_paths
+
+    dir_a = tmp_path / "a"
+    dir_a.mkdir()
+    # A missing directory is ignored, an existing one is added at the front.
+    _sync_action_paths([str(dir_a), str(tmp_path / "missing")])
+    resolved_a = str(dir_a.resolve())
+    assert sys_module.path[0] == resolved_a
+    assert _ADDED_SYS_PATH_DIRS == {resolved_a}
+    # Idempotent: re-adding the same directory does not duplicate the entry.
+    _sync_action_paths([str(dir_a)])
+    assert sys_module.path.count(resolved_a) == 1
+    # A directory already on sys.path by other means is neither adopted nor removed.
+    dir_b = tmp_path / "b"
+    dir_b.mkdir()
+    sys_module.path.insert(0, str(dir_b))
+    _sync_action_paths([str(dir_b), str(dir_a)])
+    assert _ADDED_SYS_PATH_DIRS == {resolved_a}
+    _sync_action_paths([])
+    assert _ADDED_SYS_PATH_DIRS == set()
+    assert resolved_a not in sys_module.path
+    assert str(dir_b) in sys_module.path  # not ours to remove
+    sys_module.path.remove(str(dir_b))
+
+
+@pytest.mark.asyncio
+async def test_action_imports_sibling_helper_module(tmp_path: Path):
+    """An action script can `import` a helper module from its own actions directory:
+    the plugin puts each configured directory on `sys.path` before loading the
+    catalog. A helper without an ACTION dict is probed by the catalog and skipped."""
+    dir_custom = tmp_path / "custom_actions"
+    dir_custom.mkdir()
+    (dir_custom / "helper_mod.py").write_text("MAGIC = 4242\n", encoding="utf-8")
+    (dir_custom / "helper_action.py").write_text(
+        "import helper_mod\n"
+        "\n"
+        "ACTION = {\n"
+        '    "id": "helper_action",\n'
+        '    "name": "helper_action",\n'
+        '    "description": "test action",\n'
+        '    "timeout": 10.0,\n'
+        '    "params": [],\n'
+        "}\n"
+        "\n\n"
+        "async def run(session, params, log):\n"
+        '    log(f"magic={helper_mod.MAGIC}")\n',
+        encoding="utf-8",
+    )
+
+    web_adapter, pm, loop_adapter = await _start_console(8969, {"helper_action": ["p1"]}, actions_dir=[str(dir_custom)])
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get("http://127.0.0.1:8969/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+                # A failed `import helper_mod` would have made the catalog skip the script.
+                assert [a["id"] for a in data["actions"]] == ["helper_action"]
+
+            async with session.post(
+                "http://127.0.0.1:8969/api/ports/p1/actions/helper_action/run",
+                headers=AUTH_HEADER,
+                json={"params": {}},
+            ) as resp:
+                assert resp.status == 200
+                run_id = (await resp.json())["run_id"]
+
+            events = []
+            async with session.ws_connect(f"http://127.0.0.1:8969/ws/actions/{run_id}", headers=AUTH_HEADER) as ws:
+                async for msg in ws:
+                    events.append(json.loads(msg.data))
+                    if events[-1].get("event") == "action_finished":
+                        break
+            assert events[-1]["status"] == "success"
+            assert "magic=4242" in [e.get("event") for e in events]
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()

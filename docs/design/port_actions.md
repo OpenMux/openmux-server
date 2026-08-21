@@ -446,6 +446,19 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
   fail-fast startup check treats `port_actions` as a recognized non-adapter top-level
   section (alongside `server`/`authentication`/`logging`), so a bare `port_actions:`
   section with no matching adapter plugin doesn't abort startup.
+- **`actions_dir` is a path or a list of paths**: a single string keeps working; a list
+  loads action scripts from each directory, in list order. The same action id in two
+  directories does not override the earlier entry (first directory wins). The Config
+  Editor "Actions" sub-view edits this as a textarea, one directory per line (a single
+  line stores the plain string form). The catalog scans each directory's top level only
+  and skips files whose name starts with `_` (helpers) or `test_` (co-located test
+  files), so helper and test files can live beside the action scripts without polluting
+  the catalog. The plugin also inserts each existing directory at the front of
+  `sys.path` (idempotent; entries are removed when a directory is no longer
+  configured), so an action script can `import` a helper module from the same
+  directory - for example a shared client for an internal provisioning system used by
+  several action scripts. A helper file without an `ACTION` dict is probed by the
+  catalog and skipped, so it can coexist with the scripts that import it.
 - **Action-centric layout**: `_allowed_actions()` computes a port's effective allow-list
   from `action_ports`, matching each entry's port list against the requested port name.
   A port-centric `port_actions: {port_name: [action_id, ...]}` layout was considered and

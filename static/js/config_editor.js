@@ -1080,7 +1080,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         setVal('web_console.tls_dir', deepGet(current, 'web_console.tls_dir'));
         setVal('web_console.session_ttl_seconds', deepGet(current, 'web_console.session_ttl_seconds'));
 
-        setVal('port_actions.actions_dir', deepGet(current, 'port_actions.actions_dir'));
+        const actionsDirPop = deepGet(current, 'port_actions.actions_dir');
+        setVal('port_actions.actions_dir', Array.isArray(actionsDirPop)? actionsDirPop.join('\n') : actionsDirPop);
         try {
           const actionPorts = deepGet(current, 'port_actions.action_ports') || {};
           const rows = Object.keys(actionPorts).map(function(actionId){
@@ -1181,9 +1182,13 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           const arr = wcpl.map(r=>r && r.module).filter(m=>m && String(m).trim().length>0);
           if (arr.length>0) deepSet(out, 'web_console.plugins', arr);
         }
-        // port_actions: actions_dir + action_ports (table rows -> dict of action_id -> ports)
+        // port_actions: actions_dir (one path per line; a single line stays a plain string) + action_ports (table rows -> dict of action_id -> ports)
         const portActions = {};
-        const actionsDir = getVal('port_actions.actions_dir'); if(actionsDir!==undefined) portActions.actions_dir = actionsDir;
+        const actionsDir = getVal('port_actions.actions_dir');
+        if(actionsDir!==undefined){
+          const actionsDirLines = String(actionsDir).split('\n').map(s=>s.trim()).filter(s=>s.length>0);
+          if(actionsDirLines.length>0) portActions.actions_dir = actionsDirLines.length>1? actionsDirLines : actionsDirLines[0];
+        }
         const apRows = tables['port_actions.action_ports'] && tables['port_actions.action_ports']._get ? tables['port_actions.action_ports']._get() : [];
         if (apRows && apRows.length>0) {
           const actionPorts = {};
