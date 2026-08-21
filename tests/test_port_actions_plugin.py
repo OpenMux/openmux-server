@@ -1,7 +1,10 @@
 import asyncio
 import base64
 import json
+import os
+import time
 from pathlib import Path
+from typing import List
 
 import pytest
 from aiohttp import ClientSession, TCPConnector
@@ -583,6 +586,24 @@ def test_load_catalog_reads_multiple_directories_and_skips_non_actions(tmp_path:
     assert set(_load_catalog([str(dir_a), str(tmp_path / "missing")])) == {"act_a"}
 
 
+def test_rebuild_catalog_keeps_last_good_version_of_broken_script(tmp_path: Path) -> None:
+    """A script that now fails to import (syntax error) is skipped, keeping the
+    last version that loaded successfully; the catalog keeps serving it."""
+    from openmux.server.web_plugins.port_actions import _PortActionsState, _catalog_file_mtimes, _rebuild_catalog
+
+    script = tmp_path / "act.py"
+    _write_action(tmp_path, "act")
+    state = _PortActionsState(actions_dir=[str(tmp_path)])
+    state.catalog, state.catalog_mtimes = _rebuild_catalog(state, _catalog_file_mtimes(state.actions_dir))
+    first = state.catalog["act"]
+
+    later = time.time() + 2
+    script.write_text("def broken(:\n", encoding="utf-8")
+    os.utime(script, (later, later))
+    state.catalog, state.catalog_mtimes = _rebuild_catalog(state, _catalog_file_mtimes(state.actions_dir))
+    assert state.catalog["act"] is first
+
+
 @pytest.mark.asyncio
 async def test_actions_load_from_multiple_directories(tmp_path: Path):
     """`actions_dir` as a list: actions from a custom site-local directory are served
@@ -682,6 +703,66 @@ async def test_action_imports_sibling_helper_module(tmp_path: Path):
                         break
             assert events[-1]["status"] == "success"
             assert "magic=4242" in [e.get("event") for e in events]
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+async def _run_helper_action_and_collect(session: ClientSession, base: str) -> List[str]:
+    """Run the helper_action once and return its event stream (for reuse by two tests)."""
+    async with session.post(
+        f"{base}/api/ports/p1/actions/helper_action/run", headers=AUTH_HEADER, json={"params": {}}
+    ) as resp:
+        assert resp.status == 200
+        run_id = (await resp.json())["run_id"]
+    events = []
+    async with session.ws_connect(f"{base}/ws/actions/{run_id}", headers=AUTH_HEADER) as ws:
+        async for msg in ws:
+            events.append(json.loads(msg.data))
+            if events[-1].get("event") == "action_finished":
+                break
+    assert events[-1]["status"] == "success"
+    return [e.get("event") for e in events]
+
+
+@pytest.mark.asyncio
+async def test_sibling_helper_edit_takes_effect_without_server_restart(tmp_path: Path):
+    """Editing only a shared helper module (the action script stays unchanged)
+    picks up the new helper code on the next run: the refresh stats helper
+    files too, and re-importing the action evicts the cached helper from
+    `sys.modules` so it re-executes from the current file."""
+    dir_custom = tmp_path / "helper_reload_actions"
+    dir_custom.mkdir()
+    (dir_custom / "helper_mod.py").write_text("MAGIC = 4242\n", encoding="utf-8")
+    (dir_custom / "helper_action.py").write_text(
+        "import helper_mod\n"
+        "\n"
+        "ACTION = {\n"
+        '    "id": "helper_action",\n'
+        '    "name": "helper_action",\n'
+        '    "description": "test action",\n'
+        '    "timeout": 10.0,\n'
+        '    "params": [],\n'
+        "}\n"
+        "\n\n"
+        "async def run(session, params, log):\n"
+        '    log(f"magic={helper_mod.MAGIC}")\n',
+        encoding="utf-8",
+    )
+
+    base = "http://127.0.0.1:8970"
+    web_adapter, pm, loop_adapter = await _start_console(8970, {"helper_action": ["p1"]}, actions_dir=[str(dir_custom)])
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            assert "magic=4242" in await _run_helper_action_and_collect(session, base)
+
+            # Edit only the helper and force an mtime change (filesystem mtimes
+            # can have second-level resolution).
+            (dir_custom / "helper_mod.py").write_text("MAGIC = 7777\n", encoding="utf-8")
+            later = time.time() + 2
+            os.utime(dir_custom / "helper_mod.py", (later, later))
+
+            assert "magic=7777" in await _run_helper_action_and_collect(session, base)
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()

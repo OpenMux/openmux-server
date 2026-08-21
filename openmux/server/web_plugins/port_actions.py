@@ -38,7 +38,7 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Final, List, Optional, Set
+from typing import Any, Dict, Final, List, Optional, Set, Tuple
 
 from aiohttp import WSMsgType, web
 
@@ -59,6 +59,10 @@ class _PortActionsState:
     actions_dir: Optional[List[str]] = None
     # action id -> script file mtime as of its last (re)load; drives _refresh_catalog().
     catalog_mtimes: Dict[str, float] = field(default_factory=dict)
+    # every non-skipped .py file path -> mtime as of the last catalog refresh.
+    # Also covers shared helper modules (imported by bare name), so editing a
+    # helper re-imports the action scripts from its directory.
+    script_mtimes: Dict[str, float] = field(default_factory=dict)
 
 
 def _normalize_action_dirs(value: Any) -> List[str]:
@@ -155,25 +159,15 @@ def _load_catalog(actions_dirs: Optional[List[str]], mtimes: Optional[Dict[str, 
     return catalog
 
 
-def _refresh_catalog(state: _PortActionsState) -> None:
-    """Reload any action script whose file changed since it was last loaded.
+def _catalog_file_mtimes(actions_dirs: Optional[List[str]]) -> Dict[str, float]:
+    """Map every loadable .py file in the actions directories to its mtime.
 
-    Cheap when nothing changed: this only `stat()`s each file in the configured
-    actions directories and re-imports (`load_action_from_file`) just the ones whose
-    mtime moved. Also picks
-    up added/removed script files. Called before serving the catalog and before
-    launching a run, so editing a script's ACTION metadata or run() body takes
-    effect on its very next use - no server reload needed. A script with a syntax
-    error is logged and skipped, keeping whatever version last loaded successfully.
+    Skips `_`/`test_` files (see `_is_catalog_skipped()`). Shared helper
+    modules (imported by a script by bare name) are included, so a change to
+    them triggers a catalog rebuild.
     """
-    if not state.actions_dir:
-        return
-    # A directory created after startup becomes importable (and loadable) on
-    # its next use, without a server reload.
-    _sync_action_paths(state.actions_dir)
-    bases = [Path(d) for d in state.actions_dir]
-    seen_ids = set()
-    for base in bases:
+    mtimes: Dict[str, float] = {}
+    for base in (Path(d) for d in (actions_dirs or [])):
         if not base.is_dir():
             logger.warning("port_actions actions_dir %s is not a directory; skipping", base)
             continue
@@ -181,32 +175,66 @@ def _refresh_catalog(state: _PortActionsState) -> None:
             if _is_catalog_skipped(path.name):
                 continue
             try:
-                mtime = path.stat().st_mtime
+                mtimes[str(path)] = path.stat().st_mtime
             except OSError:
                 continue
-            existing_id = next((aid for aid, a in state.catalog.items() if a.module_path == str(path)), None)
-            if existing_id is not None and state.catalog_mtimes.get(existing_id) == mtime:
-                seen_ids.add(existing_id)
-                continue
-            try:
-                action = load_action_from_file(str(path))
-            except ActionValidationError as exc:
-                logger.error("Skipping invalid action script %s: %s", path, exc)
-                continue
-            if existing_id is not None and existing_id != action.id:
-                state.catalog.pop(existing_id, None)
-                state.catalog_mtimes.pop(existing_id, None)
-            state.catalog[action.id] = action
-            state.catalog_mtimes[action.id] = mtime
-            seen_ids.add(action.id)
-            logger.info("Reloaded action script %s (id=%s)", path.name, action.id)
+    return mtimes
 
-    base_set = set(bases)
-    stale = [aid for aid, a in state.catalog.items() if Path(a.module_path).parent in base_set and aid not in seen_ids]
-    for aid in stale:
-        del state.catalog[aid]
-        state.catalog_mtimes.pop(aid, None)
-        logger.info("Removed action %s: script file no longer present", aid)
+
+def _rebuild_catalog(
+    state: _PortActionsState, current_mtimes: Dict[str, float]
+) -> Tuple[Dict[str, ActionScript], Dict[str, float]]:
+    """Re-import every action script; keep the last good version of a file that now fails to load.
+
+    A script whose file was removed drops out of the catalog. A renamed script
+    (different `id`) replaces the old entry for the same file.
+    """
+    catalog: Dict[str, ActionScript] = {}
+    mtimes: Dict[str, float] = {}
+    for path_str, mtime in sorted(current_mtimes.items()):
+        path = Path(path_str)
+        try:
+            action = load_action_from_file(str(path))
+        except ActionValidationError as exc:
+            # Probing a helper module (no ACTION dict) is normal; a real syntax
+            # error in a script is not.
+            if "missing a module-level ACTION dict" in str(exc):
+                logger.info("Skipping non-action file %s", path.name)
+            else:
+                logger.error("Skipping invalid action script %s: %s", path, exc)
+            stale = next((a for a in state.catalog.values() if a.module_path == str(path)), None)
+            if stale is not None:
+                catalog[stale.id] = stale
+                mtimes[stale.id] = state.catalog_mtimes.get(stale.id, mtime)
+            continue
+        catalog[action.id] = action
+        mtimes[action.id] = mtime
+    return catalog, mtimes
+
+
+def _refresh_catalog(state: _PortActionsState) -> None:
+    """Re-import action scripts that changed on disk, including sibling helper modules.
+
+    Cheap when nothing changed: this only `stat()`s each non-skipped file in the
+    configured actions directories, and re-imports only when some mtime moved.
+    Helper modules imported by bare name are stat'ed too, so editing one
+    re-imports the action scripts from its directory. A script with a syntax
+    error is logged and skipped, keeping whatever version last loaded
+    successfully. Called before serving the catalog and before launching a
+    run, so edits take effect on a script's very next use - no server reload
+    needed.
+    """
+    if not state.actions_dir:
+        return
+    # A directory created after startup becomes importable (and loadable) on
+    # its next use, without a server reload.
+    _sync_action_paths(state.actions_dir)
+    current_mtimes = _catalog_file_mtimes(state.actions_dir)
+    if current_mtimes == state.script_mtimes:
+        return
+    state.catalog, state.catalog_mtimes = _rebuild_catalog(state, current_mtimes)
+    state.script_mtimes = current_mtimes
+    logger.info("Port actions catalog rebuilt after script changes")
 
 
 def _action_summary(action: ActionScript) -> Dict[str, Any]:
@@ -396,6 +424,8 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     # helper module resolves (see `_sync_action_paths()`).
     _sync_action_paths(state.actions_dir)
     state.catalog = _load_catalog(state.actions_dir, state.catalog_mtimes)
+    # Baseline for `_refresh_catalog()` (covers helper modules too).
+    state.script_mtimes = _catalog_file_mtimes(state.actions_dir)
     if state.runner is None:
         logger.warning("port_actions plugin registered without a PortManager; actions will not be runnable")
     app[STATE_APP_KEY] = state

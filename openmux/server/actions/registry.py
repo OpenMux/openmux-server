@@ -9,6 +9,7 @@ A script is a plain Python module exposing:
 
 import importlib.util
 import logging
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -68,6 +69,22 @@ class ActionScript:
         return next((p for p in self.params if p.name == name), None)
 
 
+def _forget_sibling_modules(script_path: Path) -> None:
+    """Drop previously imported modules from the script's directory.
+
+    Action scripts import sibling helper modules by bare name (for example
+    ``from dabaru_api import fetch_init_config``). Python caches imported
+    modules in ``sys.modules``, so a re-import of the action script would
+    keep the siblings as executed at their first import. Dropping the cached
+    modules makes the next import re-execute them from the current file.
+    """
+    directory = script_path.parent.resolve()
+    for name in list(sys.modules):
+        module_file = getattr(sys.modules[name], "__file__", None)
+        if module_file and Path(module_file).resolve().parent == directory:
+            del sys.modules[name]
+
+
 def load_action_from_file(path: str) -> ActionScript:
     """Import a script file and build its `ActionScript` from `ACTION` + `run`.
 
@@ -78,18 +95,23 @@ def load_action_from_file(path: str) -> ActionScript:
         The loaded `ActionScript`.
 
     Raises:
-        ActionValidationError: the file is missing, or lacks a valid `ACTION`
-            dict / `run` entry point.
+        ActionValidationError: the file is missing, fails to import (syntax
+            error, unresolvable `import`), or lacks a valid `ACTION` dict /
+            `run` entry point.
     """
     file_path = Path(path)
     if not file_path.is_file():
         raise ActionValidationError(f"Action script not found: {path}")
 
+    _forget_sibling_modules(file_path)
     spec = importlib.util.spec_from_file_location(f"openmux_action_{file_path.stem}", file_path)
     if spec is None or spec.loader is None:
         raise ActionValidationError(f"Could not load action script: {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # convert any import failure into the loader's domain error
+        raise ActionValidationError(f"Could not import action script {path}: {exc}") from exc
 
     meta = getattr(module, "ACTION", None)
     if not isinstance(meta, dict):

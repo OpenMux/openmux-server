@@ -457,8 +457,18 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
   `sys.path` (idempotent; entries are removed when a directory is no longer
   configured), so an action script can `import` a helper module from the same
   directory - for example a shared client for an internal provisioning system used by
-  several action scripts. A helper file without an `ACTION` dict is probed by the
-  catalog and skipped, so it can coexist with the scripts that import it.
+   several action scripts. A helper file without an `ACTION` dict is probed by the
+   catalog and skipped, so it can coexist with the scripts that import it.
+- **Hot reload of scripts and helpers**: the plugin re-checks the catalog before every
+   catalog listing and every run launch. It `stat()`s each non-skipped `.py` file in the
+   configured directories - including shared helper modules - and re-imports when any
+   mtime moves. Re-importing an action script drops that directory's cached modules from
+   `sys.modules` first (`registry.py` `_forget_sibling_modules()`), so a script's
+   `import` of a changed helper re-executes the helper from its current file. Editing a
+   script or one of its helpers therefore takes effect on the next action use, without a
+   server (re)load. A script that fails to import (for example a syntax error) is logged
+   and skipped, and the catalog keeps the last version of that script that loaded
+   successfully.
 - **Action-centric layout**: `_allowed_actions()` computes a port's effective allow-list
   from `action_ports`, matching each entry's port list against the requested port name.
   A port-centric `port_actions: {port_name: [action_id, ...]}` layout was considered and
