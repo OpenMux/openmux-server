@@ -405,14 +405,74 @@ class ActionRunner:
             await self._broadcast_action_run_event(run, action, "action_finished")
             self._subscribers.pop(run.run_id, None)
 
+    def _federated_port(self, port_name: str) -> Optional[Any]:
+        """Return the port object if `port_name` is a federated (muxcon) port, else None.
+
+        A federated port's origin server is authoritative for the shared
+        read-write slot (issue #52): the proxy here only mirrors clients
+        attached at this hop, so a local read-write attach is necessary but not
+        sufficient - the origin must grant the slot via a FEDRW request.
+        """
+        ports = getattr(self.port_manager, "ports", None)
+        port = ports.get(port_name) if isinstance(ports, dict) else None
+        if port is not None and hasattr(port, "remote_port_name"):
+            return port
+        return None
+
+    async def _request_origin_grant(self, port: Any, client_id: str, port_name: str) -> bool:
+        """Ask the port's origin to grant `client_id` the shared read-write slot.
+
+        Returns True when the origin reports the client read-write, or when the
+        port is not federated (nothing to ask). Fails closed - False on denial,
+        timeout, link failure, or an origin that cannot arbitrate - never
+        optimistically grants across a federation link.
+        """
+        request = getattr(port, "request_read_write_for_client", None)
+        if request is None:
+            return True
+        try:
+            mode = await request(client_id)
+        except Exception:
+            logger.warning("FEDRW request failed for %s on federated port %s", client_id, port_name, exc_info=True)
+            return False
+        if mode != "read-write":
+            logger.info("Origin denied read-write slot for %s on federated port %s (mode=%s)", client_id, port_name, mode)
+            return False
+        return True
+
+    async def _release_origin_slot(self, port: Any, client_id: str, port_name: str) -> None:
+        """Tell the port's origin that `client_id` gives up the read-write slot.
+
+        Best-effort: the local demotion that follows proceeds regardless, and a
+        stale origin-side slot frees itself when the client's stream closes.
+        """
+        release = getattr(port, "release_read_write_for_client", None)
+        if release is None:
+            return
+        try:
+            await release(client_id)
+        except Exception:  # justification: best-effort origin release; local demotion still proceeds
+            logger.debug("FEDRW release failed for %s on federated port %s", client_id, port_name, exc_info=True)
+
     async def _attach_read_write(self, run: ActionRun, requesting_client_id: Optional[str]) -> None:
-        """Attach the action's client as read-write, self-demoting the launcher if needed."""
+        """Attach the action's client as read-write, self-demoting the launcher if needed.
+
+        On a federated (muxcon) port the origin server arbitrates the shared
+        read-write slot (issue #52). The launcher's origin slot (if any) is
+        released before the action requests its own, and a denied grant fails
+        the run fast - before any keystroke is sent - so a script can never
+        run against a port it has no write access to.
+        """
         port_name = run.port_name
+        port = self._federated_port(port_name)
+        if port is not None and not bool(getattr(port, "is_connected", False)):
+            raise PortBusyError(f"Federated link for port {port_name} is down; cannot run action {run.action_id}")
         attached = await self.port_manager.add_client_to_port(
             port_name, run.client_id, username=f"action:{run.action_id}", mode="read-write"
         )
         if not attached and requesting_client_id:
             if self.port_manager.get_client_mode(requesting_client_id, port_name) == "read-write":
+                await self._release_origin_slot(port, requesting_client_id, port_name)
                 await self.port_manager.demote_client(port_name, requesting_client_id)
                 run.auto_demoted_client_id = requesting_client_id
                 await self._notify_client_mode(requesting_client_id, mode="read-only", ok=False, reason="action_self_demoted")
@@ -421,6 +481,14 @@ class ActionRunner:
                 )
         if not attached:
             raise PortBusyError(f"Port {port_name} read-write slot is unavailable for action {run.action_id}")
+        if port is not None and not await self._request_origin_grant(port, run.client_id, port_name):
+            # The origin keeps the slot for whoever holds it (local or another
+            # federated peer); never preempt - detach and fail with a clear error.
+            await self.port_manager.remove_client_from_port(port_name, run.client_id)
+            raise PortBusyError(
+                f"Origin server did not grant the read-write slot for port {port_name}; "
+                f"action {run.action_id} cannot run while another client holds it"
+            )
 
     async def _broadcast_action_run_event(self, run: ActionRun, action: ActionScript, event: str) -> None:
         """Push a live "script started/finished" notice to every viewer of this run's port.
@@ -460,7 +528,14 @@ class ActionRunner:
             logger.debug("Failed to notify client %s of mode change (%s)", client_id, reason, exc_info=True)
 
     async def _detach_and_restore(self, run: ActionRun) -> None:
-        """Detach the action's client and restore any self-demoted launcher (finally-safe)."""
+        """Detach the action's client and restore any self-demoted launcher (finally-safe).
+
+        On a federated (muxcon) port the launcher's read-write slot lives on
+        the origin (issue #52): the restore re-requests it from the origin and
+        promotes locally only when granted, so a local read-write marker can
+        never outlive the origin's grant. If the slot moved on in the meantime,
+        the launcher stays read-only (first-come first-served, per design).
+        """
         try:
             await self.port_manager.remove_client_from_port(run.port_name, run.client_id)
         except Exception:
@@ -468,6 +543,18 @@ class ActionRunner:
         if run.auto_demoted_client_id:
             still_attached = self.port_manager.get_client_mode(run.auto_demoted_client_id, run.port_name) is not None
             if still_attached:
+                port = self._federated_port(run.port_name)
+                if port is not None and not await self._request_origin_grant(port, run.auto_demoted_client_id, run.port_name):
+                    logger.info(
+                        "Origin did not re-grant read-write for %s on %s after run %s; leaving read-only",
+                        run.auto_demoted_client_id,
+                        run.port_name,
+                        run.run_id,
+                    )
+                    await self._notify_client_mode(
+                        run.auto_demoted_client_id, mode="read-only", ok=False, reason="action_restore_denied"
+                    )
+                    return
                 try:
                     await self.port_manager.promote_client(run.port_name, run.auto_demoted_client_id)
                     await self._notify_client_mode(

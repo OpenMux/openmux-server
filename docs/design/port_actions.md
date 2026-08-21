@@ -152,6 +152,23 @@ an action attaches to `PortManager` exactly like a console client does, through
   any other read-only viewer is left untouched, and if that client already disconnected
   or someone else has since taken the slot, no restore happens (normal capacity rules
   decide the outcome, first-come first-served).
+- **Federated (muxcon) ports**: the origin server of a federated port owns the shared
+  read-write slot (issue #52) — this node's `connected_clients` only mirrors clients
+  attached here. A local read-write attach is necessary but not sufficient; the origin
+  must also grant the slot. `ActionRunner` therefore arbitrates per-run:
+  - Link down: the run fails fast with "Federated link … is down" before any attach.
+  - Self-demote path: the launcher's origin slot is released (FEDRW RELEASE) before the
+    action requests its own, so a port the launcher is about to give up is re-grantable.
+  - After the local attach, `ActionRunner` requests the slot from the origin (FEDRW
+    REQUEST). If the origin denies it (held by another local or federated client), the
+    action client is detached and the run fails fast with "Origin server did not grant
+    the read-write slot" — before any keystroke is sent. An action never preempts
+    (no FEDRW FORCE); a human still has the Force-take control for that.
+  - Auto-restore on a federated port re-requests the launcher's origin slot and promotes
+    locally only when the origin grants it. If the slot moved on in the meantime, the
+    launcher stays read-only (first-come first-served, per the restore rules above) and
+    the console prints `[Read-write not restored after the Port Action – the slot is
+    held by another client]` (`client_mode` reason `action_restore_denied`).
 - **Client-facing notification (phase 3)**: `demote_client()`/`promote_client()` only
   update `PortManager`'s internal state; they do not by themselves tell the affected
   browser tab its mode changed. `ActionRunner` accepts an optional `console_manager` and,

@@ -1289,7 +1289,7 @@ function connectSelected() {
           if (msg.client_id) myClientId = msg.client_id;
           updateCtrlMenuButtons();
           if (Array.isArray(msg.rw_holders) || msg.max_rw_users !== undefined) updateRoMenuInfo(msg.rw_holders || [], msg.max_rw_users);
-          const silentReasons = ['demoted', 'action_self_demoted', 'action_restored'];
+          const silentReasons = ['demoted', 'action_self_demoted', 'action_restored', 'action_restore_denied'];
           if (msg.ok === false && !silentReasons.includes(msg.reason)) {
             if (msg.max_rw_users === 0) {
               try { term.write('\r\n[read-write is not available on this port – configured with 0 read-write users]\r\n'); } catch (_) {}
@@ -1304,6 +1304,8 @@ function connectSelected() {
             try { term.write('\r\n[Your read-write access was set aside to run a Port Action]\r\n'); } catch (_) {}
           } else if (msg.reason === 'action_restored') {
             try { term.write('\r\n[Read-write access restored after the Port Action finished]\r\n'); } catch (_) {}
+          } else if (msg.reason === 'action_restore_denied') {
+            try { term.write('\r\n[Read-write not restored after the Port Action – the slot is held by another client]\r\n'); } catch (_) {}
           }
           if (clientMode === 'read-write' && msg.ok !== false && msg.reason !== 'demoted') {
             hideCtrlMenu();
