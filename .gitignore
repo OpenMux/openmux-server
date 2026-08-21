@@ -121,3 +121,5 @@ id_ed25519*
 # Miscellaneous
 *.bak
 *.backup
+*.iso
+*.img
