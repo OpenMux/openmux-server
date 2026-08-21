@@ -294,7 +294,7 @@ async def auth_middleware(request: web.Request, handler):
         sso_header_name = getattr(adapter, "sso_trust_header", "X-OMX-SSO")
         sso_value = request.headers.get(sso_header_name)
         if sso_value:
-            claims = adapter._verify_sso_header(sso_value, request=request)
+            claims = adapter._verify_sso_header(sso_value)
             if isinstance(claims, dict):
                 request["username"] = str(claims.get("user") or "sso")
                 po = claims.get("perm")
@@ -1289,7 +1289,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
         # Cached error message describing missing static assets
         self._asset_error: Optional[str] = None
 
-        # SSO trust header (for federated proxy) – optional, disabled unless secret is set
+        # SSO trust header (for federated proxy) - v1 requires sso_secret; v1e requires a
+        # registered MuxCon public key (no unsigned acceptance)
         try:
             self.sso_trust_header = str(cfg.get("sso_trust_header", "X-OMX-SSO"))
         except Exception:
@@ -1384,7 +1385,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         return items
 
     # --- SSO helpers ---
-    def _verify_sso_header(self, header_value: str, request: Optional[web.Request] = None) -> Optional[Dict[str, Any]]:
+    def _verify_sso_header(self, header_value: str) -> Optional[Dict[str, Any]]:
         try:
             if not header_value:
                 return None
@@ -1469,37 +1470,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         except Exception:
                             pub = None
                     if not pub:
-                        # Internal rollout fallback: if this request was forwarded by our proxy
-                        # (indicated by X-Forwarded-Prefix starting with /proxy/) AND the claimed
-                        # target node matches our own server_id, accept claims temporarily even
-                        # without a published public key. This prevents a remote login wall while
-                        # keys are being distributed across the fleet.
-                        if node and request is not None:
-                            try:
-                                # Check forwarded prefix signal from the proxying peer
-                                xfp = request.headers.get("X-Forwarded-Prefix", "")
-                                # Also allow legacy path check in case of direct mounting
-                                path = request.path or ""
-                                # Compare claimed node with our local server_id when available
-                                local_server_id = None
-                                try:
-                                    muxcon_local = self._find_muxcon_adapter()
-                                    local_server_id = getattr(muxcon_local, "server_id", None)
-                                except Exception:
-                                    local_server_id = None
-
-                                def _has_proxy_prefix(v: str) -> bool:
-                                    try:
-                                        return "/proxy/" in (v or "")
-                                    except Exception:
-                                        return False
-
-                                if (str(node) and str(node) == str(local_server_id)) and (
-                                    _has_proxy_prefix(xfp) or _has_proxy_prefix(path)
-                                ):
-                                    return claims
-                            except Exception:
-                                pass
+                        # No registered public key for this kid: reject. Claims must always be
+                        # verified against a key in muxcon.public_keys; unsigned acceptance was
+                        # removed because it allowed unauthenticated admin takeover.
                         return None
                     pad = "=" * (-len(payload_b64) % 4)
                     payload_bytes = base64.urlsafe_b64decode(payload_b64 + pad)
