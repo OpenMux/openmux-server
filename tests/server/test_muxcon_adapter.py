@@ -594,7 +594,7 @@ async def test_control_auth_error_and_shutdown_paths():
     # MPATH shutdown begin should send END and close
     conn_id2 = "out:y:1:1"
     w2 = FakeWriter()
-    a.connections[conn_id2] = {"writer": w2}
+    a.connections[conn_id2] = {"writer": w2, "auth_ok": True}
     a._wire_state[conn_id2] = {"send_next": 1}
     await a._process_control_command(conn_id2, cast(Any, w2), "MPATH:SHUTDOWN:BEGIN")
     assert b"MPATH:END" in w2.buffer and conn_id2 not in a.connections
@@ -605,7 +605,7 @@ async def test_control_heartbeat_req_ack_updates_state():
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     conn_id = "out:h:1:1"
     w = FakeWriter()
-    a.connections[conn_id] = {"writer": w}
+    a.connections[conn_id] = {"writer": w, "auth_ok": True}
     a._wire_state[conn_id] = {"send_next": 1}
     # REQ should cause ACK to be sent
     await a._process_control_command(conn_id, cast(Any, w), "REQ:12345")
@@ -938,7 +938,7 @@ async def test_client_auth_ok_applies_key_filters(monkeypatch):
     a._auth_key_id = "kidA"
     a._key_filters = {"kidA": {"advertise_filters": {"include": ["r*"]}, "accept_filters": {"include": ["*"]}}}
     conn_id = "out:1.2.3.4:1000:77"
-    a.connections[conn_id] = {"writer": FakeWriter()}
+    a.connections[conn_id] = {"writer": FakeWriter(), "role": "client", "auth_ok": False}
     a._wire_state[conn_id] = {"send_next": 1}
     # Avoid sending actual advertise frames
     async def fake_maybe(cid):
@@ -980,7 +980,7 @@ async def test_mpath_end_control_closes():
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     conn_id = "out:end:1"
     w = FakeWriter()
-    a.connections[conn_id] = {"writer": w}
+    a.connections[conn_id] = {"writer": w, "auth_ok": True}
     a._wire_state[conn_id] = {"send_next": 1}
     await a._process_control_command(conn_id, cast(Any, w), "MPATH:END")
     assert conn_id not in a.connections
@@ -1281,7 +1281,7 @@ async def test_hb_control_req_ack_updates(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     conn_id = "in:hb:1"
     w = FakeWriter()
-    a.connections[conn_id] = {"writer": w}
+    a.connections[conn_id] = {"writer": w, "auth_ok": True}
     a._wire_state[conn_id] = {"send_next": 1}
     # HB:REQ
     await a._process_control_command(conn_id, cast(Any, w), "HB:REQ:123")
@@ -1458,14 +1458,14 @@ async def test_shutdown_state_transitions_begin_and_end():
     # First BEGIN should send END and close, state becomes CLOSED
     cid = "in:shut:1"
     w = FakeWriter()
-    a.connections[cid] = {"writer": w}
+    a.connections[cid] = {"writer": w, "auth_ok": True}
     a._wire_state[cid] = {"send_next": 1}
     await a._process_control_command(cid, cast(Any, w), "MPATH:SHUTDOWN:BEGIN")
     assert cid not in a.connections
     assert a._shutdown_state.get(cid, {}).get("state") == "CLOSED"
     # Add connection again and send MPATH:END; should close and state remain CLOSED
     w2 = FakeWriter()
-    a.connections[cid] = {"writer": w2}
+    a.connections[cid] = {"writer": w2, "auth_ok": True}
     a._wire_state[cid] = {"send_next": 1}
     await a._process_control_command(cid, cast(Any, w2), "MPATH:END")
     assert cid not in a.connections
@@ -1501,7 +1501,7 @@ async def test_auth_ok_advertise_idempotent(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     cid = "out:idemp:1"
     w = FakeWriter()
-    a.connections[cid] = {"writer": w}
+    a.connections[cid] = {"writer": w, "role": "client", "auth_ok": False}
     a._wire_state[cid] = {"send_next": 1}
     a.main_port_manager = FakePM()
     # Make FakeWriter pass isinstance(StreamWriter) checks in module
@@ -2116,3 +2116,92 @@ async def test_end_to_end_default_initiator_reaches_default_listener_over_tls(tm
             await ad_b.stop()
     finally:
         await ad_a.stop()
+
+
+@pytest.mark.asyncio
+async def test_inbound_auth_ok_on_server_role_is_rejected():
+    """SEC-02: an inbound AUTH:OK on a server-side (acceptor) connection must not grant auth."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": True})
+    conn_id = "in:9.9.9.9:1111:5"
+    w = FakeWriter()
+    a.connections[conn_id] = {"writer": w, "role": "server", "auth_ok": False}
+    a._wire_state[conn_id] = {"send_next": 1}
+
+    await a._process_control_command(conn_id, cast(Any, w), "AUTH:OK")
+
+    assert a._is_conn_authenticated(conn_id) is False
+    if conn_id in a.connections:
+        assert a.connections[conn_id].get("auth_ok") is not True
+
+
+@pytest.mark.asyncio
+async def test_inbound_auth_ok_exploit_by_registered_keyholder():
+    """SEC-02: a peer holding a registered PKID must not skip the signature step by
+    sending AUTH:OK; the legitimate signed path must still authenticate."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": True})
+    attacker_priv = Ed25519PrivateKey.generate()
+    kid = "kidA"
+    a._auth_pubkeys[kid] = attacker_priv.public_key()
+
+    hello = f"HELLO MuxCon/1.0 TYPE=regular_client CAPS=a ID=attacker INST=ax PKID={kid}\n".encode()
+    r = FakeReader([hello])
+    w = FakeWriter()
+    await a._perform_server_handshake(cast(Any, r), cast(Any, w), "in:attacker")
+
+    # The challenge was issued, so the legitimate path exists
+    assert b"AUTH:PK:CHALLENGE:" in w.buffer
+    cid = "in:attacker"
+    assert cid in a.connections and a.connections[cid]["role"] == "server"
+
+    # The peer ignores the challenge and self-declares authentication
+    await a._process_control_command(cid, cast(Any, w), "AUTH:OK")
+    assert a._is_conn_authenticated(cid) is False
+    if cid in a.connections:
+        assert a.connections[cid].get("auth_ok") is not True
+
+    # The legitimate signed path still works
+    good_priv = Ed25519PrivateKey.generate()
+    kid2 = "kidB"
+    a._auth_pubkeys[kid2] = good_priv.public_key()
+    hello2 = f"HELLO MuxCon/1.0 TYPE=regular_client CAPS=a ID=good INST=by PKID={kid2}\n".encode()
+    r2 = FakeReader([hello2])
+    w2 = FakeWriter()
+    await a._perform_server_handshake(cast(Any, r2), cast(Any, w2), "in:good")
+    st = a.connections["in:good"]["auth_state"]
+    sig = base64.b64encode(good_priv.sign(st["nonce"])).decode()
+    await a._process_control_command("in:good", cast(Any, w2), f"AUTH:PK:RESPONSE:{kid2}:{sig}")
+    assert b"AUTH:OK" in w2.buffer
+    assert a._is_conn_authenticated("in:good") is True
+
+
+@pytest.mark.asyncio
+async def test_pre_auth_mpath_and_heartbeat_frames_ignored_on_server_role():
+    """SEC-02 hardening: pre-auth MPATH shutdown and heartbeat frames are ignored;
+    after authentication the same frames work normally."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": True})
+    conn_id = "in:9.9.9.9:1111:7"
+    w = FakeWriter()
+    a.connections[conn_id] = {"writer": w, "role": "server", "auth_ok": False}
+    a._wire_state[conn_id] = {"send_next": 1}
+
+    await a._process_control_command(conn_id, cast(Any, w), "REQ:123.456")
+    assert b"ACK:" not in w.buffer
+    assert conn_id not in a._hb_state
+    assert a._wire_state[conn_id]["send_next"] == 1
+
+    await a._process_control_command(conn_id, cast(Any, w), "ACK:123.456")
+    assert conn_id not in a._hb_state
+
+    await a._process_control_command(conn_id, cast(Any, w), "MPATH:SHUTDOWN:BEGIN")
+    assert conn_id in a.connections
+    await a._process_control_command(conn_id, cast(Any, w), "MPATH:END")
+    assert conn_id in a.connections
+    assert a._is_conn_authenticated(conn_id) is False
+
+    # Once authenticated, the same frames are processed
+    a.connections[conn_id]["auth_ok"] = True
+    await a._process_control_command(conn_id, cast(Any, w), "REQ:123.456")
+    assert b"ACK:" in w.buffer
+    await a._process_control_command(conn_id, cast(Any, w), "ACK:123.456")
+    st = a._hb_state.get(conn_id)
+    assert st and st.get("last_ack_ts", 0) > 0

@@ -3857,11 +3857,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         except Exception:
                             pass
                         return
-                # AUTH:OK / AUTH:ERROR (client side updates)
+                # AUTH:OK (client side update) - only initiator-side (client role) connections
+                # may set auth_ok from an inbound AUTH:OK. A server-side (acceptor) connection
+                # never legitimately receives AUTH:OK: the server side *sends* it after a
+                # verified signature. A peer sending us AUTH:OK is attempting to self-authenticate
+                # without the Ed25519 challenge - close the connection.
                 if payload == "AUTH:OK":
                     try:
                         conn = self.connections.get(conn_id)
-                        if conn:
+                        if conn and conn.get("role") == "client":
                             conn["auth_ok"] = True
                             # Apply our own per-key filters if we have a client key id
                             try:
@@ -3874,6 +3878,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 await self._maybe_advertise_local_ports(conn_id)
                             except Exception:
                                 pass
+                        elif conn:
+                            self.logger.warning(
+                                f"[{conn_id}] AUTH:OK received on non-client-role connection; closing "
+                                "(possible self-authentication attempt)"
+                            )
+                            await self._close_connection(conn_id)
                     except Exception:
                         pass
                     return
@@ -3909,7 +3919,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     await self._close_connection(conn_id)
                     return
             # Fast shutdown (no drain). Any BEGIN triggers immediate END + close.
+            # Unauthenticated peers may not control connection lifecycle.
             if payload.startswith("MPATH:SHUTDOWN:BEGIN"):
+                if not self._is_conn_authenticated(conn_id):
+                    return
                 st = self._shutdown_state.setdefault(conn_id, {"state": "BEGIN_SEEN"})
                 if st.get("state") != "CLOSED":
                     st["state"] = "BEGIN_SEEN"
@@ -3923,6 +3936,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     await self._close_connection(conn_id)
                 return
             if payload == "MPATH:END":
+                if not self._is_conn_authenticated(conn_id):
+                    return
                 st = self._shutdown_state.setdefault(conn_id, {"state": "CLOSED"})
                 if st.get("state") != "CLOSED":
                     st["state"] = "CLOSED"
@@ -3930,6 +3945,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 return
             # Heartbeat request/ack handling (new HB payloads or legacy HB:... in C-frames)
             if payload.startswith("REQ:") or payload.startswith("HB:REQ:"):
+                # Ignore heartbeats from unauthenticated peers; they keep no state
+                if not self._is_conn_authenticated(conn_id):
+                    return
                 # Echo back ACK with same timestamp
                 try:
                     raw = payload.split(":", 1)[1] if payload.startswith("REQ:") else payload.split(":", 2)[2]
@@ -3954,7 +3972,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 return
 
             if payload.startswith("ACK:") or payload.startswith("HB:ACK:"):
-                # Update heartbeat state
+                # Update heartbeat state (ignore unauthenticated peers)
+                if not self._is_conn_authenticated(conn_id):
+                    return
                 try:
                     raw = payload.split(":", 1)[1] if payload.startswith("ACK:") else payload.split(":", 2)[2]
                     ts = float(raw)

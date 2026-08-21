@@ -111,7 +111,7 @@ async def test_process_control_auth_challenge_and_response_ok(monkeypatch):
 async def test_process_control_heartbeat_req_and_ack_updates():
     ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
     conn_id = "in:127.0.0.1:9999:1"
-    ad.connections[conn_id] = {"last_seen": 0}
+    ad.connections[conn_id] = {"last_seen": 0, "auth_ok": True}
     ad._wire_state[conn_id] = {"send_next": 1}
     server, s_reader, s_writer, c_reader, c_writer = await _make_stream_pair()
     ts = int(time.time())
@@ -392,7 +392,7 @@ async def test_fast_shutdown_begin_sends_end_and_closes(monkeypatch):
     server, s_reader, s_writer, c_reader, c_writer = await _make_stream_pair()
     try:
         conn_id = "in:127.0.0.1:5555:99"
-        ad.connections[conn_id] = {"writer": s_writer}
+        ad.connections[conn_id] = {"writer": s_writer, "auth_ok": True}
         ad._wire_state[conn_id] = {"send_next": 1}
         closed = {"flag": False}
 
@@ -425,7 +425,7 @@ async def test_fast_shutdown_end_closes(monkeypatch):
     server, s_reader, s_writer, c_reader, c_writer = await _make_stream_pair()
     try:
         conn_id = "in:127.0.0.1:5555:100"
-        ad.connections[conn_id] = {"writer": s_writer}
+        ad.connections[conn_id] = {"writer": s_writer, "auth_ok": True}
         ad._wire_state[conn_id] = {"send_next": 1}
         closed = {"flag": False}
 
