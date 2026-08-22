@@ -2187,6 +2187,141 @@ async def test_peer_bytes_rx_counter_increments(monkeypatch):
     assert after - before >= 4
 
 
+@pytest.mark.asyncio
+async def test_peer_generation_change_resyncs_seq_state(monkeypatch):
+    """A restarted peer (new instance_id, same server_id) restarts its DATA
+    seq counter at 1; RX expected, TX seq and unacked send state must follow (#55)."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    delivered: List[Tuple[int, bytes, int]] = []
+
+    async def fake_route(cid, sid, data, seq):
+        delivered.append((sid, data, seq))
+
+    monkeypatch.setattr(a, "_route_data_frame", fake_route)
+    a.connections["c1"] = {"server_id": "peerB", "instance_id": "gen1", "opened_at": 1000.0}
+    pk = a._derive_peer_key_from_conn_id("c1")
+    # Simulate outbound state from the old generation that survives a restart.
+    a._peer_tx_seq[pk] = 90
+    a._peer_sendbuf[pk] = {89: ("c1", 1, b"old", 1000.0)}
+    a._peer_retx_count[pk] = 5
+    for s in (1, 2, 3, 4, 5):
+        await a._handle_inbound_data("c1", 1, b"d", s)
+    assert [t[2] for t in delivered] == [1, 2, 3, 4, 5]
+
+    # Peer process restarts: same server_id, new instance, TX seq back at 1.
+    a.connections["c2"] = {"server_id": "peerB", "instance_id": "gen2", "opened_at": 2000.0}
+    assert a._derive_peer_key_from_conn_id("c2") == pk
+    await a._handle_inbound_data("c2", 1, b"n1", 1)
+    await a._handle_inbound_data("c2", 1, b"n2", 2)
+    assert [(t[1], t[2]) for t in delivered][5:] == [(b"n1", 1), (b"n2", 2)]
+    st = a._peer_rx_state[pk]
+    assert st["instance_id"] == "gen2"
+    assert st["expected"] == 3
+    # Our TX side restarts at 1; unacked old-gen frames and retx counts are dropped.
+    assert a._peer_tx_seq[pk] == 1
+    assert a._peer_sendbuf.get(pk) is None
+    assert a._peer_retx_count.get(pk) is None
+
+    # A stale frame from the dying old-generation path must not roll state back.
+    await a._handle_inbound_data("c1", 1, b"stale", 7)
+    assert len(delivered) == 7
+    assert a._peer_rx_state[pk]["instance_id"] == "gen2"
+    assert a._peer_rx_state[pk]["expected"] == 3
+    assert a._peer_rx_state[pk]["buffer"] == {}
+    assert a._peer_rx_state[pk]["gap_since"] is None
+
+
+@pytest.mark.asyncio
+async def test_same_generation_failover_does_not_resync(monkeypatch):
+    """Multipath failover between two paths of the SAME peer process keeps the
+    peer-scoped seq state untouched (no reset, no drop)."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    delivered: List[Tuple[int, bytes, int]] = []
+
+    async def fake_route(cid, sid, data, seq):
+        delivered.append((sid, data, seq))
+
+    monkeypatch.setattr(a, "_route_data_frame", fake_route)
+    a.connections["c1"] = {"server_id": "peerB", "instance_id": "gen1", "opened_at": 1000.0}
+    a.connections["c2"] = {"server_id": "peerB", "instance_id": "gen1", "opened_at": 1500.0}
+    pk = a._derive_peer_key_from_conn_id("c1")
+    a._peer_tx_seq[pk] = 42
+    # Path 1 delivers 1,2 and an out-of-order 4 (buffers, gap at 3).
+    await a._handle_inbound_data("c1", 1, b"a", 1)
+    await a._handle_inbound_data("c1", 1, b"b", 2)
+    await a._handle_inbound_data("c1", 1, b"d", 4)
+    assert [t[2] for t in delivered] == [1, 2]
+    assert a._peer_rx_state[pk]["expected"] == 3
+    # Failover: path 2 delivers the missing 3; buffer drains in order.
+    await a._handle_inbound_data("c2", 1, b"c", 3)
+    assert [(t[1], t[2]) for t in delivered] == [(b"a", 1), (b"b", 2), (b"c", 3), (b"d", 4)]
+    # No resync happened: TX counter and generation untouched.
+    assert a._peer_tx_seq[pk] == 42
+    assert a._peer_rx_state[pk]["instance_id"] == "gen1"
+    assert a._peer_rx_state[pk]["expected"] == 5
+    assert a._peer_rx_state[pk]["gap_since"] is None
+
+
+@pytest.mark.asyncio
+async def test_stuck_gap_flush_delivers_buffered_tail(monkeypatch):
+    """A reorder gap the sender never refills is dropped after gap_stuck_sec
+    and the buffered tail is delivered in order, instead of wedging the peer (#55)."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    delivered: List[Tuple[int, bytes, int]] = []
+
+    async def fake_route(cid, sid, data, seq):
+        delivered.append((sid, data, seq))
+
+    monkeypatch.setattr(a, "_route_data_frame", fake_route)
+    a.connections["c1"] = {"server_id": "peerB", "instance_id": "gen1", "opened_at": 1000.0}
+    pk = a._derive_peer_key_from_conn_id("c1")
+    # A gap that gets filled in time must NOT be flushed.
+    await a._handle_inbound_data("c1", 1, b"a", 1)
+    await a._handle_inbound_data("c1", 1, b"c", 3)
+    assert [t[2] for t in delivered] == [1]
+    assert a._peer_rx_state[pk]["gap_since"] is not None
+    await a._handle_inbound_data("c1", 1, b"b", 2)
+    assert [t[2] for t in delivered] == [1, 2, 3]
+    assert a._peer_rx_state[pk]["gap_since"] is None
+    assert a._peer_rx_state[pk]["buffer"] == {}
+
+    # Now wedge a gap that no retransmission will ever fill.
+    a.gap_stuck_sec = 0.0
+    await a._handle_inbound_data("c1", 1, b"x", 5)  # gap at 4
+    assert [t[2] for t in delivered] == [1, 2, 3]
+    await a._handle_inbound_data("c1", 1, b"y", 6)  # arms + flushes the stuck gap
+    assert [t[2] for t in delivered] == [1, 2, 3, 5, 6]
+    assert [(t[1]) for t in delivered][3:] == [b"x", b"y"]
+    st = a._peer_rx_state[pk]
+    assert st["expected"] == 7
+    assert st["buffer"] == {}
+    assert st["gap_since"] is None
+
+
+@pytest.mark.asyncio
+async def test_stale_duplicate_drop_warns_once_per_second(monkeypatch):
+    """seq < expected drops are silent by default; the new rate-limited WARNING
+    fires at most once per peer per second."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    delivered: List[Tuple[int, bytes, int]] = []
+
+    async def fake_route(cid, sid, data, seq):
+        delivered.append((sid, data, seq))
+
+    monkeypatch.setattr(a, "_route_data_frame", fake_route)
+    warns: List[str] = []
+    monkeypatch.setattr(a.logger, "warning", lambda msg, *args, **kwargs: warns.append(str(msg)))
+    a.connections["c1"] = {"server_id": "peerB", "instance_id": "gen1", "opened_at": 1000.0}
+    for s in (1, 2, 3):
+        await a._handle_inbound_data("c1", 1, b"d", s)
+    # Two duplicate drops within the rate-limit window -> exactly one warning.
+    await a._handle_inbound_data("c1", 1, b"dup", 2)
+    await a._handle_inbound_data("c1", 1, b"dup", 2)
+    assert [t[2] for t in delivered] == [1, 2, 3]
+    assert len(warns) == 1
+    assert "seq=2" in warns[0] and "expected=4" in warns[0]
+
+
 def test_known_peers_legacy_json_load(tmp_path):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     a._known_peers_path = str(tmp_path / "known.yaml")

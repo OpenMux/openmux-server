@@ -260,7 +260,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # Rate-limited warning state for the "no mapping for stream" data drop:
         # (peer_key, stream_id) -> last warning timestamp (one line per stream
         # per second; every such drop is lost console output).
-        self._drop_warn_ts: Dict[Tuple[str, int], float] = {}
+        self._drop_warn_ts: Dict[Tuple[str, object], float] = {}
         # Proxies keyed by peer_key -> port_name -> proxy
         self._peer_proxies: Dict[str, Dict[str, Any]] = {}
         # Convenience mapping for UI: per-connection view of proxies (mirrors peer_proxies
@@ -284,6 +284,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.retx_max_ms = int(effective_config.get("retx_max_ms", 2000))
         except Exception:
             self.retx_max_ms = 2000
+        # A reorder gap older than this is considered permanent (the sender's
+        # retransmission window, bounded by retx_max_ms, has long passed) and
+        # is flushed: the missing seq is dropped and the buffered tail is
+        # delivered, instead of wedging every later frame for the peer
+        # (issue #55). See _flush_stuck_gap.
+        self.gap_stuck_sec = max(1.0, 2.0 * self.retx_max_ms / 1000.0)
         # Peer-level TX seq allocator and RX reorder state
         self._peer_tx_seq: Dict[str, int] = {}
         # peer_key -> { 'expected': int, 'buffer': Dict[int, Tuple[int, bytes]] }
@@ -4846,8 +4852,163 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self._peer_tx_seq[peer_key] = 1
         return seq
 
+    def _peer_instance_id(self, conn_id: str) -> Optional[str]:
+        """Return the peer's instance_id recorded on a connection, if any.
+
+        Both handshake roles store the PEER's instance id on the connection
+        record; it changes when the peer process restarts while the stable
+        server_id (and therefore the peer_key) stays the same.
+
+        Args:
+            conn_id: Connection id to look up.
+        """
+        try:
+            conn = self.connections.get(conn_id)
+            return conn.get("instance_id") if conn else None
+        except Exception:
+            return None
+
+    def _maybe_resync_peer_generation(self, peer_key: str, conn_id: str, seq: int) -> None:
+        """Resync peer-scoped DATA sequence state when the peer generation changes.
+
+        A peer process restart presents a NEW instance_id in the handshake while
+        keeping the same stable server_id (same peer_key). Its TX sequence
+        counter restarts at 1, but our RX expected counter, reorder buffer, TX
+        counter, unacked send buffer and retransmission counters are keyed by
+        peer_key and survive the restart (they are only cleared when the whole
+        multipath group empties). Left alone, every frame from the restarted
+        peer has seq < expected and is dropped as a "duplicate" while still
+        being ACKed - permanent one-direction data loss (issue #55).
+
+        The first DATA frame from a new generation resets all peer-scoped
+        sequence state and logs one WARNING. Frames from the same generation
+        (including multipath failover between paths of the same peer process)
+        leave the state untouched. A frame from an OLDER path (a connection
+        opened before the generation currently adopted) is reported as stale
+        so the caller drops it - the dying old-generation connection must not
+        roll the counters back or wedge the new generation's reorder window.
+
+        Returns:
+            True if the frame comes from a superseded generation and must be
+            dropped; False if the frame may be processed normally.
+
+        Args:
+            peer_key: Stable peer grouping key.
+            conn_id: Connection delivering the frame (source of instance_id).
+            seq: Sequence number of the frame (for the log line).
+        """
+        try:
+            inst = self._peer_instance_id(conn_id)
+            if not inst:
+                return False
+            st = self._peer_rx_state.get(peer_key)
+            if st is not None and st.get("instance_id") == inst:
+                return False
+            opened = 0.0
+            try:
+                opened = float((self.connections.get(conn_id) or {}).get("opened_at") or 0.0)
+            except Exception:
+                opened = 0.0
+            if st is not None:
+                seen = st.get("instance_id")
+                if seen is not None and opened <= float(st.get("instance_since") or 0.0):
+                    # Stale frame from a superseded generation; drop it.
+                    return True
+                self.logger.warning(
+                    f"Peer {peer_key} restarted (instance {seen} -> {inst}); "
+                    f"resyncing DATA sequence state (first new-gen seq={seq})"
+                )
+            seen = st.get("instance_id") if st else None
+            if st is None:
+                self._peer_rx_state[peer_key] = {"expected": 1, "buffer": {}}
+                st = self._peer_rx_state[peer_key]
+            st["instance_id"] = inst
+            st["instance_since"] = opened
+            if seen is not None:
+                # A real generation change: reset all peer-scoped sequence state.
+                st["expected"] = 1
+                st["buffer"] = {}
+                st["gap_since"] = None
+                self._peer_tx_seq[peer_key] = 1
+                self._peer_sendbuf.pop(peer_key, None)
+                self._peer_retx_count.pop(peer_key, None)
+            return False
+        except Exception as e:
+            self.logger.debug(f"Peer generation resync failed for {peer_key}: {e}", exc_info=True)
+            return False
+
+    def _warn_stale_data_drop(self, peer_key: str, conn_id: str, seq: int, expected: int) -> None:
+        """Rate-limited WARNING for a dropped duplicate/stale DATA frame.
+
+        A seq < expected frame is dropped (it was already delivered, or the
+        peer restarted mid-stream and the generation resync has not seen a
+        newer frame yet). At most one warning per peer per second; the same
+        rate-limit table as _log_no_mapping_drop is used under a "dup" slot.
+
+        Args:
+            peer_key: Stable peer grouping key.
+            conn_id: Connection the frame arrived on (for the log line).
+            seq: Dropped sequence number.
+            expected: Sequence number the peer reorder window expects next.
+        """
+        try:
+            slot = (peer_key, "dup")
+            now_ts = time.time()
+            if now_ts - self._drop_warn_ts.get(slot, 0.0) < 1.0:
+                return
+            self._drop_warn_ts[slot] = now_ts
+            self.logger.warning(
+                f"[{conn_id}] Peer {peer_key}: dropped DATA seq={seq} (stale; expected={expected}); "
+                "peer may have restarted - see issue #55"
+            )
+        except Exception:
+            pass
+
+    async def _flush_stuck_gap(self, peer_key: str, conn_id: str, st: Dict[str, Any], expected: int) -> None:
+        """Give up on a reorder gap that no retransmission will fill.
+
+        A missing seq wedges in-order delivery: every later frame for the peer
+        sits in the reorder buffer. The sender's retransmission window
+        (bounded by retx_max_ms) has long passed, so the gap is permanent -
+        most likely a frame lost without a RETX request. Deliver the buffered
+        tail in order (dropping the missing seq) instead of wedging the whole
+        peer (issue #55).
+
+        Args:
+            peer_key: Stable peer grouping key.
+            conn_id: Connection delivering the triggering frame (for logs).
+            st: The peer's rx state dict (mutated in place).
+            expected: The wedged expected seq.
+        """
+        buf: Dict[int, Tuple[int, bytes]] = st.get("buffer") or {}
+        if not buf:
+            st["gap_since"] = None
+            return
+        lowest = min(buf)
+        stuck = time.time() - float(st.get("gap_since") or 0.0)
+        st["gap_since"] = None
+        self.logger.error(
+            f"[{conn_id}] Peer {peer_key}: DATA gap at seq {expected} not filled after "
+            f"~{stuck:.1f}s; dropping seq {expected} and delivering buffered tail from seq {lowest}"
+        )
+        cur = lowest
+        while cur in buf:
+            sid2, data2 = buf.pop(cur)
+            try:
+                self._peer_bytes_rx[peer_key] = self._peer_bytes_rx.get(peer_key, 0) + len(data2)
+            except Exception:
+                pass
+            await self._route_data_frame(conn_id, sid2, data2, cur)
+            cur += 1
+        st["expected"] = cur
+
     async def _handle_inbound_data(self, conn_id: str, stream_id: int, data: bytes, seq: int) -> None:
         """Enforce in-order delivery per peer by buffering out-of-order frames.
+
+        Also resynchronizes the peer's DATA sequence state when the peer
+        process has restarted (new instance_id, issue #55): both sides'
+        sequence counters start over at 1, so frames from a restarted peer
+        must not be dropped as "duplicates" by a stale expected counter.
 
         Args:
             conn_id: Source connection id
@@ -4857,11 +5018,17 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         try:
             peer_key = self._derive_peer_key_from_conn_id(conn_id)
+            if self._maybe_resync_peer_generation(peer_key, conn_id, seq):
+                self._warn_stale_data_drop(
+                    peer_key, conn_id, seq, int(self._peer_rx_state.get(peer_key, {}).get("expected", 1))
+                )
+                return
             st = self._peer_rx_state.setdefault(peer_key, {"expected": 1, "buffer": {}})
             expected = int(st.get("expected", 1))
             buf: Dict[int, Tuple[int, bytes]] = st["buffer"]
             # Duplicate or already delivered
             if seq < expected:
+                self._warn_stale_data_drop(peer_key, conn_id, seq, expected)
                 return
             if seq == expected:
                 # deliver now
@@ -4881,13 +5048,19 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     await self._route_data_frame(conn_id, sid2, data2, expected)
                     expected += 1
                 st["expected"] = expected
+                st["gap_since"] = None
                 return
-            # seq > expected: buffer and wait
+            # seq > expected: buffer and wait for the missing seq
             try:
                 self._peer_bytes_rx[peer_key] = self._peer_bytes_rx.get(peer_key, 0) + len(data)
             except Exception:
                 pass
             buf[seq] = (stream_id, data)
+            gap_since = st.get("gap_since")
+            if gap_since is None:
+                st["gap_since"] = time.time()
+            elif time.time() - gap_since >= self.gap_stuck_sec:
+                await self._flush_stuck_gap(peer_key, conn_id, st, expected)
         except Exception as e:
             self.logger.debug(f"Inbound order handler error on {conn_id}:{stream_id} seq={seq}: {e}", exc_info=True)
 

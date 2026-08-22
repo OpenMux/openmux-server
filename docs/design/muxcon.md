@@ -283,6 +283,50 @@ resent by `_retx_loop` using a retransmit timeout that starts at
 `retx_initial_ms` (default 350ms), adapts toward `2.5x` the observed
 heartbeat RTT, and is capped at `retx_max_ms` (default 2000ms).
 
+### 6.1 Peer generation change (restart) resync
+
+Numbering is per peer, so a peer **restart** is the one case where numbering
+really does restart: the peer's TX counter comes back at 1 while keeping the
+same stable `server_id` (same `peer_key`), and our per-peer RX `expected`
+counter, reorder buffer, TX counter, unacked send buffer and retransmission
+counters all survive the restart (they are only cleared when the whole
+multipath group empties). Left alone, every frame from the restarted peer has
+`seq < expected` and is dropped as a "duplicate" while still being ACKed —
+permanent one-direction data loss.
+
+Both handshake roles record the peer's `instance_id` on the connection.
+`_maybe_resync_peer_generation` (called from `_handle_inbound_data`) watches
+for the `instance_id` to change under an unchanged `peer_key`. The first DATA
+frame from a new generation resets all peer-scoped sequence state and logs
+one WARNING. Two guards keep the reset precise:
+
+- **Same generation** (including a failover between two paths of the *same*
+  peer process) never resets — the counters continue.
+- A frame from an **older path** (a connection opened before the generation
+  currently adopted) is dropped, not buffered, so the dying old-generation
+  connection cannot roll the counters back or wedge the new generation's
+  reorder window.
+
+### 6.2 Stuck reorder gap flush
+
+A missing seq that the sender never refills would otherwise wedge in-order
+delivery forever: every later frame for the peer sits in the reorder buffer.
+Since the sender's retransmission window is bounded by `retx_max_ms`, a gap
+older than `gap_stuck_sec` (`2 x retx_max_ms`, default 4s, minimum 1s) is
+treated as permanent — most likely a frame lost without a RETX request.
+`_flush_stuck_gap` drops the missing seq and delivers the buffered tail in
+order, logging an ERROR, instead of wedging the whole peer. A gap that fills
+in time is never flushed.
+
+### 6.3 Duplicate drop warning
+
+A `seq < expected` frame is dropped (already delivered, or the peer restarted
+mid-stream and the generation resync has not seen a newer frame yet). This is
+now surfaced as a rate-limited WARNING (at most one per peer per second) via
+`_warn_stale_data_drop`, reusing the same rate-limit table as
+`_log_no_mapping_drop` under a `"dup"` slot, so a silent one-direction loss is
+diagnosable instead of invisible.
+
 ## 7. Viewer presence relay
 
 A `VIEWERS:<port_name>` control frame (JSON lines, `END:VIEWERS`
