@@ -184,6 +184,14 @@ reconnects. If `federated_cache_ttl_sec > 0`, a background loop purges
 proxies that have been disconnected longer than that TTL (default `0.0`:
 never expires by time).
 
+Cached proxies are registered through
+`PortManager.register_federated_port` on load (and re-registered in the
+reuse path of `_register_remote_port_from_dict` if a proxy in the port map
+still has `data_callback is None`). That wiring is what routes inbound
+port data to attached client queues; a proxy without the data callback
+only fills its own `data_queue`, which nothing consumes on this side, so
+the port would be a silent black hole after a full restart (issue #56).
+
 ### 4.3 Origin-side stream sessions (pumps)
 
 When a peer's client opens a federated port, the origin maps the received

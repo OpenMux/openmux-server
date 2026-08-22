@@ -1192,7 +1192,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # Load any persisted federated cache
             try:
                 if self.federated_cache_enabled:
-                    self._load_federated_cache()
+                    await self._load_federated_cache()
             except Exception:
                 pass
 
@@ -3401,8 +3401,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             pass
 
-    def _load_federated_cache(self) -> None:
-        """Load cached federated proxies from JSON file and register placeholders."""
+    async def _load_federated_cache(self) -> None:
+        """Load cached federated proxies from JSON file and register placeholders.
+
+        Registration goes through `PortManager.register_federated_port` so each
+        cached proxy gets its data callback wired up: a bare insertion into the
+        ports dict leaves `data_callback` None, and inbound data then falls back
+        to the proxy's own data_queue, which nothing consumes on this side -
+        the port becomes a silent black hole until it is recreated (issue #56).
+        """
         try:
             if not os.path.exists(self.federated_cache_path):
                 return
@@ -3454,7 +3461,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             proxy.last_seen = float(rec.get("last_seen", 0) or 0)
                         except Exception:
                             pass
-                        # Register with PortManager if available
+                        # Register with PortManager if available (via the normal
+                        # registration path so the data callback gets installed -
+                        # see issue #56)
                         if hasattr(self, "main_port_manager") and self.main_port_manager:
                             pm = self.main_port_manager
                             try:
@@ -3465,7 +3474,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 except Exception:
                                     existing = None
                                 if existing is None:
-                                    getattr(pm, "ports", {})[pname] = proxy
+                                    await pm.register_federated_port(metadata, proxy)
                             except Exception:
                                 getattr(pm, "ports", {})[pname] = proxy
                         self._peer_proxies[peer_key][pname] = proxy
@@ -5424,6 +5433,20 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     setattr(existing, "server_adapter", self)
                     if hasattr(existing, "is_connected"):
                         existing.is_connected = True
+                    # A proxy loaded from the federated cache may have been
+                    # registered without its data callback (issue #56): inbound
+                    # data would then fall back to the proxy's own data_queue,
+                    # which nothing consumes on this side, black-holing the
+                    # port. Re-run the PortManager registration, which installs
+                    # the callback (and manager back-reference) idempotently.
+                    if getattr(existing, "data_callback", None) is None:
+                        try:
+                            await self.main_port_manager.register_federated_port(metadata, existing)
+                            self.logger.info(f"Re-registered cached federated port '{name}' with data callback on reconnect")
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Failed to re-register data callback for {name} on reconnect: {e}", exc_info=True
+                            )
                     # Clear old client sessions and reopen on new connection
                     try:
                         if hasattr(existing, "close_all_streams"):
