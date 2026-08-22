@@ -524,6 +524,15 @@ const actionTermSplitter = document.getElementById('actionTermSplitter');
 const actionTermEl = document.getElementById('actionTerm');
 const actionTermTitle = document.getElementById('actionTermTitle');
 const actionTermStatus = document.getElementById('actionTermStatus');
+// The tag shows run state with a status color: yellow while in flight (Running /
+// Waiting for input…), green on Finished: success, red on Failed/timeout, muted on
+// cancelled, plain neutral with no run (or no colorClass). One helper owns the class
+// juggling so a state's color can never leak into the next.
+function setActionTag(text, colorClass) {
+  actionTermStatus.textContent = text;
+  actionTermStatus.classList.remove('warn', 'ok', 'bad', 'muted');
+  if (colorClass) actionTermStatus.classList.add(colorClass);
+}
 const actionTermTakeOver = document.getElementById('actionTermTakeOver');
 const actionTermStop = document.getElementById('actionTermStop');
 const actionTermClose = document.getElementById('actionTermClose');
@@ -714,8 +723,7 @@ function openActionRunPanel(action) {
   ensureActionTerm();
   actionTerm.clear();
   actionTermTitle.textContent = '';
-  actionTermStatus.textContent = '';
-  actionTermStatus.classList.remove('bad');
+  setActionTag('');
   hideActionResultBanner();
   hideActionProgressBar();
   actionsRunTitle.textContent = action.name || action.id;
@@ -749,6 +757,11 @@ function streamActionRun(runId) {
   hideActionProgressBar();
   ensureActionTerm();
   actionTermTitle.textContent = (currentAction && (currentAction.name || currentAction.id)) || 'Action';
+  // Reset the tag per stream start: it only shows run state (Running / Waiting for
+  // input… / Finished) in its status color, and a previous run's finish color (green/red/
+  // muted) must not leak into this stream - the launch and deep-link paths skip
+  // openActionRunPanel's reset.
+  setActionTag('Running', 'warn');
   openActionTermPane();
   closeActionsOverlay(); // the run dialog sits over the action terminal pane; get it out of the way once streaming starts
   const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
@@ -778,8 +791,9 @@ function streamActionRun(runId) {
       currentRunFinished = true;
       hideOperatorPrompt();
       const failed = msg.status === 'failed' || msg.status === 'timeout';
-      actionTermStatus.textContent = `Finished: ${msg.status || 'unknown'}`;
-      actionTermStatus.classList.toggle('bad', failed);
+      // Matches the outcome banner's own ok/bad/muted mapping below; an unknown status
+      // stays neutral.
+      setActionTag(`Finished: ${msg.status || 'unknown'}`, { success: 'ok', failed: 'bad', timeout: 'bad', cancelled: 'muted' }[msg.status]);
       if (actionResultBanner) {
         // One glance, no reading the small header tag required: an icon, the outcome, and
         // (when relevant) the short error - color-coded ok/bad/muted to match the tag classes.
@@ -813,10 +827,10 @@ function streamActionRun(runId) {
       // the step/percent detail lives only in the progress bar now; the tag stays generic
       // so it isn't just repeating the same text right below it.
       showActionProgress(msg.step, msg.percent);
-      actionTermStatus.textContent = 'Running';
+      setActionTag('Running', 'warn');
       showActionStrip(`Action running: ${label} — ${msg.step || ''}`);
     } else if (msg.event === 'waiting_for_operator') {
-      actionTermStatus.textContent = 'Waiting for input…';
+      setActionTag('Waiting for input…', 'warn');
       showOperatorPrompt(msg.prompt, msg.kind, msg.choices, msg.color);
       setActionWaitingBadge(true); // overlay only - never touches the step/percent already shown
       showActionStrip(`${label}: waiting for input — click to answer`);
@@ -829,8 +843,9 @@ function streamActionRun(runId) {
       }
     } else {
       // Freetext/debug log() events (see docs/design/action_session.md) - the current step
-      // is reported separately via progress() above, not inferred from these.
-      actionTermStatus.textContent = msg.event || 'running';
+      // is reported separately via progress() above, not inferred from these. The line
+      // goes to the terminal (above) and the bottom strip only; the status tag is
+      // reserved for run state (Running / Waiting for input… / Finished).
       showActionStrip(`Action running: ${label} — ${msg.event || ''}`);
     }
   };
