@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -1849,6 +1850,293 @@ async def test_read_loop_open_close_paths(monkeypatch):
     await a._read_loop(cid)
     # After E frame, mapping should be removed
     assert a._local_session_map.get(peer_key, {}).get(7) is None
+
+
+class LocalPortQueue:
+    """Minimal local port object for origin-side session tests: a data queue the
+    pump drains, plus the client bookkeeping PortManager methods expect."""
+
+    def __init__(self):
+        self.data_queue: asyncio.Queue = asyncio.Queue()
+        self.connected_clients: List[Dict[str, Any]] = []
+        self.client_queues: Dict[str, Any] = {}
+        self.max_read_write_users = 1
+        self.always_buffer = False
+
+
+def _origin_setup(monkeypatch, port_names=("lp1",)):
+    """Build an origin adapter with real PortManager/ConsoleManager and local ports."""
+    import openmux.server.adapters.muxcon as muxmod
+    from openmux.server.console_manager import ConsoleManager
+    from openmux.server.port_manager import PortManager
+
+    monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
+    pm = PortManager({})
+    for name in port_names:
+        pm.ports[name] = LocalPortQueue()
+    cm = ConsoleManager(pm, None)
+    a = UnifiedMuxConAdapter("origin", {"listeners": [], "auth_required": False})
+    a.main_port_manager = pm
+    a.console_manager = cm
+    return a, pm, cm
+
+
+def _scripted_read_loop(a, cid, writer, frames, monkeypatch):
+    """Attach a scripted connection (real _read_loop, canned frames) and return its task."""
+    a.connections[cid] = {
+        "reader": object(),
+        "writer": writer,
+        "server_id": "peerA",
+        "auth_ok": True,
+        "opened_at": time.time(),
+    }
+    a._register_mpath_connection(cid)
+
+    async def fake_read_frame(reader):
+        await asyncio.sleep(0)
+        if frames:
+            f = frames.pop(0)
+            # Deliver frames spaced out and keep the peer connected for a while
+            # after the last one, so the test can observe steady state (fed
+            # client registered, pump running) before EOF arrives.
+            await asyncio.sleep(0.5)
+            return f
+        await asyncio.sleep(0.5)
+        return None
+
+    monkeypatch.setattr(a, "_read_frame", fake_read_frame)
+    return asyncio.create_task(a._read_loop(cid))
+
+
+def _fed_clients(port) -> List[Dict[str, Any]]:
+    return [c for c in port.connected_clients if str(c.get("client_id", "")).startswith("fed:")]
+
+
+@pytest.mark.asyncio
+async def test_close_connection_tears_down_peer_local_sessions(monkeypatch):
+    """Regression (issue #54): when a peer's last path closes, its origin-side
+    session state must be torn down: pump stopped, stream mapping removed,
+    fed: pseudo-client freed and the buffering hold released."""
+    a, pm, cm = _origin_setup(monkeypatch)
+    port = pm.ports["lp1"]
+    peer_key = "node:peerA"
+    w = FakeWriter()
+    read_task = _scripted_read_loop(
+        a, "in:127.0.0.1:1:1", w, [{"frame_type": "O", "stream_id": 1, "payload": b"lp1", "seq": 1}], monkeypatch
+    )
+
+    try:
+        for _ in range(100):
+            if _fed_clients(port):
+                break
+            await asyncio.sleep(0.02)
+        assert len(_fed_clients(port)) == 1
+        assert a._local_session_map.get(peer_key, {}).get(1) == "lp1"
+        pump_task = a._pump_tasks.get((peer_key, 1))
+        assert pump_task is not None and not pump_task.done()
+        assert port.always_buffer is True
+        assert getattr(port, "_federation_viewer_count", 0) == 1
+
+        # While the session is live, port output flows toward the peer.
+        await port.data_queue.put(b"hello")
+        for _ in range(100):
+            if b"hello" in w.buffer:
+                break
+            await asyncio.sleep(0.02)
+        assert b"hello" in w.buffer
+    finally:
+        # Scripted reader runs out of frames (EOF): the read loop unwinds and
+        # closes the connection, which empties the peer group.
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await read_task
+
+    # All of the dead peer's origin-side session state must be gone. The pump is
+    # cancelled (not awaited) by teardown, so poll for its exit before asserting
+    # on the state its finally releases.
+    for _ in range(100):
+        if pump_task.done():
+            break
+        await asyncio.sleep(0.02)
+    assert pump_task.done()
+    assert a._local_session_map.get(peer_key) in (None, {})
+    assert a._session_map.get(peer_key) in (None, {})
+    assert not any(pk == peer_key for (pk, _sid) in a._pump_tasks)
+    assert _fed_clients(port) == []
+    assert port.always_buffer is False
+    assert getattr(port, "_federation_viewer_count", 1) == 0
+    assert cm.client_port_map.get(f"fed:{peer_key}:1") is None
+
+
+@pytest.mark.asyncio
+async def test_no_zombie_pump_drain_across_peer_drop_and_reconnect(monkeypatch):
+    """Decisive regression (issue #54): a peer whose last path drops WITHOUT
+    stream-close frames must not keep a pump draining the local port's queue.
+    Chunks produced while the peer is down must survive in the queue and be
+    delivered to the peer's NEW session once it reconnects."""
+    a, pm, cm = _origin_setup(monkeypatch)
+    port = pm.ports["lp1"]
+    peer_key = "node:peerA"
+
+    # First path: open a session (sid 1) and let it live.
+    w1 = FakeWriter()
+    frames1 = [{"frame_type": "O", "stream_id": 1, "payload": b"lp1", "seq": 1}]
+    read_task1 = _scripted_read_loop(a, "in:127.0.0.1:1:1", w1, frames1, monkeypatch)
+    try:
+        for _ in range(100):
+            if a._pump_tasks.get((peer_key, 1)) is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert a._local_session_map.get(peer_key, {}).get(1) == "lp1"
+    finally:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await read_task1
+
+    # Peer is now down (no E frames were ever sent). Output produced in the
+    # window must stay queued: a zombie pump would drain it and lose it.
+    await port.data_queue.put(b"while-down")
+    await asyncio.sleep(0.2)
+    assert port.data_queue.qsize() == 1, "chunk dequeued while peer had no path (zombie pump)"
+
+    # Peer reconnects with a fresh stream id; the chunk must reach the new path.
+    w2 = FakeWriter()
+    frames2 = [{"frame_type": "O", "stream_id": 2, "payload": b"lp1", "seq": 1}]
+    read_task2 = _scripted_read_loop(a, "in:127.0.0.1:2:1", w2, frames2, monkeypatch)
+    try:
+        for _ in range(100):
+            if b"while-down" in w2.buffer:
+                break
+            await asyncio.sleep(0.02)
+        assert b"while-down" in w2.buffer
+        for _ in range(100):
+            if port.data_queue.qsize() == 0:
+                break
+            await asyncio.sleep(0.02)
+        assert port.data_queue.qsize() == 0
+        # Exactly one live pump for the peer (the new session's slot).
+        pumps = [t for (pk, _sid), t in a._pump_tasks.items() if pk == peer_key]
+        assert len(pumps) == 1
+        assert a._local_session_map.get(peer_key, {}).get(2) == "lp1"
+        assert a._local_session_map.get(peer_key, {}).get(1) is None
+    finally:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await read_task2
+
+
+@pytest.mark.asyncio
+async def test_open_frame_duplicate_reuses_pump(monkeypatch):
+    """A duplicate OPEN for the same (peer, stream, port) must not stack a
+    second pump on the shared data queue, and the fed: pseudo-client must
+    remain a single record (issue #54)."""
+    a, pm, cm = _origin_setup(monkeypatch)
+    port = pm.ports["lp1"]
+    peer_key = "node:peerA"
+    w = FakeWriter()
+
+    frames = [
+        {"frame_type": "O", "stream_id": 3, "payload": b"lp1", "seq": 1},
+        {"frame_type": "O", "stream_id": 3, "payload": b"lp1", "seq": 2},
+    ]
+    started: List[Tuple[str, int, str]] = []
+
+    async def blocking_pump(pk, sid, pname):
+        started.append((pk, sid, pname))
+        await asyncio.Event().wait()
+
+    a._pump_local_port_to_remote = blocking_pump  # type: ignore
+    read_task = _scripted_read_loop(a, "in:127.0.0.1:5:1", w, frames, monkeypatch)
+    try:
+        for _ in range(100):
+            if len(started) == 1 and len(_fed_clients(port)) == 1:
+                break
+            await asyncio.sleep(0.02)
+        # Wait for the duplicate OPEN (delivered ~0.5s after the first) to arrive
+        # and be processed; exactly one pump and one fed client must survive it.
+        await asyncio.sleep(0.8)
+        assert started == [(peer_key, 3, "lp1")]
+        assert a._local_session_map.get(peer_key, {}).get(3) == "lp1"
+        assert len(_fed_clients(port)) == 1
+        # The single pump stays registered under its slot.
+        assert a._pump_tasks.get((peer_key, 3)) is not None
+    finally:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await read_task
+
+
+@pytest.mark.asyncio
+async def test_open_frame_reused_stream_id_stops_old_session(monkeypatch):
+    """When the peer reuses a stream id for a DIFFERENT port, the old session
+    (pump + fed client + mapping) must be stopped before the new one maps the
+    slot, so the old port's output is not drained into the new stream
+    (issue #54)."""
+    a, pm, cm = _origin_setup(monkeypatch, port_names=("pa", "pb"))
+    pe, pb = pm.ports["pa"], pm.ports["pb"]
+    peer_key = "node:peerA"
+    w = FakeWriter()
+
+    frames = [
+        {"frame_type": "O", "stream_id": 4, "payload": b"pa", "seq": 1},
+        {"frame_type": "O", "stream_id": 4, "payload": b"pb", "seq": 2},
+    ]
+    started: List[Tuple[str, int, str]] = []
+    phase = {"n": 0}
+
+    async def blocking_pump(pk, sid, pname):
+        started.append((pk, sid, pname))
+        await asyncio.Event().wait()
+
+    a._pump_local_port_to_remote = blocking_pump  # type: ignore
+    a.connections["in:127.0.0.1:6:1"] = {
+        "reader": object(),
+        "writer": w,
+        "server_id": "peerA",
+        "auth_ok": True,
+        "opened_at": time.time(),
+    }
+    a._register_mpath_connection("in:127.0.0.1:6:1")
+
+    async def slow_second_frame(reader):
+        await asyncio.sleep(0)
+        if not frames:
+            await asyncio.sleep(0.5)
+            return None
+        f = frames.pop(0)
+        phase["n"] += 1
+        if phase["n"] >= 2:
+            await asyncio.sleep(0.3)  # gap so phase 1 is observable
+        return f
+
+    monkeypatch.setattr(a, "_read_frame", slow_second_frame)
+    read_task = asyncio.create_task(a._read_loop("in:127.0.0.1:6:1"))
+    try:
+        # Phase 1: slot mapped to "pa" with its own pump and fed client.
+        for _ in range(100):
+            if started == [(peer_key, 4, "pa")]:
+                break
+            await asyncio.sleep(0.02)
+        assert started == [(peer_key, 4, "pa")]
+        old_task = a._pump_tasks.get((peer_key, 4))
+        assert old_task is not None and not old_task.done()
+        assert a._local_session_map.get(peer_key, {}).get(4) == "pa"
+        assert len(_fed_clients(pe)) == 1
+
+        # Phase 2: same stream id re-mapped to "pb" on the same live connection.
+        new_task = None
+        for _ in range(100):
+            new_task = a._pump_tasks.get((peer_key, 4))
+            if len(started) == 2 and new_task is not None and new_task is not old_task and old_task.done():
+                break
+            await asyncio.sleep(0.02)
+        assert started == [(peer_key, 4, "pa"), (peer_key, 4, "pb")]
+        # Slot now maps to the new port only; old pump cancelled and replaced.
+        assert new_task is not None and new_task is not old_task
+        assert old_task.done(), "old session pump was not cancelled"
+        assert a._local_session_map.get(peer_key, {}).get(4) == "pb"
+        # Old port's fed pseudo-client freed; new port's present.
+        assert _fed_clients(pe) == []
+        assert len(_fed_clients(pb)) == 1
+    finally:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await read_task
 
 
 @pytest.mark.asyncio

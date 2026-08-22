@@ -391,3 +391,38 @@ async def test_remove_client_unified_wrapper_path():
     # Ensure wrapper is not cached; call remove will use get_port path
     res = await pm.remove_client_from_port("uR", "nope")
     assert res is False
+
+
+@pytest.mark.asyncio
+async def test_add_client_to_port_dedupes_by_client_id():
+    # Regression (issue #54): re-adding a client_id that already has a record
+    # must update that record in place, never append a duplicate that skews
+    # read-write slot accounting.
+    class Port:
+        def __init__(self):
+            self.connected_clients: List[Dict[str, Any]] = []
+            self.client_queues: Dict[str, Any] = {}
+            self.max_read_write_users = 1
+
+    pm = PortManager([])
+    pm.ports["p1"] = Port()
+    port = pm.ports["p1"]
+
+    # A read-write client occupies the only seat.
+    assert await pm.add_client_to_port("p1", "rw1", "u1", "read-write") is True
+    # Re-adding the same client_id is an in-place seat update (mode change).
+    assert await pm.add_client_to_port("p1", "rw1", "u1", "read-only") is True
+    recs = [c for c in port.connected_clients if c.get("client_id") == "rw1"]
+    assert len(recs) == 1
+    assert recs[0]["mode"] == "read-only"
+    # The in-place update keeps the existing delivery queue: a live forwarding
+    # task may hold a reference to it, replacing it would orphan new data.
+    queue_ref = port.client_queues["rw1"]
+    assert await pm.add_client_to_port("p1", "rw1", "u1", "read-write") is True
+    assert port.client_queues["rw1"] is queue_ref
+    # The seat is occupied again by rw1 itself; a NEW read-write client is
+    # rejected, and rw1 did not lose its own seat by counting itself.
+    assert await pm.add_client_to_port("p1", "rw2", "u2", "read-write") is False
+    # A new read-only client is always admitted and recorded once.
+    assert await pm.add_client_to_port("p1", "ro1", "u3", "read-only") is True
+    assert sum(1 for c in port.connected_clients if c.get("client_id") == "ro1") == 1

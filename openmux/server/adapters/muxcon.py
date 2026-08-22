@@ -247,6 +247,20 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self._session_map: Dict[str, Dict[int, Any]] = {}
         # Local server-initiated stream mapping keyed by peer_key -> stream_id -> local_port_name
         self._local_session_map: Dict[str, Dict[int, str]] = {}
+        # Pump tasks keyed by (peer_key, stream_id): the _pump_local_port_to_remote
+        # coroutine currently serving each origin-side session slot. Tracking the
+        # slot -> task binding keeps exactly one pump per slot (the OPEN handler
+        # dedupes instead of stacking pumps) and lets teardown cancel exactly the
+        # pumps of a peer whose paths are gone (issue #54: a zombie pump left over
+        # after the last path drops keeps draining the local port's shared data
+        # queue, so chunks dequeued with no live path are lost, and after the peer
+        # reconnects with fresh stream ids the zombie's old-id frames are dropped
+        # on the far side).
+        self._pump_tasks: Dict[Tuple[str, int], "asyncio.Task"] = {}
+        # Rate-limited warning state for the "no mapping for stream" data drop:
+        # (peer_key, stream_id) -> last warning timestamp (one line per stream
+        # per second; every such drop is lost console output).
+        self._drop_warn_ts: Dict[Tuple[str, int], float] = {}
         # Proxies keyed by peer_key -> port_name -> proxy
         self._peer_proxies: Dict[str, Dict[str, Any]] = {}
         # Convenience mapping for UI: per-connection view of proxies (mirrors peer_proxies
@@ -1442,6 +1456,20 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 t.cancel()
             await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
+
+            # Drop origin-side session state for every peer (pumps were just
+            # cancelled): remove stream mappings and fed: pseudo-clients from
+            # local ports so a restart does not leak half-open federation
+            # viewers (issue #54).
+            try:
+                peer_keys = set(self._local_session_map) | set(self._session_map) | {pk for (pk, _sid) in self._pump_tasks}
+                for pk in list(peer_keys):
+                    try:
+                        await self._cleanup_peer_local_sessions(pk)
+                    except Exception:
+                        self.logger.debug(f"Shutdown local session cleanup failed for {pk}", exc_info=True)
+            except Exception:
+                pass
 
             # Cancel initiator dial loops
             for t in self._initiator_tasks.values():
@@ -2660,7 +2688,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         # port loses the mapping. Log loudly so this is diagnosable.
                         self.logger.warning(
                             f"[{conn_id}] Stream id {sid} reused for '{port_name}' while still mapped to "
-                            f"'{existing_port}'; traffic for '{existing_port}' will stop flowing"
+                            f"'{existing_port}'; stopping old session for '{existing_port}'"
+                        )
+                        await self._stop_local_session(peer_key, sid, reason="stream_id_reused")
+                    elif existing_port is not None:
+                        self.logger.debug(
+                            f"[{conn_id}] Duplicate OPEN for stream {sid} -> {port_name}; keeping existing session"
                         )
                     self._local_session_map[peer_key][sid] = port_name
                     # Register the federated stream as a real, tracked client on this
@@ -2689,8 +2722,22 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 )
                     # Start background pump to send local port data back to remote stream
                     if port_name:
-                        task = asyncio.create_task(self._pump_local_port_to_remote(peer_key, sid, port_name))
-                        self._tasks.append(task)
+                        slot = (peer_key, sid)
+                        existing_task = self._pump_tasks.get(slot)
+                        if existing_task is not None and not existing_task.done() and existing_port == port_name:
+                            # A pump already serves this exact slot (duplicate OPEN,
+                            # or a re-OPEN of the same stream on a new path after a
+                            # reconnect). Keep it: a second pump would drain the
+                            # same port data_queue in parallel and roughly half of
+                            # every chunk would be lost (issue #54).
+                            self.logger.info(f"[{conn_id}] OPEN stream {sid} -> {port_name}: reusing existing pump for slot")
+                        else:
+                            if existing_task is not None and not existing_task.done():
+                                existing_task.cancel()
+                            self._pump_tasks.pop(slot, None)
+                            task = asyncio.create_task(self._pump_local_port_to_remote(peer_key, sid, port_name))
+                            self._pump_tasks[slot] = task
+                            self._tasks.append(task)
                 elif ftype == "E":
                     # Require authentication before accepting stream closes
                     if not self._is_conn_authenticated(conn_id):
@@ -2725,28 +2772,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         sid = 0
                     try:
                         peer_key = self._derive_peer_key_from_conn_id(conn_id)
-                        closed_port_name = self._local_session_map.get(peer_key, {}).get(sid)
                         if peer_key in self._session_map and sid in self._session_map[peer_key]:
                             self._session_map[peer_key].pop(sid, None)
-                        if peer_key in self._local_session_map and sid in self._local_session_map[peer_key]:
-                            self._local_session_map[peer_key].pop(sid, None)
-                        # Deregister the tracked federated client (issue #52) so its
-                        # slot (read-only or read-write) is freed on this origin port.
-                        if closed_port_name:
-                            pm = getattr(self, "main_port_manager", None)
-                            if pm is not None:
-                                try:
-                                    fed_client_id = f"fed:{peer_key}:{sid}"
-                                    await pm.remove_client_from_port(closed_port_name, fed_client_id)
-                                    console_manager = getattr(self, "console_manager", None)
-                                    if console_manager is not None:
-                                        console_manager.unregister_client_port(fed_client_id)
-                                        console_manager.unregister_client_channel(fed_client_id)
-                                except Exception:
-                                    self.logger.debug(
-                                        f"[{conn_id}] Failed to remove federated client for {closed_port_name}",
-                                        exc_info=True,
-                                    )
+                        # Stop the origin-side session slot: cancel the pump, drop the
+                        # stream mapping and free the tracked federated client (issue #52)
+                        # so its slot (read-only or read-write) is freed on this port.
+                        await self._stop_local_session(peer_key, sid, reason="stream_close")
                     except Exception:  # justification: session cleanup is best-effort during close
                         pass
                 elif ftype == "HB":
@@ -3072,6 +3103,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             except Exception:
                 pass
             self.logger.info(f"Connection closed: {conn_id}")
+            # `_unregister_mpath_connection` above already ran; if the group just
+            # became empty this was the peer's last path - drop its session state
+            # (pumps, fed: pseudo-clients, local stream map) so no zombie pump keeps
+            # draining a local port for a dead peer (issue #54).
+            try:
+                await self._maybe_cleanup_empty_peer(stable_peer_key)
+            except Exception:
+                self.logger.debug(f"Empty-peer local session cleanup failed for {stable_peer_key}", exc_info=True)
             return
         # Drop wire state
         try:
@@ -3196,6 +3235,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self._refresh_conn_proxies()
         except Exception:
             pass
+        # If this was the peer's last path, drop its origin-side session state
+        # (pumps, fed: pseudo-clients, local stream map) so nothing keeps draining
+        # local port output for a dead peer (issue #54).
+        try:
+            await self._maybe_cleanup_empty_peer(stable_peer_key)
+        except Exception:
+            self.logger.debug(f"Empty-peer local session cleanup failed for {stable_peer_key}", exc_info=True)
 
     # --- Federation helpers ---
 
@@ -5016,9 +5062,135 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         exc_info=True,
                     )
             else:
-                self.logger.debug(f"[{conn_id}] No mapping for stream {stream_id}; dropping {len(data)} bytes")
+                self._log_no_mapping_drop(conn_id, peer_key, stream_id, data)
         except Exception as e:
             self.logger.error(f"Error routing data frame on {conn_id}:{stream_id}: {e}", exc_info=True)
+
+    def _log_no_mapping_drop(self, conn_id: str, peer_key: str, stream_id: int, data: bytes) -> None:
+        """Rate-limited WARNING for inbound DATA with no routing mapping.
+
+        Every dropped chunk here is lost console output; after a peer restarts
+        with fresh stream ids, this is how a stale (zombie) stream manifests
+        (issue #54), so the drop must surface at WARNING. The warning is capped
+        at one line per (peer, stream) per second; individual drops still log
+        at debug as before.
+
+        Args:
+            conn_id: Connection delivering the frame.
+            peer_key: Stable peer grouping key of the connection.
+            stream_id: Unmapped stream id from the frame.
+            data: Payload that will be dropped.
+        """
+        try:
+            now_ts = time.time()
+            slot = (peer_key, stream_id)
+            if now_ts - self._drop_warn_ts.get(slot, 0.0) < 1.0:
+                self.logger.debug(f"[{conn_id}] No mapping for stream {stream_id}; dropping {len(data)} bytes")
+                return
+            self._drop_warn_ts[slot] = now_ts
+            self.logger.warning(
+                f"[{conn_id}] No mapping for stream {stream_id}; dropped {len(data)} bytes of output "
+                "(stale stream id, peer restarted, or session not cleaned up - see issue #54)"
+            )
+        except Exception:
+            pass
+
+    async def _stop_local_session(self, peer_key: str, stream_id: int, reason: str = "") -> None:
+        """Stop one origin-side session slot: cancel its pump, drop its mapping, free its client.
+
+        The slot is claimed (pump-registry entry and stream mapping removed) before
+        the pump is cancelled, so the pump's own exit path cannot remove state that
+        a replacement session already installed on the same slot (issue #54).
+
+        Args:
+            peer_key: Stable peer grouping key owning the session.
+            stream_id: Stream id occupying the slot.
+            reason: Human-readable reason for the telemetry log line.
+        """
+        slot = (peer_key, stream_id)
+        try:
+            port_name = self._local_session_map.get(peer_key, {}).get(stream_id)
+        except Exception:
+            port_name = None
+        task = self._pump_tasks.pop(slot, None)
+        try:
+            if peer_key in self._local_session_map:
+                self._local_session_map[peer_key].pop(stream_id, None)
+        except Exception:
+            pass
+        if task is not None and not task.done():
+            task.cancel()
+        if port_name:
+            pm = getattr(self, "main_port_manager", None)
+            if pm is not None:
+                try:
+                    fed_client_id = f"fed:{peer_key}:{stream_id}"
+                    await pm.remove_client_from_port(port_name, fed_client_id)
+                    console_manager = getattr(self, "console_manager", None)
+                    if console_manager is not None:
+                        console_manager.unregister_client_port(fed_client_id)
+                        console_manager.unregister_client_channel(fed_client_id)
+                except Exception:
+                    self.logger.debug(f"Failed to remove federated client for {port_name} ({reason})", exc_info=True)
+        self.logger.debug(f"Stopped local session {peer_key}:{stream_id} port={port_name} reason={reason}")
+
+    async def _cleanup_peer_local_sessions(self, peer_key: str) -> None:
+        """Stop every origin-side session a peer owned and drop its stream routing state.
+
+        Called when the last path of a peer group closes (or on adapter
+        shutdown). Without this, the peer's pumps keep draining the local port's
+        shared data_queue: any chunk a surviving pump dequeues while no path is
+        connected is consumed and lost, and after the peer reconnects with fresh
+        stream ids the zombie pumps' old-id frames are dropped on the far side -
+        the "half the console output disappears" symptom (issue #54).
+
+        Args:
+            peer_key: Stable peer grouping key whose paths are all gone.
+        """
+        slots: List[int] = [sid for (pk, sid) in list(self._pump_tasks) if pk == peer_key]
+        try:
+            for sid in list(self._local_session_map.get(peer_key, {})):
+                if sid not in slots:
+                    slots.append(sid)
+        except Exception:
+            pass
+        for sid in slots:
+            try:
+                await self._stop_local_session(peer_key, sid, reason="peer_paths_closed")
+            except Exception as e:
+                self.logger.debug(f"Failed to stop local session {peer_key}:{sid}: {e}", exc_info=True)
+        try:
+            self._local_session_map.pop(peer_key, None)
+        except Exception:
+            pass
+        try:
+            self._session_map.pop(peer_key, None)
+        except Exception:
+            pass
+
+    async def _maybe_cleanup_empty_peer(self, peer_key: Optional[str]) -> None:
+        """Drop a peer's origin-side session state if its multipath group has no paths left.
+
+        Called from `_close_connection` on every close path. No-ops while any path
+        of the group is still connected (the peer is alive and its sessions must
+        keep flowing).
+
+        Args:
+            peer_key: Stable peer grouping key to check.
+        """
+        try:
+            if not peer_key:
+                return
+            grp = self._mpath_groups.get(peer_key)
+            if grp and grp.get("conns"):
+                return
+            has_pumps = any(pk == peer_key for (pk, _sid) in self._pump_tasks)
+            if not (self._local_session_map.get(peer_key) or self._session_map.get(peer_key) or has_pumps):
+                return
+            self.logger.info(f"Last path closed for peer {peer_key}; stopping its local sessions")
+            await self._cleanup_peer_local_sessions(peer_key)
+        except Exception as e:
+            self.logger.debug(f"Empty-peer local session cleanup failed for {peer_key}: {e}", exc_info=True)
 
     async def _pump_local_port_to_remote(self, peer_key: str, stream_id: int, port_name: str):
         """Continuously forward data from a local port to the remote stream.
@@ -5026,10 +5198,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         This coroutine runs while the session mapping remains intact and the
         adapter is not stopping. It polls the ``main_port_manager`` for new data
         (non‑blocking) and sends DATA frames upstream. On termination the local
-        mapping for the stream is removed.
+        mapping for the stream is removed, but only if this task still owns the
+        slot - a replacement pump or an in-flight teardown may own it now
+        (issue #54).
 
         Args:
-            conn_id: Connection identifier carrying the federated session.
+            peer_key: Stable peer grouping key the stream is pumped toward.
             stream_id: Logical stream id targeting a local port consumer.
             port_name: Name of the local port to read from.
         """
@@ -5076,10 +5250,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     pm.remove_federation_buffering_hold(port_name)
                 except Exception:
                     self.logger.debug(f"Failed to remove federation buffering hold for {port_name}", exc_info=True)
-            # Cleanup mapping on exit
+            # Cleanup mapping on exit, but only if we still own the slot: a
+            # replacement pump or an in-flight teardown may own it now, and
+            # popping would delete the new session's mapping (issue #54).
             try:
-                if peer_key in self._local_session_map:
-                    self._local_session_map[peer_key].pop(stream_id, None)
+                if self._pump_tasks.get((peer_key, stream_id)) is asyncio.current_task():
+                    if peer_key in self._local_session_map:
+                        self._local_session_map[peer_key].pop(stream_id, None)
+                    self._pump_tasks.pop((peer_key, stream_id), None)
             except Exception:  # justification: local session map cleanup is best-effort on pump exit
                 pass
 

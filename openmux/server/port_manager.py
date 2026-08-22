@@ -553,9 +553,22 @@ class PortManager:
                     exc_info=True,
                 )
 
-            # Enforce read-write slot limit; read-only clients are always allowed through
+            # Re-adding a client_id that already has a record is an in-place
+            # update (for example a re-OPEN of the same federated stream slot),
+            # not a second seat: a duplicated record would skew read-write slot
+            # accounting and presence display (issue #54).
+            existing_idx = None
+            for i, existing in enumerate(port.connected_clients):
+                if existing.get("client_id") == client_id:
+                    existing_idx = i
+                    break
+
+            # Enforce read-write slot limit; read-only clients are always allowed
+            # through. The client being (re-)added does not count against its own seat.
             if mode == "read-write":
-                current_rw = sum(1 for c in port.connected_clients if c.get("mode") == "read-write")
+                current_rw = sum(
+                    1 for c in port.connected_clients if c.get("mode") == "read-write" and c.get("client_id") != client_id
+                )
                 if current_rw >= port.max_read_write_users:
                     self.logger.warning(
                         f"Port {port_name} is at maximum read-write capacity ({current_rw}/{port.max_read_write_users})"
@@ -569,11 +582,22 @@ class PortManager:
                 "mode": mode,
                 "connected_at": time.time(),
             }
-            port.connected_clients.append(client_info)
-            if hasattr(port, "client_queues"):
-                port.client_queues[client_id] = asyncio.Queue(maxsize=100)
-
-            self.logger.info(f"Added client {username} ({client_id}) to port {port_name} in {mode} mode")
+            if existing_idx is not None:
+                prior_mode = port.connected_clients[existing_idx].get("mode")
+                port.connected_clients[existing_idx] = client_info
+                # Keep the existing delivery queue: a live forwarding task may hold
+                # a reference to it, and replacing it here would orphan new data.
+                if hasattr(port, "client_queues") and client_id not in port.client_queues:
+                    port.client_queues[client_id] = asyncio.Queue(maxsize=100)
+                self.logger.info(
+                    f"Updated existing client {username} ({client_id}) on port {port_name} "
+                    f"to {mode} mode (was {prior_mode})"
+                )
+            else:
+                port.connected_clients.append(client_info)
+                if hasattr(port, "client_queues"):
+                    port.client_queues[client_id] = asyncio.Queue(maxsize=100)
+                self.logger.info(f"Added client {username} ({client_id}) to port {port_name} in {mode} mode")
             # Lifecycle event: client connected
             try:
                 DataLogger.get().record_meta(
