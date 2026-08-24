@@ -589,7 +589,7 @@ def test_load_catalog_reads_multiple_directories_and_skips_non_actions(tmp_path:
 def test_rebuild_catalog_keeps_last_good_version_of_broken_script(tmp_path: Path) -> None:
     """A script that now fails to import (syntax error) is skipped, keeping the
     last version that loaded successfully; the catalog keeps serving it."""
-    from openmux.server.web_plugins.port_actions import _PortActionsState, _catalog_file_mtimes, _rebuild_catalog
+    from openmux.server.web_plugins.port_actions import _catalog_file_mtimes, _PortActionsState, _rebuild_catalog
 
     script = tmp_path / "act.py"
     _write_action(tmp_path, "act")
