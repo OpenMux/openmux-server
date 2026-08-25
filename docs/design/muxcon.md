@@ -327,6 +327,48 @@ now surfaced as a rate-limited WARNING (at most one per peer per second) via
 `_log_no_mapping_drop` under a `"dup"` slot, so a silent one-direction loss is
 diagnosable instead of invisible.
 
+### 6.4 Sequence state survives path loss
+
+The peer-scoped sequence state (`_peer_tx_seq`, `_peer_rx_state`,
+`_peer_sendbuf`, `_peer_retx_count`) is tied to the peer *identity*
+(`node:<server_id>`), not to live paths. When a peer's mpath group becomes
+empty, `_unregister_mpath_connection` removes the group but does NOT clear
+this state: an empty group only means "no live path right now", and the
+peer often re-dials seconds later with the same identity. Clearing it here
+used to reset the counter on whichever side's group emptied first, while
+the other side (whose replacement path joined before its last path was
+reaped) kept its old counter. Every frame from the reset side then read
+`seq < expected`, was dropped as stale, and was ACKed anyway, so it was
+lost for good: permanent one-direction data loss after a path loss +
+reconnect with no process restart on either side. The state now lives
+until process exit. The only in-process reset is a peer generation change
+(same `server_id`, new `instance_id` — a restart): the first DATA frame
+from the new generation resyncs all state for that peer
+(`_maybe_resync_peer_generation`).
+
+### 6.5 Reconnect recovery: stale stream CLOSE and read-write re-grant
+
+Stream sessions are per path. When the last path to a peer dies, the
+initiator's proxy cannot deliver CLOSE frames for the streams it opened
+(the path is dead). It remembers those stream ids in
+`RemotePortProxy._stale_sessions` instead of forgetting them. When a path
+is back and the peer re-advertises its ports (the proxy reuse path in
+`_register_remote_port_from_dict`), the adapter resends those CLOSEs on
+the live path before it reopens fresh streams
+(`_close_stale_proxy_sessions`). That makes the origin tear down the
+orphaned sessions — their pumps, their `fed:<peer>:<sid>` clients, and any
+read-write slot they hold — instead of leaving them alive until the
+origin's whole peer group empties. Unknown stream ids are ignored by the
+origin's CLOSE handler, so a peer restart in between is harmless.
+
+The same reuse path then re-requests the origin's read-write grant for
+every local client that was `read-write` before the outage
+(`_regrant_proxy_read_write`, a plain `FEDRW ... REQUEST`): the reopened
+streams register read-only on the origin, and nothing else re-sends the
+grant. A denied grant (the slot is held by another user) demotes the
+client locally so its mode matches the origin; a human can still
+force-take.
+
 ## 7. Viewer presence relay
 
 A `VIEWERS:<port_name>` control frame (JSON lines, `END:VIEWERS`

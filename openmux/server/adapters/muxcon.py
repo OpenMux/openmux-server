@@ -4454,25 +4454,22 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # Pick next available as primary
             new_primary = next(iter(grp["conns"].keys()), None)
             grp["primary"] = new_primary
-        # Cleanup empty group
+        # Cleanup empty group. The peer-scoped DATA sequence state
+        # (_peer_sendbuf, _peer_rx_state, _peer_tx_seq, _peer_retx_count) is
+        # deliberately NOT cleared here: DATA numbering is per peer identity,
+        # not per path (docs/design/muxcon.md §6). An empty group only means
+        # "no live paths right now" - the peer often re-dials seconds later
+        # with the same identity. Clearing here reset the counter on whichever
+        # side's group emptied first, while the other side (whose replacement
+        # path joined before its last path was reaped) kept the old counter:
+        # every frame from the reset side then read seq < expected, was
+        # dropped as stale, and was ACKed anyway, so it was lost for good -
+        # permanent one-directional data loss after path loss + reconnect
+        # without a process restart. The state now lives until process exit;
+        # only a peer generation change (_maybe_resync_peer_generation)
+        # resets it, and a rekey migrates it (see _rekey_mpath_connection).
         if not grp["conns"]:
             self._mpath_groups.pop(key, None)
-            try:
-                self._peer_sendbuf.pop(key, None)
-            except Exception:
-                pass
-            try:
-                self._peer_rx_state.pop(key, None)
-            except Exception:
-                pass
-            try:
-                self._peer_tx_seq.pop(key, None)
-            except Exception:
-                pass
-            try:
-                self._peer_retx_count.pop(key, None)
-            except Exception:
-                pass
         self.logger.debug(f"Unregistered {conn_id} from multipath group {key}")
         # Refresh mapping after topology change
         try:
@@ -4875,10 +4872,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         keeping the same stable server_id (same peer_key). Its TX sequence
         counter restarts at 1, but our RX expected counter, reorder buffer, TX
         counter, unacked send buffer and retransmission counters are keyed by
-        peer_key and survive the restart (they are only cleared when the whole
-        multipath group empties). Left alone, every frame from the restarted
-        peer has seq < expected and is dropped as a "duplicate" while still
-        being ACKed - permanent one-direction data loss (issue #55).
+        peer_key and survive the restart (they live until process exit; path
+        loss and group-empty do not clear them - see
+        _unregister_mpath_connection). Left alone, every frame from the
+        restarted peer has seq < expected and is dropped as a "duplicate"
+        while still being ACKed - permanent one-direction data loss
+        (issue #55).
 
         The first DATA frame from a new generation resets all peer-scoped
         sequence state and logs one WARNING. Frames from the same generation
@@ -5626,6 +5625,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             await existing.close_all_streams()
                     except Exception:  # justification: stream cleanup on reuse is best-effort
                         pass
+                    # Close the stream ids the dead path never got to close, so the
+                    # origin tears down their orphaned sessions (pumps, federated
+                    # clients, and any read-write slot they hold) before the fresh
+                    # streams open below.
+                    try:
+                        await self._close_stale_proxy_sessions(existing, conn_id)
+                    except Exception:  # justification: stale session cleanup on reuse is best-effort
+                        pass
                     # Notify clients that link is restored (de-duplicated)
                     try:
                         # Build machine-readable source path server/port
@@ -5648,6 +5655,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 await existing.open_stream_for_client(cid)
                     except Exception as e:
                         self.logger.debug(f"Failed to reopen streams for {name} on reconnect: {e}", exc_info=True)
+                    # Re-request the origin's read-write grant for the clients that
+                    # held it before the outage. The streams above reopened
+                    # read-only and nothing else re-sends FEDRW, so without this a
+                    # pre-outage writer stays write-dead on the origin (its local
+                    # record still says read-write, so every write is silently
+                    # rejected at the origin's mode gate) until a human force-takes.
+                    try:
+                        await self._regrant_proxy_read_write(existing, conn_id)
+                    except Exception:  # justification: re-grant on reuse is best-effort
+                        pass
 
                     # Update peer->proxy mapping
                     try:
@@ -5726,6 +5743,71 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     pass
         else:
             self.logger.warning("No main_port_manager set; cannot register federated ports")
+
+    async def _close_stale_proxy_sessions(self, proxy: Any, conn_id: str) -> None:
+        """Close stream ids the proxy lost over a dead path, once a path is back.
+
+        On last-path loss the proxy's disconnect() moves its client stream ids
+        into _stale_sessions (the CLOSE frames cannot reach the origin over the
+        dead path). The origin only tears those sessions down when its whole
+        peer group empties - which never happens if the replacement path joins
+        first - so the orphaned pumps keep draining the port and the orphaned
+        federated clients keep holding their read-write slot. Resend the CLOSEs
+        on the live path now. The origin's CLOSE handler ignores unknown stream
+        ids, so a peer process restart in between is harmless.
+
+        Args:
+            proxy: RemotePortProxy to recover (_stale_sessions is cleared).
+            conn_id: Live connection that just (re)established the peer link.
+        """
+        stale = getattr(proxy, "_stale_sessions", None)
+        if not stale:
+            return
+        peer_key = self._derive_peer_key_from_conn_id(conn_id)
+        for key, sid in list(stale.items()):
+            try:
+                await self._send_stream_close_mpath(peer_key, sid, "stale_after_reconnect")
+                self.logger.info(
+                    f"Closed stale remote stream sid={sid} ({key}) for port={proxy.remote_port_name} on reconnect"
+                )
+            except Exception:
+                pass
+        stale.clear()
+
+    async def _regrant_proxy_read_write(self, proxy: Any, conn_id: str) -> None:
+        """Re-request the origin's read-write grant for pre-outage read-write clients.
+
+        Stream reopens on reconnect register the federated clients read-only on
+        the origin, and nothing else re-sends the FEDRW request. A plain REQUEST
+        (not FORCE) is used: if the slot is legitimately held by another user
+        (origin-local or via another peer), the grant is denied and the client
+        is demoted locally to match, instead of every write being silently
+        rejected at the origin's mode gate.
+
+        Args:
+            proxy: RemotePortProxy whose clients may need the grant back.
+            conn_id: Live connection that just (re)established the peer link.
+        """
+        pm = getattr(self, "main_port_manager", None)
+        if pm is None:
+            return
+        for c in list(getattr(proxy, "connected_clients", []) or []):
+            cid = c.get("client_id") if isinstance(c, dict) else None
+            if not cid or c.get("mode") != "read-write":
+                continue
+            try:
+                mode = await proxy.request_read_write_for_client(cid)
+            except Exception:
+                mode = "read-only"
+            if mode != "read-write":
+                self.logger.warning(
+                    f"Origin did not re-grant read-write for {cid} on {proxy.remote_port_name} "
+                    "after reconnect; demoting locally (slot held by another user? force-take to override)"
+                )
+                try:
+                    await pm.demote_client(proxy.remote_port_name, cid)
+                except Exception:
+                    pass
 
     # --- Wire helpers: frame send/read ---
 
@@ -5921,6 +6003,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.data_callback = None  # set by PortManager
             self.port_manager = None
             self._client_sessions: Dict[str, int] = {}
+            # Stream ids opened over a path that died before their CLOSE could
+            # reach the origin. Kept (not forgotten) on disconnect() so the
+            # reconnect reuse path can resend their CLOSEs and make the origin
+            # tear down the orphaned sessions - their pumps, federated clients,
+            # and any read-write slot they hold - instead of leaving them
+            # alive until the whole peer group empties.
+            self._stale_sessions: Dict[str, int] = {}
             # Stream ids are allocated peer-scoped via adapter._alloc_local_stream_id(),
             # not per-proxy, so no local counter is kept here (see _ensure_session).
             self.logger = logging.getLogger(f"openmux.unified.remote_proxy.{remote_port_name}")
@@ -6223,10 +6312,19 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
 
             Sets state to DESTROYING, closes streams, then DESTROYED. Errors
             during cleanup are ignored.
+
+            The stream ids are remembered in _stale_sessions before
+            close_all_streams() forgets them: the CLOSE for a dead path cannot
+            reach the origin, so without this the origin keeps every session
+            (pump, federated client, read-write slot) from the old path alive.
             """
             try:
                 self.is_connected = False
                 self.state = PortState.DESTROYING
+                try:
+                    self._stale_sessions.update(self._client_sessions)
+                except Exception:
+                    pass
                 await self.close_all_streams()
                 self.state = PortState.DESTROYED
                 # keep last_seen as-is to reflect last activity

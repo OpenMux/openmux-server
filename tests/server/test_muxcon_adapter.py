@@ -808,6 +808,120 @@ async def test_remote_port_proxy_operations(monkeypatch):
     await proxy.stop()
 
 
+def test_tx_seq_continues_after_group_empty_and_reconnect():
+    # The incident: the initiator's only path dies (its group empties) and it
+    # re-dials seconds later with the same peer identity. The TX counter must
+    # continue where it left off - clearing it on group-empty used to restart
+    # numbering at 1 on exactly one side, and the other side (whose group
+    # never emptied) dropped every frame as stale (one-direction data loss).
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    cid1 = "out:h:7822:1"
+    a.connections[cid1] = {"server_id": "peer", "opened_at": time.time()}
+    a._register_mpath_connection(cid1)
+    key = a._derive_peer_key_from_conn_id(cid1)
+    assert key == "node:peer"
+    assert a._next_peer_seq(key) == 1
+    a._next_peer_seq(key)
+    a._next_peer_seq(key)  # counter now at 4
+    a._unregister_mpath_connection(cid1)
+    assert key not in a._mpath_groups
+    cid2 = "out:h:7822:2"
+    a.connections[cid2] = {"server_id": "peer", "opened_at": time.time()}
+    a._register_mpath_connection(cid2)
+    assert a._next_peer_seq(key) == 4
+
+
+@pytest.mark.asyncio
+async def test_proxy_disconnect_keeps_stale_sessions_and_reconnect_closes_them(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    closes: List[Tuple[Any, int, str]] = []
+
+    async def fake_close(pk, sid, reason):
+        closes.append((pk, sid, reason))
+        return True
+
+    monkeypatch.setattr(a, "_send_stream_close_mpath", fake_close)
+
+    class M:
+        description = "R"
+        max_rw_users = 2
+
+    proxy = a.RemotePortProxy(a, "node:peer", "rp1", M())
+    # Two client sessions opened over the path that is about to die
+    proxy._client_sessions["c1"] = 5
+    proxy._client_sessions["c2"] = 6
+    await proxy.disconnect()
+    # disconnect() makes a best-effort CLOSE attempt (no path, so it is a
+    # no-op in production) and must remember the sids instead of forgetting
+    # them - the origin only learns of them when the sids are closed on the
+    # replacement path
+    assert proxy._client_sessions == {}
+    assert proxy._stale_sessions == {"c1": 5, "c2": 6}
+    attempt_closes = list(closes)
+    assert all(reason == "proxy_disconnect" for _, _, reason in attempt_closes)
+    # Reconnect: the reuse path closes the stale sids on the live path
+    a.connections["out:peer:7822:99"] = {"server_id": "peer", "opened_at": time.time()}
+    await a._close_stale_proxy_sessions(proxy, "out:peer:7822:99")
+    assert closes[len(attempt_closes) :] == [
+        ("node:peer", 5, "stale_after_reconnect"),
+        ("node:peer", 6, "stale_after_reconnect"),
+    ]
+    assert proxy._stale_sessions == {}
+    # A second reconnect has nothing left to close
+    count_after_first = len(closes)
+    await a._close_stale_proxy_sessions(proxy, "out:peer:7822:99")
+    assert len(closes) == count_after_first
+
+
+@pytest.mark.asyncio
+async def test_regrant_proxy_read_write_on_reconnect(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    pm = FakePM()
+    a.main_port_manager = pm
+    requests: List[str] = []
+    demotions: List[Tuple[str, str]] = []
+
+    async def fake_demote(port_name, client_id):
+        demotions.append((port_name, client_id))
+        return True
+
+    monkeypatch.setattr(pm, "demote_client", fake_demote, raising=False)
+
+    class M:
+        description = "R"
+        max_rw_users = 2
+
+    proxy = a.RemotePortProxy(a, "node:peer", "rp1", M())
+    # Pre-outage roster: one RW client that keeps its grant, one RW client the
+    # origin denies (slot held by another user), one read-only client
+    proxy.connected_clients = [
+        {"client_id": "ws:1", "mode": "read-write"},
+        {"client_id": "ws:2", "mode": "read-only"},
+        {"client_id": "ws:3", "mode": "read-write"},
+    ]
+
+    async def fake_request(cid, timeout=3.0):
+        requests.append(cid)
+        return "read-write" if cid == "ws:1" else "read-only"
+
+    monkeypatch.setattr(proxy, "request_read_write_for_client", fake_request)
+    await a._regrant_proxy_read_write(proxy, "out:peer:7822:99")
+    # Only read-write clients are re-requested; the denied one is demoted
+    # locally so its mode matches the origin (instead of writing into the void)
+    assert requests == ["ws:1", "ws:3"]
+    assert demotions == [("rp1", "ws:3")]
+    # No port manager: nothing to demote, and no error
+    a2 = UnifiedMuxConAdapter("mx", {"listeners": []})
+    proxy2 = a2.RemotePortProxy(a2, "node:peer", "rp2", M())
+    proxy2.connected_clients = [{"client_id": "ws:9", "mode": "read-write"}]
+
+    async def boom(cid, timeout=3.0):
+        raise AssertionError("must not request without a port manager")
+
+    monkeypatch.setattr(proxy2, "request_read_write_for_client", boom)
+    await a2._regrant_proxy_read_write(proxy2, "out:peer:7822:99")
+
+
 @pytest.mark.asyncio
 async def test_read_frame_and_send_protocol_and_seq_incrementing(caplog):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
@@ -1338,24 +1452,27 @@ def test_mpath_rekey_migrates_peer_state():
     assert new_key in a._peer_retx_count and a._peer_retx_count[new_key] >= 1
 
 
-def test_mpath_unregister_clears_group_and_maps():
+def test_mpath_unregister_removes_group_keeps_seq_state():
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     conn_id = "out:h:1000:9"
     a.connections[conn_id] = {"opened_at": time.time()}
     key = a._derive_peer_key_from_conn_id(conn_id)
     a._mpath_groups[key] = {"conns": OrderedDict({conn_id: {"opened_at": time.time()}}), "primary": conn_id, "rr_index": 0}
     a._peer_sendbuf[key] = {}
-    a._peer_rx_state[key] = {"expected": 1, "buffer": {}}
-    a._peer_tx_seq[key] = 2
+    a._peer_rx_state[key] = {"expected": 43, "buffer": {}}
+    a._peer_tx_seq[key] = 43
     a._peer_retx_count[key] = 3
     a._unregister_mpath_connection(conn_id)
     assert key not in a._mpath_groups
-    assert (
-        key not in a._peer_sendbuf
-        and key not in a._peer_rx_state
-        and key not in a._peer_tx_seq
-        and key not in a._peer_retx_count
-    )
+    # Peer-scoped DATA seq state must survive an empty group: numbering is per
+    # peer identity, not per path. Clearing it here used to reset the counter
+    # on whichever side's group emptied first while the other side kept its
+    # old counter, dropping every post-reconnect frame as stale (one-direction
+    # data loss after path loss + reconnect without process restart).
+    assert a._peer_rx_state[key]["expected"] == 43
+    assert a._peer_tx_seq[key] == 43
+    assert key in a._peer_sendbuf
+    assert a._peer_retx_count[key] == 3
 
 
 def test_allow_advertise_port_helper():
