@@ -21,7 +21,7 @@ _COMMANDS = [
 ]
 
 
-async def run(session, params):
+async def run(session):
     session.progress("select")
     command = await session.select("Pick a command to send", _COMMANDS, timeout=90.0)
     session.progress("send")

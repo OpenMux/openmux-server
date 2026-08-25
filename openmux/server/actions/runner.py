@@ -327,6 +327,7 @@ class ActionRunner:
                 self.port_manager,
                 port_name,
                 run.client_id,
+                params=validated,
                 on_input_wait=lambda prompt, kind, choices, step, color: self._publish(
                     run.run_id,
                     {
@@ -354,7 +355,7 @@ class ActionRunner:
             self._sessions[run.run_id] = session
             run_timeout = action.timeout if timeout is None else timeout
             try:
-                await asyncio.wait_for(action.run_func(session, validated), timeout=run_timeout)
+                await asyncio.wait_for(action.run_func(session), timeout=run_timeout)
                 run.status = "success"
             except asyncio.TimeoutError:
                 run.status = "timeout"

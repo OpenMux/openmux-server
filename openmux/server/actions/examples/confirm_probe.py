@@ -18,8 +18,8 @@ ACTION = {
 }
 
 
-async def run(session, params):
-    text = params["text"]
+async def run(session):
+    text = session.params["text"]
     session.progress("confirm")
     ok = await session.confirm(f"Send {text!r} to the port?", timeout=90.0)
     if not ok:

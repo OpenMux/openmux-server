@@ -549,7 +549,7 @@ def _write_action(dir_path: Path, action_id: str) -> Path:
     """Write a minimal valid action script named `<action_id>.py` into `dir_path`."""
     path = dir_path / f"{action_id}.py"
     path.write_text(
-        f'ACTION = {{\n    "id": "{action_id}",\n    "name": "{action_id}",\n    "description": "test action",\n    "timeout": 10.0,\n    "params": [],\n}}\n\n\nasync def run(session, params):\n    session.log("done")\n',
+        f'ACTION = {{\n    "id": "{action_id}",\n    "name": "{action_id}",\n    "description": "test action",\n    "timeout": 10.0,\n    "params": [],\n}}\n\n\nasync def run(session):\n    session.log("done")\n',
         encoding="utf-8",
     )
     return path
@@ -673,7 +673,7 @@ async def test_action_imports_sibling_helper_module(tmp_path: Path):
         '    "params": [],\n'
         "}\n"
         "\n\n"
-        "async def run(session, params):\n"
+        "async def run(session):\n"
         '    session.log(f"magic={helper_mod.MAGIC}")\n',
         encoding="utf-8",
     )
@@ -745,7 +745,7 @@ async def test_sibling_helper_edit_takes_effect_without_server_restart(tmp_path:
         '    "params": [],\n'
         "}\n"
         "\n\n"
-        "async def run(session, params):\n"
+        "async def run(session):\n"
         '    session.log(f"magic={helper_mod.MAGIC}")\n',
         encoding="utf-8",
     )

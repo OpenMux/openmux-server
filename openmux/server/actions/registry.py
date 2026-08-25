@@ -4,7 +4,7 @@ See docs/design/port_actions.md ("Script format", "Security / permissions").
 A script is a plain Python module exposing:
 
 - A module-level `ACTION` dict (id, name, description, timeout, params).
-- `async def run(session, params)`.
+- `async def run(session)`.
 """
 
 import importlib.util
@@ -118,7 +118,7 @@ def load_action_from_file(path: str) -> ActionScript:
         raise ActionValidationError(f"Action script {path} is missing a module-level ACTION dict")
     run_func = getattr(module, "run", None)
     if not callable(run_func):
-        raise ActionValidationError(f"Action script {path} is missing an async def run(session, params)")
+        raise ActionValidationError(f"Action script {path} is missing an async def run(session)")
 
     action_id = meta.get("id") or file_path.stem
     raw_params = meta.get("params", []) or []

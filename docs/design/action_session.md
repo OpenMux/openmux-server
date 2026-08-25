@@ -6,7 +6,7 @@ expect-style API to drive a port — send bytes, wait for a pattern, and pause
 for operator input — without touching `PortManager` directly.
 
 `ActionSession` (`openmux/server/actions/session.py`) is the `session`
-argument passed to a script's `async def run(session, params)`. One
+argument passed to a script's `async def run(session)`. One
 instance is bound to one port attachment (one `client_id`), created and torn
 down by `ActionRunner._execute()` around a single run. It reads from the same
 per-client delivery queue that `PortManager.add_client_to_port()` creates for

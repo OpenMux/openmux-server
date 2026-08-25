@@ -1,7 +1,7 @@
 """Expect-style session wrapper for port action scripts.
 
 An `ActionSession` is the `session` argument passed to a script's
-`async def run(session, params)` (see docs/design/port_actions.md,
+`async def run(session)` (see docs/design/port_actions.md,
 "Script format"). It reads from the same per-client delivery queue that
 `PortManager.add_client_to_port` creates for the action's `client_id`, so it
 sees exactly the bytes a normal read-write console client would see.
@@ -9,7 +9,7 @@ sees exactly the bytes a normal read-write console client would see.
 
 import asyncio
 import re
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from openmux.server.actions.choices import Choice, normalize_choices
 from openmux.server.actions.errors import ActionSessionError, ActionTimeoutError
@@ -35,6 +35,7 @@ class ActionSession:
         port_manager,
         port_name: str,
         client_id: str,
+        params: Optional[Dict[str, Any]] = None,
         on_input_wait: Optional[
             Callable[[Optional[str], str, Optional[List[Dict[str, str]]], Optional[str], str], None]
         ] = None,
@@ -45,6 +46,9 @@ class ActionSession:
         self.port_manager = port_manager
         self.port_name = port_name
         self.client_id = client_id
+        # The run's user-supplied inputs, validated against the ACTION metadata
+        # before the script runs (see docs/design/port_actions.md, "Script format").
+        self.params: Dict[str, Any] = params if params is not None else {}
         self._buffer = bytearray()
         self._operator_input: "asyncio.Queue[str]" = asyncio.Queue()
         # Called (sync) from log() with the script's operator-facing message.

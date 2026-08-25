@@ -16,8 +16,8 @@ ACTION = {
 }
 
 
-async def run(session, params):
-    text = params["text"]
+async def run(session):
+    text = session.params["text"]
     session.progress("send")
     await session.sendline(text)
     session.progress("expect_echo")

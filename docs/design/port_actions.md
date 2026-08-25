@@ -90,7 +90,7 @@ an action attaches to `PortManager` exactly like a console client does, through
 
 ## Script format
 - A script is a plain Python module with `ACTION` metadata (name, description, declared
-  input parameters) and an `async def run(session, params)` entry point.
+  input parameters) and an `async def run(session)` entry point.
 - `session` is a small expect-style wrapper: `await session.send(text)`,
   `await session.expect(pattern, timeout=...)`, `await session.sendline(text)`.
   A matched `expect()` (and anything before it) is dropped from the buffer, so a
@@ -101,8 +101,8 @@ an action attaches to `PortManager` exactly like a console client does, through
   branch on it) without needing an `expect()` call; pass `consume=True` to also drop
   the returned text from the buffer. See [action_session.md](action_session.md) for
   the full `ActionSession` API reference.
-- `params` is a dict of the user-supplied inputs, validated against the `ACTION`
-  metadata's declared parameter types before the script runs.
+- `session.params` is a dict of the user-supplied inputs, validated against the
+  `ACTION` metadata's declared parameter types before the script runs.
 - Each declared param (`ActionParam` in `registry.py`) has a `widget`, defaulting to
   `"text"` (a plain text/number/password input, per its `type`/`sensitive`). Setting
   `widget: "select"` or `widget: "radio"` plus a non-empty `choices` list (plain values,

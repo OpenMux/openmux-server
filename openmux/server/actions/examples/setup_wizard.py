@@ -52,9 +52,9 @@ ACTION = {
 }
 
 
-async def run(session, params):
-    step_seconds = params["step_seconds"]
-    session.debug(f"launch_params: device_type={params['device_type']} priority={params['priority']}")
+async def run(session):
+    step_seconds = session.params["step_seconds"]
+    session.debug(f"launch_params: device_type={session.params['device_type']} priority={session.params['priority']}")
 
     session.progress("confirm_start", 5)
     ok = await session.confirm("Start the setup wizard?", color="blue", timeout=10.0)
