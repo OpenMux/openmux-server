@@ -5222,7 +5222,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             peer_key = self._derive_peer_key_from_conn_id(conn_id)
             proxy = self._session_map.get(peer_key, {}).get(stream_id)
             if proxy and hasattr(proxy, "trigger_data_received"):
-                self.logger.info(f"[{conn_id}] ROUTE D->proxy sid={stream_id} bytes={len(data)}")
+                self.logger.debug(f"[{conn_id}] ROUTE D->proxy sid={stream_id} bytes={len(data)}")
                 await proxy.trigger_data_received(data)
                 return
             # Check for local session mapping (server-initiated stream targeting local port)
@@ -6122,7 +6122,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 Exception: If the federation connection or writer is missing.
             """
             session_id = await self._ensure_session(client_id)
-            self.logger.info(
+            self.logger.debug(
                 f"REMOTE PROXY WRITE port={self.remote_port_name} sid={session_id} bytes={len(data)} client={client_id}"
             )
             try:
