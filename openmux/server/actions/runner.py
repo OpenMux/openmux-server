@@ -10,7 +10,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from openmux.server.actions.errors import ActionTimeoutError, PortBusyError
 from openmux.server.actions.registry import ActionScript, redact_params, validate_params
@@ -349,12 +349,12 @@ class ActionRunner:
                     },
                 ),
                 on_debug=lambda message: self._log_debug(run, message),
+                on_log=lambda message: self._publish(run.run_id, {"event": message, "ts": time.time()}),
             )
             self._sessions[run.run_id] = session
             run_timeout = action.timeout if timeout is None else timeout
-            log = self._make_log_func(run)
             try:
-                await asyncio.wait_for(action.run_func(session, validated, log), timeout=run_timeout)
+                await asyncio.wait_for(action.run_func(session, validated), timeout=run_timeout)
                 run.status = "success"
             except asyncio.TimeoutError:
                 run.status = "timeout"
@@ -363,12 +363,12 @@ class ActionRunner:
                 logger.warning(
                     "Action %s run %s on port %s timed out after %ss", run.action_id, run.run_id, port_name, run_timeout
                 )
-                log(f"action_timeout: {run.error}")
+                session.log(f"action_timeout: {run.error}")
             except asyncio.CancelledError:
                 run.status = "cancelled"
                 run.error = "Cancelled by user"
                 logger.info("Action %s run %s on port %s was cancelled", run.action_id, run.run_id, port_name)
-                log(f"action_cancelled: {run.error}")
+                session.log(f"action_cancelled: {run.error}")
             except Exception as exc:
                 run.status = "failed"
                 run.error = str(exc)
@@ -378,7 +378,7 @@ class ActionRunner:
                 logger.error(
                     "Action %s run %s on port %s failed: %s", run.action_id, run.run_id, port_name, exc, exc_info=True
                 )
-                log(f"action_error: {type(exc).__name__}: {exc}")
+                session.log(f"action_error: {type(exc).__name__}: {exc}")
                 self._log_debug(run, f"buffer_at_crash: {_truncate(session.read_buffer())!r}")
                 self._log_debug(run, f"traceback:\n{_truncate(traceback.format_exc())}")
         except PortBusyError as exc:
@@ -567,14 +567,6 @@ class ActionRunner:
                         run.port_name,
                         exc_info=True,
                     )
-
-    def _make_log_func(self, run: ActionRun) -> Callable[[str], None]:
-        """Build the `log(message)` callable passed into `action.run_func` (freetext, like `logging.info()`)."""
-
-        def log(message: str) -> None:
-            self._publish(run.run_id, {"event": message, "ts": time.time()})
-
-        return log
 
     def _notify(self, port_name: str, event: str, run: ActionRun) -> None:
         """Push an `action_started`/`action_finished` meta event (see get_status().active_action)."""

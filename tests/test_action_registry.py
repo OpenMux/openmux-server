@@ -19,7 +19,7 @@ SCRIPT_TEMPLATE = textwrap.dedent(
         ],
     }}
 
-    async def run(session, params, log):
+    async def run(session, params):
         {body}
     """
 )
@@ -48,7 +48,7 @@ def test_load_action_from_file_missing_file_raises(tmp_path):
 
 def test_load_action_from_file_missing_action_dict_raises(tmp_path):
     path = tmp_path / "no_meta.py"
-    path.write_text("async def run(session, params, log):\n    pass\n")
+    path.write_text("async def run(session, params):\n    pass\n")
     with pytest.raises(ActionValidationError):
         load_action_from_file(str(path))
 

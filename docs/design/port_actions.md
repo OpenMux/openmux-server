@@ -90,7 +90,7 @@ an action attaches to `PortManager` exactly like a console client does, through
 
 ## Script format
 - A script is a plain Python module with `ACTION` metadata (name, description, declared
-  input parameters) and an `async def run(session, params, log)` entry point.
+  input parameters) and an `async def run(session, params)` entry point.
 - `session` is a small expect-style wrapper: `await session.send(text)`,
   `await session.expect(pattern, timeout=...)`, `await session.sendline(text)`.
   A matched `expect()` (and anything before it) is dropped from the buffer, so a
@@ -111,8 +111,12 @@ an action attaches to `PortManager` exactly like a console client does, through
   a `device_type` param with `widget: "select"` and `choices: ["router", "switch"]`. The
   same `widget`/`choices` fields are included in the `GET .../actions` catalog response
   so the console page (`renderActionParamField()` in `console.js`) can render them.
-- `log` is a callable for structured progress events (step name, status, matched text) —
-  distinct from raw port I/O, see "Live view" below.
+- `session.log(message)` reports an operator-facing line for the run (step name,
+  status, matched text) — distinct from raw port I/O, see "Live view" below. It
+  reaches both the live console UI and the persisted log file. For tracing detail
+  the operator does not need (per-line decisions, dialog traffic, buffer contents,
+  raw API data), use `session.debug(message)` instead — it writes only to the
+  persisted log file, never to the UI (see "Persisted log" below).
 
 ## Execution model
 - Run the script in a separate process (subprocess isolation) by default, not in-process
@@ -365,12 +369,13 @@ separate, self-contained transcript file per run
 (`logs/ports/{port_name}_action_{action_id}_{started_YYYYMMDDHHMMSS}_{run_id}.log`),
 independent of the port's own log.
 
-`ActionRunner._publish()` is the single place every event (the script's own `log()`
-messages *and* the runner's own `action_started`/`progress`/`waiting_for_operator`/
-`action_finished`/`operator_changed` events) passes through, so it's also the single
-place that writes to this transcript via `DataLogger.record_meta()` — the on-disk file
-ends up with the same lines the live terminal view shows, not just the script's own
-`log()` calls. `_format_event_for_log()` renders each structured event as one line,
+`ActionRunner._publish()` is the single place every event (the script's own
+`session.log()` messages *and* the runner's own `action_started`/`progress`/
+`waiting_for_operator`/`action_finished`/`operator_changed` events) passes through, so
+it's also the single place that writes to this transcript via
+`DataLogger.record_meta()` — the on-disk file ends up with the same lines the live
+terminal view shows, not just the script's own `session.log()` calls.
+`_format_event_for_log()` renders each structured event as one line,
 mirroring `console.js`'s terminal "detail" text; keep both in sync if either changes.
 
 `ActionRunner._log_debug()` writes extra debug-only lines straight to the same
@@ -378,10 +383,11 @@ transcript file via `DataLogger.record_meta()`, bypassing `_publish()` entirely 
 never touch `run.events` or WS subscribers, so they never reach the live console, only
 the on-disk file. Covers: the operator's answer to a `prompt()` (`operator_answered`),
 `session.send()`/`sendline()` text (`send`), `session.expect()`'s matched text or the
-buffered-but-unmatched text at timeout (`expect_matched`/`expect_timeout`), and, on an
-unhandled script exception, the port's remaining read buffer and the full Python
-traceback (`buffer_at_crash`/`traceback`) - all truncated (`_truncate()`) since port
-output/tracebacks can be arbitrarily large.
+buffered-but-unmatched text at timeout (`expect_matched`/`expect_timeout`), the script's
+own `session.debug(message)` calls (untruncated, the script's own debug channel), and,
+on an unhandled script exception, the port's remaining read buffer and the full Python
+traceback (`buffer_at_crash`/`traceback`) - the session-generated lines are truncated
+(`_truncate()`) since port output/tracebacks can be arbitrarily large.
 
 ## Run registry
 Keep a lightweight in-memory `ActionRun` record per run: run_id, port_name, action_id,

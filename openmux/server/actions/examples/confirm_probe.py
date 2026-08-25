@@ -18,16 +18,16 @@ ACTION = {
 }
 
 
-async def run(session, params, log):
+async def run(session, params):
     text = params["text"]
     session.progress("confirm")
     ok = await session.confirm(f"Send {text!r} to the port?", timeout=90.0)
     if not ok:
-        log("done: declined")
+        session.log("done: declined")
         return
     session.progress("send")
     await session.sendline(text)
     session.progress("expect_echo")
     matched = await session.expect(text, timeout=5.0)
-    log(f"expect_echo: matched={matched}")
-    log("done")
+    session.log(f"expect_echo: matched={matched}")
+    session.log("done")

@@ -183,7 +183,7 @@ async def test_run_broadcast_failure_is_swallowed_and_does_not_fail_run(dummy_lo
 async def test_concurrent_action_on_same_port_fails_fast(dummy_logger):
     pm, adapter = await _make_pm(max_rw=2)
 
-    async def _slow_run(session, params, log):
+    async def _slow_run(session, params):
         await asyncio.sleep(5)
 
     action = load_action_from_file(ECHO_PROBE_PATH)
@@ -211,7 +211,7 @@ async def test_concurrent_action_on_same_port_fails_fast(dummy_logger):
 async def test_timeout_detaches_client_and_marks_run_timed_out(dummy_logger):
     pm, adapter = await _make_pm()
 
-    async def _hang(session, params, log):
+    async def _hang(session, params):
         await asyncio.sleep(5)
 
     action = load_action_from_file(ECHO_PROBE_PATH)
@@ -233,7 +233,7 @@ async def test_timeout_detaches_client_and_marks_run_timed_out(dummy_logger):
 async def test_script_crash_still_detaches_client(dummy_logger):
     pm, adapter = await _make_pm()
 
-    async def _boom(session, params, log):
+    async def _boom(session, params):
         raise RuntimeError("script bug")
 
     action = load_action_from_file(ECHO_PROBE_PATH)

@@ -1,7 +1,7 @@
 """Expect-style session wrapper for port action scripts.
 
 An `ActionSession` is the `session` argument passed to a script's
-`async def run(session, params, log)` (see docs/design/port_actions.md,
+`async def run(session, params)` (see docs/design/port_actions.md,
 "Script format"). It reads from the same per-client delivery queue that
 `PortManager.add_client_to_port` creates for the action's `client_id`, so it
 sees exactly the bytes a normal read-write console client would see.
@@ -40,12 +40,17 @@ class ActionSession:
         ] = None,
         on_progress: Optional[Callable[[str, Optional[int]], None]] = None,
         on_debug: Optional[Callable[[str], None]] = None,
+        on_log: Optional[Callable[[str], None]] = None,
     ):
         self.port_manager = port_manager
         self.port_name = port_name
         self.client_id = client_id
         self._buffer = bytearray()
         self._operator_input: "asyncio.Queue[str]" = asyncio.Queue()
+        # Called (sync) from log() with the script's operator-facing message.
+        # The runner wires this to its _publish() so the line reaches both the
+        # live console UI (run.events / WS subscribers) and the persisted log.
+        self._on_log = on_log
         # Called (sync) each time wait_for_input()/confirm() starts waiting, so the
         # caller can surface a "waiting_for_operator" structured event (see
         # docs/design/port_actions.md "Operator input"). Receives the current step
@@ -108,6 +113,31 @@ class ActionSession:
                 self._on_progress(step, percent)
             except Exception:
                 pass
+
+    def log(self, message: str) -> None:
+        """Report an operator-facing line for the run.
+
+        Reaches both the live console UI (the run's event stream) and the
+        persisted log file. Use it for the run's milestones - what the
+        operator watching the run needs to see. For tracing detail the
+        operator does not need, use `debug()` instead (file only).
+        """
+        if self._on_log is not None:
+            try:
+                self._on_log(message)
+            except Exception:
+                pass
+
+    def debug(self, message: str) -> None:
+        """Write a debug-only line to the run's persisted log file.
+
+        Unlike `session.log()` (which also reaches the live console UI), this
+        goes only to the on-disk transcript (see docs/design/port_actions.md,
+        "Persisted log"). Use it for tracing detail an operator watching the
+        run does not need: per-line decisions, dialog traffic, buffer
+        contents, raw API data.
+        """
+        self._debug(message)
 
     def read_buffer(self, *, consume: bool = False) -> str:
         """Return the inbound text seen so far, without waiting for a pattern match.

@@ -52,14 +52,14 @@ ACTION = {
 }
 
 
-async def run(session, params, log):
+async def run(session, params):
     step_seconds = params["step_seconds"]
-    log(f"launch_params: device_type={params['device_type']} priority={params['priority']}")
+    session.debug(f"launch_params: device_type={params['device_type']} priority={params['priority']}")
 
     session.progress("confirm_start", 5)
     ok = await session.confirm("Start the setup wizard?", color="blue", timeout=10.0)
     if not ok:
-        log("done: declined")
+        session.log("done: declined")
         return
 
     session.progress("device_name", 15)
@@ -86,13 +86,13 @@ async def run(session, params, log):
         color="orange",
         timeout=120.0,
     )
-    log(f"inputs: name={name} mode={mode} baud={baud}")
+    session.log(f"inputs: name={name} mode={mode} baud={baud}")
 
     session.progress("verbosity", 45)
     verbosity = await session.radio(
         "Pick a log verbosity for this run", ["quiet", "normal", "verbose"], color="pink", timeout=120.0
     )
-    log(f"inputs: verbosity={verbosity}")
+    session.log(f"inputs: verbosity={verbosity}")
 
     # Simulate a device flash that takes a moment, in a few visible stages.
     flash_percent = {"erasing": 55, "writing": 70, "verifying": 85}
@@ -102,24 +102,24 @@ async def run(session, params, log):
 
         session.progress(f"flash: {stage}", flash_percent[stage])
         await asyncio.sleep(step_seconds)
-    log("done: flash complete")
+    session.log("done: flash complete")
 
     session.progress("waiting for non-existant prompt to time out (5s)", 90)
     try:
         await session.send(f"waiting for non-existant prompt to time out (5s)\n")
         await session.expect(r"\[NON-EXISTANT-PROMPT\]", timeout=5.0)
     except ActionTimeoutError:
-        log("timed out waiting for non-existant prompt (5s)")
+        session.log("timed out waiting for non-existant prompt (5s)")
 
     # Simulate a reboot prompt: a bare newline is enough to make the loopback
     # adapter emit "[ENTER]", exercising the "wait for the device's prompt" pattern.
     session.progress("reboot", 95)
     await session.send("\n")
     matched = await session.expect(r"\[ENTER\]", timeout=10.0)
-    log(f"reboot: matched={matched}")
+    session.log(f"reboot: matched={matched}")
 
     session.progress("reboot", 98)
     await session.wait_for_input("Press Enter once the device has finished rebooting", color="yellow", timeout=120.0)
 
     session.progress("done", 100)
-    log(f"done: name={name} mode={mode} baud={baud} verbosity={verbosity}")
+    session.log(f"done: name={name} mode={mode} baud={baud} verbosity={verbosity}")

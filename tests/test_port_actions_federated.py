@@ -231,13 +231,13 @@ async def test_restore_left_read_only_when_origin_slot_moved_on(dummy_logger):
     runner = ActionRunner(pm, console_manager=console_manager)
     action = load_action_from_file(ECHO_PROBE_PATH)
 
-    async def _run_with_intrusion(session, params, log):
+    async def _run_with_intrusion(session, params):
         # Mid-run, another client takes the origin slot out from under the action.
         # (No port I/O: the action has just lost the slot, so a write would time out.)
         action_holders = [h for h in origin.holders if h.startswith("action:")]
         origin.holders.remove(action_holders[0])
         origin.holders.append("intruder")
-        log("intruded")
+        session.log("intruded")
 
     action.run_func = _run_with_intrusion
 

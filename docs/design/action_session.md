@@ -6,7 +6,7 @@ expect-style API to drive a port — send bytes, wait for a pattern, and pause
 for operator input — without touching `PortManager` directly.
 
 `ActionSession` (`openmux/server/actions/session.py`) is the `session`
-argument passed to a script's `async def run(session, params, log)`. One
+argument passed to a script's `async def run(session, params)`. One
 instance is bound to one port attachment (one `client_id`), created and torn
 down by `ActionRunner._execute()` around a single run. It reads from the same
 per-client delivery queue that `PortManager.add_client_to_port()` creates for
@@ -58,9 +58,9 @@ Returns the buffer's current text without waiting for a pattern match.
 #### `session.progress(step: str, percent: Optional[int] = None) -> None`
 Reports what the script is doing, for the console page's progress bar (shown
 in the run panel, in the same slot the finished-run outcome banner uses).
-Purely informational — `log(message)` (passed into `run_func` alongside
-`session`) is for freetext/debug messages, like `logging.info()`;
-`progress()` is the one dedicated channel for "what step, how far along".
+Purely informational — `session.log(message)` is for operator-facing
+freetext messages, like `logging.info()`; `progress()` is the one dedicated
+channel for "what step, how far along".
 - `percent`: `0`-`100`, or omit/`None` for an indeterminate step (still
   running, no known fraction) — the console page then shows an animated
   bar with no fill level instead of a specific percentage.
@@ -69,6 +69,24 @@ Purely informational — `log(message)` (passed into `run_func` alongside
   overlay state, not a step of its own; it never advances or resets the
   last-reported step/percent.
 - **Raises**: `ValueError` if `percent` is given but outside `0`-`100`.
+
+### Logging
+
+#### `session.log(message: str) -> None`
+Reports an operator-facing line for the run. Reaches both the live console
+UI (the run's event stream) and the persisted log file. Use it for the run's
+milestones — what the operator watching the run needs to see. For tracing
+detail the operator does not need, use `debug()` instead (file only).
+
+### Debug logging
+
+#### `session.debug(message: str) -> None`
+Writes a debug-only line to the run's persisted log file (see
+[port_actions.md](port_actions.md), "Persisted log"). Unlike
+`session.log()` — which also reaches the live console UI — `debug()` never
+reaches the UI. Use it for tracing detail an operator watching the run does
+not need: per-line decisions, dialog traffic, buffer contents, raw API data.
+The message is written verbatim (not truncated).
 
 ### Operator input
 One base primitive, `prompt()`, backs five convenience wrappers. All are

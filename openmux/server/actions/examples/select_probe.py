@@ -21,12 +21,12 @@ _COMMANDS = [
 ]
 
 
-async def run(session, params, log):
+async def run(session, params):
     session.progress("select")
     command = await session.select("Pick a command to send", _COMMANDS, timeout=90.0)
     session.progress("send")
     await session.sendline(command)
     session.progress("expect_echo")
     matched = await session.expect(command, timeout=5.0)
-    log(f"expect_echo: matched={matched}")
-    log("done")
+    session.log(f"expect_echo: matched={matched}")
+    session.log("done")

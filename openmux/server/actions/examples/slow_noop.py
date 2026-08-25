@@ -17,8 +17,8 @@ ACTION = {
 }
 
 
-async def run(session, params, log):
+async def run(session, params):
     seconds = params["seconds"]
-    log("sleeping")
+    session.log("sleeping")
     await asyncio.sleep(seconds)
-    log("done")
+    session.log("done")
