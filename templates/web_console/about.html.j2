@@ -15,7 +15,10 @@
         {% endif %}
         <div class="about-title">OpenMux</div>
         <div class="about-subtitle">Web Console &middot; {{ server.realm }}</div>
-        <div class="about-version">v{{ server.version }}</div>
+        <div class="about-version">v{{ server.version_base }}</div>
+        {% if server.version != server.version_base %}
+        <div class="about-version-sub"><code>v{{ server.version }}</code></div>
+        {% endif %}
         <div class="about-subtitle">
           Up {{ server.uptime_human or '---' }}
           {% if server.started %}&middot; started {{ server.started | fmt_ts }}{% endif %}

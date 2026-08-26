@@ -59,6 +59,40 @@ def test_read_hardware_info_missing_returns_empty():
     assert _read_hardware_info(None) == {}
 
 
+def test_about_version_split(monkeypatch):
+    import openmux.server.web_console as wc
+
+    adapter = _make_adapter(0)
+    monkeypatch.setattr(wc, "_get_dist_version", lambda: "9.8.7.post3+gabc1234.d20260101")
+    info = wc._about_server_info(adapter, ports_snapshot=[])
+    assert info["version"] == "9.8.7.post3+gabc1234.d20260101"
+    assert info["version_base"] == "9.8.7.post3"
+
+    # Without a local segment the base equals the full string
+    monkeypatch.setattr(wc, "_get_dist_version", lambda: "1.0.1")
+    info = wc._about_server_info(adapter, ports_snapshot=[])
+    assert info["version_base"] == "1.0.1"
+
+
+def test_login_page_shows_server_version(monkeypatch):
+    import openmux.server.web_console as wc
+    from jinja2 import Environment, FileSystemLoader
+
+    adapter = _make_adapter(0)
+    # tests/ -> repo root, so templates live at <repo>/templates/web_console
+    tdir = Path(__file__).resolve().parents[1] / "templates" / "web_console"
+    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+
+    monkeypatch.setattr(wc, "_get_dist_version", lambda: "9.8.7.post3+gabc1234.d20260101")
+    html = adapter._render_login().decode()
+    assert "OpenMux v9.8.7.post3+gabc1234.d20260101" in html
+
+    # A plain release tag shows just the tag version
+    monkeypatch.setattr(wc, "_get_dist_version", lambda: "1.0.1")
+    html = adapter._render_login().decode()
+    assert "OpenMux v1.0.1" in html
+
+
 @pytest.mark.asyncio
 async def test_about_page_shows_server_version():
     adapter = _make_adapter(8911)

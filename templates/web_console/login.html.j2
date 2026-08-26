@@ -34,6 +34,7 @@
              onkeydown="if(event.key==='Enter'){event.preventDefault();this.closest('form').requestSubmit();}" />
       <button class="btn" type="submit">Sign in</button>
       <div class="hint">After login you'll be redirected back.</div>
+      <div class="login-version">OpenMux v{{ version }}</div>
     </form>
   </body>
   <script src="{{ base_path }}/static/js/login.js"></script>

@@ -161,6 +161,10 @@ def _about_server_info(adapter, ports_snapshot: Optional[list] = None) -> Dict[s
             info.update(getter())
         except Exception:
             pass
+    # Split the full PEP 440 version at the local segment so the template can
+    # show the base ("1.0.1.post48") as the hero and the full string
+    # ("1.0.1.post48+g5dc0139.dYYYYMMDD") one size smaller underneath.
+    info["version_base"] = str(info["version"]).partition("+")[0]
     return info
 
 
@@ -2998,6 +3002,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             logo_url=self._get_logo_url(),
             base_path=base_path,
             message=message,
+            version=_get_dist_version(),
         )
         return html_text.encode("utf-8")
 
