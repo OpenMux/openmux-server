@@ -11,8 +11,10 @@ rather than the top/bottom stacking originally sketched below — a draggable
 docked to the right of the main `#term` console (see "UI surface" and "Live
 view" notes below). Phase 4's structured-event late-join
 is implemented (a port's actions catalog response includes `active_run` when
-one is in progress, the console page shows a "Script running — click to join"
-strip, and `/ws/actions/<run_id>` replays a run's full structured-event history
+one is in progress, the console page shows a persistent "Script running — click
+to open" strip whose click re-opens the split-pane transcript view (joining a
+run this tab has not yet joined), and `/ws/actions/<run_id>` replays a run's
+full structured-event history
 before switching to live streaming) — the raw-byte scrollback ring buffer for
 a late joiner is NOT implemented, since the raw port terminal already
 broadcasts live to every attached client regardless of mode (see "Live view"
@@ -237,11 +239,12 @@ they need a way in without starting a second run:
   `action_id`, `started_at`, `status`, ...) whenever `ActionRunner.get_active_run(port_name)`
   returns a run — no separate poll/endpoint was added, and no `get_status()`/`notify_meta_updated`
   wiring was needed for this since the existing per-port actions fetch already happens at the
-  right time (page load). The console page shows a "Script running: `<name>` — click to join"
+  right time (page load). The console page shows a "Script running: `<name>` — click to open"
   strip (reusing the same persistent `#actionRunStrip` chip from phase 3) when `active_run` is
-  present and this tab hasn't itself started a run; clicking it opens the actions overlay's run
-  panel and connects to that run's WS stream (`joinActiveRun()` in `console.js`) instead of
-  starting a new run.
+  present and this tab hasn't itself started a run; clicking it opens the action
+  pane for that run and connects to that run's WS stream (`joinActiveRun()` in
+  `console.js`) instead of starting a new run - pane only, never the run panel
+  or the params overlay (the Actions button owns that).
 - Joining opens the same split-pane `#actionTermPane` described in phase 3 above,
   connecting to the *same* `/ws/actions/<run_id>` the run is already using — it does not
   start a new run.
@@ -270,7 +273,7 @@ they need a way in without starting a second run:
   "action_name":..., "operator_client_id":...}` over the client's *existing* main port
   WebSocket (the same `OMXCTRL `-prefixed control-frame channel used for `client_mode`/
   `meta`, not a new connection). `console.js`'s `ws.onmessage` handler shows/hides the
-  same persistent `#actionRunStrip` "click to join" chip used for late-join (above) —
+  same persistent `#actionRunStrip` "click to open" chip used for late-join (above) —
   from this viewer's perspective there's no difference between "a run was already active
   when I opened the page" and "a run just started while I was already looking", both
   surface the same strip. A client that already has its own `/ws/actions/<run_id>`
@@ -417,8 +420,11 @@ through the port's general traffic log.
   The first field of the run form is focused when the panel opens, and Enter in
   a field submits the form - that routes to the same launch path as the Run
   button (a plain form submission that reloads the page is intercepted).
-  The bottom-right "Action running: ..." strip is the "view the run" affordance:
-  clicking it opens the run panel of the in-progress run.
+  The bottom-right "Action running: ..." strip is the action pane affordance:
+  clicking it opens the action pane - joining and streaming a run this tab has
+  not yet joined, or re-showing the pane of a run this tab already streams (a
+  finished run's transcript re-opens the same way). It never opens the run
+  panel.
 - **API**: `POST /api/ports/<name>/actions/<id>/run` starts a run; `GET
   /api/ports/<name>/actions/<id>/runs` lists history.
 - **Web plugin**: implemented as its own `openmux.server.web_plugins.port_actions` module

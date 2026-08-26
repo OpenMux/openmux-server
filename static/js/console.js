@@ -480,7 +480,7 @@ async function loadActionsCatalog() {
     if (portActiveRun && !currentActionsWs) {
       pendingJoinRun = data.active_run;
       const label = (actionsCatalog.find((a) => a.id === pendingJoinRun.action_id) || {}).name || pendingJoinRun.action_id;
-      showActionStrip(`Script running: ${label} \u2014 click to join`);
+      showActionStrip(`Script running: ${label} \u2014 click to open`);
     }
   } catch (_) {
     actionsCatalog = [];
@@ -688,7 +688,12 @@ function closeActionTermPane() {
   actionTermSplitter.style.display = 'none';
   actionTermPane.style.display = 'none';
   setTimeout(fitTerminal, 0);
+  // The strip is the pane's reopen affordance - show it whenever there is
+  // something to reopen: a run this tab streams, or the transcript of a run
+  // this tab has watched (finish included - the strip click re-opens the
+  // pane via a history replay, see the strip handler below).
   if (currentActionsWs) showActionStrip(lastActionStripText || 'Action running\u2026');
+  else if (currentRunId) showActionStrip(lastActionStripText || 'Action finished \u2014 click to open');
 }
 if (actionTermClose) actionTermClose.addEventListener('click', () => closeActionTermPane());
 
@@ -863,8 +868,7 @@ function streamActionRun(runId) {
       loadRunHistory();
       if (portActiveRun && portActiveRun.run_id === currentRunId) portActiveRun = null;
       updateActionsRunButton();
-      showActionStrip(`${label}: ${msg.status || 'finished'}`);
-      setTimeout(() => { if (!currentActionsWs) hideActionStrip(); }, 6000);
+      showActionStrip(`Action finished: ${msg.status || 'unknown'} \u2014 click to open`);
       hideActionProgressBar(); // the outcome banner above takes over this slot now
     } else if (msg.event === 'progress') {
       // Script-reported step/percent (session.progress(), see docs/design/action_session.md) -
@@ -1124,24 +1128,29 @@ function hideActionStrip() {
   actionRunStrip.style.display = 'none';
   actionRunStrip.classList.remove('action-needs-attention');
 }
-// Late join (docs/design/port_actions.md "Late join"): open the run panel for an action
-// already started by someone else, and stream its full event history plus live updates.
+// Late join (docs/design/port_actions.md "Late join"): stream a run this tab does
+// not have open yet, opening the action pane with the run's full event history
+// plus live updates. Deliberately pane-only - it does not open the overlay's
+// run panel ("properties" window), which the Actions button owns, so the strip
+// click has exactly one behavior regardless of state.
 function joinActiveRun(activeRun) {
-  const action = actionsCatalog.find((a) => a.id === activeRun.action_id) || { id: activeRun.action_id, name: activeRun.action_id, params: [] };
-  openActionsOverlay();
-  openActionRunPanel(action);
-  setActionsRunStatus(`Running (run ${activeRun.run_id}) — joined in progress`, false);
+  currentAction = actionsCatalog.find((a) => a.id === activeRun.action_id) || { id: activeRun.action_id, name: activeRun.action_id, params: [] };
   streamActionRun(activeRun.run_id);
   currentRunOperatorClientId = activeRun.operator_client_id || null;
   updateOperatorTakeOverUI();
 }
 if (actionRunStrip) actionRunStrip.addEventListener('click', () => {
   actionRunStrip.classList.remove('action-needs-attention');
-  if (pendingJoinRun && !currentAction) { joinActiveRun(pendingJoinRun); pendingJoinRun = null; return; }
-  // The strip is the "view the run" affordance: jump straight to the run panel of
-  // the run this tab streams, while the Actions button always reopens the list.
-  if (currentActionsWs) { openActionsOverlay(); showActionsRunView(); return; }
-  openActionsOverlay();
+  // The strip is ONE affordance with ONE behavior - open the action pane - in
+  // every wording it carries ("Script running ...", "Action running ...", a
+  // finished run's outcome). It never opens the run panel / properties overlay
+  // (that is the Actions button's job):
+  //   - a run this tab does not stream yet -> join it (pane + full WS stream);
+  //   - a finished run this tab watched -> replay its transcript (pane + history);
+  //   - a run this tab already streams -> just re-show the pane.
+  if (pendingJoinRun && !currentActionsWs) { joinActiveRun(pendingJoinRun); pendingJoinRun = null; return; }
+  if (!currentActionsWs && currentRunId) { streamActionRun(currentRunId); return; }
+  openActionTermPane();
 });
 
 // Closing the overlay only hides it - the run keeps executing server-side and its
@@ -1424,7 +1433,7 @@ function connectSelected() {
           if (msg.event === 'action_started') {
             pendingJoinRun = { run_id: msg.run_id, action_id: msg.action_id, operator_client_id: msg.operator_client_id };
             const label = (actionsCatalog.find((a) => a.id === msg.action_id) || {}).name || msg.action_name || msg.action_id;
-            showActionStrip(`Script running: ${label} \u2014 click to join`);
+            showActionStrip(`Script running: ${label} \u2014 click to open`);
           } else if (msg.event === 'action_finished' && pendingJoinRun && pendingJoinRun.run_id === msg.run_id) {
             pendingJoinRun = null;
             hideActionStrip();
