@@ -43,9 +43,14 @@ reload-full:
 
 # Project configuration
 PROJECT_NAME = openmux
-# Read version from pyproject.toml using sed; default to 1.0.0 if not found
-VERSION = $(shell v=$$(sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p' pyproject.toml | head -n1); \
-        if [ -n "$$v" ]; then echo $$v; else echo 1.0.0; fi)
+# Version from git, same rule as the setuptools-scm config in pyproject.toml
+# (scripts/git_version.py needs only stdlib + git). Plain python3 as a last
+# resort keeps the Makefile usable on a machine without the venv. 0.0.0 is
+# the same "unknown" sentinel used by the fallback_version in pyproject.
+VERSION = $(shell \
+        $(PYTHON_VENV) scripts/git_version.py 2>/dev/null \
+        || $(PYTHON) scripts/git_version.py 2>/dev/null \
+        || echo 0.0.0)
 PACKAGE_NAME = $(PROJECT_NAME)-$(VERSION)
 
 # Virtual environment paths

@@ -176,36 +176,41 @@ make deb
 dpkg-buildpackage -us -uc -b
 ```
 
-Artifacts are placed one directory up, e.g. `../openmux_1.0.0-1_all.deb`.
+Artifacts are placed one directory up, e.g. `../openmux_1.0.1-48_all.deb`
+(the base is the nearest `v*` tag, the number after the dash is the commit
+distance from that tag).
 
 ### Automated Debian versioning
 
-OpenMux includes a small helper to keep the Debian package version in sync with `pyproject.toml` and to optionally add a snapshot suffix for nightly builds.
+The Python version is git-derived by setuptools-scm (nearest `v*` tag, commit
+distance, short SHA). Debian versions cannot contain `+`, so the same facts
+translate as: **tag base + commit distance as the Debian revision**.
 
 - Script: `scripts/update_deb_changelog.py`
-  - Reads `project.version` from `pyproject.toml`
+  - Runs `git describe` (same flags as setuptools-scm) to find the base and the distance
   - Writes `debian/changelog` with an RFC 2822 date
-  - Supports a Debian revision and optional snapshot suffix
-  - No external dependencies (pure stdlib)
+  - Supports an optional snapshot suffix for nightly builds
+  - No external dependencies (pure stdlib), so it runs on the build host without the venv
 
+- Example: 48 commits past tag `v1.0.1` -> Python `1.0.1.post48+g5dc0139` and `openmux_1.0.1-48_all.deb`.
 - Makefile integration: the `make deb` target runs the updater automatically before `dpkg-buildpackage`.
 
 Controls (via env or make variables):
 
-- `DEB_REVISION` (default `1`): Debian revision appended as `-<rev>`
+- `DEB_REVISION` (default `1`): revision used when the tree is exactly at a tag; otherwise the commit distance sets it
 - `DEB_DIST` (default `unstable`): distribution field in changelog
-- `DEB_SNAPSHOT` (default `off`): set to `auto` to append `~gitYYYYMMDDHHMM` (and short SHA when available)
+- `DEB_SNAPSHOT` (default `off`): set to `auto` to append `~gitYYYYMMDDHHMM[.sha]` (sorts below the same commit, which is what a snapshot is)
 
 Examples:
 
 ```sh
-# Standard release from pyproject version (e.g., 1.0.0-1)
+# Release-style build from the current git state (e.g., 1.0.1-48)
 make deb
 
-# Bump Debian revision, set suite
-make DEB_REVISION=2 DEB_DIST=sid deb
+# Set the suite
+make DEB_DIST=sid deb
 
-# Nightly snapshot builds (e.g., 1.0.0-1~git202510270617.ab12cd3)
+# Nightly snapshot builds (e.g., 1.0.1-48~git202608261744.ab12cd3)
 make DEB_SNAPSHOT=auto deb
 ```
 
@@ -245,7 +250,7 @@ jobs:
 ### Install / remove the package
 
 ```sh
-sudo apt-get install -y ../openmux_1.0.0-1_all.deb
+sudo apt-get install -y ../openmux_1.0.1-48_all.deb
 
 # Remove
 sudo apt-get remove -y openmux

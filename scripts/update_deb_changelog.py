@@ -1,15 +1,23 @@
 """
-Update debian/changelog version from pyproject.toml with minimal dependencies.
+Update debian/changelog version from git with minimal dependencies.
+
+The upstream (Python) version is computed by setuptools-scm from the nearest
+v* tag: "<base>.post<N>+g<sha>". Debian versions cannot contain "+", and a
+dpkg revision belongs to a package version, so this script translates: the
+base stays the tag's version and the commit distance N becomes the Debian
+revision. Both sides gain one entry per commit, so the sort order agrees.
+
+Clean exactly at a tag uses revision DEB_REVISION (default 1).
 
 Usage:
   python3 scripts/update_deb_changelog.py \
       [--revision 1] [--dist unstable] [--message "Automated build"] [--snapshot auto] [--dry-run]
 
 Environment:
-  DEB_REVISION   - default Debian revision (e.g., 1)
+  DEB_REVISION   - Debian revision used when the tree is exactly at a tag
   DEB_DIST       - Debian distribution (e.g., unstable)
   DEB_MESSAGE    - changelog entry message
-  DEB_SNAPSHOT   - if set to 'auto', append '~gitYYYYMMDDHHMM' to the version
+  DEB_SNAPSHOT   - if set to 'auto', append '~gitYYYYMMDDHHMM[.sha]' to the version
 
 The script writes debian/changelog compatible with dpkg-buildpackage.
 """
@@ -25,29 +33,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PYPROJECT = REPO_ROOT / "pyproject.toml"
 CHANGELOG = REPO_ROOT / "debian" / "changelog"
 
 
-def read_version_from_pyproject() -> str:
-    text = PYPROJECT.read_text(encoding="utf-8")
-    # Try simple TOML key match to avoid tomllib dependency
-    # pattern: version = "1.2.3"
-    m = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE)
-    if m:
-        return m.group(1).strip()
-    # Fallback: minimal parse of [project] section
-    in_project = False
-    for line in text.splitlines():
-        s = line.strip()
-        if s.startswith("[") and s.endswith("]"):
-            in_project = s == "[project]"
-            continue
-        if in_project and s.startswith("version") and "=" in s:
-            v = s.split("=", 1)[1].strip().strip('"')
-            if v:
-                return v
-    raise RuntimeError("Could not find version in pyproject.toml")
+def _run(args: list[str], cwd: Path = REPO_ROOT) -> str:
+    return subprocess.check_output(args, cwd=cwd, text=True, stderr=subprocess.DEVNULL).strip()
+
+
+def read_git_version() -> tuple[str, int]:
+    """Return (base version, commit distance from the tag) from git.
+
+    Mirrors the setuptools-scm git_describe_command in pyproject.toml so the
+    deb version always tracks the Python version. With no tag at all the base
+    is 0.0.0 and the distance is the total commit count. Without git there is
+    no base, so (0.0.0, 0) is returned and the caller warns.
+    """
+    try:
+        _run(["git", "rev-parse", "--git-dir"])
+    except subprocess.CalledProcessError:
+        return "0.0.0", 0
+    try:
+        tag = _run(["git", "describe", "--tags", "--abbrev=0", "--match", "v*"])
+        long_desc = _run(["git", "describe", "--tags", "--long", "--match", "v*"])
+    except subprocess.CalledProcessError:
+        count = int(_run(["git", "rev-list", "--count", "HEAD"]) or 0)
+        return "0.0.0", count
+    m = re.match(r"^v?(\d+\.\d+(?:\.\d+)?(?:rc\d+|a\d+|b\d+)?)[0-9A-Za-z.-]*$", tag)
+    base = m.group(1) if m else tag.lstrip("v")
+    d = re.search(r"-(\d+)-g[0-9a-f]+(-dirty)?$", long_desc)
+    return base, int(d.group(1)) if d else 0
 
 
 def git_snapshot_suffix() -> str | None:
@@ -101,8 +115,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
-    base_version = read_version_from_pyproject()
-    deb_version = f"{base_version}-{args.revision}"
+    base_version, distance = read_git_version()
+    # Commit distance becomes the deb revision; exactly at a tag the
+    # fallback DEB_REVISION (min 1) is used instead
+    revision = distance if distance > 0 else max(1, int(args.revision))
+    deb_version = f"{base_version}-{revision}"
     if args.snapshot == "auto":
         suf = git_snapshot_suffix()
         if suf:

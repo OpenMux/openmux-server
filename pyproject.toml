@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=64", "wheel", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "openmux"
-version = "1.0.1"
+dynamic = ["version"]
 description = "Serial port multiplexing server and client"
 keywords = ["serial", "console", "server", "client"]
 authors = [
@@ -44,6 +44,7 @@ dev = [
     "black>=22.0.0",
     "isort>=5.10.0",
     "flake8>=4.0.0",
+    "setuptools-scm>=8",  # required in the dev venv for `pip install -e .`
 ]
 pam = [
     "python-pam>=2.0.2",
@@ -55,6 +56,16 @@ openmux-server = "openmux.server.main:main"
 openmux-client = "openmux.client.main:main"
 openmuxctl = "openmux.cli.openmuxctl:main"
 
+[tool.setuptools_scm]
+# Version = nearest v* tag + commit distance + short SHA.
+#   tag v1.0.1, 48 commits past, clean  -> 1.0.1.post48+g5dc0139
+#   same tree, dirty                    -> 1.0.1.post48+g5dc0139.dYYYYMMDD
+#   exactly at the tag, clean           -> 1.0.1
+version_scheme = "post-release"
+local_scheme = "node-and-date"
+fallback_version = "0.0.0"
+git_describe_command = ["git", "describe", "--tags", "--long", "--dirty", "--match", "v*"]
+write_to = "openmux/_version.py"
 
 [tool.setuptools.packages.find]
 # This tells setuptools to automatically find all packages

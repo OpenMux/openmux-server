@@ -23,6 +23,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+
+# setuptools-scm generated version file
+openmux/_version.py
 .coverage
 htmlcov/
 coverage.xml
@@ -123,3 +126,4 @@ id_ed25519*
 *.backup
 *.iso
 *.img
+action_scripts/
