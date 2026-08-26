@@ -1010,24 +1010,36 @@ if (actionsOperatorInput) actionsOperatorInput.addEventListener('keydown', (e) =
 // run path (docs/design/port_actions.md "Deep-linking an action") - autorun goes through
 // this exact same auth/permission/validation-checked API call, no shortcut taken.
 function setActionsRunStatus(text, isError) {
+  // isError: true -> red (a failed start), 'busy' -> the status warning color
+  // (the run button's "cannot start" notice), false -> default text color.
   actionsRunStatus.textContent = text;
-  actionsRunStatus.style.color = isError ? 'var(--status-err-text)' : '';
+  actionsRunStatus.style.color = isError === true ? 'var(--status-err-text)' : (isError === 'busy' ? 'var(--status-warn-text)' : '');
 }
 
-// Run button state (docs/design/port_actions.md "UI surface"): disabled while the
-// port has a run - either one this tab streams (WS open and not yet finished) or
-// one reported by the catalog for another client. Nothing happens until the user
-// presses Run; while busy, the button shows the "another action is running" notice
-// in #actionsRunStatus, and a forced click still gets the server's 400 message
-// ("Failed to start: An action is already running on port ...") below.
+// Run button state (docs/design/port_actions.md "UI surface"): disabled while
+// the port has a run - either one this tab streams (WS open and not yet
+// finished) or one reported by the catalog for another client. Nothing happens
+// until the user presses Run; while busy, the disabled button (kept in the
+// dimmed disabled style) carries the reason in its title, and the
+// #actionsRunStatus line carries the same notice in the warning color, so the
+// state is visible without hovering. A forced click still gets the server's
+// 400 message ("Failed to start: An action is already running on port ...")
+// rendered in red below.
 function updateActionsRunButton() {
   const busy = !!(portActiveRun || (currentActionsWs && !currentRunFinished));
   actionsRunSubmit.disabled = busy || !currentAction;
+  actionsRunSubmit.title = busy ? 'Another action is running on this port' : '';
   if (busy) {
     const runId = (portActiveRun && portActiveRun.run_id) || (currentRunId || '');
-    setActionsRunStatus(`Cannot start: another action is running on this port (run ${runId})`, false);
-  } else if (!actionsRunStatus.textContent.startsWith('Failed to start') && !actionsRunStatus.textContent.startsWith('Finished')) {
-    setActionsRunStatus('', false);
+    setActionsRunStatus(`Cannot start: another action is running on this port (run ${runId})`, 'busy');
+  } else {
+    // Keep the error/red text from a failed start and the green-ish text from a
+    // finished run (both written by the WS path) untouched; only a stale notice
+    // or an empty line is cleared.
+    const t = actionsRunStatus.textContent;
+    if (!t.startsWith('Failed to start') && !t.startsWith('Finished') && !t.startsWith('Running')) {
+      setActionsRunStatus('', false);
+    }
   }
 }
 

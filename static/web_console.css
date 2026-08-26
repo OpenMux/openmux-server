@@ -115,6 +115,10 @@ header .brand .subtitle { color: var(--text-muted); font-size: 12px; margin-top:
 /* Buttons and inputs */
 a.btn, button.btn { display: inline-block; padding: 6px 10px; background: var(--bg-hover); border: 1px solid var(--border-light); border-radius: 4px; color: var(--text-main); text-decoration: none; cursor: pointer; }
 a.btn:hover, button.btn:hover { background: var(--bg-active); }
+/* A disabled control must read as unavailable - the browser default barely dims,
+   and the hover cue alone gives no reason. Dimmed face with a no-drop cursor. */
+button.btn:disabled, a.btn:disabled { background: var(--bg-panel); color: var(--text-dim); border-color: var(--border-color); cursor: not-allowed; opacity: 0.6; }
+button.btn:disabled:hover, a.btn:disabled:hover { background: var(--bg-panel); }
 /* Compact utility for table action buttons */
 a.btn.tiny, button.btn.tiny { padding: 2px 6px; font-size: 12px; line-height: 1.1; }
 /* Compact icon-style button for +/- toggles */
