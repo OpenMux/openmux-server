@@ -26,8 +26,10 @@ import json
 import logging
 import os
 import re
+import platform
 import secrets
 import ssl
+import sys
 import time
 import urllib.parse
 from collections import deque
@@ -50,6 +52,116 @@ from openmux.server.adapters.base_adapter import AdapterCapability, BaseGenericA
 _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-9;?]*[ -/]*[@-~]")
 
 _PORT_SORT_KEYS = {"name", "description", "device", "origin", "status", "clients"}
+
+
+def _get_dist_version() -> str:
+    """Return the installed package version, or 'unknown' when metadata is unavailable."""
+    if _dist_version is None:
+        return "unknown"
+    try:
+        return str(_dist_version("openmux"))
+    except Exception:
+        return "unknown"
+
+
+def _format_uptime(seconds: Optional[float]) -> str:
+    """Format a duration in seconds as `1d 4h`, `4h 12m`, or `12m 30s`.
+
+    Returns an empty string when the value is None.
+    """
+    if seconds is None:
+        return ""
+    try:
+        total = int(max(0.0, float(seconds)))
+    except Exception:
+        return str(seconds)
+    d, rem = divmod(total, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+_HARDWARE_INFO_RE = re.compile(r'^(OPENMUX_(MANUFACTURER|PRODUCT|SERIAL))="([^"]*)"\s*$', re.M)
+_HARDWARE_FIELDS = {
+    "OPENMUX_MANUFACTURER": "manufacturer",
+    "OPENMUX_PRODUCT": "product",
+    "OPENMUX_SERIAL": "serial",
+}
+
+
+def _read_hardware_info(path: Optional[str]) -> Dict[str, str]:
+    """Parse the OPENMUX_* assignments from the hardware info file.
+
+    Returns an empty dict when the file is missing or has no recognized
+    lines. The file is parsed as text only; it is never executed.
+    """
+    info: Dict[str, str] = {}
+    if not path:
+        return info
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return info
+    for match in _HARDWARE_INFO_RE.finditer(text):
+        field = _HARDWARE_FIELDS.get(match.group(1))
+        value = match.group(3).strip()
+        if field and value:
+            info[field] = value
+    return info
+
+
+def _about_server_info(adapter, ports_snapshot: Optional[list] = None) -> Dict[str, Any]:
+    """Assemble the server details shown on the About page.
+
+    Each field is collected by a small getter. A getter that fails or errors
+    keeps the default value for that field. ``ports_snapshot`` is a preloaded
+    port list reused for the count when provided.
+    """
+    info: Dict[str, Any] = {
+        "version": _get_dist_version(),
+        "python": sys.version.split()[0],
+        "os": platform.platform(),
+        "uptime_seconds": None,
+        "started": None,
+        "endpoints": [],
+        "tls": False,
+        "base_path": None,
+        "realm": "OpenMux",
+        "ports_total": 0,
+        "hardware": {},
+    }
+
+    def _uptime():
+        started = getattr(adapter, "_started_monotonic", None)
+        if started is None:
+            return {}
+        uptime = max(0.0, time.monotonic() - started)
+        return {"uptime_seconds": uptime, "started": time.time() - uptime}
+
+    def _endpoints():
+        details = adapter.get_status_info()["details"]
+        return {"endpoints": list(details.get("endpoints") or []), "tls": bool(details.get("tls"))}
+
+    getters = [
+        _uptime,
+        _endpoints,
+        lambda: {"base_path": adapter._effective_base_path(None)},
+        lambda: {"realm": getattr(adapter, "realm", "OpenMux")},
+        lambda: {"ports_total": len(ports_snapshot if ports_snapshot is not None else adapter._get_ports_snapshot())},
+        lambda: {"hardware": _read_hardware_info(getattr(adapter, "hardware_info_file", None))},
+    ]
+    for getter in getters:
+        try:
+            info.update(getter())
+        except Exception:
+            pass
+    return info
 
 
 def _assemble_status_payload(adapter, preloaded_ports: Optional[list[Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -508,6 +620,26 @@ async def handle_logs(request: web.Request) -> web.Response:
 async def handle_status(request: web.Request) -> web.Response:
     adapter = _get_adapter(request)
     return await _render_status_page(request, adapter, default_status_path="/status")
+
+
+async def handle_about(request: web.Request) -> web.Response:
+    adapter = _get_adapter(request)
+    username = request.get("username")
+    ports = adapter._get_ports_snapshot()
+    try:
+        plugin_nav = adapter._get_allowed_plugin_nav(username, request=request)
+    except Exception:
+        plugin_nav = []
+    try:
+        user_perm = adapter._get_effective_permission(username, request)
+    except Exception:
+        user_perm = None
+    try:
+        body = adapter._render_about(plugin_nav=plugin_nav, user_permission=user_perm, ports=ports)
+    except Exception as exc:
+        adapter.logger.error(f"About page render failed: {exc}")
+        raise web.HTTPInternalServerError(text="Failed to render about page.\n")
+    return web.Response(body=body, content_type="text/html")
 
 
 async def handle_login(request: web.Request) -> web.Response:
@@ -1223,6 +1355,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
         # Optional template/static configuration
         self.template_dir = cfg.get("template_dir")  # directory with Jinja2 templates
         self.static_dir = cfg.get("static_dir")  # directory to serve /static from
+        # Hardware identity file written at boot on OpenMux console hardware
+        self.hardware_info_file = str(cfg.get("hardware_info_file", "/etc/openmux-hardware"))
         # Probe / health endpoint configuration
         self.enable_probes = bool(cfg.get("enable_probes", True))
         self.probes_include_details = bool(cfg.get("probes_include_details", False))
@@ -1554,6 +1688,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 app.router.add_get("/logs", handle_logs)
                 app.router.add_get("/logs/{port_name}", handle_logs)
                 app.router.add_get("/status", handle_status)
+                app.router.add_get("/about", handle_about)
             # Login/logout
             app.router.add_get("/login", handle_login)
             app.router.add_post("/login", handle_login)
@@ -1898,6 +2033,15 @@ class WebConsoleAdapter(BaseGenericAdapter):
         """
         assert self._jinja_env is not None
         tmpl = self._jinja_env.get_template("status.html.j2")
+        server_version = _get_dist_version()
+        try:
+            server_uptime = (
+                _format_uptime(max(0.0, time.monotonic() - self._started_monotonic))
+                if self._started_monotonic is not None
+                else ""
+            )
+        except Exception:
+            server_uptime = ""
         # Compute a few top-level metrics for cards
         ports = data.get("ports", []) or []
         sidebar_ports = data.get("sidebar_ports") or ports
@@ -1982,6 +2126,32 @@ class WebConsoleAdapter(BaseGenericAdapter):
             sort_dir=sort_dir,
             sort_query=sort_query,
             status_path=status_path,
+            server_version=server_version,
+            server_uptime=server_uptime,
+        )
+        return html_text.encode("utf-8")
+
+    def _render_about(
+        self,
+        plugin_nav: Optional[list[Dict[str, Any]]] = None,
+        user_permission: Optional[str] = None,
+        ports: Optional[list] = None,
+    ) -> bytes:
+        """Render the About page (server identity, runtime, and hardware info)."""
+        assert self._jinja_env is not None
+        tmpl = self._jinja_env.get_template("about.html.j2")
+        info = _about_server_info(self, ports_snapshot=ports)
+        info["uptime_human"] = _format_uptime(info["uptime_seconds"]) if info["uptime_seconds"] is not None else ""
+        base_path = self._effective_base_path(None)
+        html_text = tmpl.render(
+            realm=self.realm,
+            logo_url=self._get_logo_url(),
+            title="OpenMux About",
+            base_path=base_path,
+            plugin_nav=plugin_nav or [],
+            user_permission=user_permission,
+            ports=ports or [],
+            server=info,
         )
         return html_text.encode("utf-8")
 

@@ -339,6 +339,7 @@ properties:
       respect_forwarded_prefix: { type: boolean }
       static_dir: { type: string }
       template_dir: { type: string }
+      hardware_info_file: { type: string, default: /etc/openmux-hardware }
       plugins:
         type: array
         items:

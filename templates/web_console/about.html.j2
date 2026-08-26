@@ -1,0 +1,82 @@
+{% extends "layout.html.j2" %}
+
+{% set active_page = 'about' %}
+
+{% block page_title %}About{% endblock %}
+
+{% block content %}
+  <div class="about-wrap">
+    <div class="card about-card">
+      <div class="about-head">
+        {% if logo_url %}
+          <img class="about-logo" src="{{ base_path }}{{ logo_url }}" alt="logo" />
+        {% else %}
+          <div class="about-logo-fallback">{{ (realm.split()[0][0] ~ (realm.split()[1][0] if realm.split()|length > 1 else '')) | upper }}</div>
+        {% endif %}
+        <div class="about-title">OpenMux</div>
+        <div class="about-subtitle">Web Console &middot; {{ server.realm }}</div>
+        <div class="about-version">v{{ server.version }}</div>
+        <div class="about-subtitle">
+          Up {{ server.uptime_human or '---' }}
+          {% if server.started %}&middot; started {{ server.started | fmt_ts }}{% endif %}
+        </div>
+      </div>
+
+      <div class="about-section">
+        <h2>Server</h2>
+        <table class="mini-table mini-table--form">
+          <tbody>
+            <tr>
+              <th>Endpoints</th>
+              <td>
+                {% if server.endpoints %}
+                  {% for ep in server.endpoints %}{% if not loop.first %}<br>{% endif %}<code>{{ ep }}</code>{% if server.tls and loop.last %} <span class="tag tiny ok">TLS</span>{% endif %}{% endfor %}
+                {% else %}
+                  <span class="muted">&mdash;</span>
+                {% endif %}
+              </td>
+            </tr>
+            <tr>
+              <th>Base path</th>
+              <td><code>{{ server.base_path or '/' }}</code></td>
+            </tr>
+            <tr>
+              <th>Python</th>
+              <td><span class="muted">{{ server.python }}</span></td>
+            </tr>
+            <tr>
+              <th>Platform</th>
+              <td><span class="muted">{{ server.os }}</span></td>
+            </tr>
+            <tr>
+              <th>Ports</th>
+              <td><span class="muted">{{ server.ports_total }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {% if server.hardware %}
+      <div class="about-section">
+        <h2>Hardware</h2>
+        <table class="mini-table mini-table--form">
+          <tbody>
+            <tr>
+              <th>Manufacturer</th>
+              <td><span class="muted">{{ server.hardware.manufacturer or '---' }}</span></td>
+            </tr>
+            <tr>
+              <th>Product</th>
+              <td><span class="muted">{{ server.hardware.product or '---' }}</span></td>
+            </tr>
+            <tr>
+              <th>Serial</th>
+              <td><code>{{ server.hardware.serial or '---' }}</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}

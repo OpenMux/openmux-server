@@ -163,6 +163,7 @@ web_console (runtime defaults from openmux/server/web_console.py)
 - session_ttl_seconds: 28800 (8 hours)
  - static_dir: ./static (relative to working directory if not set)
  - template_dir: ./templates/web_console (relative to working directory if not set)
+- hardware_info_file: /etc/openmux-hardware (OpenMux hardware identity file; shown on the /about page)
 - ssl_cert, ssl_key: required if use_tls true and tls_autogen false (runtime enforcement)
 - plugins: array of module strings (no default; example includes openmux.server.web_plugins.config_editor)
 

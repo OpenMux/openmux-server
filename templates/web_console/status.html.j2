@@ -6,6 +6,9 @@
 
 {% block header_actions %}
   <div class="extras">
+    {% if server_version %}
+      <span class="muted" title="OpenMux server version">OpenMux v{{ server_version }}{% if server_uptime %} · up {{ server_uptime }}{% endif %}</span>
+    {% endif %}
     <button class="btn" id="autoRefreshToggle" type="button" title="Toggle auto-refresh">Auto Refresh: Off</button>
   </div>
 {% endblock %}

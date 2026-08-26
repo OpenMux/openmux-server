@@ -288,6 +288,23 @@ body.mode-readonly header.site { background: #2a2200; border-bottom-color: #6b5a
 .mini-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
 .mini-table th, .mini-table td { border-bottom: 1px solid var(--border-color); padding: 4px 6px; }
 .mini-table th { text-align: left; color: var(--text-muted); font-weight: 600; }
+/* Two-column form-style tables (e.g. About page): fixed label width so the
+   value column starts at the same place in every table */
+.mini-table--form { table-layout: fixed; }
+.mini-table--form th { width: 130px; }
+/* About page: a single centered, dialog-like card */
+.about-wrap { display: flex; justify-content: center; padding: 24px 0; }
+.about-card { max-width: 520px; }
+.about-head { text-align: center; padding: 8px 0 14px; }
+.about-head + .about-section { border-top: 1px solid var(--border-color); }
+.about-logo { width: 48px; height: 48px; border-radius: 10px; object-fit: contain; background: var(--logo-bg); margin-bottom: 8px; }
+.about-logo-fallback { width: 48px; height: 48px; border-radius: 10px; background: var(--logo-bg); display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 20px; color: var(--text-bright); margin-bottom: 8px; }
+.about-title { font-size: 20px; font-weight: 700; }
+.about-subtitle { color: var(--text-muted); font-size: 13px; margin-top: 2px; }
+.about-version { font-size: 28px; font-weight: 700; margin: 8px 0 4px; color: var(--text-bright); }
+.about-section { margin-top: 10px; }
+.about-section h2 { margin-bottom: 4px; }
+.about-card h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
 
 /* Sidebar Components */
 .sidebar-header { padding: 0 16px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; gap: 10px; height: 40px; box-sizing: border-box; flex-shrink: 0; }
