@@ -26,7 +26,13 @@ function fitTerminal() { try { fitAddon && fitAddon.fit(); } catch (_) {} }
 window.fitTerminal = fitTerminal; // Expose for layout sidebar toggle
 window.addEventListener('load', () => { fitTerminal(); setTimeout(fitTerminal, 0); });
 window.addEventListener('resize', () => { fitTerminal(); fitActionTerminal(); });
-try { const ro = new ResizeObserver(() => { fitTerminal(); fitActionTerminal(); }); ro.observe(document.getElementById('term-container')); } catch (_) {}
+try {
+  const ro = new ResizeObserver(() => { fitTerminal(); fitActionTerminal(); });
+  ro.observe(document.getElementById('term-container'));
+  // Opening/closing the pane does not resize #term-container itself, so the
+  // pane needs its own observer to re-fit after a display or width change.
+  ro.observe(document.getElementById('actionTermPane'));
+} catch (_) {}
 
 const qs = new URLSearchParams(window.location.search);
 const bannerEl = document.getElementById('banner');
@@ -425,6 +431,9 @@ let actionsCsrf = null;
 let actionsCatalog = [];
 let currentAction = null;
 let currentActionsWs = null;
+// Id of the run this tab is streaming, if any - reported in the Run button's
+// "cannot start" notice and used to clear the port-busy state on action_finished.
+let currentRunId = null;
 // Who may currently answer this run's operator-input prompts (see "Taking over as
 // operator" in the design doc) - kept in sync via the `operator_changed` event.
 let currentRunOperatorClientId = null;
@@ -434,6 +443,10 @@ let currentRunFinished = false;
 // Another client's already-running action on this port, discovered via loadActionsCatalog();
 // cleared once the user clicks the strip to join it (see joinActiveRun()).
 let pendingJoinRun = null;
+// The port's in-flight run from the latest catalog fetch (the `active_run` field).
+// Gates the Run button: while the port has a run, starting another one must be
+// blocked client-side (the server still enforces it with a 400 for other tabs).
+let portActiveRun = null;
 
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -456,14 +469,15 @@ function actionsHeaders() {
 
 async function loadActionsCatalog() {
   const port = currentPort();
-  if (!port) { actionsToggle.style.display = 'none'; return; }
+  if (!port) { actionsToggle.style.display = 'none'; portActiveRun = null; return; }
   try {
     const res = await fetch(`${getBasePath()}/api/ports/${encodeURIComponent(port)}/actions`, { credentials: 'same-origin', cache: 'no-store' });
-    if (!res.ok) { actionsCatalog = []; actionsToggle.style.display = 'none'; return; }
+    if (!res.ok) { actionsCatalog = []; actionsToggle.style.display = 'none'; portActiveRun = null; return; }
     const data = await res.json();
     actionsCatalog = Array.isArray(data.actions) ? data.actions : [];
     actionsToggle.style.display = actionsCatalog.length ? '' : 'none';
-    if (data.active_run && !currentActionsWs) {
+    portActiveRun = data.active_run || null;
+    if (portActiveRun && !currentActionsWs) {
       pendingJoinRun = data.active_run;
       const label = (actionsCatalog.find((a) => a.id === pendingJoinRun.action_id) || {}).name || pendingJoinRun.action_id;
       showActionStrip(`Script running: ${label} \u2014 click to join`);
@@ -471,7 +485,9 @@ async function loadActionsCatalog() {
   } catch (_) {
     actionsCatalog = [];
     actionsToggle.style.display = 'none';
+    portActiveRun = null;
   }
+  updateActionsRunButton();
 }
 
 function showActionsListView() {
@@ -497,9 +513,11 @@ function renderActionsList() {
     actionsListEl.innerHTML = '<div class="muted">No actions available for this port</div>';
     return;
   }
+  const busyId = portActiveRun ? portActiveRun.action_id : null;
   actionsListEl.innerHTML = actionsCatalog.map((a) =>
     `<div class="actions-item" data-action-id="${escapeHtml(a.id)}" style="padding:6px 0; border-bottom:1px solid var(--border-color); cursor:pointer;">` +
-    `<b>${escapeHtml(a.name || a.id)}</b><div class="muted mini">${escapeHtml(a.description || '')}</div></div>`
+    `<b>${escapeHtml(a.name || a.id)}</b>${a.id === busyId ? '<span class="muted mini"> (running)</span>' : ''}` +
+    `<div class="muted mini">${escapeHtml(a.description || '')}</div></div>`
   ).join('');
   actionsListEl.querySelectorAll('.actions-item').forEach((el) => {
     el.addEventListener('click', () => {
@@ -511,6 +529,7 @@ function renderActionsList() {
 
 function closeActionRunStream() {
   if (currentActionsWs) { try { currentActionsWs.close(); } catch (_) {} currentActionsWs = null; }
+  currentRunId = null;
   currentRunOperatorClientId = null;
   updateOperatorTakeOverUI();
   hideOperatorPrompt();
@@ -639,14 +658,25 @@ window.addEventListener('theme-changed', () => {
 });
 
 function openActionTermPane() {
-  ensureActionTerm();
+  // Show the pane BEFORE creating the terminal: xterm only measures its cell
+  // metrics once its container is visible, and the fit addon no-ops while the
+  // cell size is still 0. A terminal opened while the pane was hidden (or a
+  // fit() in this same tick) would keep the terminal at its initial small
+  // size until a later resize - so the fit runs again on the next frame(s)
+  // and after a short delay, by which time the metrics are real.
   actionTermSplitter.style.display = 'block';
   actionTermPane.style.display = 'flex';
   const savedWidth = parseInt(localStorage.getItem(ACTION_TERM_WIDTH_KEY), 10);
   if (savedWidth) actionTermPane.style.width = savedWidth + 'px';
+  ensureActionTerm();
   fitTerminal();
   fitActionTerminal();
-  setTimeout(() => { fitTerminal(); fitActionTerminal(); }, 0);
+  requestAnimationFrame(() => {
+    fitTerminal();
+    fitActionTerminal();
+    requestAnimationFrame(() => { fitTerminal(); fitActionTerminal(); });
+  });
+  setTimeout(() => { fitTerminal(); fitActionTerminal(); }, 200);
   // The pane's own header already shows status - the fixed bottom-right strip would
   // otherwise sit on top of the pane's operator-input box.
   hideActionStrip();
@@ -717,25 +747,32 @@ function renderActionParamField(p) {
 }
 
 function openActionRunPanel(action) {
+  // Only swaps the overlay's content to this action's run form. The action
+  // pane, its terminal, and any running run's stream are left untouched - the
+  // pane's visibility is the user's own (its ✕ button) decision, so selecting
+  // a list entry (or the deep link / strip joining path) must not hide an
+  // open pane or drop a live stream. The pane's content changes only when a
+  // new stream starts (streamActionRun, on Run/join) or the pane is closed.
   currentAction = action;
-  closeActionRunStream();
-  closeActionTermPane();
-  ensureActionTerm();
-  actionTerm.clear();
-  actionTermTitle.textContent = '';
-  setActionTag('');
-  hideActionResultBanner();
-  hideActionProgressBar();
   actionsRunTitle.textContent = action.name || action.id;
   actionsRunDesc.textContent = action.description || '';
   showActionsRunView();
   setActionsRunStatus('', false);
-  hideOperatorPrompt();
   actionsRunForm.innerHTML = (action.params || []).map(renderActionParamField).join('') || '<div class="muted">No parameters</div>';
   loadRunHistory();
+  updateActionsRunButton();
+  // Focus the first input-like field so Enter submits straight away (the form
+  // submit listener above routes that to the launch). Runs after the deep link
+  // pre-fill (see applyActionDeepLink) - focusing never changes a pre-filled
+  // value. Skipped for forms whose fields are only selects/radios.
+  requestAnimationFrame(() => {
+    const field = actionsRunForm.querySelector('input:not([type=radio]):not([type=checkbox]), select');
+    if (!field) return;
+    try { field.focus(); } catch (_) {}
+  });
 }
 
-actionsRunBack.addEventListener('click', () => { closeActionRunStream(); showActionsListView(); });
+actionsRunBack.addEventListener('click', () => { showActionsListView(); });
 
 function collectActionParams() {
   const params = {};
@@ -752,10 +789,10 @@ function collectActionParams() {
 
 function streamActionRun(runId) {
   closeActionRunStream();
+  currentRunId = runId; // closeActionRunStream() above resets it for the old stream
   currentRunFinished = false;
   hideActionResultBanner();
   hideActionProgressBar();
-  ensureActionTerm();
   actionTermTitle.textContent = (currentAction && (currentAction.name || currentAction.id)) || 'Action';
   // Reset the tag per stream start: it only shows run state (Running / Waiting for
   // input… / Finished) in its status color, and a previous run's finish color (green/red/
@@ -763,7 +800,12 @@ function streamActionRun(runId) {
   // openActionRunPanel's reset.
   setActionTag('Running', 'warn');
   openActionTermPane();
-  closeActionsOverlay(); // the run dialog sits over the action terminal pane; get it out of the way once streaming starts
+  actionTerm.clear(); // fresh transcript for this run; openActionTermPane() created it if needed
+  // The run dialog sits over the action terminal pane; get it out of the way once
+  // streaming starts (the run panel reopens list-first next time the Actions button
+  // is pressed - docs/design/port_actions.md "UI surface"). The bottom-right strip
+  // and the terminal pane keep the run reachable until it finishes.
+  closeActionsOverlay();
   const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
   const qs = myClientId ? `?client_id=${encodeURIComponent(myClientId)}` : '';
   const sock = new WebSocket(`${proto}://${location.host}${getBasePath()}/ws/actions/${encodeURIComponent(runId)}${qs}`);
@@ -819,6 +861,8 @@ function streamActionRun(runId) {
       currentRunOperatorClientId = null;
       updateOperatorTakeOverUI();
       loadRunHistory();
+      if (portActiveRun && portActiveRun.run_id === currentRunId) portActiveRun = null;
+      updateActionsRunButton();
       showActionStrip(`${label}: ${msg.status || 'finished'}`);
       setTimeout(() => { if (!currentActionsWs) hideActionStrip(); }, 6000);
       hideActionProgressBar(); // the outcome banner above takes over this slot now
@@ -849,7 +893,7 @@ function streamActionRun(runId) {
       showActionStrip(`Action running: ${label} — ${msg.event || ''}`);
     }
   };
-  sock.onclose = () => { if (currentActionsWs === sock) currentActionsWs = null; };
+  sock.onclose = () => { if (currentActionsWs === sock) { currentActionsWs = null; updateActionsRunButton(); } };
   updateOperatorTakeOverUI();
 }
 
@@ -970,6 +1014,23 @@ function setActionsRunStatus(text, isError) {
   actionsRunStatus.style.color = isError ? 'var(--status-err-text)' : '';
 }
 
+// Run button state (docs/design/port_actions.md "UI surface"): disabled while the
+// port has a run - either one this tab streams (WS open and not yet finished) or
+// one reported by the catalog for another client. Nothing happens until the user
+// presses Run; while busy, the button shows the "another action is running" notice
+// in #actionsRunStatus, and a forced click still gets the server's 400 message
+// ("Failed to start: An action is already running on port ...") below.
+function updateActionsRunButton() {
+  const busy = !!(portActiveRun || (currentActionsWs && !currentRunFinished));
+  actionsRunSubmit.disabled = busy || !currentAction;
+  if (busy) {
+    const runId = (portActiveRun && portActiveRun.run_id) || (currentRunId || '');
+    setActionsRunStatus(`Cannot start: another action is running on this port (run ${runId})`, false);
+  } else if (!actionsRunStatus.textContent.startsWith('Failed to start') && !actionsRunStatus.textContent.startsWith('Finished')) {
+    setActionsRunStatus('', false);
+  }
+}
+
 async function launchCurrentAction() {
   if (!currentAction) return;
   const port = currentPort();
@@ -977,8 +1038,6 @@ async function launchCurrentAction() {
   const params = collectActionParams();
   actionsRunSubmit.disabled = true;
   setActionsRunStatus('Starting\u2026', false);
-  ensureActionTerm();
-  actionTerm.clear();
   try {
     const res = await fetch(`${getBasePath()}/api/ports/${encodeURIComponent(port)}/actions/${encodeURIComponent(currentAction.id)}/run`, {
       method: 'POST', credentials: 'same-origin', headers: actionsHeaders(),
@@ -1001,9 +1060,15 @@ async function launchCurrentAction() {
   } catch (e) {
     setActionsRunStatus(`Failed to start: ${e}`, true);
   } finally {
-    actionsRunSubmit.disabled = false;
+    updateActionsRunButton();
   }
 }
+// Enter inside a field submits the form. Route that to the exact same launch
+// path as the Run button - without this, the plain <form> does a default
+// implicit submission, which reloads the page to the console URL and loses the
+// panel and the run's port context. The browser's native validation still
+// applies: submit does not fire while a required field is empty.
+actionsRunForm.addEventListener('submit', (e) => { e.preventDefault(); launchCurrentAction(); });
 actionsRunSubmit.addEventListener('click', () => launchCurrentAction());
 
 async function loadRunHistory() {
@@ -1061,8 +1126,10 @@ function joinActiveRun(activeRun) {
 if (actionRunStrip) actionRunStrip.addEventListener('click', () => {
   actionRunStrip.classList.remove('action-needs-attention');
   if (pendingJoinRun && !currentAction) { joinActiveRun(pendingJoinRun); pendingJoinRun = null; return; }
+  // The strip is the "view the run" affordance: jump straight to the run panel of
+  // the run this tab streams, while the Actions button always reopens the list.
+  if (currentActionsWs) { openActionsOverlay(); showActionsRunView(); return; }
   openActionsOverlay();
-  if (currentAction) showActionsRunView();
 });
 
 // Closing the overlay only hides it - the run keeps executing server-side and its
@@ -1085,10 +1152,15 @@ async function refreshActionsCatalog() {
   } else {
     renderActionsList();
   }
+  updateActionsRunButton();
 }
 function openActionsOverlay() {
+  // Always reopen the choose-script list first, even when a run panel is open:
+  // the last action's form must not silently come back (docs/design/port_actions.md
+  // "UI surface"). The run panel of a running action is reachable from the
+  // bottom-right strip (the "view the run" affordance) and from any list entry.
   actionsOverlay.style.display = 'block';
-  if (!currentAction) { renderActionsList(); } else { showActionsRunView(); }
+  renderActionsList();
   refreshActionsCatalog();
 }
 function closeActionsOverlay() { actionsOverlay.style.display = 'none'; }

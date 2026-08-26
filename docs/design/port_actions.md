@@ -64,14 +64,22 @@ and returns 400 immediately.
 The console page's Actions button (hidden when no actions are configured for the
 current port, or the user lacks permission) opens a small overlay listing the
 allowed actions; selecting one shows a generated param form and a Run button.
-Starting a run opens the split-pane `#actionTermPane` docked to the right of
-the main console (an xterm.js transcript of the run's structured events, plus
-an operator-input prompt when the script is waiting on `wait_for_input()`), and
-a small run-history table stays in the overlay itself. Closing the `#actionTermPane`
-(✕ button) only hides it — the run's WS stream keeps updating in the
-background, and a small persistent "Action running: ..." strip stays visible
-(click to reopen the pane) so it stays clear the port's read-write slot is
-still held. The pane's width is draggable via `#actionTermSplitter` and
+While the port has a run in progress, the Run button is disabled and shows a
+"Cannot start: another action is running on this port" notice; a start request
+sent anyway (for example from another tab) gets the run API's immediate 400
+with the same message. Starting a run opens the split-pane `#actionTermPane`
+docked to the right of the main console (an xterm.js transcript of the run's
+structured events, plus an operator-input prompt when the script is waiting on
+`wait_for_input()`) and then closes the overlay automatically. The Actions
+button always reopens the overlay at the choose-script list - the last
+action's run panel does not return on its own. The run panel of a running
+action is reachable from the persistent "Action running: ..." strip (click
+opens the run panel and, when this tab does not stream the run yet, connects
+to that run's WS stream via `joinActiveRun()`), and a small run-history table
+stays in the overlay itself. Closing the `#actionTermPane` (✕ button) only
+hides it — the run's WS stream keeps updating in the
+background, and the strip stays visible so it is clear the port's read-write
+slot is still held. The pane's width is draggable via `#actionTermSplitter` and
 persisted across reloads (`localStorage` key `omx_action_term_width`).
 
 
@@ -401,7 +409,16 @@ through the port's general traffic log.
   toolbar button (next to `Connect`/`Menu`/`Info`/`Show Logs`) plus a section in the
   existing `ctrlMenu` overlay, listing the actions available for the current port
   (fetched from `GET /api/ports/<name>/actions`). Each entry has a "Run" button that
-  opens a small params form.
+  opens a small params form. The button always reopens this list - it never reopens
+  the last action's run panel - and the entry of the action that currently runs on
+  the port carries a muted "(running)" suffix. While the port has a run in
+  progress, the run panel's Run button is disabled with a "Cannot start: another
+  action is running on this port" notice; it re-enables once the run finishes.
+  The first field of the run form is focused when the panel opens, and Enter in
+  a field submits the form - that routes to the same launch path as the Run
+  button (a plain form submission that reloads the page is intercepted).
+  The bottom-right "Action running: ..." strip is the "view the run" affordance:
+  clicking it opens the run panel of the in-progress run.
 - **API**: `POST /api/ports/<name>/actions/<id>/run` starts a run; `GET
   /api/ports/<name>/actions/<id>/runs` lists history.
 - **Web plugin**: implemented as its own `openmux.server.web_plugins.port_actions` module
