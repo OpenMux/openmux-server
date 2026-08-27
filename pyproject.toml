@@ -46,10 +46,6 @@ dev = [
     "flake8>=4.0.0",
     "setuptools-scm>=8",  # required in the dev venv for `pip install -e .`
 ]
-pam = [
-    "python-pam>=2.0.2",
-    "six>=1.16.0",
-]
 
 [project.scripts]
 openmux-server = "openmux.server.main:main"
