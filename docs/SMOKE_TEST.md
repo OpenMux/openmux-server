@@ -55,7 +55,7 @@ You can trigger reloads from the CLI without using the UI. The server writes a P
 
   Expected:
   - Logs show `[reload-soft:sighup]` messages and `AuthManager updated` when applicable
-  - No listener restarts; only in-place updates and port reconciliations
+  - No listener restarts; only in-place updates (auth, web console UI settings) and port reconciliations
 
 - Full reload (SIGUSR1):
 

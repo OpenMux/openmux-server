@@ -761,6 +761,8 @@ class OpenMuxServer:
 
         - Reload YAML from disk using ConfigManager
         - Update AuthManager configuration live
+        - Update the running web console's UI-only settings in place (motd,
+          logged_in_motd, realm)
         - Reconcile ports for adapters that support online updates (serial, loopback, command,
           tcp initiator, telnet listener)
         - Do NOT restart connection endpoints (web console, client listener, muxcon)
@@ -797,6 +799,20 @@ class OpenMuxServer:
                 self.logger.info(f"[reload-soft:{req_id}] AuthManager updated")
         except Exception as e:
             self.logger.error(f"[reload-soft:{req_id}] Auth update failed: {e}", exc_info=True)
+
+        # Hot-apply UI-only web_console settings (motd, logged_in_motd, realm).
+        # The web console endpoint is NOT restarted by soft reload, but these
+        # values are read per request/render, so they update in place.
+        try:
+            if self.web_console is not None and hasattr(self.web_console, "update_ui_config"):
+                wc_cfg = new_cfg.get("web_console", new_cfg)
+                changed = self.web_console.update_ui_config(wc_cfg)
+                changed_only = {k: v for k, v in changed.items() if v}
+                summary["adapters"]["web_console"] = changed_only if changed_only else "unchanged"
+                if changed_only:
+                    self.logger.info(f"[reload-soft:{req_id}] web_console UI config updated: {sorted(changed_only.keys())}")
+        except Exception as e:
+            self.logger.error(f"[reload-soft:{req_id}] web_console UI update failed: {e}", exc_info=True)
 
         # Reconcile adapters that support in-place updates
         serial_section = new_cfg.get("serial_ports")

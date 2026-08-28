@@ -1335,12 +1335,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
         host: 0.0.0.0 (str)
         port: 8081 (int)
         enable_ui: true (bool)  # serve landing page
-        realm: "OpenMux" (str)  # Basic-Auth realm
+        realm: "OpenMux" (str)  # Basic-Auth realm (soft-reloadable)
         motd: <multiline text> (str, optional)  # public message of the day, shown
-                # on the login page only; hidden when blank
+                # on the login page only; hidden when blank (soft-reloadable)
         logged_in_motd: <multiline text> (str, optional)  # message of the day for
                 # logged-in users; shown at the top of the status page;
-                # hidden when blank
+                # hidden when blank (soft-reloadable)
         static_dir: <path> (str, optional)  # where /static/ is served from; created if missing
         template_dir: <path> (str, optional) # jinja2 templates directory (index.html.j2, console.html.j2, status.html.j2)
         enable_probes: true (bool)  # register /healthz, /livez, /readyz endpoints
@@ -1515,6 +1515,37 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             return None
         return None
+
+    def update_ui_config(self, web_console_cfg: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+        """Hot-apply UI-only web_console settings during a soft reload.
+
+        Recomputes each value exactly the way ``__init__`` does, so a soft
+        reload converges to the same state as a fresh start with the same
+        config (including clearing a previously-set value). Only settings
+        read per request/render are applied - no rebind or restart needed:
+        ``realm`` (shown in 401 headers and login pages) and the two
+        messages of the day (``motd`` on the login page, ``logged_in_motd``
+        for authenticated users). Network settings (host, port, TLS) are
+        NOT applied here; they require a full reload.
+
+        Returns a dict of {key: changed} for each key updated.
+        """
+        cfg = web_console_cfg if isinstance(web_console_cfg, dict) else {}
+        changed: Dict[str, bool] = {}
+        # realm: "OpenMux" when the key is absent (mirrors __init__'s default)
+        realm_raw = cfg.get("realm", "OpenMux")
+        new_realm = str(realm_raw) if realm_raw is not None else ""
+        changed["realm"] = new_realm != self.realm
+        if changed["realm"]:
+            self.realm = new_realm
+        for key in ("motd", "logged_in_motd"):
+            raw = cfg.get(key)
+            # Blank/missing -> "" (hidden), mirroring __init__
+            new_value = str(raw).strip() if raw is not None and str(raw).strip() else ""
+            changed[key] = new_value != getattr(self, key)
+            if changed[key]:
+                setattr(self, key, new_value)
+        return changed
 
     def get_capabilities(self) -> Set[AdapterCapability]:
         return {AdapterCapability.ACCEPTS_CONNECTIONS}

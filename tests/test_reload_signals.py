@@ -73,6 +73,83 @@ async def test_soft_reload_method(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_soft_reload_hot_applies_web_console_ui_config(monkeypatch, tmp_path):
+    """Soft reload updates the web console's UI-only settings (motd,
+    logged_in_motd, realm) in place without restarting the endpoint."""
+    cfg_path = _write_isolated_config(tmp_path)
+
+    server = OpenMuxServer(cfg_path, log_level="DEBUG")
+
+    async def _noop_update(cfg):
+        return True
+
+    monkeypatch.setattr(server.auth_manager, "update_config", _noop_update, raising=True)
+
+    # Attach a real (unstarted) web console adapter with known initial values.
+    from openmux.server.web_console import WebConsoleAdapter
+
+    wc = WebConsoleAdapter(
+        "web_console", {"motd": "Old login motd", "logged_in_motd": "Old logged-in motd", "realm": "OldRealm"}
+    )
+    server.web_console = wc
+    assert wc.motd == "Old login motd"
+    assert wc.logged_in_motd == "Old logged-in motd"
+    assert wc.realm == "OldRealm"
+
+    # Rewrite the on-disk web_console section with new values.
+    with open(cfg_path) as f:
+        cfg_text = f.read()
+    cfg_text += (
+        "web_console:\n"
+        "  port: 8081\n"
+        '  motd: "New\\nline one\\nline two"\n'
+        '  logged_in_motd: "New logged-in motd"\n'
+        '  realm: "NewRealm"\n'
+    )
+    with open(cfg_path, "w") as f:
+        f.write(cfg_text)
+
+    res = await server.reload_adapters_soft(context={"origin": "test"})
+
+    assert wc.motd == "New\nline one\nline two"
+    assert wc.logged_in_motd == "New logged-in motd"
+    assert wc.realm == "NewRealm"
+    assert res["adapters"]["web_console"] == {"motd": True, "logged_in_motd": True, "realm": True}
+
+
+@pytest.mark.asyncio
+async def test_soft_reload_web_console_unchanged_reports_unchanged(monkeypatch, tmp_path):
+    """Soft reload with unchanged web_console UI values reports 'unchanged'."""
+    cfg_path = _write_isolated_config(tmp_path)
+
+    server = OpenMuxServer(cfg_path, log_level="DEBUG")
+
+    async def _noop_update(cfg):
+        return True
+
+    monkeypatch.setattr(server.auth_manager, "update_config", _noop_update, raising=True)
+
+    from openmux.server.web_console import WebConsoleAdapter
+
+    # Values match the isolated config (no motd keys, realm default "OpenMux"),
+    # so a soft reload must report no change.
+    wc = WebConsoleAdapter("web_console", {})
+    server.web_console = wc
+
+    # Add a web_console section on disk that matches the adapter's defaults.
+    with open(cfg_path) as f:
+        cfg_text = f.read()
+    cfg_text += "web_console:\n  port: 8081\n"
+    with open(cfg_path, "w") as f:
+        f.write(cfg_text)
+
+    res = await server.reload_adapters_soft(context={"origin": "test"})
+
+    assert res["adapters"]["web_console"] == "unchanged"
+    assert wc.motd == "" and wc.logged_in_motd == "" and wc.realm == "OpenMux"
+
+
+@pytest.mark.asyncio
 async def test_full_reload_method(monkeypatch, tmp_path):
     # Use an isolated, adapter-free config (never the real config/server.yaml; see
     # _write_isolated_config for why that matters).

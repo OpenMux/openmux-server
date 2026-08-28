@@ -59,10 +59,11 @@ python -m openmux.cli.openmuxctl status
 python -m openmux.cli.openmuxctl reload --soft
 ```
 
-A soft reload re-reads the config and reconciles adapters and ports without
-disconnecting clients. Use a full reload (`reload --full` or `SIGUSR1`) only
-when a soft reload cannot pick up the change (for example, some adapter type
-changes).
+A soft reload re-reads the config and updates authentication, web console UI
+settings (MOTD, realm), adapters, and ports without disconnecting clients.
+Use a full reload (`reload --full` or `SIGUSR1`) only when a soft reload
+cannot pick up the change (for example, the web console port or TLS settings,
+or some adapter type changes).
 
 ## 4. Configure MuxCon
 
