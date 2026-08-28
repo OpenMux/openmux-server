@@ -201,3 +201,59 @@ async def test_about_page_shows_hardware_info(tmp_path):
                 assert "OMH123" in html
     finally:
         await adapter.stop()
+
+
+def test_render_about_shows_logged_in_user():
+    """The About page shows the caller's username, permission, and groups."""
+    from jinja2 import Environment, FileSystemLoader
+
+    tdir = Path(__file__).resolve().parents[1] / "templates" / "web_console"
+    adapter = _make_adapter(0)
+    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+
+    html = adapter._render_about(username="admin1", user_groups={"ops", "user"}, user_permission="admin").decode()
+    assert "<h2>User</h2>" in html
+    assert "<code>admin1</code>" in html
+    assert '<span class="tag ok">admin</span>' in html
+    # groups render sorted, each as a muted tag
+    assert html.index(">ops<") < html.index(">user<")
+    assert 'tag muted">ops<' in html and 'tag muted">user<' in html
+
+    # read-write uses the warn tag color
+    html = adapter._render_about(username="u", user_groups={"user"}, user_permission="read-write").decode()
+    assert '<span class="tag warn">read-write</span>' in html
+
+    # No username (should not happen for authenticated callers): no User section
+    html = adapter._render_about(username=None, user_groups=None, user_permission=None).decode()
+    assert "<h2>User</h2>" not in html
+    assert "<code>None</code>" not in html
+
+
+def test_get_user_groups_includes_explicit_groups():
+    """get_user_groups returns the baseline 'user' group plus explicit groups."""
+    auth = AuthManager(
+        {
+            "users": [
+                {"username": "u", "password_hash": _USER_HASH, "permissions": "read-write",
+                 "groups": ["tech", "serials"]},
+            ]
+        }
+    )
+    assert auth.get_user_groups("u") == {"user", "tech", "serials"}
+
+
+@pytest.mark.asyncio
+async def test_about_page_shows_logged_in_user_route():
+    adapter = _make_adapter(8913)
+    assert await adapter.start()
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get("http://127.0.0.1:8913/about", headers=_AUTH) as resp:
+                assert resp.status == 200
+                html = await resp.text()
+                # the authenticated caller's identity is rendered
+                assert "<h2>User</h2>" in html
+                assert "<code>u</code>" in html
+                assert 'tag muted">user<' in html
+    finally:
+        await adapter.stop()

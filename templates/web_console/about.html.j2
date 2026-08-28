@@ -25,6 +25,31 @@
         </div>
       </div>
 
+      {% if username %}
+      <div class="about-section">
+        <h2>User</h2>
+        <table class="mini-table mini-table--form">
+          <tbody>
+            <tr>
+              <th>Username</th>
+              <td><code>{{ username }}</code></td>
+            </tr>
+            <tr>
+              <th>Permission</th>
+              <td>{% if user_permission %}<span class="tag {{ user_perm_class }}">{{ user_permission }}</span>{% else %}<span class="tag muted">unknown</span>{% endif %}</td>
+            </tr>
+            <tr>
+              <th>Groups</th>
+              <td>
+                {% if user_groups %}{% for g in user_groups %}<span class="tag muted">{{ g }}</span>{% if not loop.last %} {% endif %}{% endfor %}
+                {% else %}<span class="muted">&mdash;</span>{% endif %}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+
       <div class="about-section">
         <h2>Server</h2>
         <table class="mini-table mini-table--form">

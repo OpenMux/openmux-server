@@ -639,7 +639,17 @@ async def handle_about(request: web.Request) -> web.Response:
     except Exception:
         user_perm = None
     try:
-        body = adapter._render_about(plugin_nav=plugin_nav, user_permission=user_perm, ports=ports)
+        user_groups = adapter.auth_manager.get_user_groups(username) if username and adapter.auth_manager else set()
+    except Exception:
+        user_groups = set()
+    try:
+        body = adapter._render_about(
+            username=username,
+            user_groups=user_groups,
+            plugin_nav=plugin_nav,
+            user_permission=user_perm,
+            ports=ports,
+        )
     except Exception as exc:
         adapter.logger.error(f"About page render failed: {exc}")
         raise web.HTTPInternalServerError(text="Failed to render about page.\n")
@@ -2189,23 +2199,37 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
     def _render_about(
         self,
+        username: Optional[str] = None,
+        user_groups: Optional[Set[str]] = None,
         plugin_nav: Optional[list[Dict[str, Any]]] = None,
         user_permission: Optional[str] = None,
         ports: Optional[list] = None,
     ) -> bytes:
-        """Render the About page (server identity, runtime, and hardware info)."""
+        """Render the About page (logged-in user, server identity, runtime, hardware)."""
         assert self._jinja_env is not None
         tmpl = self._jinja_env.get_template("about.html.j2")
         info = _about_server_info(self, ports_snapshot=ports)
         info["uptime_human"] = _format_uptime(info["uptime_seconds"]) if info["uptime_seconds"] is not None else ""
         base_path = self._effective_base_path(None)
+        perm = user_permission or ""
+        # Tag colors: admin is the "granted everything" case (ok),
+        # read-write is the working case (warn), read-only is limited (muted).
+        try:
+            perm_class = {"admin": "ok", "read-write": "warn"}.get(perm, "muted")
+        except Exception:
+            perm_class = "muted"
+        # Sorted groups for stable display ("user" is the implicit baseline group)
+        groups = sorted(str(g) for g in (user_groups or set()))
         html_text = tmpl.render(
             realm=self.realm,
             logo_url=self._get_logo_url(),
             title="OpenMux About",
             base_path=base_path,
             plugin_nav=plugin_nav or [],
-            user_permission=user_permission,
+            username=username or "",
+            user_permission=perm,
+            user_perm_class=perm_class,
+            user_groups=groups,
             ports=ports or [],
             server=info,
         )
