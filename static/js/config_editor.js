@@ -437,7 +437,14 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
             editRow(idx);
           });
           const bR=document.createElement('button'); bR.className='mini-btn'; bR.type='button'; bR.textContent='Remove'; bR.addEventListener('click',()=>{ try{ if(typeof options.onBeforeRemove==='function'){ const proceed = options.onBeforeRemove(rows[idx], idx); if(proceed===false){ return; } } }catch(_e){} if(editingIndex===idx && activeEditorEl && wrap.contains(activeEditorEl)){ if(typeof activeEditorCleanup==='function'){ activeEditorCleanup({render:false}); activeEditorCleanup=null; } else { activeEditorEl.parentNode && activeEditorEl.parentNode.removeChild(activeEditorEl); activeEditorEl=null; } activeEditorValidate=null; activeEditorSave=null; } rows.splice(idx,1); if(editingIndex!=null){ if(idx<editingIndex) editingIndex -= 1; else if(idx===editingIndex) editingIndex=null; } renderBody(); try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} }); tdA.appendChild(bE); tdA.appendChild(bR); tr.appendChild(tdA); tbody.appendChild(tr); }); renderAddBar(); }
-        function editRow(idx){ const row = rows[idx] || {}; if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } else if(activeEditorEl && activeEditorEl.parentNode){ activeEditorEl.parentNode.removeChild(activeEditorEl); activeEditorEl=null; } activeEditorValidate=null; activeEditorSave=null; editingIndex = idx; renderBody(); const editorRow=document.createElement('tr'); editorRow.className='inline-editor-row'; const editorCell=document.createElement('td'); editorCell.colSpan = visibleColumnCount; editorRow.appendChild(editorCell); const editor=document.createElement('div'); editor.className='section inline-editor-panel'; const lg=document.createElement('div'); lg.className='legend'; const t=document.createElement('div'); t.className='title'; t.textContent = (idx===rows.length)? 'Add item' : 'Edit item'; lg.appendChild(t); const d=document.createElement('div'); d.className='desc'; d.textContent='Fields marked * are required'; lg.appendChild(d); editor.appendChild(lg); const getters=[]; const reqChecks=[]; const errBox=document.createElement('div'); editor.appendChild(errBox);
+        function editRow(idx){ const row = rows[idx] || {}; if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } else if(activeEditorEl && activeEditorEl.parentNode){ activeEditorEl.parentNode.removeChild(activeEditorEl); activeEditorEl=null; } activeEditorValidate=null; activeEditorSave=null; editingIndex = idx; renderBody(); const editorRow=document.createElement('tr'); editorRow.className='inline-editor-row'; const editorCell=document.createElement('td'); editorCell.colSpan = visibleColumnCount; editorRow.appendChild(editorCell); const editor=document.createElement('div'); editor.className='section inline-editor-panel'; const lg=document.createElement('div'); lg.className='legend'; const t=document.createElement('div'); t.className='title'; t.textContent = (idx===rows.length)? 'Add item' : 'Edit item'; lg.appendChild(t); const d=document.createElement('div'); d.className='desc'; d.textContent='Fields marked * are required'; lg.appendChild(d);
+          const _rkinds=columns.map(c=>reloadHintFor(rootId,c.key)).filter(Boolean);
+          const _rstrict=_rkinds.indexOf('full')!==-1 ? 'full' : (_rkinds[0]||null);
+          if(_rstrict){
+            const _rtip=_rstrict==='full' ? 'RW/RO group fields need a Full Reload; other fields apply via Soft Reload.' : (RELOAD_TIPS[_rstrict]||'');
+            lg.appendChild(document.createTextNode(' ')); lg.appendChild(makeReloadHint(_rstrict,_rtip));
+          }
+          editor.appendChild(lg); const getters=[]; const reqChecks=[]; const errBox=document.createElement('div'); editor.appendChild(errBox);
           // Special inline row for serial 8-N-1 when editing serial_ports
           const isSerial = rootId==='serial_ports'; const isTcpInitiator = rootId==='tcp_initiator_ports'; let _protTypeInput = null;
           columns.forEach(c=>{
@@ -446,7 +453,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
               // Defer handling to a single grouped row once (on baudrate)
               if(c.key!=='baudrate') return;
               const field=document.createElement('div'); field.className='field';
-              const lab=document.createElement('label'); lab.textContent='Serial settings'; const star=document.createElement('span'); star.className='req'; star.textContent=' *'; lab.appendChild(star); field.appendChild(lab);
+              const lab=document.createElement('label'); lab.textContent='Serial settings'; const star=document.createElement('span'); star.className='req'; star.textContent=' *'; lab.appendChild(star); lab.appendChild(makeReloadHint('soft', RELOAD_TIPS.soft)); field.appendChild(lab);
               // Baud (select with custom)
               const baudLabel=document.createElement('span'); baudLabel.className='subtle'; baudLabel.textContent='Baud'; field.appendChild(baudLabel);
               const baudChoices = ['', '9600','19200','38400','57600','115200','230400','460800','921600'];
@@ -502,7 +509,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
               return; // Skip default handling for grouped fields
             }
             // Default field rendering
-            const lab=document.createElement('label'); lab.textContent=c.label||c.key; if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; lab.appendChild(star); } const field=document.createElement('div'); field.className='field'; field.appendChild(lab); let input; if(c.type==='boolean'){ input=document.createElement('input'); input.type='checkbox'; if(row[c.key]!==undefined && row[c.key]!==null){ input.checked=!!row[c.key]; } else if(c.default!==undefined){ input.checked=!!c.default; } else { input.checked=false; } } else if(c.type==='enum'){ input=document.createElement('select'); const blank=document.createElement('option'); blank.value=''; blank.textContent=''; input.appendChild(blank); (c.enum||[]).forEach(v=>{ const o=document.createElement('option'); o.value=String(v); o.textContent=String(v); if(String(row[c.key])===String(v)) o.selected=true; input.appendChild(o); }); } else if(c.type==='number'||c.type==='integer'){ input=document.createElement('input'); input.type='number'; if(c.min!==undefined) input.min=String(c.min); if(c.max!==undefined) input.max=String(c.max); if(c.step!==undefined) input.step=String(c.step); if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } } else if(c.type==='array-string'){ input=document.createElement('input'); input.type='text'; input.placeholder='comma,separated,values'; if(Array.isArray(row[c.key])) input.value=row[c.key].join(','); } else { input=document.createElement('input'); input.type='text'; if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } }
+            const lab=document.createElement('label'); lab.textContent=c.label||c.key; if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; lab.appendChild(star); } const _rr=reloadHintFor(rootId, c.key); if(_rr){ lab.appendChild(makeReloadHint(_rr, RELOAD_TIPS[_rr])); } const field=document.createElement('div'); field.className='field'; field.appendChild(lab); let input; if(c.type==='boolean'){ input=document.createElement('input'); input.type='checkbox'; if(row[c.key]!==undefined && row[c.key]!==null){ input.checked=!!row[c.key]; } else if(c.default!==undefined){ input.checked=!!c.default; } else { input.checked=false; } } else if(c.type==='enum'){ input=document.createElement('select'); const blank=document.createElement('option'); blank.value=''; blank.textContent=''; input.appendChild(blank); (c.enum||[]).forEach(v=>{ const o=document.createElement('option'); o.value=String(v); o.textContent=String(v); if(String(row[c.key])===String(v)) o.selected=true; input.appendChild(o); }); } else if(c.type==='number'||c.type==='integer'){ input=document.createElement('input'); input.type='number'; if(c.min!==undefined) input.min=String(c.min); if(c.max!==undefined) input.max=String(c.max); if(c.step!==undefined) input.step=String(c.step); if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } } else if(c.type==='array-string'){ input=document.createElement('input'); input.type='text'; input.placeholder='comma,separated,values'; if(Array.isArray(row[c.key])) input.value=row[c.key].join(','); } else { input=document.createElement('input'); input.type='text'; if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } }
             if(c.placeholder){ input.placeholder=c.placeholder; }
             field.appendChild(input);
             const needsPasswordHelper = (rootId==='auth.users' && c.key==='password_hash');
@@ -725,6 +732,79 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
             c = {...c, default: map[c.key]};
           }
           return c;
+        });
+      }
+
+      // Reload requirements per config field, derived from the reload code paths
+      // (main.py reload_adapters_soft/full, SIGHUP handler, and start()-only reads).
+      //   'soft'    - applied by Soft Reload (SIGHUP / the Soft Reload button)
+      //   'full'    - applied only by Full Reload (SIGUSR1 / the Full Reload button)
+      //   'restart' - applied only on process restart
+      //   'sighup'  - applied only by kill -HUP (not by either editor button)
+      //   'live'    - picked up on use; no reload needed
+      // Simple fields are keyed by input id; table columns by "<rootId>.<key>".
+      // Per-field marks win over the section header badges.
+      const RELOAD_REQUIREMENTS = {
+        // server.id/description are re-read by live adapters on full reload only
+        'server.id': 'full',
+        'server.description': 'full',
+        // control socket and PID file are created at process start
+        'server.control_socket': 'restart',
+        'server.pidfile': 'restart',
+        // log level is re-applied by the SIGHUP signal handler only
+        'logging.level': 'sighup',
+        // log handler set-up (console/file/rotation) happens at process start
+        'logging.console': 'restart',
+        'logging.file': 'restart',
+        'logging.log_dir': 'restart',
+        'logging.max_log_size': 'restart',
+        'logging.log_backup_count': 'restart',
+        // action catalog is re-checked on every use; no reload needed
+        'port_actions.actions_dir': 'live',
+        // Web console UI text is hot-applied on a soft reload (realm is read
+        // per request, the MOTDs on each render); the rest of the web_console
+        // section needs a full reload, so the SOFT marks override the section
+        // badge for these three fields.
+        'web_console.realm': 'soft',
+        'web_console.motd': 'soft',
+        'web_console.logged_in_motd': 'soft',
+      };
+      // Tables whose per-row fields are applied by Soft Reload reconcile
+      const SOFT_RELOAD_TABLE_ROOTS = new Set([
+        'serial_ports','loopback_ports','command_ports','tcp_initiator_ports',
+        'telnet_listener','ssh_listener','muxcon.listeners','muxcon.initiators','muxcon.public_keys',
+      ]);
+      // Access-group fields are NOT included in any port reconcile diff, so they
+      // only take effect when the port is re-created (Full Reload).
+      const FULL_RELOAD_ONLY_COLUMNS = new Set(['read_write_groups', 'read_only_groups']);
+      const RELOAD_TIPS = {
+        soft: 'Applied by Soft Reload (or a Full Reload).',
+        full: 'Needs a Full Reload. A Soft Reload does not update this.',
+        restart: 'Needs a process restart.',
+        sighup: 'Needs kill -HUP (SIGHUP). The editor reload buttons do not change this.',
+        live: 'Applied on use; no reload needed.',
+      };
+      function reloadHintFor(rootId, key){
+        const v = RELOAD_REQUIREMENTS[rootId + '.' + key];
+        if(v) return v;
+        if(SOFT_RELOAD_TABLE_ROOTS.has(rootId)) return FULL_RELOAD_ONLY_COLUMNS.has(key) ? 'full' : 'soft';
+        return null;
+      }
+      function makeReloadHint(kind, tip){
+        const s = document.createElement('span');
+        s.className = 'reload-hint reload-hint-' + kind;
+        s.textContent = kind; /* CSS renders it lowercase */
+        if(tip) s.title = tip;
+        return s;
+      }
+      function injectReloadHints(){
+        Object.keys(RELOAD_REQUIREMENTS).forEach(id=>{
+          const el = q(id); if(!el) return;
+          const field = el.closest('.field'); if(!field) return;
+          const lab = field.querySelector('label'); if(!lab) return;
+          if(lab.querySelector('.reload-hint')) return;
+          const kind = RELOAD_REQUIREMENTS[id];
+          lab.appendChild(makeReloadHint(kind, RELOAD_TIPS[kind]));
         });
       }
       function initStatic(){
@@ -1483,6 +1563,7 @@ if(formRoot){
 fetchCSRF();
 initStatic();
 injectHelps();
+injectReloadHints();
 injectDefaultHints();
 setWritableMetadata(INITIAL_WRITABLE_SECTIONS, INITIAL_WRITABLE_ENFORCED);
 loadCurrent();

@@ -60,6 +60,15 @@
   .toolbar { display:flex; gap:8px; align-items:center; }
   .req { color:var(--req-color); margin-left: 4px; font-size: 11px; }
   .subtle { color:var(--text-muted); font-size: 12px; }
+  /* Reload-required marks: quiet lowercase text, no border or fill. They sit
+     beside the label; the detail lives in the hover tooltip and the legend. */
+  .reload-hint { display:inline-block; margin-left:5px; font-size:9.5px; font-weight:600; letter-spacing:.03em; text-transform:lowercase; white-space:nowrap; vertical-align:baseline; color:var(--text-muted); }
+  .section-header .reload-hint { margin-left:4px; font-size:10px; }
+  .reload-hint-soft, .reload-hint-live { color:#4f9d6d; }
+  .reload-hint-full { color:#a16207; }
+  .reload-hint-restart { color:#b91c1c; }
+  .reload-hint-sighup { color:#1d4ed8; }
+  .reload-legend { display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center; margin-top:6px; font-size:12px; color:var(--text-muted); }
   .password-helper { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; align-items:center; }
   .password-helper input[type="password"] { flex:1; min-width:200px; }
   .password-helper-status { font-size:12px; min-height:16px; color:var(--text-muted); }
@@ -94,12 +103,20 @@
 </div>
 <div class="advisory" id="advisory"></div>
 <div class="subtle" style="margin-top:6px">Fields marked with <span class="req">*</span> are required.</div>
+<div class="reload-legend"><span>Reload needed to apply changes:</span>
+  <span><span class="reload-hint reload-hint-live">LIVE</span> no reload</span>
+  <span><span class="reload-hint reload-hint-soft">SOFT</span> Soft Reload</span>
+  <span><span class="reload-hint reload-hint-full">FULL</span> Full Reload</span>
+  <span><span class="reload-hint reload-hint-sighup">SIGHUP</span> kill -HUP only</span>
+  <span><span class="reload-hint reload-hint-restart">RESTART</span> process restart</span>
+  <span>Section marks show the strictest requirement across the section; per-field marks override.</span>
+</div>
 
 <div id="formRoot">
   <div id="view-auth" class="config-view" style="display:none">
 
   <div class="config-section" data-config-section="authentication">
-    <div class="section-header"><span class="title">Authentication</span> <span class="desc">Local users, API keys, public keys, and external authentication</span></div>
+    <div class="section-header"><span class="title">Authentication</span><span class="reload-hint reload-hint-soft" title="A Soft Reload applies authentication changes">SOFT</span> <span class="desc">Local users, API keys, public keys, and external authentication</span></div>
     <div id="authSection">
       <div class="legend"><div class="title">Users</div><div class="desc">Basic-auth accounts</div></div>
       <div id="auth.users"></div>
@@ -131,7 +148,7 @@
   <div id="view-setup" class="config-view">
 
   <div class="config-section" data-config-section="server">
-    <div class="section-header"><span class="title">Server</span> <span class="desc">Server identity and description</span></div>
+    <div class="section-header"><span class="title">Server</span><span class="reload-hint reload-hint-restart" title="control_socket and pidfile need a process restart">RESTART</span> <span class="desc">Server identity and description</span></div>
     <div class="section">
       <div class="field"><label for="server.id">Server ID</label><input id="server.id" type="text" /></div>
       <div class="field"><label for="server.description">Description</label><input id="server.description" type="text" /></div>
@@ -141,7 +158,7 @@
   </div>
 
   <div class="config-section" data-config-section="logging">
-    <div class="section-header"><span class="title">Logging</span> <span class="desc">File and console logging</span></div>
+    <div class="section-header"><span class="title">Logging</span><span class="reload-hint reload-hint-restart" title="level applies via kill -HUP; the rest need a process restart">RESTART</span> <span class="desc">File and console logging</span></div>
     <div class="section">
       <div class="field"><label for="logging.level">Level</label>
         <select id="logging.level">
@@ -162,7 +179,7 @@
 
   <div id="view-listeners" class="config-view" style="display:none">
   <div class="config-section" data-config-section="client_listener">
-    <div class="section-header"><span class="title">Client listener</span> <span class="desc">TCP console endpoint</span></div>
+    <div class="section-header"><span class="title">Client listener</span><span class="reload-hint reload-hint-full" title="The client listener is not restarted by a soft reload; use a Full Reload">FULL</span> <span class="desc">TCP console endpoint</span></div>
     <div class="section">
       <div class="field"><label for="client_listener.enabled">Enable listener</label><input id="client_listener.enabled" type="checkbox" /></div>
       <div class="field"><label for="client_listener.host">Host</label><input id="client_listener.host" type="text" /></div>
@@ -205,8 +222,10 @@
     <div class="section-header"><span class="title">Guidance</span> <span class="desc">When to use what</span></div>
     <div class="section">
       <ul style="margin:0 0 0 18px; padding:0;">
-        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, and edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports.</li>
-        <li>Use <b>Full Reload</b> for: Client listener enable/host/port changes, muxcon listeners/initiators, TLS enable/certs/TOFU settings, and other adapter-wide options.</li>
+        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, web console MOTD and realm, and edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports.</li>
+        <li>Use <b>Full Reload</b> for: Client listener changes, muxcon advanced settings (heartbeat, multipath, cache, core auth), web status and web console network/TLS settings, web console plugins, and port RW/RO group access fields.</li>
+        <li>Use <b>kill -HUP</b> for: the log level only (the Soft Reload button does not change the log level).</li>
+        <li>Use a <b>process restart</b> for: the control socket path, PID file path, and the logging file/rotation settings.</li>
         <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>
       </ul>
     </div>
@@ -215,48 +234,48 @@
 
   <div id="view-ports" class="config-view" style="display:none">
   <div class="config-section" data-config-section="serial_ports">
-    <div class="section-header"><span class="title">Serial ports</span> <span class="desc">Physical serial devices</span></div>
+    <div class="section-header"><span class="title">Serial ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload; a Full Reload covers the RW/RO groups access fields">SOFT</span> <span class="desc">Physical serial devices</span></div>
     <div id="serial_ports"></div>
   </div>
 
   <div class="config-section" data-config-section="loopback_ports">
-    <div class="section-header"><span class="title">Loopback ports</span> <span class="desc">Software loopbacks</span></div>
+    <div class="section-header"><span class="title">Loopback ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload; a Full Reload covers the RW/RO groups access fields">SOFT</span> <span class="desc">Software loopbacks</span></div>
     <div id="loopback_ports"></div>
   </div>
 
   <div class="config-section" data-config-section="command_ports">
-    <div class="section-header"><span class="title">Command ports</span> <span class="desc">Process-backed ports</span></div>
+    <div class="section-header"><span class="title">Command ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload; a Full Reload covers the RW/RO groups access fields">SOFT</span> <span class="desc">Process-backed ports</span></div>
     <div id="command_ports"></div>
   </div>
 
   <div class="config-section" data-config-section="tcp_initiator_ports">
-    <div class="section-header"><span class="title">TCP initiator ports</span> <span class="desc">Outbound TCP adapters</span></div>
+    <div class="section-header"><span class="title">TCP initiator ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload; a Full Reload covers the RW/RO groups access fields">SOFT</span> <span class="desc">Outbound TCP adapters</span></div>
     <div id="tcp_initiator_ports"></div>
   </div>
   </div>
 
   <div id="view-muxcon" class="config-view" style="display:none">
   <div class="config-section" data-config-section="muxcon">
-    <div class="section-header"><span class="title">Muxcon</span> <span class="desc">Federation and transport</span></div>
+    <div class="section-header"><span class="title">Muxcon</span><span class="reload-hint reload-hint-full" title="Core and advanced settings are only re-read on a Full Reload">FULL</span> <span class="desc">Federation and transport</span></div>
   </div>
 
   <div class="config-section" data-config-section="muxcon">
-    <div class="section-header"><span class="title">Listeners</span> <span class="desc">Incoming connections</span></div>
+    <div class="section-header"><span class="title">Listeners</span><span class="reload-hint reload-hint-soft" title="Listeners are reconciled by a Soft Reload">SOFT</span> <span class="desc">Incoming connections</span></div>
     <div id="muxcon.listeners"></div>
   </div>
 
   <div class="config-section" data-config-section="muxcon">
-    <div class="section-header"><span class="title">Initiators</span> <span class="desc">Outgoing connections</span></div>
+    <div class="section-header"><span class="title">Initiators</span><span class="reload-hint reload-hint-soft" title="Initiators are reconciled by a Soft Reload">SOFT</span> <span class="desc">Outgoing connections</span></div>
     <div id="muxcon.initiators"></div>
   </div>
 
   <div class="config-section" data-config-section="web_status">
-    <div class="section-header"><span class="title">Public Keys</span> <span class="desc">Ed25519 keys for muxcon federation</span></div>
+    <div class="section-header"><span class="title">Public Keys</span><span class="reload-hint reload-hint-soft" title="Public keys are replaced by a Soft Reload">SOFT</span> <span class="desc">Ed25519 keys for muxcon federation</span></div>
     <div id="muxcon.public_keys"></div>
   </div>
 
   <div class="config-section" data-config-section="web_console">
-    <div class="section-header"><span class="title">Advanced</span> <span class="desc">Timing, cache, filters, auth</span></div>
+    <div class="section-header"><span class="title">Advanced</span><span class="reload-hint reload-hint-full" title="MuxCon core and advanced settings are only re-read on a Full Reload">FULL</span> <span class="desc">Timing, cache, filters, auth</span></div>
     <div class="section">
       <div class="field"><label for="muxcon.heartbeat_interval">Heartbeat interval</label><input id="muxcon.heartbeat_interval" type="number" min="0" step="0.1" /></div>
       <div class="field"><label for="muxcon.mpath_primary_stale_sec">MP stale sec</label><input id="muxcon.mpath_primary_stale_sec" type="number" min="0" step="0.1" /></div>
@@ -276,7 +295,7 @@
 
   <div id="view-actions" class="config-view" style="display:none">
   <div class="config-section" data-config-section="port_actions">
-    <div class="section-header"><span class="title">Port Actions</span> <span class="desc">Per-port action catalog and allow-list</span></div>
+    <div class="section-header"><span class="title">Port Actions</span><span class="reload-hint reload-hint-live" title="Checked on every use; no reload needed">LIVE</span> <span class="desc">Per-port action catalog and allow-list</span></div>
     <div class="section">
       <div class="field"><label for="port_actions.actions_dir">Actions directories</label><textarea id="port_actions.actions_dir" rows="2" placeholder="openmux/server/actions/examples"></textarea><span class="help">Directories of action scripts loaded into the catalog, one per line (a single line is saved as a plain path). Scripts are re-checked on every use.</span></div>
     </div>
@@ -290,7 +309,7 @@
 
   <div id="view-setup-2" class="config-view">
   <div class="config-section" data-config-section="web_status">
-    <div class="section-header"><span class="title">Web status</span> <span class="desc">Read-only status server</span></div>
+    <div class="section-header"><span class="title">Web status</span><span class="reload-hint reload-hint-full" title="The web status adapter is only re-created on a Full Reload">FULL</span> <span class="desc">Read-only status server</span></div>
     <div class="section">
       <div class="field"><label for="web_status.host">Host</label><input id="web_status.host" type="text" /></div>
       <div class="field"><label for="web_status.port">Port</label><input id="web_status.port" type="number" min="1" max="65535" /></div>
@@ -301,7 +320,7 @@
   </div>
 
   <div class="config-section" data-config-section="web_console">
-    <div class="section-header"><span class="title">Web console</span> <span class="desc">Admin UI and WS console</span></div>
+    <div class="section-header"><span class="title">Web console</span><span class="reload-hint reload-hint-full" title="Network and TLS settings need a Full Reload; MOTD and realm apply on a Soft Reload">FULL</span> <span class="desc">Admin UI and WS console</span></div>
     <div class="section">
       <div class="field"><label for="web_console.host">Host</label><input id="web_console.host" type="text" /></div>
       <div class="field"><label for="web_console.port">Port</label><input id="web_console.port" type="number" min="1" max="65535" /></div>

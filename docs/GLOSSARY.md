@@ -68,6 +68,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Writable section | A config section the current user is allowed to save, per `security.yaml`. | editable section |
 | Soft reload | A reload that updates authentication, web console UI settings, adapters, and ports without a full restart (SIGHUP). | hot reload |
 | Full reload | A reload that stops and re-creates all adapters (SIGUSR1). | hard reload |
+| Reload hint | The badge in the Config Editor that marks what applies a field change: LIVE (no reload), SOFT, FULL, SIGHUP, or RESTART (process restart). | reload requirement mark |
 | Login MOTD | The public message of the day from `web_console.motd`, shown on the login page. | notice, banner (for this text) |
 | Logged-in MOTD | The message of the day from `web_console.logged_in_motd`, shown at the top of the status page. May hold sensitive text. | notice, banner (for this text) |
 
