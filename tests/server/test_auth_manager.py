@@ -229,7 +229,9 @@ class TestGetUserGroups:
         }
         assert am.get_user_groups("carol") == {"user", "openmux_admin", "field-techs"}
 
-    def test_read_only_permission_deprecation_warning_logged_once(self, caplog):
+    def test_read_only_permission_resolves_without_deprecation_warning(self, caplog):
+        # Issue #58 Part 1: read-only is a first-class global permission again;
+        # the old 'deprecated' log line was removed with the warning machinery.
         am = AuthManager(
             {
                 "users": [{"username": "viewer", "password_hash": "x", "permissions": "read-only"}],
@@ -237,6 +239,4 @@ class TestGetUserGroups:
         )
         with caplog.at_level("WARNING"):
             assert am.get_user_permissions("viewer") == "read-only"
-            assert am.get_user_permissions("viewer") == "read-only"
-        deprecation_msgs = [r for r in caplog.records if "deprecated" in r.message]
-        assert len(deprecation_msgs) == 1
+        assert not [r for r in caplog.records if "deprecated" in r.message]

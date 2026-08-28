@@ -414,9 +414,9 @@ Per-console (per-port) access control layers on top of the global `permissions` 
   table.
 - A port may declare `read_write_groups: [str]` and `read_only_groups: [str]` in `server.yaml`
   (alongside `max_read_write_users`).
-- **Default-allow**: if a port sets neither list, it is open to all authenticated users, exactly
-  as before this feature existed (loopback ports additionally keep their legacy "always
-  read-write" shortcut in this mode).
+- **Default-allow**: if a port sets neither list, it is open to all authenticated users per the
+  access ladder (`_resolve_access_mode`, console_manager.py): loopback ports get no special
+  treatment — they follow the same ladder and slot rules as any other port.
 - **Explicit ACL mode**: once a port sets either list, membership decides access:
   - `admin` permission always bypasses group ACLs (unchanged from before).
   - A user whose groups intersect `read_write_groups` is eligible for read-write (subject to the

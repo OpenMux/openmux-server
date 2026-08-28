@@ -51,8 +51,6 @@ class AuthManager:
         self._pw_hmac_challenges = {}
         # Authentication failure tracking: (username, ip) -> {failures, first_failure, locked_until}
         self._fail_tracker = {}
-        # Usernames already warned about deprecated "permissions: read-only" (one warning each)
-        self._ro_deprecation_warned: Set[str] = set()
         # Policy parameters (overridable via security policy)
         self._max_fail_window = 300  # seconds window for counting failures
         self._base_lock_seconds = 30  # initial lock duration after threshold
@@ -560,9 +558,7 @@ class AuthManager:
                 if user.get("username") == username:
                     # Explicit permissions field
                     if "permissions" in user:
-                        perms = user["permissions"]
-                        self._warn_if_deprecated_read_only(username, perms)
-                        return perms
+                        return user["permissions"]
                     # Fall through to default if static user matched
                     return "read-write"
 
@@ -580,16 +576,6 @@ class AuthManager:
 
         # Unknown user: if this is reached, the caller likely failed auth.
         return None
-
-    def _warn_if_deprecated_read_only(self, username: str, perms: str) -> None:
-        """Log a one-time deprecation warning for `permissions: read-only` users."""
-        if perms == "read-only" and username not in self._ro_deprecation_warned:
-            self._ro_deprecation_warned.add(username)
-            self.logger.warning(
-                "User '%s' uses deprecated 'permissions: read-only'; console access is now "
-                "controlled per-console via read_write_groups/read_only_groups instead",
-                username,
-            )
 
     def get_user_groups(self, username: str) -> Set[str]:
         """Return the console-access groups an identity belongs to.

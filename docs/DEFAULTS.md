@@ -89,7 +89,7 @@ loopback_ports (per-port) (schema + runtime)
 - echo_delay: 0.0 (schema)
 - max_read_write_users: 5 (schema; legacy read_write_users is normalized to this field with a warning)
 - sanitize_control: true
-- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior). A loopback port with either list set loses the legacy "always force read-write" shortcut and is enforced like any other port.
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior). Loopback ports are enforced like any other port (no legacy "always force read-write" shortcut).
 
 command_ports (per-port) (schema defaults)
 - shell: false

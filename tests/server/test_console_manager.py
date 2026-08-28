@@ -392,7 +392,9 @@ class TestConnectClientToPortGroupAcl:
         assert (ok, mode, reason) == (False, None, "no_permissions")
 
     @pytest.mark.asyncio
-    async def test_loopback_without_acl_keeps_legacy_force_read_write(self, monkeypatch):
+    async def test_loopback_without_acl_follows_slot_rules(self, monkeypatch):
+        """Loopback ports are not special: a default read-write user gets
+        read-write while the slot is free, like any other port."""
         cm = await self._make_manager(
             monkeypatch,
             {"name": "loopback1", "max_read_write_users": 1},
@@ -415,3 +417,210 @@ class TestConnectClientToPortGroupAcl:
         )
         ok, mode, reason = await cm.connect_client_to_port("c1", "loopback1", "bob")
         assert (ok, mode, reason) == (True, "read-only", None)
+
+    # ------------------------------------------------------------------
+    # Issue #58 Part 1: ladder fixes beyond the original issue #24 ACL block
+    #
+    # NOTE: every port in this class lives on a LoopbackAdapter, so the wrapper
+    # marks them `loopback=True` and the ladder's loopback auto-promotion
+    # exception applies. The generic (non-loopback) cases live in
+    # TestResolveAccessModeLadder below, which drives `_resolve_access_mode`
+    # directly with non-loopback stand-in ports.
+
+    @pytest.mark.asyncio
+    async def test_loopback_port_treats_read_only_global_as_read_only(self, monkeypatch):
+        """The old loopback auto-promotion is gone (#58): a global read-only
+        user stays read-only on a no-list loopback port, even with a free slot."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 1},
+            {"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only"}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "auditor")
+        assert (ok, mode, reason) == (True, "read-only", None)
+
+    @pytest.mark.asyncio
+    async def test_global_read_write_user_demotes_when_port_full(self, monkeypatch):
+        """Demote, never reject: a write-entitled user on a full port gets read-only."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 1},
+            {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
+        )
+        ok1, mode1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
+        assert (ok1, mode1) == (True, "read-write")
+        ok2, mode2, reason2 = await cm.connect_client_to_port("c2", "p1", "bob")
+        assert (ok2, mode2, reason2) == (True, "read-only", None)
+
+    @pytest.mark.asyncio
+    async def test_rw_group_member_respects_slot_limit(self, monkeypatch):
+        """Bug 2 fix: group grants are subject to max_read_write_users."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 1, "read_write_groups": ["ops"]},
+            {
+                "users": [
+                    {"username": "a", "password_hash": "x", "groups": ["ops"]},
+                    {"username": "b", "password_hash": "x", "groups": ["ops"]},
+                ]
+            },
+        )
+        ok1, mode1, _ = await cm.connect_client_to_port("c1", "p1", "a")
+        assert (ok1, mode1) == (True, "read-write")
+        ok2, mode2, reason2 = await cm.connect_client_to_port("c2", "p1", "b")
+        assert (ok2, mode2, reason2) == (True, "read-only", None)
+
+    @pytest.mark.asyncio
+    async def test_rw_group_grant_beats_read_only_global_permission(self, monkeypatch):
+        """Explicit grants beat the global permission, both directions."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 1, "read_write_groups": ["ops"]},
+            {"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only", "groups": ["ops"]}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "auditor")
+        assert (ok, mode, reason) == (True, "read-write", None)
+
+    @pytest.mark.asyncio
+    async def test_ro_group_grant_beats_read_write_global_permission(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 5, "read_only_groups": ["viewers"]},
+            {"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "bob")
+        assert (ok, mode, reason) == (True, "read-only", None)
+
+    @pytest.mark.asyncio
+    async def test_loopback_port_demotes_second_write_user_when_full(self, monkeypatch):
+        """A full no-list loopback port demotes the next write-entitled user
+        to read-only, never rejected or overflowed."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "loopback1", "max_read_write_users": 1},
+            {"users": [{"username": "a", "password_hash": "x"}, {"username": "b", "password_hash": "x"}]},
+        )
+        ok1, mode1, _ = await cm.connect_client_to_port("c1", "loopback1", "a")
+        assert (ok1, mode1) == (True, "read-write")
+        ok2, mode2, reason2 = await cm.connect_client_to_port("c2", "loopback1", "b")
+        assert (ok2, mode2, reason2) == (True, "read-only", None)
+
+    @pytest.mark.asyncio
+    async def test_acl_port_denies_unlisted_user_even_with_read_write_global(self, monkeypatch):
+        """The closed boundary: a list-bearing port never falls back to the slot branch."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 5, "read_write_groups": ["ops"]},
+            {"users": [{"username": "stranger", "password_hash": "x", "permissions": "read-write"}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "stranger")
+        assert (ok, mode, reason) == (False, None, "denied_by_group_acl")
+
+
+# ---------------------------------------------------------------------------
+# _resolve_access_mode: issue #58 ladder unit matrix (non-loopback ports)
+
+
+class _LadderPort:
+    """Stand-in port with explicit ladder inputs (no loopback, no sockets)."""
+
+    def __init__(
+        self,
+        max_rw: int = 1,
+        rw_clients: int = 0,
+        ro_groups: tuple = (),
+        rw_groups: tuple = (),
+        loopback: bool = False,
+        adapter_type: str = "fake",
+    ):
+        self.max_read_write_users = max_rw
+        self.read_write_groups = list(rw_groups)
+        self.read_only_groups = list(ro_groups)
+        self.loopback = loopback
+        self.adapter_type = adapter_type
+        self.connected_clients = [
+            {"client_id": f"rw{i}", "username": f"rw{i}", "mode": "read-write"} for i in range(rw_clients)
+        ]
+
+
+class TestResolveAccessModeLadder:
+    """Unit matrix for the issue #58 access ladder, driven directly.
+
+    ``_resolve_access_mode(port, port_name, permissions, username)`` returns
+    ``(mode, deny_reason)``. ``permissions`` is the user's global permission
+    as resolved by AuthManager; the unknown-identity case (None) is rejected
+    by the caller before the ladder runs and is covered by the integration
+    tests (``no_permissions``).
+    """
+
+    def _cm(self, auth_config: Dict[str, Any]) -> ConsoleManager:
+        from openmux.server.auth_manager import AuthManager
+
+        return ConsoleManager(FakePortManager(), AuthManager(auth_config))
+
+    def test_admin_gets_read_write_everywhere(self):
+        cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
+        port = _LadderPort(rw_clients=1, rw_groups=("ops",))  # full + ACL'd
+        assert cm._resolve_access_mode(port, "p1", "admin", "root") == ("read-write", None)
+
+    def test_global_read_write_demotes_on_full_port(self):
+        cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
+        assert cm._resolve_access_mode(_LadderPort(max_rw=1), "p1", "read-write", "alice") == ("read-write", None)
+        assert cm._resolve_access_mode(_LadderPort(max_rw=1, rw_clients=1), "p1", "read-write", "alice") == (
+            "read-only",
+            None,
+        )
+
+    def test_global_read_only_never_promoted(self):
+        """Bug 1 fix: the slot branch consults the global permission."""
+        cm = self._cm({"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only"}]})
+        assert cm._resolve_access_mode(_LadderPort(max_rw=1), "p1", "read-only", "auditor") == ("read-only", None)
+        assert cm._resolve_access_mode(_LadderPort(max_rw=1, rw_clients=1), "p1", "read-only", "auditor") == (
+            "read-only",
+            None,
+        )
+
+    def test_rw_group_member_gets_read_write_on_free_slot(self):
+        cm = self._cm({"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]})
+        port = _LadderPort(max_rw=1, rw_groups=("ops",))
+        assert cm._resolve_access_mode(port, "p1", "read-write", "alice") == ("read-write", None)
+
+    def test_rw_group_member_demotes_when_port_full(self):
+        """Bug 2 fix: group grants respect the slot cap at resolution time."""
+        cm = self._cm({"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]})
+        port = _LadderPort(max_rw=1, rw_clients=1, rw_groups=("ops",))
+        assert cm._resolve_access_mode(port, "p1", "read-write", "alice") == ("read-only", None)
+
+    def test_rw_group_grant_beats_read_only_global(self):
+        """Explicit grants beat the global permission, both directions."""
+        cm = self._cm(
+            {"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only", "groups": ["ops"]}]}
+        )
+        port = _LadderPort(max_rw=1, rw_groups=("ops",))
+        assert cm._resolve_access_mode(port, "p1", "read-only", "auditor") == ("read-write", None)
+
+    def test_ro_group_grant_beats_read_write_global(self):
+        cm = self._cm({"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]})
+        port = _LadderPort(max_rw=5, ro_groups=("viewers",))
+        assert cm._resolve_access_mode(port, "p1", "read-write", "bob") == ("read-only", None)
+
+    def test_group_acl_is_closed_boundary_even_with_read_write_global(self):
+        cm = self._cm({"users": [{"username": "stranger", "password_hash": "x", "permissions": "read-write"}]})
+        port = _LadderPort(max_rw=1, rw_groups=("ops",), ro_groups=("viewers",))
+        assert cm._resolve_access_mode(port, "p1", "read-write", "stranger") == (None, "denied_by_group_acl")
+
+    def test_loopback_ports_get_no_special_treatment(self):
+        """The old loopback auto-promotion is gone (#58): no-list loopback
+        ports follow the same ladder and slot rules as any port."""
+        cm = self._cm({"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only"}]})
+        # Free slot does not promote a global read-only user anymore.
+        port = _LadderPort(max_rw=1, loopback=True, adapter_type="loopback")
+        assert cm._resolve_access_mode(port, "p1", "read-only", "auditor") == ("read-only", None)
+        # A full port demotes a global read-write user, loopback or not.
+        port_full = _LadderPort(max_rw=1, rw_clients=1, loopback=True, adapter_type="loopback")
+        assert cm._resolve_access_mode(port_full, "p1", "read-write", "alice") == ("read-only", None)
+
+    def test_loopback_with_groups_is_not_auto_promoted(self):
+        cm = self._cm({"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]})
+        port = _LadderPort(loopback=True, adapter_type="loopback", ro_groups=("viewers",))
+        assert cm._resolve_access_mode(port, "p1", "read-write", "bob") == ("read-only", None)

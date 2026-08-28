@@ -226,17 +226,40 @@ class ConsoleManager:
         current_rw_users = sum(1 for client in getattr(port, "connected_clients", []) if client.get("mode") == "read-write")
         return current_rw_users < max_rw_users
 
+    def _rw_mode_or_demote(self, port: Optional[Any], port_name: str, username: str, context: str) -> str:
+        """Return "read-write" if a slot is free, else "read-only" (demote, never reject)."""
+        if self._has_write_slots(port):
+            self.logger.info(f"Granting read-write access to user {username} for port {port_name} ({context})")
+            return "read-write"
+        self.logger.info(
+            f"Read-write slots full; granting read-only access to user {username} for port {port_name} ({context})"
+        )
+        return "read-only"
+
     def _resolve_access_mode(
         self, port: Optional[Any], port_name: str, permissions: Optional[str], username: str
     ) -> Tuple[Optional[str], Optional[str]]:
-        """Resolve the console-group-aware access mode for a connecting user.
+        """Resolve the console access mode for a connecting user (issue #58 ladder).
 
-        Precedence: admin bypasses all ACLs; a loopback port without an
-        explicit ACL keeps the legacy always-read-write shortcut; a port
-        with neither `read_write_groups` nor `read_only_groups` configured
-        stays open to all authenticated users (today's slot-contention
-        behavior); otherwise the user's console groups (see
-        `AuthManager.get_user_groups`) must intersect one of the two lists.
+        Single ladder, first match wins:
+
+        1. admin                         -> read-write, done
+        2. port declares group lists:
+             in read_write_groups        -> read-write while a slot is free, else read-only
+             in read_only_groups         -> read-only
+             in neither                  -> denied ("denied_by_group_acl")
+        3. port declares no group lists (server-wide allow; the `deny` value
+           of `access_default` arrives with Part 2 of issue #58):
+             global read-write           -> read-write while a slot is free, else read-only
+             global read-only            -> read-only
+
+        Loopback ports get no special treatment: they follow the same ladder
+        and slot rules as any other port.
+
+        A full port demotes read-write -> read-only; it never rejects. An
+        explicit per-port grant beats the global permission in both
+        directions. Unknown identities cannot reach this method: the caller
+        rejects ``permissions is None`` first.
 
         Returns:
             Tuple[Optional[str], Optional[str]]: (mode, deny_reason). ``mode``
@@ -247,35 +270,25 @@ class ConsoleManager:
             self.logger.info(f"Granting read-write access to admin user for port {port_name}")
             return "read-write", None
 
-        is_loopback = bool(
-            getattr(port, "loopback", False)
-            or getattr(port, "adapter_type", "") == "loopback"
-            or "loopback" in port_name.lower()
-        )
         rw_groups = set(getattr(port, "read_write_groups", None) or [])
         ro_groups = set(getattr(port, "read_only_groups", None) or [])
+        if rw_groups or ro_groups:
+            user_groups = self.auth_manager.get_user_groups(username)
+            if user_groups & rw_groups:
+                # Group grants respect the slot cap like global grants do.
+                return self._rw_mode_or_demote(port, port_name, username, "group ACL"), None
+            if user_groups & ro_groups:
+                self.logger.info(f"Granting read-only access to user {username} for port {port_name} (group ACL)")
+                return "read-only", None
+            # Group lists are a closed boundary: anyone not listed is denied,
+            # regardless of the global permission or the server-wide default.
+            return None, "denied_by_group_acl"
 
-        if is_loopback and not (rw_groups or ro_groups):
-            self.logger.info(f"Auto-promoting client to read-write for loopback port {port_name}")
-            return "read-write", None
-
-        if not (rw_groups or ro_groups):
-            # Default-allow: no console ACL configured, anyone authenticated competes for slots.
-            if self._has_write_slots(port):
-                self.logger.info(f"Granting read-write access to user {username} for port {port_name} (slot available)")
-                return "read-write", None
-            self.logger.info(f"Granting read-only access to user {username} for port {port_name}")
-            return "read-only", None
-
-        # Explicit console-group ACL mode
-        user_groups = self.auth_manager.get_user_groups(username)
-        if user_groups & rw_groups:
-            return "read-write", None
-        if user_groups & ro_groups:
-            self.logger.info(f"Granting read-only access to user {username} for port {port_name} (group ACL)")
-            return "read-only", None
-
-        return None, "denied_by_group_acl"
+        # No group lists: the global permission decides.
+        if permissions == "read-write":
+            return self._rw_mode_or_demote(port, port_name, username, "global permission"), None
+        self.logger.info(f"Granting read-only access to user {username} for port {port_name}")
+        return "read-only", None
 
     async def connect_client_to_port(
         self, client_id: str, port_name: str, username: str
