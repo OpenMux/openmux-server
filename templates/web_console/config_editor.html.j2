@@ -30,6 +30,10 @@
   .field .default-hint { color:var(--text-muted); font-size:12px; margin-left: 8px; }
   .field input[type="text"], .field input[type="number"], .field select { flex:1; padding:4px; background:var(--input-bg); color:var(--input-text); border:1px solid var(--border-color); }
   .field input[type="checkbox"] { width: 16px; height: 16px; }
+  .field textarea { flex:1; min-width:320px; padding:4px; background:var(--input-bg); color:var(--input-text); border:1px solid var(--border-color); font:inherit; resize:vertical; }
+  /* Stacked variant for multiline inputs: label above, full-width control below */
+  .field-multiline { flex-direction:column; align-items:stretch; }
+  .field-multiline label { width:auto; margin-bottom:2px; }
   .tbl-wrap { margin: 12px 0; border: 1px solid var(--border-color); border-radius: 4px; overflow: hidden; background: var(--bg-panel); }
   table.config { width:100%; border-collapse: collapse; border-spacing: 0; }
   table.config th, table.config td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border-color); font-size: 13px; }
@@ -306,6 +310,8 @@
       <div class="field"><label for="web_console.respect_forwarded_prefix">Respect X-Forwarded-Prefix</label><input id="web_console.respect_forwarded_prefix" type="checkbox" /></div>
       <div class="field"><label for="web_console.enable_ui">Enable UI</label><input id="web_console.enable_ui" type="checkbox" /></div>
       <div class="field"><label for="web_console.realm">Realm</label><input id="web_console.realm" type="text" /></div>
+      <div class="field field-multiline"><label for="web_console.motd">Login MOTD</label><textarea id="web_console.motd" rows="3" placeholder="Shown on the login page only"></textarea></div>
+      <div class="field field-multiline"><label for="web_console.logged_in_motd">Logged-in MOTD</label><textarea id="web_console.logged_in_motd" rows="4" placeholder="Shown after login; may hold sensitive text"></textarea></div>
       <div class="field"><label for="web_console.static_dir">Static dir</label><input id="web_console.static_dir" type="text" /></div>
       <div class="field"><label for="web_console.template_dir">Template dir</label><input id="web_console.template_dir" type="text" /></div>
       <div class="field"><label for="web_console.session_ttl_seconds">Session TTL (s)</label><input id="web_console.session_ttl_seconds" type="number" min="0" /></div>

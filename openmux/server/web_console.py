@@ -1336,6 +1336,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
         port: 8081 (int)
         enable_ui: true (bool)  # serve landing page
         realm: "OpenMux" (str)  # Basic-Auth realm
+        motd: <multiline text> (str, optional)  # public message of the day, shown
+                # on the login page only; hidden when blank
+        logged_in_motd: <multiline text> (str, optional)  # message of the day for
+                # logged-in users; shown at the top of the status page;
+                # hidden when blank
         static_dir: <path> (str, optional)  # where /static/ is served from; created if missing
         template_dir: <path> (str, optional) # jinja2 templates directory (index.html.j2, console.html.j2, status.html.j2)
         enable_probes: true (bool)  # register /healthz, /livez, /readyz endpoints
@@ -1349,6 +1354,21 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self.port = int(cfg.get("port", 8081))  # Default port for the web console
         self.enable_ui = bool(cfg.get("enable_ui", True))
         self.realm = str(cfg.get("realm", "OpenMux"))
+        # Messages of the day: free-form multiline text; blank values hide it.
+        #   motd           - public, shown on the login page only
+        #   logged_in_motd - shown at the top of the status page; may hold
+        #                    more sensitive
+        #                    text because it is never shown before login
+        try:
+            _motd = cfg.get("motd")
+            self.motd = str(_motd).strip() if _motd else ""
+        except Exception:
+            self.motd = ""
+        try:
+            _li_motd = cfg.get("logged_in_motd")
+            self.logged_in_motd = str(_li_motd).strip() if _li_motd else ""
+        except Exception:
+            self.logged_in_motd = ""
         # Base path configuration (UI may be served under a subpath)
         try:
             self.base_path = str(cfg.get("base_path", "/"))
@@ -2132,6 +2152,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             status_path=status_path,
             server_version=server_version,
             server_uptime=server_uptime,
+            motd=self.logged_in_motd,
         )
         return html_text.encode("utf-8")
 
@@ -3003,6 +3024,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             base_path=base_path,
             message=message,
             version=_get_dist_version(),
+            motd=self.motd,
         )
         return html_text.encode("utf-8")
 

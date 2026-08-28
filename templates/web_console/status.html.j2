@@ -104,6 +104,17 @@
       <div class="metric">{{ (multipath.totals.groups if multipath and multipath.totals else 0) }}</div>
     </div>
   </div>
+  {% if motd %}
+  <!-- Logged-in MOTD from server config (web_console.logged_in_motd), shown
+       to authenticated users only. One line per config line, in a <pre> so
+       line breaks survive. Same trust model as the other server.yaml
+       strings: .j2 templates are not autoescaped, so the admin can include
+       simple HTML (e.g. bold, links) if desired. -->
+  <div class="card status-motd">
+    <div class="muted status-motd-label">MOTD</div>
+    <pre class="status-motd-text">{% for line in motd.split('\n') %}{{ line }}{{- ' \n' if not loop.last else '' -}}{% endfor %}</pre>
+  </div>
+  {% endif %}
 
   <h2>Ports</h2>
   <table class="table-compact">

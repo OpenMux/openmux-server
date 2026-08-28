@@ -436,7 +436,9 @@ Supported keys:
 - `host`: Bind address (default: `0.0.0.0`)
 - `port`: HTTP/HTTPS port (default: 8081)
 - `enable_ui`: Serve HTML UI endpoints (default: true)
-- `realm`: HTTP Basic-Auth realm name (default: "OpenMux")
+- `realm`: HTTP Basic-Auth realm name (default: "OpenMux").
+- `motd`: Public message of the day. Shown on the login page only. Multiline; hidden when blank (default: not set).
+- `logged_in_motd`: Message of the day for authenticated users. Shown at the top of the status page. May hold sensitive text; never shown before login. Multiline; hidden when blank (default: not set).
 - `base_path`: URL prefix for all routes (default: `/`)
 - `respect_forwarded_prefix`: Honor `X-Forwarded-Prefix` headers from reverse proxies
 - `static_dir`: Directory for static assets (xterm, css, js)

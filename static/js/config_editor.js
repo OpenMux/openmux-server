@@ -159,6 +159,8 @@
         'web_console.port': 'TCP port for the admin web console.',
         'web_console.enable_ui': 'Serve the HTML UI (disable to expose only APIs).',
         'web_console.realm': 'HTTP Basic-Auth realm displayed in login dialogs.',
+        'web_console.motd': 'Public message of the day shown on the login page. Multiline is supported; empty hides it.',
+        'web_console.logged_in_motd': 'Message of the day for authenticated users (top of the status page). Never shown on the login page; may hold sensitive text.',
         'web_console.static_dir': 'Directory for static assets (xterm, css, js).',
         'web_console.template_dir': 'Directory containing Jinja2 templates.',
         'web_console.session_ttl_seconds': 'How long browser sessions remain valid before re-login is required (seconds).',
@@ -1069,6 +1071,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         setVal('web_console.respect_forwarded_prefix', deepGet(current, 'web_console.respect_forwarded_prefix'));
         setVal('web_console.enable_ui', deepGet(current, 'web_console.enable_ui'));
         setVal('web_console.realm', deepGet(current, 'web_console.realm'));
+        setVal('web_console.motd', deepGet(current, 'web_console.motd'));
+        setVal('web_console.logged_in_motd', deepGet(current, 'web_console.logged_in_motd'));
         setVal('web_console.static_dir', deepGet(current, 'web_console.static_dir'));
         setVal('web_console.template_dir', deepGet(current, 'web_console.template_dir'));
         setVal('web_console.enable_probes', deepGet(current, 'web_console.enable_probes'));
@@ -1175,7 +1179,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         // web_status
         if(getVal('web_status.host')!==undefined || getVal('web_status.port')!==undefined){ deepSet(out,'web_status',{}); maybeSet('web_status.host','web_status.host'); maybeSet('web_status.port','web_status.port'); maybeSet('web_status.enable_http_api','web_status.enable_http_api'); maybeSet('web_status.cors_enable','web_status.cors_enable'); maybeSet('web_status.enable_fault_injection','web_status.enable_fault_injection'); }
         // web_console
-        if(getVal('web_console.host')!==undefined || getVal('web_console.port')!==undefined){ deepSet(out,'web_console',{}); ['host','port','ssl_port','base_path','respect_forwarded_prefix','enable_ui','realm','static_dir','template_dir','enable_probes','probes_include_details','use_tls','ssl_cert','ssl_key','tls_autogen','tls_dir','session_ttl_seconds'].forEach(k=>{ maybeSet('web_console.'+k,'web_console.'+k); }); }
+        if(getVal('web_console.host')!==undefined || getVal('web_console.port')!==undefined){ deepSet(out,'web_console',{}); ['host','port','ssl_port','base_path','respect_forwarded_prefix','enable_ui','realm','motd','logged_in_motd','static_dir','template_dir','enable_probes','probes_include_details','use_tls','ssl_cert','ssl_key','tls_autogen','tls_dir','session_ttl_seconds'].forEach(k=>{ maybeSet('web_console.'+k,'web_console.'+k); }); }
         // web_console.plugins from table -> array of strings
         const wcpl = tables['web_console.plugins'] && tables['web_console.plugins']._get ? tables['web_console.plugins']._get() : [];
         if (wcpl && wcpl.length>0) {

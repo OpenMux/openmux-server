@@ -269,6 +269,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
                 user_permission=user_permission,
                 writable_sections=writable_sections,
                 writable_enforced=writable_enforced,
+                motd=getattr(adapter, "logged_in_motd", "") or "",
             )
             return web.Response(body=html_text.encode("utf-8"), content_type="text/html")
     except Exception:

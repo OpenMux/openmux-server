@@ -332,6 +332,8 @@ properties:
       ssl_port: { type: integer, minimum: 1, maximum: 65535 }
       enable_ui: { type: boolean, default: true }
       realm: { type: string, default: OpenMux }
+      motd: { type: string, description: "Public message of the day shown on the login page. Multiline text is supported; blank hides it." }
+      logged_in_motd: { type: string, description: "Message of the day for logged-in users, shown at the top of the status page. May hold sensitive text; never shown before login. Multiline; blank hides it." }
       enable_probes: { type: boolean, default: true }
       probes_include_details: { type: boolean, default: false }
       use_tls: { type: boolean, default: false }

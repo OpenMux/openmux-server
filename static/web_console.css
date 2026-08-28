@@ -144,6 +144,16 @@ body.login .card h1 { margin: 0 0 12px 0; font-size: 18px; }
 body.login .card .hint { color: var(--text-muted); font-size: 12px; margin-top: 8px; }
 body.login .card input { width: 100%; box-sizing: border-box; background: var(--bg-input); color: var(--text-main); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 12px; margin: 6px 0; }
 body.login .card .login-version { color: var(--text-muted); font-size: 11px; margin-top: 10px; word-break: break-all; }
+/* MOTD notice on the login page (web_console.motd in server.yaml) */
+.login-motd { margin: 12px 0 4px; padding: 8px 12px; max-height: 160px; overflow-y: auto; background: var(--bg-hover); border: 1px solid var(--border-color); border-radius: 6px; }
+.login-motd-label, .status-motd-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 4px; }
+.login-motd-text { white-space: pre-wrap; overflow-wrap: break-word; overflow-wrap: anywhere; margin: 0; font-size: 12px; color: var(--text-muted); line-height: 1.5; max-width: 100%; }
+/* Logged-in MOTD below the metric cards (web_console.logged_in_motd) */
+/* The <pre> must be able to shrink to a single column so it never pushes the
+   page wider than the window. overflow-wrap (anywhere) collapses the min-content
+   width; where a browser lacks `anywhere` it falls back to break-word. */
+.status-motd { margin-top: 16px; margin-bottom: 8px; min-width: 0; }
+.status-motd-text { white-space: pre-wrap; overflow-wrap: break-word; overflow-wrap: anywhere; margin: 0; font-size: 13px; color: var(--text-muted); line-height: 1.5; max-width: 100%; }
 body.login .card button.btn { width: 100%; margin-top: 8px; padding: 10px 12px; }
 /* Branding header inside card */
 .card .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }

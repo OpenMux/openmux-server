@@ -27,6 +27,12 @@
       {% elif error %}
       <p style="color:var(--status-err-text)">Invalid username or password</p>
       {% endif %}
+      {% if motd %}
+      <div class="login-motd">
+        <div class="login-motd-label">MOTD</div>
+        <pre class="login-motd-text">{% for line in motd.split('\n') %}{{ line }}{{- ' \n' if not loop.last else '' -}}{% endfor %}</pre>
+      </div>
+      {% endif %}
       <h1>Sign in to {{ realm }}</h1>
       <input type="hidden" name="next" value="{{ next or '/' }}" />
       <input type="text" name="username" placeholder="Username" autocomplete="username" required />

@@ -155,6 +155,8 @@ web_console (runtime defaults from openmux/server/web_console.py)
 - respect_forwarded_prefix: true
 - enable_ui: true (schema default)
 - realm: OpenMux (schema default)
+- motd: not set (public, login page only; blank hides it)
+- logged_in_motd: not set (logged-in users only; blank hides it)
 - enable_probes: true (schema default)
 - probes_include_details: false (schema default)
 - use_tls: false (schema default)

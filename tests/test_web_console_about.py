@@ -93,6 +93,74 @@ def test_login_page_shows_server_version(monkeypatch):
     assert "OpenMux v1.0.1" in html
 
 
+def test_login_page_shows_motd():
+    from jinja2 import Environment, FileSystemLoader
+
+    tdir = Path(__file__).resolve().parents[1] / "templates" / "web_console"
+    motd = "Planned maintenance\nSaturday 22:00-02:00"
+
+    adapter = _make_adapter(0, motd=motd)
+    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    html = adapter._render_login().decode()
+    assert "login-motd" in html
+    assert "Planned maintenance" in html
+    assert "Saturday 22:00-02:00" in html
+
+    # No motd in config -> no MOTD block at all
+    adapter_no_motd = _make_adapter(0)
+    adapter_no_motd._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    html = adapter_no_motd._render_login().decode()
+    assert "login-motd" not in html
+
+    # Blank motd -> hidden (same as unset)
+    adapter_blank = _make_adapter(0, motd="   \n  ")
+    adapter_blank._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    html = adapter_blank._render_login().decode()
+    assert "login-motd" not in html
+    assert adapter_blank.motd == ""
+
+
+def test_login_page_never_shows_logged_in_motd():
+    """The logged-in MOTD may hold sensitive text; it must not leak pre-auth."""
+    from jinja2 import Environment, FileSystemLoader
+
+    tdir = Path(__file__).resolve().parents[1] / "templates" / "web_console"
+    li_motd = "Internal detail: rack B42, PSU 2 failing"
+
+    adapter = _make_adapter(0, logged_in_motd=li_motd)
+    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    html = adapter._render_login().decode()
+    assert "login-motd" not in html
+    assert "rack B42" not in html
+
+    # logged_in_motd renders at the top of the status page
+    status = adapter._jinja_env.get_template("status.html.j2")
+    html = status.render(
+        base_path="", realm="R", user_permission="admin", plugin_nav=[], ports=[],
+        motd=adapter.logged_in_motd, total_ports=0, connected_ports=0,
+        federation={}, multipath={}, ports_by_name={}, data={},
+        sort_key="name", sort_dir="asc",
+        sort_query="", status_path="/", server_version="", server_uptime="",
+    )
+    assert "status-motd" in html
+    assert "rack B42" in html
+    # and no longer appears in the sidebar (layout) or the Ctrl+E menu (console)
+    layout = adapter._jinja_env.get_template("layout.html.j2")
+    html = layout.render(base_path="", realm="R", user_permission="admin",
+                         plugin_nav=[], ports=[], motd=adapter.logged_in_motd)
+    assert "sidebar-motd" not in html
+
+
+def test_logged_in_motd_blank_and_unset():
+    adapter = _make_adapter(0)
+    assert adapter.motd == ""
+    assert adapter.logged_in_motd == ""
+    adapter_blank = _make_adapter(0, logged_in_motd="  \n ")
+    assert adapter_blank.logged_in_motd == ""
+    adapter_str = _make_adapter(0, logged_in_motd=42)
+    assert adapter_str.logged_in_motd == "42"
+
+
 @pytest.mark.asyncio
 async def test_about_page_shows_server_version():
     adapter = _make_adapter(8911)
