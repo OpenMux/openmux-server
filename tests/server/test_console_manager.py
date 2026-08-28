@@ -516,9 +516,69 @@ class TestConnectClientToPortGroupAcl:
         ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "stranger")
         assert (ok, mode, reason) == (False, None, "denied_by_group_acl")
 
+    # ---------------- access_default integration (issue #58, part 2) ----------------
+
+    @pytest.mark.asyncio
+    async def test_access_default_deny_denies_unlisted_user_end_to_end(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 1},
+            {"users": [{"username": "alice", "password_hash": "x"}]},
+        )
+        cm.security_policy = _StubPolicy("deny")
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        assert (ok, mode, reason) == (False, None, "denied_by_access_default")
+
+    @pytest.mark.asyncio
+    async def test_access_default_deny_admin_still_connects(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 1},
+            {"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]},
+        )
+        cm.security_policy = _StubPolicy("deny")
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "root")
+        assert (ok, mode, reason) == (True, "read-write", None)
+
+    @pytest.mark.asyncio
+    async def test_access_default_deny_group_grant_still_connects(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 1, "read_write_groups": ["ops"]},
+            {"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]},
+        )
+        cm.security_policy = _StubPolicy("deny")
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        assert (ok, mode, reason) == (True, "read-write", None)
+
+    @pytest.mark.asyncio
+    async def test_access_default_allow_is_default_end_to_end(self, monkeypatch):
+        """Without a policy (and with an explicit allow stub) no-list ports are open."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "max_read_write_users": 1},
+            {"users": [{"username": "alice", "password_hash": "x"}]},
+        )
+        ok0, mode0, _ = await cm.connect_client_to_port("c1", "p1", "alice")
+        assert (ok0, mode0) == (True, "read-write")
+        cm.security_policy = _StubPolicy("allow")  # explicit stub: same expectation
+        await cm.disconnect_client_from_port("c1", "p1")
+        ok1, mode1, _ = await cm.connect_client_to_port("c2", "p1", "alice")
+        assert (ok1, mode1) == (True, "read-write")
+
 
 # ---------------------------------------------------------------------------
 # _resolve_access_mode: issue #58 ladder unit matrix (non-loopback ports)
+
+
+class _StubPolicy:
+    """Minimal stand-in for SecurityPolicy exposing only get_access_default."""
+
+    def __init__(self, access_default: str = "allow"):
+        self._access_default = access_default
+
+    def get_access_default(self) -> str:
+        return self._access_default
 
 
 class _LadderPort:
@@ -619,6 +679,37 @@ class TestResolveAccessModeLadder:
         # A full port demotes a global read-write user, loopback or not.
         port_full = _LadderPort(max_rw=1, rw_clients=1, loopback=True, adapter_type="loopback")
         assert cm._resolve_access_mode(port_full, "p1", "read-write", "alice") == ("read-only", None)
+
+    # ---------------- access_default (issue #58, part 2) ----------------
+
+    def test_access_default_unset_policy_defaults_to_allow(self):
+        """Unwired console manager (no policy) keeps today's allow behavior."""
+        cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
+        assert cm.security_policy is None
+        assert cm._resolve_access_mode(_LadderPort(), "p1", "read-write", "alice") == ("read-write", None)
+
+    def test_access_default_deny_denies_no_list_port(self):
+        cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
+        cm.security_policy = _StubPolicy("deny")
+        assert cm._resolve_access_mode(_LadderPort(), "p1", "read-write", "alice") == (None, "denied_by_access_default")
+
+    def test_access_default_deny_still_allows_admin(self):
+        cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
+        cm.security_policy = _StubPolicy("deny")
+        assert cm._resolve_access_mode(_LadderPort(), "p1", "admin", "root") == ("read-write", None)
+
+    def test_access_default_deny_group_grant_unaffected(self):
+        """deny only acts on no-list ports: list-bearing ports keep their grants."""
+        cm = self._cm({"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]})
+        cm.security_policy = _StubPolicy("deny")
+        port = _LadderPort(max_rw=1, rw_groups=("ops",))
+        assert cm._resolve_access_mode(port, "p1", "read-write", "alice") == ("read-write", None)
+
+    def test_access_default_deny_unlisted_on_acl_port_keeps_group_acl_reason(self):
+        cm = self._cm({"users": [{"username": "stranger", "password_hash": "x", "permissions": "read-write"}]})
+        cm.security_policy = _StubPolicy("deny")
+        port = _LadderPort(rw_groups=("ops",))
+        assert cm._resolve_access_mode(port, "p1", "read-write", "stranger") == (None, "denied_by_group_acl")
 
     def test_loopback_with_groups_is_not_auto_promoted(self):
         cm = self._cm({"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]})

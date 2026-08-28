@@ -3,13 +3,23 @@
 title: OpenMux Security Configuration Schema
 description: >
   Defines security.yaml: which adapter types may run, which Config Editor
-  sections are writable, and authentication rate-limit overrides. Both
-  `adapters` and `config_editor` share the same allowed/disabled mini-schema;
+  sections are writable, authentication rate-limit overrides, and the
+  server-wide console access default (`access_default`). Both `adapters` and
+  `config_editor` share the same allowed/disabled mini-schema;
   the effective set is always `allowed - disabled`, with "*" meaning "all
   known names for that block".
 type: object
 additionalProperties: false
 properties:
+  access_default:
+    type: string
+    enum: [ "allow", "deny" ]
+    default: "allow"
+    description: >
+      Server-wide default for console ports that declare no group lists
+      (issue #58). "allow" (default): every authenticated user connects.
+      "deny": only admin connects to no-list ports. Ports with group lists
+      are unaffected by this key.
   adapters:
     type: object
     additionalProperties: false

@@ -18,6 +18,15 @@ Service adapters (not port lists):
 
 Note: Binding is configured per-adapter; the `server` section is metadata-only (e.g., `id`, `description`).
 
+## Port Access Control (group ACL and server-wide default)
+
+Every port of every type supports the same two access-control settings (issue #58):
+
+- `read_write_groups: [str]` and `read_only_groups: [str]` (per port, alongside `max_read_write_users`): users whose `groups` in `authentication.yaml` intersect a list are admitted at that level; once either list is set, the lists are a **closed boundary** — a user in neither list is denied, even with a global `read-write` permission. `admin` always bypasses the lists.
+- `access_default: allow | deny` (server-wide, top-level key in `security.yaml`, default `allow`): decides whether a port that declares *neither* list is open at all. Under `deny`, only `admin` can connect to no-list ports (reason `denied_by_access_default`) — a fail-closed posture for mis-created ports. A slot-full port never rejects: read-write demotes to read-only.
+
+Loopback ports follow these same rules; they get no special treatment. Denial reasons surfaced to clients: `no_permissions` (unknown identity), `denied_by_group_acl`, `denied_by_access_default`. See `docs/ARCHITECTURE.md` §17 and `config/security.yaml`.
+
 ## Loopback Adapter (`loopback_ports`)
 
 Virtual loopback devices for testing and development.

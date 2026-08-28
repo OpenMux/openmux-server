@@ -83,6 +83,9 @@ class OpenMuxServer:
         except Exception:  # justification: optional attribute injection; non-fatal if it fails
             pass
         self.console_manager = ConsoleManager(self.port_manager, self.auth_manager)
+        # issue #58: hand the console manager the security policy so its
+        # access ladder can consult the server-wide access_default.
+        self.console_manager.security_policy = self.security_policy
         # Provide a back-reference so web plugins can reach server APIs (e.g., full reload)
         try:
             setattr(self.console_manager, "server", self)
@@ -153,6 +156,12 @@ class OpenMuxServer:
                 factory.set_security_policy(policy)
             except Exception:
                 self.logger.warning("Adapter factory failed to accept security policy", exc_info=True)
+        console = getattr(self, "console_manager", None)
+        if console is not None:
+            # issue #58: the console ladder reads access_default per connect,
+            # so a soft reload of security.yaml changes it from the next
+            # connection without restarting any adapter.
+            console.security_policy = policy
 
     def _reload_config_from_disk(self) -> Dict[str, Any]:
         cfg = self.config_manager.load_config()

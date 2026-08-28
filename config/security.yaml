@@ -50,3 +50,15 @@ rate_limits:
     failure_threshold: 5
     base_lock_seconds: 30
 
+# issue #58: server-wide default for console ports that declare no group
+# lists (no read_write_groups / read_only_groups).
+#   allow (default, also the behavior when unset): every authenticated user
+#     connects; the mode comes from the global permission and write slots.
+#   deny: only admin can connect to those ports (fail-closed). A mis-created
+#     port that nobody added group lists to is locked, not open.
+# Ports that DO declare group lists are unaffected by this key: the lists
+# are a closed boundary that admits only admin and listed users, under
+# either setting. Applies from the next connection; live sessions keep
+# their connect-time mode. Hot-applies on SIGHUP / soft reload.
+access_default: allow
+

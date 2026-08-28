@@ -80,10 +80,11 @@ _KNOWN_CONFIG_SECTIONS: FrozenSet[str] = frozenset(
     }
 )
 
-_TOP_LEVEL_ALLOWED_KEYS = {"adapters", "config_editor", "rate_limits"}
+_TOP_LEVEL_ALLOWED_KEYS = {"adapters", "config_editor", "rate_limits", "access_default"}
 _ALLOW_DENY_KEYS = {"allowed", "disabled"}
 _RATE_LIMITS_ALLOWED_KEYS = {"authentication"}
 _AUTH_RATE_LIMIT_KEYS = {"window_seconds", "failure_threshold", "base_lock_seconds"}
+_ACCESS_DEFAULT_VALUES = frozenset({"allow", "deny"})
 
 _DEFAULT_AUTH_RATE_LIMITS = {
     "window_seconds": 300,
@@ -177,11 +178,14 @@ class SecurityPolicy:
         auth_rate_limits: Mapping containing ``window_seconds``,
             ``failure_threshold``, and ``base_lock_seconds`` overrides for
             AuthManager's failure tracker.
+        access_default: Server-wide default for console ports that declare no
+            group lists (issue #58): "allow" or "deny". Unset means "allow".
     """
 
     allowed_adapter_types: Set[str] = field(default_factory=set)
     config_editor_writable_sections: Set[str] = field(default_factory=set)
     auth_rate_limits: Dict[str, int] = field(default_factory=dict)
+    access_default: str = "allow"
 
     @classmethod
     def from_mapping(cls, raw: Optional[Dict[str, Any]]) -> "SecurityPolicy":
@@ -206,10 +210,13 @@ class SecurityPolicy:
         rate_limits_cfg = _validated_block(data, "rate_limits", _RATE_LIMITS_ALLOWED_KEYS)
         auth_limits = _parse_auth_rate_limits(rate_limits_cfg)
 
+        access_default = _parse_access_default(data.get("access_default"))
+
         return cls(
             allowed_adapter_types=allowed_adapter_types,
             config_editor_writable_sections=writable_sections,
             auth_rate_limits=auth_limits,
+            access_default=access_default,
         )
 
     def is_adapter_allowed(self, *, adapter_type: Optional[str]) -> bool:
@@ -227,3 +234,29 @@ class SecurityPolicy:
 
     def get_auth_rate_limits(self) -> Dict[str, int]:
         return dict(self.auth_rate_limits)
+
+    def get_access_default(self) -> str:
+        """Server-wide default for no-list console ports (issue #58).
+
+        "allow": every authenticated user connects; mode comes from the
+        global permission and write slots. "deny": only admin connects.
+        """
+        return self.access_default
+
+
+def _parse_access_default(raw: Any) -> str:
+    """Validate the top-level `access_default` key, defaulting to "allow".
+
+    Accepts the strings "allow" and "deny" (case-insensitive, surrounding
+    whitespace trimmed). Missing or null means "allow". Any other value
+    (for example "AllowAll") or any other type is a hard error, matching the
+    file convention that unknown values in security.yaml never pass silently.
+    """
+    if raw is None:
+        return "allow"
+    if not isinstance(raw, str):
+        raise SecurityPolicyError("'access_default' must be 'allow' or 'deny'")
+    value = raw.strip().lower()
+    if value not in _ACCESS_DEFAULT_VALUES:
+        raise SecurityPolicyError(f"'access_default' must be 'allow' or 'deny', got: {raw!r}")
+    return value

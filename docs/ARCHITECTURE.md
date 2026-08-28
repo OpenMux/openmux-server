@@ -22,7 +22,7 @@ This document gives a precise, implementation‑oriented map of how the OpenMux 
 The authoritative schemas live in `config_schema/`, one per config file. Minimal required top‑level keys:
 - `server.yaml` (schema `openmux_config_schema.yaml`): `server` (identifiers and metadata). At least one runtime provider section present: one or more of (`client_listener`, `serial_ports`, `loopback_ports`, `command_ports`, `muxcon`, `web_status`).
 - `authentication.yaml` (schema `openmux_authentication_schema.yaml`): at least one of `users`, `api_keys`, `public_keys`, or `external_auth`.
-- `security.yaml` (schema `openmux_security_schema.yaml`): optional allow‑lists and rate limits.
+- `security.yaml` (schema `openmux_security_schema.yaml`): optional allow‑lists, rate limits, and the server-wide `access_default` console posture (`allow`/`deny`).
 
 Only per‑section configuration is supported. Each top‑level section maps directly to a specific adapter plugin (e.g., `loopback_ports`, `serial_ports`, `client_listener`, `muxcon`). The factory instantiates adapters from the sections present in the config.
 
@@ -414,9 +414,13 @@ Per-console (per-port) access control layers on top of the global `permissions` 
   table.
 - A port may declare `read_write_groups: [str]` and `read_only_groups: [str]` in `server.yaml`
   (alongside `max_read_write_users`).
-- **Default-allow**: if a port sets neither list, it is open to all authenticated users per the
-  access ladder (`_resolve_access_mode`, console_manager.py): loopback ports get no special
-  treatment — they follow the same ladder and slot rules as any other port.
+- **Server-wide access default**: if a port sets neither list, the top-level
+  `access_default` in `security.yaml` (default `allow`) decides whether anyone may connect at
+  all. Under `deny`, only `admin` connects to a no-list port (reason
+  `denied_by_access_default`). Under `allow` (also the behavior when the file or key is unset),
+  every authenticated user connects per the access ladder (`_resolve_access_mode`,
+  console_manager.py); loopback ports get no special treatment — they follow the same ladder
+  and slot rules as any other port.
 - **Explicit ACL mode**: once a port sets either list, membership decides access:
   - `admin` permission always bypasses group ACLs (unchanged from before).
   - A user whose groups intersect `read_write_groups` is eligible for read-write (subject to the
@@ -430,8 +434,8 @@ Per-console (per-port) access control layers on top of the global `permissions` 
 All local console attachment goes through `ConsoleManager.connect_client_to_port()`
 (`openmux/server/console_manager.py`), used identically by `client_listener`, `ssh_listener`,
 `telnet_listener`, and `web_console`. It returns `(success, mode, reason)`; `reason` is one of
-`"no_permissions"`, `"denied_by_group_acl"`, `"port_full"`, or `None` on success, and each adapter
-surfaces a reason-specific message to the client. Enforcement reads `read_write_groups`/
+`"no_permissions"`, `"denied_by_group_acl"`, `"denied_by_access_default"`, `"port_full"`, or `None`
+on success, and each adapter surfaces a reason-specific message to the client. Enforcement reads `read_write_groups`/
 `read_only_groups` off the port object generically (`getattr`), so it works the same way for every
 adapter type, including federated ports, without any per-adapter special-casing.
 

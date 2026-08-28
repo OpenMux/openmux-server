@@ -40,6 +40,11 @@ class ConsoleManager:
         # New: support multiple client managers and explicit client routing
         self.client_managers = []  # type: List[Any]
         self.client_to_manager = {}  # type: Dict[str, Any]
+        # Server-wide security policy (issue #58 `access_default` for no-list
+        # ports). Set by OpenMuxServer at construction and on every soft/full
+        # reload via _refresh_security_policy; resolution falls back to
+        # "allow" when unset, so a missing policy is backward compatible.
+        self.security_policy = None
 
         # Set the global reference to this console manager
         set_console_manager(self)
@@ -248,10 +253,12 @@ class ConsoleManager:
              in read_write_groups        -> read-write while a slot is free, else read-only
              in read_only_groups         -> read-only
              in neither                  -> denied ("denied_by_group_acl")
-        3. port declares no group lists (server-wide allow; the `deny` value
-           of `access_default` arrives with Part 2 of issue #58):
-             global read-write           -> read-write while a slot is free, else read-only
-             global read-only            -> read-only
+        3. port declares no group lists: apply the server-wide access_default
+           (security.yaml, "allow" by default when unset):
+             deny                        -> denied ("denied_by_access_default")
+             allow:
+               global read-write         -> read-write while a slot is free, else read-only
+               global read-only          -> read-only
 
         Loopback ports get no special treatment: they follow the same ladder
         and slot rules as any other port.
@@ -284,7 +291,19 @@ class ConsoleManager:
             # regardless of the global permission or the server-wide default.
             return None, "denied_by_group_acl"
 
-        # No group lists: the global permission decides.
+        # No group lists: the server-wide access_default decides whether the
+        # port is open at all (security.yaml, issue #58).
+        access_default = "allow"
+        if self.security_policy is not None and hasattr(self.security_policy, "get_access_default"):
+            try:
+                access_default = self.security_policy.get_access_default() or "allow"
+            except Exception:
+                access_default = "allow"  # justification: policy lookup must not break attach; stay fail-open on this path
+        if access_default == "deny":
+            self.logger.info(f"Denying user {username} for port {port_name}: access_default is deny")
+            return None, "denied_by_access_default"
+
+        # access_default allow: the global permission decides.
         if permissions == "read-write":
             return self._rw_mode_or_demote(port, port_name, username, "global permission"), None
         self.logger.info(f"Granting read-only access to user {username} for port {port_name}")

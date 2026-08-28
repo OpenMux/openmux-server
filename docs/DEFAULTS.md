@@ -18,7 +18,7 @@ server
 authentication
 - At least one of users, api_keys, public_keys, or external_auth must be provided.
 - users[*].groups / api_keys[*].groups: unset (empty). Console groups for per-port `read_write_groups`/`read_only_groups` access control. External-auth (PAM) group names are reused as-is as console groups.
-- users[*].permissions: read-only is deprecated (still works; logs a one-time warning). Use per-port `read_write_groups`/`read_only_groups` instead of the global read-only permission.
+- users[*].permissions: all three levels are first-class: admin, read-write, read-only (issue #58). The ladder applies this level only to ports with no group lists (see security.yaml `access_default` below); per-port `read_write_groups`/`read_only_groups` still override it. (Historically read-only was deprecated in favor of per-port lists; that was reversed.)
 - External authentication (helper binary — e.g. openmux-pam-helper):
   - authentication.external_auth.enabled: false
   - authentication.external_auth.helper: (empty — resolved from PATH or /usr/lib/openmux/openmux-pam-helper)
@@ -30,6 +30,9 @@ authentication
   - authentication.external_auth.allow_root: false
   - authentication.external_auth.allowed_users: unset (optional allowlist; if set, only listed users can log in)
   Note: the former `pam:` key is not supported; its presence logs a warning. Use `external_auth`.
+
+security.yaml (runtime defaults from openmux/server/security_policy.py; the file is optional and defaults to allow-everything when absent)
+- security.yaml access_default: allow (server-wide default for console ports with no group lists; `deny` restricts those ports to admin; applies from the next connection, hot-applies on SIGHUP/soft reload)
 
 logging (runtime defaults from openmux/server/logging_manager.py)
 - logging.log_level: INFO (key name is log_level in code)

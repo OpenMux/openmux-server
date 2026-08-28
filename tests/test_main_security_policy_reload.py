@@ -88,3 +88,28 @@ def test_reload_keeps_last_known_good_policy_on_invalid_security_yaml(tmp_path):
 
     assert server.security_policy is good_policy
     assert not server.security_policy.is_adapter_allowed(adapter_type="serial")
+
+
+def test_console_manager_receives_policy_and_follows_reloads(tmp_path):
+    """issue #58: the console ladder reads security_policy, and a soft-reload
+    path update (access_default allow -> deny) must be visible to it without
+    restarting any adapter. Also covers the invalid-file last-known-good
+    path: the console manager must never see the invalid policy."""
+    cfg_path = _write_isolated_config(tmp_path)
+    security_path = tmp_path / "security.yaml"
+    security_path.write_text("access_default: allow")
+
+    server = OpenMuxServer(cfg_path, log_level="DEBUG")
+    assert server.console_manager.security_policy is server.security_policy
+    assert server.console_manager.security_policy.get_access_default() == "allow"
+
+    security_path.write_text("access_default: deny")
+    server._reload_config_from_disk()
+    assert server.console_manager.security_policy is server.security_policy
+    assert server.console_manager.security_policy.get_access_default() == "deny"
+
+    # Corrupt: last-known-good (deny) must stay, console manager included.
+    security_path.write_text("access_default: AllowAll")
+    server._reload_config_from_disk()
+    assert server.console_manager.security_policy is server.security_policy
+    assert server.console_manager.security_policy.get_access_default() == "deny"
