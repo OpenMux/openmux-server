@@ -93,14 +93,16 @@
 {% block content %}
 <div class="row toolbar-row">
   <div class="toolbar">
+    <span class="reload-legend" style="margin:0; gap:6px 14px; white-space:nowrap"></span>
     <button class="btn" id="loadBtn" title="Load current config">Load</button>
     <button class="btn" id="validateBtn" title="Validate without saving">Validate</button>
     <button class="btn" id="saveBtn" title="Save to server.yaml">Save</button>
     <div class="status" id="status"></div>
   </div>
   <div class="spacer"></div>
-  
+  <span class="legend-ro" id="roLegend" style="display:none"></span>
 </div>
+<div class="ro-advisory" id="securitiesAdvisory" style="display:none"></div>
 <div class="advisory" id="advisory"></div>
 <div class="subtle" style="margin-top:6px">Fields marked with <span class="req">*</span> are required.</div>
 <div class="reload-legend"><span>Reload needed to apply changes:</span>
@@ -154,6 +156,13 @@
       <div class="field"><label for="server.description">Description</label><input id="server.description" type="text" /></div>
       <div class="field"><label for="server.control_socket">Control socket path</label><input id="server.control_socket" type="text" placeholder="logs/openmux.sock" /><span class="help">Unix domain socket for local CLI control (status/reload). Env override: OPENMUX_CTL_SOCK.</span></div>
       <div class="field"><label for="server.pidfile">PID file path</label><input id="server.pidfile" type="text" placeholder="logs/openmux.pid" /><span class="help">PID file used for signal-based control (HUP soft reload, USR1 full reload). Env override: OPENMUX_PIDFILE.</span></div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header"><span class="title">Console Access Default</span><span class="reload-hint reload-hint-soft" title="Applied from the next connection; a Soft Reload re-reads security.yaml">SOFT</span><span class="legend-ro" data-ro-badge style="display:none"></span> <span class="desc">security.yaml — default posture for ports with no group lists (read-only)</span></div>
+    <div class="section">
+      <div class="field"><label for="security.access_default">Default for ports without groups</label><select id="security.access_default" data-allowReadonly="true" disabled><option value="allow">allow</option><option value="deny">deny</option></select><span class="help">Stored in <code>config/security.yaml</code>, not server.yaml. allow (default): every authenticated user connects to a port that declares no groups; deny: only admin connects (denied as <code>denied_by_access_default</code>). Ports that declare <code>read_write_groups</code> or <code>read_only_groups</code> are unaffected by this key; the lists stay a closed boundary. Edit <code>config/security.yaml</code> by hand, then Soft Reload (or kill -HUP). Applies from the next connection; live sessions keep their mode.</span></div>
     </div>
   </div>
 
@@ -222,7 +231,7 @@
     <div class="section-header"><span class="title">Guidance</span> <span class="desc">When to use what</span></div>
     <div class="section">
       <ul style="margin:0 0 0 18px; padding:0;">
-        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, web console MOTD and realm, and edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports.</li>
+        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, web console MOTD and realm, edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports, and the console access default (the access_default key in security.yaml).</li>
         <li>Use <b>Full Reload</b> for: Client listener changes, muxcon advanced settings (heartbeat, multipath, cache, core auth), web status and web console network/TLS settings, web console plugins, and port RW/RO group access fields.</li>
         <li>Use <b>kill -HUP</b> for: the log level only (the Soft Reload button does not change the log level).</li>
         <li>Use a <b>process restart</b> for: the control socket path, PID file path, and the logging file/rotation settings.</li>
@@ -356,6 +365,7 @@
   window.OMX_CONFIG_EDITOR_BOOTSTRAP = {
     writableSections: {{ writable_sections|default([])|tojson|safe }},
     writableEnforced: {{ writable_enforced|default(False)|tojson|safe }},
+    accessDefault: {{ access_default|default('allow')|tojson|safe }},
     defaultsDocJson: {{ defaults_doc_json|tojson|safe }}
   };
 </script>

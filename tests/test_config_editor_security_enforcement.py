@@ -8,7 +8,11 @@ allow and disable side of the `config_editor` block.
 import textwrap
 
 from openmux.server.config_manager import ConfigManager
-from openmux.server.web_plugins.config_editor import _enforce_writable_sections, _get_writable_metadata
+from openmux.server.web_plugins.config_editor import (
+    _enforce_writable_sections,
+    _get_access_default,
+    _get_writable_metadata,
+)
 
 
 def _write_server_config(tmp_path, extra_sections="") -> str:
@@ -144,3 +148,28 @@ def test_enforce_writable_sections_fully_read_only_blocks_any_change(tmp_path):
     disallowed = _enforce_writable_sections(cm, payload)
 
     assert disallowed == {"server"}
+
+
+# ---------------------------------------------------------------------------
+# access_default read-only row (issue #58, part 3)
+
+
+def test_get_access_default_none_config_manager():
+    assert _get_access_default(None) == "allow"
+
+
+def test_get_access_default_unset_policy_is_allow(tmp_path):
+    cm = _manager(tmp_path)
+
+    assert _get_access_default(cm) == "allow"
+
+
+def test_get_access_default_reads_deny(tmp_path):
+    cm = _manager(
+        tmp_path,
+        security_yaml="""
+        access_default: deny
+        """,
+    )
+
+    assert _get_access_default(cm) == "deny"

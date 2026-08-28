@@ -102,6 +102,17 @@
         }
       }
 
+      // issue #58: the access_default row is read-only in this editor; the
+      // value comes from /data (security.yaml), never from the save payload
+      function setAccessDefaultReadonly(value){
+        var v = (value === 'deny') ? 'deny' : 'allow';
+        try{ setVal('security.access_default', v); }catch(_e){}
+        var badge = document.querySelector('[data-ro-badge]');
+        if(badge){ badge.textContent = 'READ-ONLY: ' + v; badge.style.display = 'inline-block'; }
+        var ad = document.getElementById('securitiesAdvisory');
+        if(ad){ ad.textContent = v === 'deny' ? 'access_default is deny: ports with no group lists admit only admin (denied as denied_by_access_default); list-bearing ports are unaffected.' : ''; ad.style.display = v === 'deny' ? 'block' : 'none'; }
+      }
+
       function setWritableMetadata(sections, enforced){
         if(Array.isArray(sections)){
           writableSections = new Set(sections.map((s)=>String(s)));
@@ -119,6 +130,7 @@
       // Help text for simple fields (non-table inputs)
       const FIELD_HELP = {
         'server.id': 'Unique server identifier used in federation and status; if empty, hostname may be used.',
+        'security.access_default': 'Server-wide default for console ports with no group lists (security.yaml). allow = every authenticated user connects; deny = only admin connects. Read-only here; edit config/security.yaml by hand.',
         'server.description': 'Human-readable description shown in UIs and status.',
         'server.control_socket': 'Unix domain socket path for openmuxctl and local control. Default logs/openmux.sock; env OPENMUX_CTL_SOCK overrides.',
         'server.pidfile': 'PID file written on startup to enable kill -HUP/-USR1 control. Default logs/openmux.pid; env OPENMUX_PIDFILE overrides.',
@@ -751,6 +763,9 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         // control socket and PID file are created at process start
         'server.control_socket': 'restart',
         'server.pidfile': 'restart',
+        // console access posture (issue #58): security.yaml is re-read on a soft
+        // reload; the ladder picks the value up from the next connection
+        'security.access_default': 'soft',
         // log level is re-applied by the SIGHUP signal handler only
         'logging.level': 'sighup',
         // log handler set-up (console/file/rotation) happens at process start
@@ -1054,6 +1069,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         setVal('server.description', deepGet(current, 'server.description'));
         setVal('server.control_socket', deepGet(current, 'server.control_socket'));
         setVal('server.pidfile', deepGet(current, 'server.pidfile'));
+        // access_default comes from the /data response, never from the payload: the UI shows it read-only
+        setVal('security.access_default', data && data.access_default);
 
         tables['auth.users']._set(deepGet(current, 'authentication.users')||[]);
         tables['auth.api_keys']._set(deepGet(current, 'authentication.api_keys')||[]);
@@ -1284,7 +1301,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         return out;
       }
 
-async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); if('writable_sections' in j || 'writable_enforced' in j){ setWritableMetadata(j.writable_sections||[], j.writable_enforced); } markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
+async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); if('writable_sections' in j || 'writable_enforced' in j){ setWritableMetadata(j.writable_sections||[], j.writable_enforced); } if('access_default' in j){ setAccessDefaultReadonly(j.access_default); } markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
 async function validateOnly(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Validation failed'); return; } try{ const r=await fetch(withBase('/config-editor/validate'),{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Validation OK'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Validation failed'); } }catch(e){ setStatus(false,String(e)); } }
 async function refreshSidebarPorts() {
   try {

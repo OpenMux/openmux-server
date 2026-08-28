@@ -70,6 +70,22 @@ def _get_writable_metadata(cm: Optional[ConfigManager]) -> Tuple[List[str], bool
         return [], False
 
 
+def _get_access_default(cm: Optional[ConfigManager]) -> str:
+    """Server-wide `access_default` (security.yaml, issue #58) for the editor UI.
+
+    The Config Editor UI never edits security.yaml (it owns server.yaml), so the
+    value is presented READ-ONLY in the Server view. Best-effort: any load or
+    parse failure shows "allow", the default posture of an unset policy.
+    """
+    if not cm:
+        return "allow"
+    try:
+        policy = cm.get_security_policy()
+        return policy.get_access_default() or "allow"
+    except Exception:
+        return "allow"
+
+
 def _normalize_section_value(value: Any) -> Any:
     if isinstance(value, dict):
         normalized_dict = {}
@@ -257,6 +273,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
                 base_path = ""
             cm = _find_config_manager(adapter)
             writable_sections, writable_enforced = _get_writable_metadata(cm)
+            access_default = _get_access_default(cm)
             html_text = tmpl.render(
                 realm=adapter.realm,
                 logo_url=adapter._get_logo_url() if hasattr(adapter, "_get_logo_url") else None,
@@ -269,6 +286,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
                 user_permission=user_permission,
                 writable_sections=writable_sections,
                 writable_enforced=writable_enforced,
+                access_default=access_default,
                 motd=getattr(adapter, "logged_in_motd", "") or "",
             )
             return web.Response(body=html_text.encode("utf-8"), content_type="text/html")
@@ -323,6 +341,7 @@ async def _handle_data(request: web.Request) -> web.StreamResponse:
                 "config": _mask_config_secrets(config),
                 "writable_sections": writable_sections,
                 "writable_enforced": writable_enforced,
+                "access_default": _get_access_default(cm),
             }
         ).encode("utf-8"),
         content_type="application/json",
@@ -357,6 +376,10 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
         # any field the user left untouched before validating/saving.
         current_cfg = cm.config or cm.load_config() or {}
         _restore_masked_secrets(payload, current_cfg)
+
+        # security.yaml is not editable from this editor (issue #58):
+        # discard any access_default the UI might carry.
+        payload.pop("access_default", None)
 
         # Validate before saving
         ok, err, exc = _validate_payload(payload, cm)
