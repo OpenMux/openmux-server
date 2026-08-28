@@ -97,6 +97,45 @@
        }
   }
 
+  // Center the current port in the port list after page load.
+  // Port links are real page loads, so the scrollable list resets to the top on
+  // every port switch. When the URL selects a port (?port=...), scroll the list
+  // so that port is centered in the visible list area.
+  (function () {
+      const list = document.getElementById('console-ports');
+      if (!list) return;
+
+      // Center an item inside the list only - never scrollIntoView, which can
+      // also scroll the page. Only #console-ports is scrollable in this layout.
+      function centerItem(item) {
+          const lr = list.getBoundingClientRect();
+          const ir = item.getBoundingClientRect();
+          list.scrollTop += (ir.top + ir.height / 2) - (lr.top + lr.height / 2);
+      }
+
+      // Match by decoded URL port param, not link text, so any port name works.
+      function findItem(port) {
+          const links = list.querySelectorAll('.nav-sub-item');
+          for (const link of links) {
+              const href = link.getAttribute('href');
+              if (!href) continue;
+              if (new URL(href, window.location.origin).searchParams.get('port') === port) {
+                  return link;
+              }
+          }
+          return null;
+      }
+
+      function apply() {
+          if (list.style.display === 'none') return;
+          const port = new URLSearchParams(window.location.search).get('port');
+          const item = findItem(port) || list.querySelector('.nav-sub-item.active');
+          if (item) centerItem(item);
+      }
+
+      requestAnimationFrame(apply);
+  })();
+
   // Theme toggle logic
   const themeToggle = document.getElementById('themeToggle');
   const themeIcon = document.getElementById('themeIcon');
