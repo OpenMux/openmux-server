@@ -76,7 +76,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 
 | Term | Meaning | Do not use |
 |---|---|---|
-| Permission | The access level of a user: `admin`, `read-write`, or `read-only`. | role (for these three levels) || Access default | The server-wide posture for console ports with no group lists: `allow` or `deny` from `security.yaml` `access_default` (issue #58). | default ACL, access policy || Console group | A named group that controls read-write or read-only access to one console, via a port's `read_write_groups`/`read_only_groups` and a user's `groups`. | role (for a console-level group), team |
+| Permission | The access level of a user: `admin`, `read-write`, or `read-only`. | role (for these three levels) || Access default | The server-wide posture for console ports with no group lists: `allow` or `deny` from `security.yaml` `access_default` (issue #58). | default ACL, access policy || Write slot capacity | How many users may write to a port at once: `none` (0 writers), `one` (1), or `multiple` (unlimited), from the port's `max_read_write_users` (issue #59). It is a resource, not a privilege: `none` binds even admin. | write slot (for the mode), driver count, RW limit || Console group | A named group that controls read-write or read-only access to one console, via a port's `read_write_groups`/`read_only_groups` and a user's `groups`. | role (for a console-level group), team |
 | API key | A static credential used instead of a username and password. | token (use "API key" for this credential type) |
 | Allow-list | The set of adapter/module names permitted by `security.yaml`. | whitelist |
 | Control menu | The in-band Ctrl+E,c command menu on telnet/SSH sessions for read-write access control. | escape menu |

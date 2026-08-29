@@ -22,6 +22,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Set
 
+from ..access_control import capacity_display_label
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 
 
@@ -590,7 +591,8 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
                         # V1 compatibility
                         "server_chain": p.get("server_chain", []),
                         "federation_type": p.get("federation_type"),
-                        "max_rw_users": p.get("max_read_write_users", p.get("max_rw_users")),
+                        # Display as the mode label ("none"/"one"/"multiple").
+                        "max_rw_users": capacity_display_label(p.get("max_read_write_users", p.get("max_rw_users"))),
                         "connected_clients": p.get("client_count", p.get("connected_clients", 0)),
                     }
                     ports_summary.append(entry)

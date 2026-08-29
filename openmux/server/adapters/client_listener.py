@@ -20,6 +20,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Set
 
+from openmux.server.access_control import capacity_to_wire
 from openmux.server.port_utils import resolve_port_connected_state, safe_get_port
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
@@ -738,12 +739,12 @@ class TcpServerAdapter(BaseGenericAdapter):
         return "unknown"
 
     def _max_rw_users_for_port(self, port_name: Optional[str]) -> Optional[int]:
-        """Return max_read_write_users for a port, or None if not determinable."""
+        """Return the UI wire capacity for a port (0/1/WIRE_MULTIPLE), or None if not determinable."""
         try:
             pm = getattr(self.console_manager, "port_manager", None)
             port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
             if port_obj is not None:
-                return int(getattr(port_obj, "max_read_write_users", 1))
+                return capacity_to_wire(getattr(port_obj, "max_read_write_users", 1))
         except Exception:
             pass
         return None

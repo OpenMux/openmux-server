@@ -11,6 +11,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 # Import the helper module to set the console manager reference
+from openmux.server.access_control import write_capacity
 from openmux.server.console_manager_helper import set_console_manager
 from openmux.server.data_logger import DataLogger
 
@@ -224,21 +225,42 @@ class ConsoleManager:
                     self.console_clients.pop(port_name, None)
 
     def _has_write_slots(self, port: Optional[Any]) -> bool:
-        """Return whether a port has an available read-write slot."""
+        """Return whether a port can grant a read-write slot right now.
+
+        Capacity comes from the port's ``max_read_write_users`` mode (issue #59):
+        ``multiple`` means unlimited (always True), ``one`` means one concurrent
+        writer (True while none is attached), ``none`` means the port is never
+        drivable (always False, for everyone including admin).
+        """
         if port is None:
             return False
-        max_rw_users = getattr(port, "max_read_write_users", 1)
+        capacity = write_capacity(getattr(port, "max_read_write_users", 1))
+        if capacity == 0.0:
+            return False
+        if capacity == float("inf"):
+            return True
         current_rw_users = sum(1 for client in getattr(port, "connected_clients", []) if client.get("mode") == "read-write")
-        return current_rw_users < max_rw_users
+        return current_rw_users < capacity
 
     def _rw_mode_or_demote(self, port: Optional[Any], port_name: str, username: str, context: str) -> str:
-        """Return "read-write" if a slot is free, else "read-only" (demote, never reject)."""
+        """Return "read-write" if a slot is free, else "read-only" (demote, never reject).
+
+        A full port demotes; a ``none`` port (0 writers, issue #59) always
+        demotes — that includes admin, because a slot is a resource, not a
+        privilege.
+        """
         if self._has_write_slots(port):
             self.logger.info(f"Granting read-write access to user {username} for port {port_name} ({context})")
             return "read-write"
-        self.logger.info(
-            f"Read-write slots full; granting read-only access to user {username} for port {port_name} ({context})"
-        )
+        if write_capacity(getattr(port, "max_read_write_users", 1)) == 0.0:
+            self.logger.info(
+                f"Port {port_name} has no write slots (max_read_write_users=none); "
+                f"granting read-only access to user {username} ({context})"
+            )
+        else:
+            self.logger.info(
+                f"Read-write slots full; granting read-only access to user {username} for port {port_name} ({context})"
+            )
         return "read-only"
 
     def _resolve_access_mode(
@@ -246,9 +268,11 @@ class ConsoleManager:
     ) -> Tuple[Optional[str], Optional[str]]:
         """Resolve the console access mode for a connecting user (issue #58 ladder).
 
-        Single ladder, first match wins:
+        Single ladder, first match wins ("a slot is free" reads the port's
+        write-capacity mode, issue #59: ``one`` = free while 0 writers are
+        attached, ``multiple`` = always free, ``none`` = never free):
 
-        1. admin                         -> read-write, done
+        1. admin                         -> read-write while a slot is free, else read-only
         2. port declares group lists:
              in read_write_groups        -> read-write while a slot is free, else read-only
              in read_only_groups         -> read-only
@@ -263,10 +287,13 @@ class ConsoleManager:
         Loopback ports get no special treatment: they follow the same ladder
         and slot rules as any other port.
 
-        A full port demotes read-write -> read-only; it never rejects. An
-        explicit per-port grant beats the global permission in both
-        directions. Unknown identities cannot reach this method: the caller
-        rejects ``permissions is None`` first.
+        Admin bypasses access control (the group boundary, the server-wide
+        default), not capacity: under ``none`` admin attaches read-only like
+        everyone else (issue #59, explicit behavior change). A full port
+        demotes read-write -> read-only; it never rejects. An explicit
+        per-port grant beats the global permission in both directions. Unknown
+        identities cannot reach this method: the caller rejects
+        ``permissions is None`` first.
 
         Returns:
             Tuple[Optional[str], Optional[str]]: (mode, deny_reason). ``mode``
@@ -274,8 +301,9 @@ class ConsoleManager:
             then None); ``mode`` is None with a deny_reason when denied.
         """
         if permissions == "admin":
-            self.logger.info(f"Granting read-write access to admin user for port {port_name}")
-            return "read-write", None
+            # Admin bypasses access control but not capacity (issue #59): under a
+            # ``none`` (0-writer) port admin attaches read-only like everyone else.
+            return self._rw_mode_or_demote(port, port_name, username, "admin"), None
 
         rw_groups = set(getattr(port, "read_write_groups", None) or [])
         ro_groups = set(getattr(port, "read_only_groups", None) or [])

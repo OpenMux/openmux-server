@@ -20,12 +20,15 @@ Note: Binding is configured per-adapter; the `server` section is metadata-only (
 
 ## Port Access Control (group ACL and server-wide default)
 
-Every port of every type supports the same two access-control settings (issue #58):
+Every port of every type supports the same access-control settings (issues #58 and #59):
 
 - `read_write_groups: [str]` and `read_only_groups: [str]` (per port, alongside `max_read_write_users`): users whose `groups` in `authentication.yaml` intersect a list are admitted at that level; once either list is set, the lists are a **closed boundary** — a user in neither list is denied, even with a global `read-write` permission. `admin` always bypasses the lists.
-- `access_default: allow | deny` (server-wide, top-level key in `security.yaml`, default `allow`): decides whether a port that declares *neither* list is open at all. Under `deny`, only `admin` can connect to no-list ports (reason `denied_by_access_default`) — a fail-closed posture for mis-created ports. A slot-full port never rejects: read-write demotes to read-only.
+- `max_read_write_users: none | one | multiple` (per port, write-slot capacity, issue #59): how many users may write at once. `one` (default) gives one driver: the first write-entitled user gets write, later ones attach read-only. `multiple` gives every write-entitled user write. `none` gives no driver at all: everyone attaches read-only, **including admin**. A slot is a resource, not a privilege: admin bypasses access control (groups, `access_default`), not capacity. Legacy integers still load (0 = none, 1 = one, >= 2 = multiple) with a one-time deprecation log line naming the port; any other value is a hard error.
+- `access_default: allow | deny` (server-wide, top-level key in `security.yaml`, default `allow`): decides whether a port that declares *neither* list is open at all. Under `deny`, only `admin` can connect to no-list ports (reason `denied_by_access_default`) — a fail-closed posture for mis-created ports.
 
-Loopback ports follow these same rules; they get no special treatment. Denial reasons surfaced to clients: `no_permissions` (unknown identity), `denied_by_group_acl`, `denied_by_access_default`. See `docs/ARCHITECTURE.md` §17 and `config/security.yaml`.
+A full port never rejects: a write-entitled user on a full `one` port demotes to read-only; a `none` port demotes everyone to read-only. Note `none` decides who may *drive*; `access_default` decides who may be *present*. They are orthogonal.
+
+Loopback ports follow these same rules; they get no special treatment (the three modes included: a `none` loopback attaches read-only for everyone). Denial reasons surfaced to clients: `no_permissions` (unknown identity), `denied_by_group_acl`, `denied_by_access_default`. See `docs/ARCHITECTURE.md` §17 and `config/security.yaml`.
 
 ## Loopback Adapter (`loopback_ports`)
 
@@ -71,7 +74,7 @@ Supported options per port:
 - `restart_delay`: Initial delay before restart in seconds (default: 1.0)
 - `max_restarts`: Max restart attempts (0 = unlimited, default: 0)
 - `restart_backoff`: Exponential backoff factor (default: 1.0)
-- `max_read_write_users`: Max concurrent writers (default: 1)
+- `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above)
 Lifecycle and on-demand options:
 - `spawn_on_demand`: When true, do not start the process at server startup; spawn only when the first client attaches. Default: false.
 - `spawn_mode`: Alternative to `spawn_on_demand`. Supported values: `shared_eager` (default) or `shared_on_demand` (equivalent to `spawn_on_demand: true`).
@@ -138,7 +141,7 @@ command_ports:
 Because the command adapter allocates a real PTY in `interactive` mode, you can expose a system login prompt instead of launching a shell directly. This is useful for local access scenarios, jump boxes, or controlled service consoles.
 
 Security note:
-- Treat these like you would a console or SSH: restrict access (authz), use `max_read_write_users: 1`, and prefer on-demand spawning with an idle timeout.
+- Treat these like you would a console or SSH: restrict access (authz), use `max_read_write_users: one`, and prefer on-demand spawning with an idle timeout.
 
 macOS (login(1)):
 ```yaml
@@ -236,7 +239,7 @@ Supported options per port:
 - `flow_control`: Flow control mode (default: "none")
 - `dtr`: Set DTR on open (default: true)
 - `rts`: Set RTS on open (default: true)
-- `max_read_write_users`: Max concurrent writers (default: 1; legacy `read_write_users` is still accepted with a warning)
+- `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above); legacy `read_write_users` is still accepted with a warning
 
 Adapter-level performance options:
 - `read_coalesce` (default: true): Enable small, time-bounded coalescing of rapid serial read bursts before forwarding to clients. This reduces visual artifacts when devices emit very small chunks quickly (e.g., repeated CR/LF while holding Enter), without adding noticeable latency.

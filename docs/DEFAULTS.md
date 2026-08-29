@@ -79,7 +79,7 @@ serial_ports (per-port) (schema defaults, plus adapter runtime behavior)
 - flow_control: none
 - dtr: true
 - rts: true
-- max_read_write_users: 1
+- max_read_write_users: one
 - read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
 
 serial adapter (runtime defaults from openmux/server/adapters/serial.py)
@@ -90,13 +90,13 @@ serial adapter (runtime defaults from openmux/server/adapters/serial.py)
 loopback_ports (per-port) (schema + runtime)
 - buffer_size: 1024 (schema)
 - echo_delay: 0.0 (schema)
-- max_read_write_users: 5 (schema; legacy read_write_users is normalized to this field with a warning)
+- max_read_write_users: one
 - sanitize_control: true
-- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior). Loopback ports are enforced like any other port (no legacy "always force read-write" shortcut).
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior). Loopback ports are enforced like any other port (no legacy "always force read-write" shortcut): under none a loopback attaches read-only for everyone.
 
 command_ports (per-port) (schema defaults)
 - shell: false
-- max_read_write_users: 1
+- max_read_write_users: one
 - cwd, env, interactive, always_buffer: no defaults
 - read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
 

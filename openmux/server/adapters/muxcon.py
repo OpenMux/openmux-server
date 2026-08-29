@@ -105,6 +105,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from cryptography.x509.oid import NameOID
 
+from openmux.server.access_control import capacity_from_wire, capacity_to_wire, wire_to_mode
 from openmux.server.port_utils import safe_get_port
 
 from ...common.federation_types import (
@@ -3599,7 +3600,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     status = "connected" if p.get("connected") else "disconnected"
                 elif "state" in p:
                     status = p.get("state")
-                max_rw = p.get("max_read_write_users", p.get("max_rw_users", 1))
+                # Port-level write-slot capacity (issue #59): local ports carry the
+                # mode ("one"/"multiple"/"none" or a legacy int); the wire keeps the
+                # capacity int so older peers (integer-only) apply the same >= 2
+                # behavior on their side, while new peers re-derive the mode from it.
+                max_rw = capacity_to_wire(p.get("max_read_write_users", p.get("max_rw_users", 1)))
                 rw_groups = p.get("read_write_groups") or None
                 ro_groups = p.get("read_only_groups") or None
                 # Optional serial details for local serial or loopback ports
@@ -5491,7 +5496,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         name = pd.get("name") or pd.get("original_name") or "remote_port"
         desc = pd.get("description", f"Remote port {name}")
         adapter_type = pd.get("adapter_type", "remote_muxcon")
-        max_rw = int(pd.get("max_rw_users", 1) or 1)
+        # Port-level write-slot capacity (issue #59): the wire field stays int; the
+        # REMOTE side evaluates it. A new origin sends 0/1/WIRE_MULTIPLE, an older
+        # peer sends its legacy count (>= 2 behaves like multiple here as well).
+        max_rw = capacity_from_wire(pd.get("max_rw_users", 1) or 1)
         status = pd.get("status", "connected")
         # Server chain if provided (prefer V2 detailed objects)
         server_chain = [server_info]
@@ -5603,6 +5611,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     setattr(existing, "connection_id", peer_key)
                     setattr(existing, "metadata", metadata)
                     setattr(existing, "server_adapter", self)
+                    # Refresh the write-slot capacity mode ("none"/"one"/"multiple")
+                    # from the fresh metadata so a soft-reloaded origin is honored
+                    # without recreating the proxy. (issue #59)
+                    try:
+                        existing.max_read_write_users = wire_to_mode(getattr(metadata, "max_rw_users", None))
+                    except Exception:
+                        pass
                     if hasattr(existing, "is_connected"):
                         existing.is_connected = True
                     # A proxy loaded from the federated cache may have been
@@ -5967,7 +5982,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             name: Public name of the remote port (same as `remote_port_name`).
             description: Human-readable port description.
             connected_clients: List of connected client records.
-            max_read_write_users: Max number of concurrent RW clients allowed.
+            max_read_write_users: Write-slot capacity mode ("none"/"one"/"multiple"),
+                evaluated locally from the origin's advertised capacity (issue #59).
             state: Current `PortState` of the proxy.
         """
 
@@ -6022,7 +6038,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # muxcon VIEWERS presence message (issue #48 federation follow-up); each
             # entry carries its own "server_id" naming the server it's really attached to.
             self.remote_viewers: List[Dict[str, Any]] = []
-            self.max_read_write_users: int = int(getattr(metadata, "max_rw_users", 5) or 5)
+            # Port-level write-slot capacity mode (issue #59), evaluated here on the
+            # (local) side from the origin's advertised wire capacity, exactly like the
+            # group lists above are enforced locally from remote metadata. The wire
+            # value is 0/1/WIRE_MULTIPLE from a new origin or a legacy int from an
+            # older peer (>= 2 behaves like "multiple"); unknown falls back to "one".
+            self.max_read_write_users: str = wire_to_mode(getattr(metadata, "max_rw_users", None), port_name=remote_port_name)
             # Console-group access control (issue #24), propagated from the origin
             # server's PortMetadata so ConsoleManager enforces the same ACL locally.
             self.read_write_groups: List[str] = list(getattr(metadata, "read_write_groups", None) or [])

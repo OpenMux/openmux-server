@@ -36,7 +36,9 @@ def apply_client_mode_response(adapter: Any, payload: Dict[str, Any]) -> str:
         lines.append("[Your read-write access was taken by another user]")
     elif ok is False:
         if payload.get("max_rw_users") == 0:
-            lines.append("[Read-write is not available on this port (configured with 0 read-write users)]")
+            # 0 = the port's write-slot capacity is "none" (issue #59): it has
+            # no driver at all.
+            lines.append("[Read-write is not available on this port (it has no write slots: capacity 'none')]")
         else:
             holders = payload.get("rw_holders") or []
             who = f" (held by: {', '.join(holders)})" if holders else ""

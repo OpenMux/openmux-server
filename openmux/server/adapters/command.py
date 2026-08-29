@@ -15,6 +15,7 @@ import termios
 import tty
 from typing import Any, Dict, List, Optional, Set
 
+from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
 
@@ -77,7 +78,13 @@ class CommandPort:
         self.cwd = config.get("cwd")
         self.env = config.get("env")
         self.description = config.get("description", f"Command: {self.command}")
-        self.max_read_write_users = config.get("max_read_write_users", 1)
+        # Write-slot capacity mode (issue #59): "one" (default) / "multiple" /
+        # "none". Legacy ints (0/1/>=2) still work and log a one-time
+        # deprecation line; any other value raises (create_port fails the port
+        # with an error log).
+        self.max_read_write_users: str = parse_write_mode(
+            config.get("max_read_write_users", 1), port_name=name, logger=self.logger
+        )
         # Console-group access control (issue #24): empty on both = open to all
         # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
         self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
@@ -1094,6 +1101,13 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                 return False
             if "name" not in port_config or "command" not in port_config:
                 return False
+            # Write-slot capacity (issue #59): mode, legacy int, or unset. Any
+            # other value is a hard error so typos fail fast at load time.
+            if "max_read_write_users" in port_config:
+                try:
+                    parse_write_mode(port_config["max_read_write_users"])
+                except InvalidWriteMode:
+                    return False
         return True
 
     def get_port_configurations(self) -> Dict[str, Dict[str, Any]]:
@@ -1245,15 +1259,18 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         common = sorted(old_names & new_names)
 
         def _material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-            # Apply the same defaults as CommandPort.__init__ so comparison is apples-to-apples
+            # Apply the same defaults as CommandPort.__init__ so comparison is
+            # apples-to-apples. Silent normalization (wire_to_mode) on both
+            # sides: the load path already logged legacy ints (issue #59).
             _interactive = bool(cfg.get("interactive", False))
+            mru = wire_to_mode(cfg.get("max_read_write_users", 1))
             return {
                 "command": cfg.get("command", ""),
                 "shell": bool(cfg.get("shell", False)),
                 "cwd": cfg.get("cwd"),
                 "env": cfg.get("env"),
                 "auto_restart": bool(cfg.get("auto_restart", False)),
-                "max_read_write_users": cfg.get("max_read_write_users", 1),
+                "max_read_write_users": mru,
                 "interactive": _interactive,
                 "always_buffer": bool(cfg.get("always_buffer", _interactive)),
                 "scrollback_size": int(cfg.get("scrollback_size", 0)),
@@ -1272,7 +1289,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                         "cwd": getattr(port, "cwd", None),
                         "env": getattr(port, "env", None),
                         "auto_restart": getattr(port, "auto_restart", None),
-                        "max_read_write_users": getattr(port, "max_read_write_users", None),
+                        "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", None)),
                         "interactive": getattr(port, "interactive", None),
                         "always_buffer": getattr(port, "always_buffer", None),
                         "scrollback_size": getattr(port, "scrollback_size", None),

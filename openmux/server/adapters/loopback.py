@@ -10,6 +10,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Set
 
+from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
 
@@ -61,8 +62,13 @@ class LoopbackPort:
         # Buffer to assemble incomplete ESC/CSI sequences across writes
         self._esc_buf = bytearray()
 
-        # Client capacity hint used by wrappers/manager
-        self.max_read_write_users = int(config.get("max_read_write_users", 5))
+        # Write-slot capacity mode (issue #59): "one"/"multiple"/"none".
+        # Default is "one" (consistent with serial and command). Legacy ints in
+        # config still work (>= 2 -> multiple) and log a one-time deprecation
+        # line; any other value is a hard error (validate_config fails port creation).
+        self.max_read_write_users: str = parse_write_mode(
+            config.get("max_read_write_users", "one"), port_name=name, logger=self.logger
+        )
         # Console-group access control (issue #24): empty on both = open to all
         # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
         self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
@@ -380,7 +386,8 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                    "echo_delay": float >= 0 (optional),
                    "buffer_size": int >= 1 (optional),
                    "sanitize_control": bool (optional),
-                   "max_read_write_users": int >= 1 (optional)
+                   "max_read_write_users": "none"|"one"|"multiple" (optional;
+                     legacy ints 0/1/>=2 still accepted and deprecation-logged)
                  }, ...
               ]
             }
@@ -391,38 +398,48 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             ports = config.get("loopback_ports")
             if not isinstance(ports, list):
                 return False
-            for i, entry in enumerate(ports):
-                if not isinstance(entry, dict):
+            for entry in ports:
+                if not cls._loopback_entry_valid(entry):
                     return False
-                name = entry.get("name")
-                if not isinstance(name, str) or not name.strip():
-                    return False
-                if "echo_delay" in entry:
-                    ed = entry["echo_delay"]
-                    if not isinstance(ed, (int, float)) or ed < 0:
-                        return False
-                if "buffer_size" in entry:
-                    bs = entry["buffer_size"]
-                    if not isinstance(bs, int) or bs <= 0:
-                        return False
-                if "sanitize_control" in entry:
-                    sc = entry["sanitize_control"]
-                    if not isinstance(sc, bool):
-                        return False
-                if "scrollback_size" in entry:
-                    sbs = entry["scrollback_size"]
-                    if not isinstance(sbs, int) or sbs < 0:
-                        return False
-                # Unified-only: reject legacy synonyms
-                if "read_write_users" in entry or "read_write_users_max" in entry:
-                    return False
-                if "max_read_write_users" in entry:
-                    mru = entry["max_read_write_users"]
-                    if not isinstance(mru, int) or mru < 0:
-                        return False
             return True
         except Exception:  # justification: malformed config structure; simple False result suffices for validator contract
             return False
+
+    @staticmethod
+    def _loopback_entry_valid(entry: Any) -> bool:
+        """Whether a single loopback port entry is structurally valid."""
+        if not isinstance(entry, dict):
+            return False
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return False
+        if "echo_delay" in entry:
+            ed = entry["echo_delay"]
+            if not isinstance(ed, (int, float)) or ed < 0:
+                return False
+        if "buffer_size" in entry:
+            bs = entry["buffer_size"]
+            if not isinstance(bs, int) or bs <= 0:
+                return False
+        if "sanitize_control" in entry:
+            sc = entry["sanitize_control"]
+            if not isinstance(sc, bool):
+                return False
+        if "scrollback_size" in entry:
+            sbs = entry["scrollback_size"]
+            if not isinstance(sbs, int) or sbs < 0:
+                return False
+        # Unified-only: reject legacy synonyms
+        if "read_write_users" in entry or "read_write_users_max" in entry:
+            return False
+        if "max_read_write_users" in entry:
+            # Tri-value mode (issue #59); legacy ints still accepted and migrate
+            # at load time with a deprecation line. Any other value is a hard error.
+            try:
+                parse_write_mode(entry["max_read_write_users"])
+            except InvalidWriteMode:
+                return False
+        return True
 
     def get_adapter_type(self) -> str:
         """Return adapter type identifier."""
@@ -617,12 +634,15 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         common = sorted(old_names & new_names)
 
         def _material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-            # Apply the same defaults as LoopbackPort.__init__ so comparison is apples-to-apples
+            # Apply the same defaults as LoopbackPort.__init__ so comparison is
+            # apples-to-apples. Silent normalization (wire_to_mode) on both
+            # sides: the load path already logged legacy ints (issue #59).
+            mru = wire_to_mode(cfg.get("max_read_write_users", "one"))
             return {
                 "echo_delay": cfg.get("echo_delay", 0.0),
                 "buffer_size": cfg.get("buffer_size", 1024),
                 "sanitize_control": bool(cfg.get("sanitize_control", True)),
-                "max_read_write_users": int(cfg.get("max_read_write_users", 5)),
+                "max_read_write_users": mru,
                 "scrollback_size": int(cfg.get("scrollback_size", 0)),
             }
 
@@ -636,7 +656,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                     "echo_delay": getattr(port, "echo_delay", None),
                     "buffer_size": getattr(port, "buffer_size", None),
                     "sanitize_control": getattr(port, "sanitize_control", None),
-                    "max_read_write_users": getattr(port, "max_read_write_users", None),
+                    "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", None)),
                     "scrollback_size": getattr(port, "scrollback_size", None),
                 }
             except Exception:

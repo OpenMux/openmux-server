@@ -38,6 +38,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from aiohttp import web
 
+from openmux.server.access_control import capacity_display_label, capacity_to_wire
 from openmux.server.data_logger import DataLogger
 from openmux.server.port_utils import natural_sort_key, safe_get_port
 from openmux.server.web_plugins import ADAPTER_APP_KEY
@@ -997,12 +998,17 @@ def _rw_holders_for_port(adapter: Any, port_name: str) -> list:
 
 
 def _max_rw_users_for_port(adapter: Any, port_name: str) -> Optional[int]:
-    """Return max_read_write_users for a port, or None if not determinable."""
+    """Return the UI wire capacity for a port (0/1/WIRE_MULTIPLE), or None if not determinable.
+
+    The port stores the tri-value mode (issue #59); the browser only needs the
+    int shape it has always rendered (0 shows the "read-write is disabled"
+    notice; anything else shows holder info).
+    """
     try:
         pm = getattr(getattr(adapter, "console_manager", None), "port_manager", None)
         port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
         if port_obj is not None:
-            return int(getattr(port_obj, "max_read_write_users", 1))
+            return capacity_to_wire(getattr(port_obj, "max_read_write_users", 1))
     except Exception:
         pass
     return None
@@ -2635,7 +2641,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         "server_chain_info": chain_info,
                         "server_chain": p.get("server_chain", []),
                         "federation_type": p.get("federation_type"),
-                        "max_rw_users": p.get("max_read_write_users", p.get("max_rw_users")),
+                        # Display as the mode label ("none"/"one"/"multiple"); legacy ints
+                        # are migrated to their label (issue #59).
+                        "max_rw_users": capacity_display_label(p.get("max_read_write_users", p.get("max_rw_users"))),
                         "connected_clients": p.get("client_count", p.get("connected_clients", 0)),
                         "serial_config": (live_meta.get("serial_config") if live_meta else p.get("serial_config")),
                         "line_status": (live_meta.get("line_status") if live_meta else p.get("line_status")),

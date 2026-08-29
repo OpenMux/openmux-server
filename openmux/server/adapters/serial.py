@@ -15,6 +15,7 @@ import stat
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
+from ..access_control import InvalidWriteMode, WRITE_MODES, parse_write_mode, wire_to_mode
 from ..data_logger import DataLogger
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
@@ -36,7 +37,7 @@ class SerialPortConfig:
         flow_control: Flow control mode string.
         dtr: Initial DTR state.
         rts: Initial RTS state.
-        max_read_write_users: Max simultaneous read-write users.
+        max_read_write_users: Write-slot capacity mode, "none"/"one"/"multiple".
     """
 
     name: str
@@ -50,7 +51,7 @@ class SerialPortConfig:
     flow_control: str = "none"
     dtr: bool = True  # vulture: ignore (configured via runtime, accessed through config)
     rts: bool = True  # vulture: ignore (configured via runtime, accessed through config)
-    max_read_write_users: int = 1  # Maximum number of users with write access
+    max_read_write_users: str = "one"  # Write-slot capacity mode: "none"/"one"/"multiple" (issue #59)
     log_file: Optional[str] = None  # Optional per-port data log file path
     log_format: Optional[str] = None  # 'line' or 'jsonl'
     log_line_template: Optional[str] = None  # For 'line' format
@@ -80,6 +81,8 @@ class SerialPortConfig:
             raise ValueError("Parity must be N, E, O, M, or S")
         if self.stopbits not in [1, 1.5, 2]:
             raise ValueError("Stopbits must be 1, 1.5, or 2")
+        if self.max_read_write_users not in WRITE_MODES:
+            raise ValueError(f"max_read_write_users must be one of {list(WRITE_MODES)}, got {self.max_read_write_users!r}")
 
 
 class SerialPortWrapper:
@@ -94,7 +97,7 @@ class SerialPortWrapper:
         config: Immutable ``SerialPortConfig`` describing the port.
         name: Convenience alias of ``config.name``.
         description: Human friendly description string.
-        max_read_write_users: Maximum concurrent read/write users allowed.
+        max_read_write_users: Write-slot capacity mode ("none"/"one"/"multiple").
         is_connected: True while active connection is established.
         data_callback: Callback set by PortManager; called with (port_name, data).
     """
@@ -495,42 +498,40 @@ class SerialAdapter(BaseGenericAdapter):
             # Each port must have name and device
             if "name" not in port_config or "device" not in port_config:
                 return False
+            # Write-slot capacity (issue #59): mode, legacy int, or unset. Any
+            # other value is a hard error so typos fail fast at load time.
+            if "max_read_write_users" in port_config:
+                try:
+                    parse_write_mode(port_config["max_read_write_users"])
+                except InvalidWriteMode:
+                    return False
 
         return True
 
-    def _resolve_max_rw_users(self, port_config: Dict[str, Any], *, port_name: Optional[str] = None, default: int = 1) -> int:
-        """Resolve the max_read_write_users value with legacy fallback."""
+    def _resolve_max_rw_users(self, port_config: Dict[str, Any], *, port_name: Optional[str] = None) -> str:
+        """Resolve the write-slot capacity mode (issue #59 tri-value).
+
+        The key holds `"one"`, `"multiple"`, or `"none"` (unset = "one"). Legacy
+        integers still work and log a one-time deprecation line (0 -> none, 1
+        -> one, >= 2 -> multiple). The legacy `read_write_users` key is still
+        honored as a fallback (also deprecation-logged). Any other value is a
+        hard error: no silent fallback, so a typo cannot quietly change who
+        drives the port.
+        """
 
         value = port_config.get("max_read_write_users")
         legacy = False
         if value is None and "read_write_users" in port_config:
             value = port_config.get("read_write_users")
             legacy = True
-        if value is None:
-            return max(1, int(default))
-        try:
-            resolved = int(value)
-        except (TypeError, ValueError):
-            self.logger.warning(
-                "Port %s has invalid max_read_write_users=%r; falling back to %s",
-                port_name or port_config.get("name") or "unknown",
-                value,
-                default,
-            )
-            return max(0, int(default))
-        if resolved < 0:
-            self.logger.warning(
-                "Port %s has max_read_write_users=%s < 0; clamping to 0",
-                port_name or port_config.get("name") or "unknown",
-                resolved,
-            )
-            return 0
+        label = port_name or port_config.get("name") or "unknown"
+        mode = parse_write_mode(value, port_name=label, logger=self.logger)
         if legacy:
             self.logger.info(
                 "Port %s uses deprecated read_write_users; rename to max_read_write_users",
-                port_name or port_config.get("name") or "unknown",
+                label,
             )
-        return resolved
+        return mode
 
     def _make_notifier(self) -> Callable[[str, Dict[str, Any]], None]:
         """Return a meta-notify callback bound to this adapter's port manager."""
@@ -829,8 +830,9 @@ class SerialAdapter(BaseGenericAdapter):
             mru = port_cfg.get("max_read_write_users")
             if mru is None and "read_write_users" in port_cfg:
                 mru = port_cfg.get("read_write_users")
-            if mru is None:
-                mru = 1
+            # Normalize to the stored mode (issue #59) silently on both sides:
+            # the load path already emitted the deprecation line for legacy ints.
+            mru = wire_to_mode(mru)
             return {
                 "device": port_cfg.get("device"),
                 "baudrate": port_cfg.get("baudrate", 9600),
@@ -868,7 +870,9 @@ class SerialAdapter(BaseGenericAdapter):
                     "flow_control": spw.config.flow_control,
                     "dtr": spw.config.dtr,
                     "rts": spw.config.rts,
-                    "max_read_write_users": spw.config.max_read_write_users,
+                    # Silent normalization (wire_to_mode) so a raw legacy int
+                    # compares equal to its migrated mode string (issue #59).
+                    "max_read_write_users": wire_to_mode(spw.config.max_read_write_users),
                     "log_file": getattr(spw.config, "log_file", None),
                     "log_format": getattr(spw.config, "log_format", None),
                     "log_line_template": getattr(spw.config, "log_line_template", None),

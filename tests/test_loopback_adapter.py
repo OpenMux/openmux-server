@@ -209,7 +209,7 @@ async def test_adapter_reconcile_ports_unchanged(monkeypatch):
         echo_delay = 0.0
         buffer_size = 1024
         sanitize_control = True
-        max_read_write_users = 5
+        max_read_write_users = "one"
         scrollback_size = 0
 
     adapter.ports["a"] = PortObj()  # type: ignore[assignment]
@@ -243,14 +243,14 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
         echo_delay = 0.0
         buffer_size = 1024
         sanitize_control = True
-        max_read_write_users = 5
+        max_read_write_users = 1  # one (the default)
         scrollback_size = 0
 
     class PortB:
         echo_delay = 0.0
         buffer_size = 512  # will be changed to 2048
         sanitize_control = True
-        max_read_write_users = 5
+        max_read_write_users = 1  # one (the default)
         scrollback_size = 0
 
     adapter.ports["a"] = PortA()  # type: ignore[assignment]

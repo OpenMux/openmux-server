@@ -577,7 +577,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           flow_control: 'Hardware/software flow control (none/rtscts/dsrdtr/xonxoff).',
           dtr: 'Initial DTR line state.',
           rts: 'Initial RTS line state.',
-          max_read_write_users: 'Max concurrent read/write users for this port.',
+          max_read_write_users: 'How many users may write at once: one = 1, multiple = unlimited, none = no driver (admin included).',
           scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.',
           read_write_groups: 'Console groups granted read-write access. Empty = open to all authenticated users.',
           read_only_groups: 'Console groups granted read-only access (never promoted to read-write). Empty = open to all authenticated users.'
@@ -588,7 +588,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           buffer_size: 'Size of the internal buffer (bytes).',
           echo_delay: 'Artificial echo delay in seconds.',
           sanitize_control: 'Replace non-printable control characters with visible placeholders (e.g., show ^C instead of raw control bytes); helps prevent terminal glitches when testing.',
-          max_read_write_users: 'Max concurrent users for this loopback.',
+          max_read_write_users: 'How many users may write at once: one = 1 (default), multiple = unlimited, none = no driver (admin included).',
           scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.',
           read_write_groups: 'Console groups granted read-write access. Empty = open to all authenticated users.',
           read_only_groups: 'Console groups granted read-only access (never promoted to read-write). Empty = open to all authenticated users.'
@@ -599,7 +599,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           command: 'Command or executable to run for the session.',
           shell: 'Run via shell (true) or exec directly (false).',
           cwd: 'Working directory for the command.',
-          max_read_write_users: 'Max concurrent users.',
+          max_read_write_users: 'How many users may write at once: one = 1 (default), multiple = unlimited, none = no driver (admin included).',
           interactive: 'Allocate interactive TTY-like behavior.',
           always_buffer: 'Buffer early output until first client connects.',
           scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.',
@@ -719,8 +719,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
       // Default value hints for table columns per section
       const COLUMN_DEFAULTS_BASE = {
         'serial_ports': { baudrate: 115200, bytesize: 8, parity: 'N', stopbits: 1 },
-        'loopback_ports': { max_read_write_users: 5, echo_delay: 0.0, buffer_size: 1024, sanitize_control: true },
-        'command_ports': { max_read_write_users: 1, shell: false },
+        'loopback_ports': { max_read_write_users: 'one', echo_delay: 0.0, buffer_size: 1024, sanitize_control: true },
+        'command_ports': { max_read_write_users: 'one', shell: false },
         'tcp_initiator_ports': { enabled: true, use_tls: false, ssl_verify: true, timeout: 10.0, auto_reconnect: true, reconnect_delay: 5.0, enable_batching: true, batch_size: 1024, batch_timeout: 0.015, protocol_type: 'plain', protocol_telnet_negotiation: 'none', connect_on_demand: false, disconnect_when_idle: false, idle_disconnect_delay: 30.0 },
         'telnet_listener': { bind_host: '0.0.0.0', read_only: false, enabled: true, require_auth: false },
         'ssh_listener': { bind_host: '0.0.0.0', read_only: false, enabled: true, require_auth: true },
@@ -894,7 +894,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'flow_control', label:'Flow', type:'enum', enum:['none','rtscts','dsrdtr','xonxoff']},
           {key:'dtr', label:'DTR', type:'boolean'},
           {key:'rts', label:'RTS', type:'boolean'},
-          {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
+          {key:'max_read_write_users', label:'Write slots', type:'enum', enum:['one','multiple','none']},
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
           {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
           {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
@@ -906,7 +906,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'buffer_size', label:'Buffer size', type:'integer', min:1},
           {key:'echo_delay', label:'Echo delay', type:'number', min:0, step:0.1},
           {key:'sanitize_control', label:'Sanitize control', type:'boolean'},
-          {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
+          {key:'max_read_write_users', label:'Write slots', type:'enum', enum:['one','multiple','none']},
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
           {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
           {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
@@ -918,7 +918,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'command', label:'Command', type:'string', required:true},
           {key:'shell', label:'Shell', type:'boolean'},
           {key:'cwd', label:'CWD', type:'string'},
-          {key:'max_read_write_users', label:'Max RW users', type:'integer', min:1},
+          {key:'max_read_write_users', label:'Write slots', type:'enum', enum:['one','multiple','none']},
           {key:'interactive', label:'Interactive', type:'boolean'},
           {key:'always_buffer', label:'Always buffer', type:'boolean'},
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},

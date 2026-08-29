@@ -19,6 +19,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from openmux.server.access_control import write_capacity
 from openmux.server.data_logger import DataLogger
 from openmux.server.port_utils import natural_sort_key
 
@@ -201,6 +202,8 @@ class PortManager:
                 self.description = getattr(unified_port, "description", f"Unified {adapter_type} port")
                 self.is_running = getattr(unified_port, "is_running", True)
                 self.connected_clients = []
+                # Write-slot capacity mode (issue #59): "one"/"multiple"/"none"
+                # (or a legacy int, which consumers map via write_capacity()).
                 self.max_read_write_users = getattr(unified_port, "max_read_write_users", 5)
                 # Console-group access control (issue #24): empty on both = open to all.
                 self.read_write_groups = list(getattr(unified_port, "read_write_groups", None) or [])
@@ -563,16 +566,18 @@ class PortManager:
                     existing_idx = i
                     break
 
-            # Enforce read-write slot limit; read-only clients are always allowed
-            # through. The client being (re-)added does not count against its own seat.
+            # Enforce read-write slot capacity (issue #59: the port's
+            # max_read_write_users mode = "none"/"one"/"multiple"); read-only
+            # clients are always allowed through. ``none`` rejects every
+            # read-write attach, including an admin's. The client being
+            # (re-)added does not count against its own seat.
             if mode == "read-write":
+                capacity = write_capacity(port.max_read_write_users)
                 current_rw = sum(
                     1 for c in port.connected_clients if c.get("mode") == "read-write" and c.get("client_id") != client_id
                 )
-                if current_rw >= port.max_read_write_users:
-                    self.logger.warning(
-                        f"Port {port_name} is at maximum read-write capacity ({current_rw}/{port.max_read_write_users})"
-                    )
+                if current_rw >= capacity:
+                    self.logger.warning(f"Port {port_name} is at maximum read-write capacity ({current_rw}/{capacity})")
                     return False
 
             # Add client (the client object will be provided by the console manager)
@@ -772,14 +777,17 @@ class PortManager:
             client_id = getattr(client, "username", str(id(client)))
         port = self.ports[port_name]
 
-        # Enforce the read-write slot limit; skip check if client is already read-write
+        # Enforce the read-write slot capacity (issue #59 mode); skip check if
+        # client is already read-write. A ``none`` port refuses promotion for
+        # everyone, including admin.
         already_rw = any(c["client_id"] == client_id and c.get("mode") == "read-write" for c in port.connected_clients)
         if not already_rw:
+            capacity = write_capacity(port.max_read_write_users)
             current_rw = sum(1 for c in port.connected_clients if c.get("mode") == "read-write")
-            if current_rw >= port.max_read_write_users:
+            if current_rw >= capacity:
                 self.logger.warning(
                     f"Cannot promote {client_id}: port {port_name} already at max read-write capacity "
-                    f"({current_rw}/{port.max_read_write_users})"
+                    f"({current_rw}/{capacity})"
                 )
                 return False
 
@@ -1274,8 +1282,26 @@ class PortManager:
         """
         client_id = getattr(client, "username", str(id(client)))
         username = getattr(client, "username", "unknown")
-        mode = "read-write" if permissions in ["read-write", "admin"] else "read-only"
+        # Entitlement from the permission, then capacity: an entitled user on a
+        # full (or ``none``) port lands read-only via the fallback in
+        # add_client_to_port (issue #59: a slot is a resource, not a privilege).
+        if permissions in ["read-write", "admin"]:
+            port = self.ports.get(port_name)
+            mode = "read-write" if (port is not None and self._has_free_write_slot(port, client_id)) else "read-only"
+        else:
+            mode = "read-only"
         return await self.add_client_to_port(port_name, client_id, username, mode)
+
+    @staticmethod
+    def _has_free_write_slot(port: Any, client_id: str) -> bool:
+        """Whether ``port`` currently grants a read-write seat to ``client_id`` (issue #59)."""
+        capacity = write_capacity(getattr(port, "max_read_write_users", 1))
+        current_rw = sum(
+            1
+            for c in getattr(port, "connected_clients", [])
+            if c.get("mode") == "read-write" and c.get("client_id") != client_id
+        )
+        return current_rw < capacity
 
     async def disconnect_client(self, port_name: str, client: Any) -> bool:
         """Disconnect a client from a port (ConsoleManager compatibility).

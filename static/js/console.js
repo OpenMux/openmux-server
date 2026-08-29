@@ -1400,7 +1400,8 @@ function connectSelected() {
           const silentReasons = ['demoted', 'action_self_demoted', 'action_restored', 'action_restore_denied'];
           if (msg.ok === false && !silentReasons.includes(msg.reason)) {
             if (msg.max_rw_users === 0) {
-              try { term.write('\r\n[read-write is not available on this port – configured with 0 read-write users]\r\n'); } catch (_) {}
+              // 0 = the port's write-slot capacity is 'none' (issue #59): it has no driver at all.
+              try { term.write('\r\n[read-write is not available on this port – it has no write slots (capacity: none)]\r\n'); } catch (_) {}
             } else {
               const who = (lastRwHolders.length ? ' (held by: ' + lastRwHolders.join(', ') + ')' : '');
               try { term.write('\r\n[read-write request denied' + who + ' – use Force take if needed]\r\n'); } catch (_) {}

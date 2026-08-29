@@ -89,7 +89,14 @@ properties:
         flow_control: { type: string, enum: [none, rtscts, dsrdtr, xonxoff], default: none }
         dtr: { type: boolean, default: true }
         rts: { type: boolean, default: true }
-        max_read_write_users: { type: integer, minimum: 1, default: 1 }
+        # Write-slot capacity (issue #59): how many users may write at once.
+        # Mode strings are preferred; legacy integers (0/1/>=2) are still accepted
+        # during migration and map to none/one/multiple with a deprecation log line.
+        max_read_write_users:
+          oneOf:
+            - { type: string, enum: [none, one, multiple] }
+            - { type: integer, minimum: 0 }
+          default: one
         scrollback_size: { type: integer, minimum: 0, default: 0 }
         read_write_groups:
           type: array
@@ -109,7 +116,14 @@ properties:
         buffer_size: { type: integer, minimum: 1, default: 1024 }
         echo_delay: { type: number, minimum: 0, default: 0.0 }
         sanitize_control: { type: boolean, default: true }
-        max_read_write_users: { type: integer, minimum: 1, default: 5 }
+        # Write-slot capacity (issue #59); default is 'one' (consistent with
+        # serial and command). Legacy ints are accepted during migration
+        # (0 -> none, 1 -> one, >= 2 -> multiple).
+        max_read_write_users:
+          oneOf:
+            - { type: string, enum: [none, one, multiple] }
+            - { type: integer, minimum: 0 }
+          default: one
         scrollback_size: { type: integer, minimum: 0, default: 0 }
         read_write_groups:
           type: array
@@ -130,7 +144,12 @@ properties:
         shell: { type: boolean, default: false }
         cwd: { type: string }
         env: { type: object, additionalProperties: { type: string } }
-        max_read_write_users: { type: integer, minimum: 1, default: 1 }
+        # Write-slot capacity (issue #59); legacy ints 0/1/>=2 map to none/one/multiple.
+        max_read_write_users:
+          oneOf:
+            - { type: string, enum: [none, one, multiple] }
+            - { type: integer, minimum: 0 }
+          default: one
         interactive: { type: boolean }
         always_buffer: { type: boolean }
         normalize_newlines: { type: boolean }

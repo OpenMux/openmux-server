@@ -586,7 +586,7 @@ class _LadderPort:
 
     def __init__(
         self,
-        max_rw: int = 1,
+        max_rw: Any = 1,
         rw_clients: int = 0,
         ro_groups: tuple = (),
         rw_groups: tuple = (),
@@ -618,10 +618,27 @@ class TestResolveAccessModeLadder:
 
         return ConsoleManager(FakePortManager(), AuthManager(auth_config))
 
-    def test_admin_gets_read_write_everywhere(self):
+    def test_admin_binds_to_write_slot_capacity(self):
+        # issue #59: admin bypasses access control but NOT capacity. A slot is
+        # a resource, not a privilege -- an exhausted port demotes admin to
+        # read-only.
         cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
-        port = _LadderPort(rw_clients=1, rw_groups=("ops",))  # full + ACL'd
-        assert cm._resolve_access_mode(port, "p1", "admin", "root") == ("read-write", None)
+        # "one" with a free slot: admin gets read-write.
+        assert cm._resolve_access_mode(_LadderPort(max_rw="one"), "p1", "admin", "root") == ("read-write", None)
+        # "one" full (legacy int 1 accepted): admin demotes, even with group grants.
+        assert cm._resolve_access_mode(_LadderPort(max_rw=1, rw_clients=1, rw_groups=("ops",)), "p1", "admin", "root") == (
+            "read-only",
+            None,
+        )
+        # "none" has no slots at all: admin is always read-only.
+        assert cm._resolve_access_mode(_LadderPort(max_rw="none", rw_groups=("ops",)), "p1", "admin", "root") == (
+            "read-only",
+            None,
+        )
+        # "multiple" never demotes, no matter how busy.
+        assert cm._resolve_access_mode(
+            _LadderPort(max_rw="multiple", rw_clients=7, rw_groups=("ops",)), "p1", "admin", "root"
+        ) == ("read-write", None)
 
     def test_global_read_write_demotes_on_full_port(self):
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
