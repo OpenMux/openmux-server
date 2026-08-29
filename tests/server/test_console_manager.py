@@ -641,17 +641,22 @@ async def test_two_takers_race_empty_slot_leaves_exactly_one_writer(cm, port_man
 class _StubProxy:
     """Stands in for a muxcon RemotePortProxy on the request side.
 
-    Carries ``connected_clients`` (for the taker's username lookup) and
-    ``max_read_write_users`` (for ``_taker_entitled``) so that the entitlement
-    check can run, and the federation branch then just returns the stub's mode.
+    Carries ``connected_clients`` (for the taker's username lookup AND the
+    local mirror a granted takeover must write) and ``max_read_write_users``
+    (for ``_taker_entitled``) so that the entitlement check can run. The
+    federation branch then just returns the stub's mode. NOTE: the stub does
+    NOT demote its "other" holder on grant - the real origin does that in
+    order (victim relay first, then the taker's ack), which the local
+    mirror's capacity check depends on.
     """
 
-    def __init__(self, result: str):
+    def __init__(self, result: str, taker_present: bool = True):
         self.result = result
         self.connected_clients = [
             {"client_id": "A", "username": "alice", "mode": "read-write"},
-            {"client_id": "B", "username": "bob", "mode": "read-only"},
         ]
+        if taker_present:
+            self.connected_clients.append({"client_id": "B", "username": "bob", "mode": "read-only"})
         self.max_read_write_users = "one"
         self.read_write_groups = []
         self.read_only_groups = []
@@ -662,6 +667,14 @@ class _StubProxy:
 
 @pytest.mark.asyncio
 async def test_take_federated_origin_grants(cm, port_manager):
+    """A granted federated take must MIRROR onto the taker's LOCAL record.
+
+    Regression for the "UI shows control but every keystroke is WRITE
+    BLOCKED until reconnect" bug: the origin's promote only reaches its own
+    ``fed:<peer>:<sid>`` pseudo-client; the local write gate reads THIS
+    node's ``connected_clients`` mode, so the take must promote the taker's
+    own local record too.
+    """
     port = _StubProxy("read-write")
     port_manager.ports["p1"] = port
     cm.client_port_map["B"] = "p1"
@@ -669,10 +682,14 @@ async def test_take_federated_origin_grants(cm, port_manager):
     ok, reason = await cm.take_write_slot("B", "p1")
 
     assert (ok, reason) == (True, "ok")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes["B"] == "read-write"  # the local mirror - this is what the write gate reads
+    assert modes["A"] == "read-write"  # the stub holds (the real origin demoted it in order before the ack)
 
 
 @pytest.mark.asyncio
 async def test_take_federated_origin_denies(cm, port_manager):
+    """A refused take leaves the local record exactly as it was."""
     port = _StubProxy("read-only")
     port_manager.ports["p1"] = port
     cm.client_port_map["B"] = "p1"
@@ -680,6 +697,26 @@ async def test_take_federated_origin_denies(cm, port_manager):
     ok, reason = await cm.take_write_slot("B", "p1")
 
     assert (ok, reason) == (False, "federation_denied")
+    assert all(c["mode"] == "read-only" for c in port.connected_clients if c["client_id"] == "B")
+
+
+@pytest.mark.asyncio
+async def test_take_federated_origin_grant_missing_local_seat_refuses(cm, port_manager):
+    """Origin granted but the taker has no local record to mirror onto
+    (corrupt state): refuse rather than report success the write gate
+    cannot honor. Permission resolves via the adapter metadata path so the
+    entitlement check still passes and we reach the federation branch."""
+    port = _StubProxy("read-write", taker_present=False)
+    port_manager.ports["p1"] = port
+    cm.client_port_map["B"] = "p1"  # attached, but absent from the port's local record list
+    cm.client_to_manager["B"] = FakeAdapterChannel()
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    # A grant the local write gate cannot honor is refused (promote_failed)
+    # rather than reported as success.
+    assert (ok, reason) == (False, "promote_failed")
+    assert all(c["client_id"] != "B" for c in port.connected_clients)  # no record invented
 
 
 # ---------------------------------------------------------------------------

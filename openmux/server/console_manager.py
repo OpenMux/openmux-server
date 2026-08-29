@@ -1029,7 +1029,13 @@ class ConsoleManager:
           authority and sees every holder this server cannot (a client local
           to the origin, another peer's writer). The origin re-checks that the
           taker's own mirror is connected there and arbitrates the transfer
-          via a FEDRW TAKE frame; the origin also audits the transfer.
+          via a FEDRW TAKE frame; the origin also audits the transfer. When
+          the origin grants it, the TAKER'S OWN local record is mirrored to
+          read-write here too - the local data path gates writes on that
+          record, so without the mirror the taker's console shows read-write
+          but every keystroke is `WRITE BLOCKED` until reconnect. (The
+          victim's mirror is demoted in order: the origin relays the
+          victim's demotion before the taker's ack reaches this node.)
 
         Args:
             taker_id: Client session requesting the takeover.
@@ -1089,6 +1095,29 @@ class ConsoleManager:
                 self.logger.debug(f"FEDRW TAKE request failed for {taker_id} on {port_name}", exc_info=True)
                 origin_mode = "read-only"
             if origin_mode == "read-write":
+                # The origin granted the takeover. Mirror it onto our LOCAL
+                # view of the taker: the origin's promote only reached the
+                # origin's "fed:<peer>:<sid>" pseudo-client, not this node's
+                # client record - and the local write path gates on that
+                # record, so without this line the taker would show
+                # read-write but stay blocked (WRITE BLOCKED) until
+                # reconnect. Safe order: the origin relays the victim's
+                # demotion (FEDRWACK, demoting the local mirror) BEFORE the
+                # taker's take-ack, in order on the same connection, so when
+                # this node promotes the taker the slot already looks free.
+                if not await self.promote_client_to_read_write(taker_id, port_name):
+                    # The origin held the transfer, but the local record
+                    # could not follow (the taker has no local seat, or the
+                    # victim's demotion relay did not land here yet). Report
+                    # the take as FAILED: a success the local write gate
+                    # cannot honor would just reproduce the read-write-but-
+                    # blocked state (the taker sees RW, every keystroke is
+                    # WRITE BLOCKED until reconnect).
+                    self.logger.warning(
+                        f"Federated takeover granted by the origin, but mirroring it locally "
+                        f"failed for {taker_id} on {port_name}"
+                    )
+                    return False, "promote_failed"
                 self._log_takeover_audit(port, port_name, taker_id, taker_username, target or "(latest)")
                 return True, "ok"
             return False, "federation_denied"
