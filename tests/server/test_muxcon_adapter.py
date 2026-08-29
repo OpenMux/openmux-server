@@ -3037,13 +3037,29 @@ async def test_origin_take_restores_victim_when_taker_promote_fails():
 
 
 @pytest.mark.asyncio
-async def test_origin_take_no_eligible_holder_is_a_noop():
+async def test_origin_take_latest_on_empty_slot_promotes_taker():
     a, pm, port = _take_setup()
-    # Every other holder is already read-only: nothing to take.
+    # No holder at all (every other client read-only): the no-target fallback
+    # ("latest") takes the EMPTY slot directly - the taker's mirror is
+    # promoted, nothing is demoted or restored.
     for c in port.connected_clients:
         if c["client_id"] != "fed:peerA:3":
             c["mode"] = "read-only"
     await a._handle_fedrw_take("conn", pm, "p1", "fed:peerA:3", "latest")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes["fed:peerA:3"] == "read-write"
+    assert all(c["mode"] == "read-only" for c in port.connected_clients if c["client_id"] != "fed:peerA:3")
+
+
+@pytest.mark.asyncio
+async def test_origin_take_named_spec_on_empty_slot_refuses():
+    a, pm, port = _take_setup()
+    # No holder at all; a NAMED spec still refuses (the named victim does not
+    # exist), even though "latest" would have granted the empty slot.
+    for c in port.connected_clients:
+        if c["client_id"] != "fed:peerA:3":
+            c["mode"] = "read-only"
+    await a._handle_fedrw_take("conn", pm, "p1", "fed:peerA:3", "own:7")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
     assert modes["fed:peerA:3"] == "read-only"
 

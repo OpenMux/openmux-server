@@ -833,7 +833,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
           shape and stream ids are shared both directions by design.
 
         Returns the connected_clients record, or None when no eligible holder
-        matches (the caller then leaves the port untouched).
+        matches. The caller then either promotes the taker's mirror into the
+        EMPTY slot (spec ``latest``: the no-target fallback) or leaves the
+        port untouched (a named spec: the named victim does not match any
+        current holder).
         """
         try:
             port = pm.get_port(port_name)
@@ -881,6 +884,19 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         victim = self._resolve_fedrw_take_target(pm, port_name, fed_client_id, spec)
         if victim is None:
+            if not spec or spec == "latest":
+                # No holder, no name: the taker's mirror takes the EMPTY slot
+                # directly (legacy force behavior, mirrored from the local
+                # take_write_slot branch). Entitlement was already checked on
+                # the requesting peer before the frame left it.
+                if await pm.promote_client(port_name, fed_client_id):
+                    self.logger.info(
+                        f"WRITE-SLOT TAKEN (empty slot, federation, origin) port={port_name} "
+                        f"taker={fed_client_id} time={time.time():.3f}"
+                    )
+                    return
+                self.logger.warning(f"[{conn_id}] FEDRW TAKE on {port_name}: taker promote into empty slot failed; holding")
+                return
             self.logger.warning(
                 f"[{conn_id}] FEDRW TAKE on {port_name}: no eligible read-write holder (spec={spec!r}); holding"
             )

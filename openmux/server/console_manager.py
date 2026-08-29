@@ -981,6 +981,30 @@ class ConsoleManager:
             self.logger.debug(f"DataLogger takeover record failed for {port_name}", exc_info=True)
         return True, "ok"
 
+    def _log_empty_slot_grant(self, port: Any, port_name: str, taker_id: str, taker_username: str) -> None:
+        """Audit a take that grabbed an EMPTY write slot directly.
+
+        Same DataLogger event as a demoting takeover, with ``victim`` empty:
+        one grep covers every slot acquisition through the force verb.
+        """
+        self.logger.info(
+            f"WRITE-SLOT TAKEN (empty slot) port={port_name} " f"taker={taker_username}:{taker_id} time={time.time():.3f}"
+        )
+        try:
+            DataLogger.get().record_meta(
+                port_name=port_name,
+                event="write_slot_takeover",
+                client_id=str(taker_id),
+                meta={
+                    "taker": taker_id,
+                    "taker_username": taker_username,
+                    "victim": None,
+                },
+                port_obj=port,
+            )
+        except Exception:
+            self.logger.debug(f"DataLogger takeover record failed for {port_name}", exc_info=True)
+
     async def take_write_slot(self, taker_id: str, port_name: str, target: Optional[str] = None) -> Tuple[bool, str]:
         """Take the port's write slot from another holder (issue #59 Part 2).
 
@@ -997,7 +1021,10 @@ class ConsoleManager:
           without the slot check, `_taker_entitled`) - an attached read-only
           seat can never take the slot.
         - The victim is the chosen target, else the most recently attached
-          other read-write holder (see `_resolve_take_target`).
+          other read-write holder (see `_resolve_take_target`). When nobody
+          holds the slot, a no-target take takes the EMPTY slot and promotes
+          the taker directly; a named target that matches no holder is
+          refused.
         - Federated (`remote_muxcon`) ports: the origin is the capacity
           authority and sees every holder this server cannot (a client local
           to the origin, another peer's writer). The origin re-checks that the
@@ -1016,7 +1043,8 @@ class ConsoleManager:
                 ``port_missing``, ``not_entitled``, ``denied_by_group_acl``,
                 ``denied_by_access_default``, ``no_holder``,
                 ``invalid_target``, ``victim_not_current``, ``promote_failed``,
-                ``federation_denied``.
+                ``federation_denied``. ``no_holder`` applies to ``none``
+                ports and to named targets that match no holder.
         """
         if self.client_port_map.get(taker_id) != port_name:
             return False, "not_attached"
@@ -1073,9 +1101,20 @@ class ConsoleManager:
             return False, "no_holder"
 
         victim, reason = self._resolve_take_target(port, port_name, taker_id, target)
-        if victim is None:
-            return False, reason
-        return await self._take_slot_local(port, port_name, taker_id, taker_username, victim)
+        if victim is not None:
+            return await self._take_slot_local(port, port_name, taker_id, taker_username, victim)
+        # No holder to demote. A no-target take takes the EMPTY slot: the
+        # taker becomes the writer directly (legacy force behavior). A named
+        # target that matched no holder is still refused - the named victim
+        # does not (or no longer) exist.
+        if target is not None or reason != "no_holder":
+            return False, (reason or "no_holder")
+        if self._is_client_rw(port, taker_id):
+            return True, "already_rw"
+        if not await self.promote_client_to_read_write(taker_id, port_name):
+            return False, "promote_failed"
+        self._log_empty_slot_grant(port, port_name, taker_id, taker_username)
+        return True, "ok"
 
     def _client_permissions(self, port_name: str, client_id: str) -> Optional[str]:
         """Recover the global permission for an attached client whose adapter

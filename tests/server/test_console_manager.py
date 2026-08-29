@@ -199,16 +199,90 @@ async def test_take_demotes_and_notifies_a_federated_holder(cm, port_manager):
 
 
 @pytest.mark.asyncio
-async def test_take_with_no_holder_refuses(cm, port_manager):
-    """Nothing to take: no other holder means there is no slot to transfer."""
+async def test_take_empty_slot_grants(cm, port_manager):
+    """Nobody holds the slot: a no-target take takes the EMPTY slot.
+
+    Legacy force behavior, restored: the taker is promoted directly, no
+    demotion happens (there is no one to demote) and no notice is sent.
+    """
     port = FakePort()
     port_manager.ports["p1"] = port
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
     ok, reason = await cm.take_write_slot("B", "p1")
 
+    assert (ok, reason) == (True, "ok")
+    assert port.connected_clients[0]["mode"] == "read-write"
+
+
+@pytest.mark.asyncio
+async def test_take_empty_slot_already_rw_when_sole_holder(cm, port_manager):
+    """The taker is already the sole RW holder: the no-target take is a no-op
+    ``already_rw`` (matching multiple-mode), with nothing demoted or sent."""
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+
+    ok, reason = await cm.take_write_slot("A", "p1")
+
+    assert (ok, reason) == (True, "already_rw")
+    assert port.connected_clients[0]["mode"] == "read-write"
+
+
+@pytest.mark.asyncio
+async def test_take_empty_slot_named_target_refuses(cm, port_manager):
+    """A named target that matches no holder is refused even on an empty
+    slot: the named victim does not (or no longer) exist, so nothing
+    changes."""
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+    ok, reason = await cm.take_write_slot("B", "p1", target="ghost")
+
     assert (ok, reason) == (False, "no_holder")
     assert port.connected_clients[0]["mode"] == "read-only"
+
+
+@pytest.mark.asyncio
+async def test_take_empty_slot_audits(cm, port_manager, monkeypatch):
+    """An empty-slot grant writes the same ``write_slot_takeover`` event as a
+    demoting takeover (victim empty) plus a distinct INFO line."""
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+    logs: List[str] = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord):
+            logs.append(record.getMessage())
+
+    handler = _CaptureHandler()
+    cm.logger.addHandler(handler)
+    old_level = cm.logger.level
+    cm.logger.setLevel(logging.INFO)  # tests inherit the WARNING root level by default
+
+    from openmux.server import data_logger as dl_mod
+
+    recorded: List[Dict[str, Any]] = []
+
+    class _RecLogger:
+        def record_meta(self, **kwargs):
+            recorded.append(kwargs)
+
+    monkeypatch.setattr(dl_mod.DataLogger, "get", classmethod(lambda cls: _RecLogger()))
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+    cm.logger.removeHandler(handler)
+    cm.logger.setLevel(old_level)
+
+    assert (ok, reason) == (True, "ok")
+    assert any("WRITE-SLOT TAKEN (empty slot)" in m and "port=p1" in m for m in logs)
+    events = [r for r in recorded if r.get("event") == "write_slot_takeover"]
+    assert len(events) == 1
+    assert events[0]["meta"]["victim"] is None
+    assert events[0]["meta"]["taker"] == "B"
 
 
 @pytest.mark.asyncio
@@ -502,6 +576,62 @@ async def test_take_writes_audit_line_and_data_logger_event(cm, port_manager, mo
     assert (ok, reason) == (True, "ok")
     assert any("WRITE-SLOT TAKEOVER" in m and "port=p1" in m for m in logs)
     assert any(r.get("event") == "write_slot_takeover" for r in recorded)
+
+
+@pytest.mark.asyncio
+async def test_two_takers_race_empty_slot_leaves_exactly_one_writer(cm, port_manager):
+    """Two concurrent no-target takes on an EMPTY slot: the port always ends
+    with at most one read-write holder. One path grabs the empty slot
+    directly (``ok``); the other path's promote is refused by capacity
+    (``promote_failed``) OR both grab in sequence and the earlier taker is
+    demoted by the later take (it still got ``ok``; the winner gets the
+    slot). Only the final state and the frame count are pinned."""
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+    _attach(cm, port, "p1", "C", "carol", "read-only")
+    other_receiver = FakeAdapterChannel(accept=True)
+    cm.client_to_manager["B"] = other_receiver  # capture B's demotion notice, if any
+    # Force maximum interleaving: yield at every promote/demote step. The
+    # yielding promote also models the REAL PortManager's one-port capacity
+    # check (a 2nd concurrent promote is refused), which the plain fake does
+    # not carry.
+    real_promote = port_manager.promote_client
+    real_demote = port_manager.demote_client
+
+    async def yielding_promote(port_name, client_id):
+        await asyncio.sleep(0)
+        port_obj = port_manager.ports[port_name]
+        already = any(c["client_id"] == client_id and c.get("mode") == "read-write" for c in port_obj.connected_clients)
+        if not already:
+            current_rw = sum(1 for c in port_obj.connected_clients if c.get("mode") == "read-write")
+            if current_rw >= 1:
+                return False
+        return await real_promote(port_name, client_id)
+
+    async def yielding_demote(port_name, client_id):
+        await asyncio.sleep(0)
+        return await real_demote(port_name, client_id)
+
+    port_manager.promote_client = yielding_promote
+    port_manager.demote_client = yielding_demote
+
+    results = await asyncio.gather(cm.take_write_slot("B", "p1"), cm.take_write_slot("C", "p1"))
+
+    rw = [c["client_id"] for c in port.connected_clients if c["mode"] == "read-write"]
+    assert len(rw) == 1  # the invariant: the one-writer count is never exceeded
+    # Each taker's own report is legitimate for ITS operation: an ``ok`` take
+    # that later lost the slot to the other take is accepted preemption
+    # semantics (the loser sees a "demoted" notice); a capacity-refused
+    # interleaving reports ``promote_failed``.
+    for ok, reason in results:
+        assert (ok, reason) in [(True, "ok"), (True, "already_rw"), (False, "promote_failed")]
+    # At most one demotion notice is sent (two takers; one may lose its seat
+    # to the other's take).
+    demotions = [p for p in other_receiver.received if p.get("type") == "client_mode" and p.get("reason") == "demoted"]
+    assert len(demotions) <= 1
+    if demotions:
+        assert demotions[0]["mode"] == "read-only"
 
 
 # ---------------------------------------------------------------------------
