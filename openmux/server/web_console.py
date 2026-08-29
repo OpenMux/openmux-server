@@ -1194,25 +1194,28 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                     pass
                                 continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "force_promote":
-                                ok = False
-                                undelivered: list = []
+                                # Single write-slot takeover (issue #59 Part 2).
+                                # `client_id` names the victim; absent = most
+                                # recently attached holder. The victim's own
+                                # demotion notice is pushed by the console manager.
+                                target = (
+                                    req.get("client_id")
+                                    if isinstance(req.get("client_id"), str) and req.get("client_id") != client_id
+                                    else None
+                                )
+                                ok, reason = False, "not_attached"
                                 try:
-                                    ok, undelivered = await adapter.console_manager.force_promote_client(client_id, port_name)
+                                    ok, reason = await adapter.console_manager.take_write_slot(client_id, port_name, target)
                                 except Exception:
-                                    ok = False
-                                if ok:
-                                    demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
-                                    for other_id in undelivered:
-                                        # Cross-adapter routing unavailable; fall back to same-adapter delivery
-                                        try:
-                                            other_ws = adapter._clients.get(other_id)
-                                            if other_ws is not None:
-                                                await other_ws.send_str(
-                                                    "OMXCTRL " + json.dumps(demotion, separators=(",", ":"))
-                                                )
-                                        except Exception:
-                                            pass
-                                resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
+                                    ok, reason = False, "error"
+                                resp = {
+                                    "type": "client_mode",
+                                    "ok": bool(ok),
+                                    "mode": ("read-write" if ok else "read-only"),
+                                    "reason": reason,
+                                }
+                                if ok and reason == "already_rw":
+                                    resp.pop("reason")
                                 if not ok:
                                     max_rw = _max_rw_users_for_port(adapter, port_name)
                                     if max_rw is not None:

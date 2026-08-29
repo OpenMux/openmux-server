@@ -97,24 +97,19 @@ class FakeConsoleManager:
         self.client_modes[client_id] = "read-only"
         return True
 
-    async def force_promote_client(self, client_id: str, port_name: str):
-        """Demote every other attached client, promote `client_id`, and push
+    async def take_write_slot(self, client_id: str, port_name: str, target=None):
+        """Demote the other attached client, promote `client_id`, and push
         a cross-adapter demotion notice via the owning adapter directly
-        (mirrors ConsoleManager.force_promote_client for single-adapter tests)."""
-        undelivered: List[str] = []
+        (mirrors ConsoleManager.take_write_slot for single-adapter tests)."""
         for other_id in list(self.attached):
             if other_id == client_id:
                 continue
             self.client_modes[other_id] = "read-only"
             demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
             if self.adapter is not None:
-                delivered = await self.adapter.send_control_frame_to_client(other_id, demotion)
-                if not delivered:
-                    undelivered.append(other_id)
-            else:
-                undelivered.append(other_id)
+                await self.adapter.send_control_frame_to_client(other_id, demotion)
         self.client_modes[client_id] = "read-write"
-        return True, undelivered
+        return True, "ok"
 
     def get_rw_holders_display(self, port_name: str) -> List[str]:
         return list(self.rw_holders)

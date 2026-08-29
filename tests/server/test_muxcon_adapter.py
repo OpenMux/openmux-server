@@ -2700,7 +2700,15 @@ async def test_end_to_end_local_force_take_notifies_federated_peers_own_client()
 
     pm_a = PortManager({})
     pm_a.ports["p1"] = _FakePort(max_read_write_users=1)
-    cm_a = ConsoleManager(pm_a, None)
+
+    class _FakeAuth:
+        def get_user_permissions(self, username: str):
+            return "read-write"
+
+        def get_user_groups(self, username: str):
+            return set()
+
+    cm_a = ConsoleManager(pm_a, _FakeAuth())
     ad_a.main_port_manager = pm_a
     ad_a.console_manager = cm_a
 
@@ -2753,12 +2761,12 @@ async def test_end_to_end_local_force_take_notifies_federated_peers_own_client()
         fed_clients[0]["mode"] = "read-write"
         proxy.connected_clients.append({"client_id": "browser1", "username": "browser_user", "mode": "read-write"})
 
-        # A genuinely local origin client force-takes read-write.
+        # A genuinely local origin client takes the read-write slot.
         cm_a.client_port_map["human1"] = "p1"
         pm_a.ports["p1"].connected_clients.append({"client_id": "human1", "username": "human1", "mode": "read-only"})
 
-        ok, undelivered = await cm_a.force_promote_client("human1", "p1")
-        assert ok is True
+        ok, reason = await cm_a.take_write_slot("human1", "p1")
+        assert (ok, reason) == (True, "ok")
 
         # Origin-side bookkeeping demoted the federated holder...
         assert next(c for c in pm_a.ports["p1"].connected_clients if c["client_id"] == fed_client_id)["mode"] == "read-only"
@@ -2771,7 +2779,7 @@ async def test_end_to_end_local_force_take_notifies_federated_peers_own_client()
             await asyncio.sleep(0.02)
         assert (
             browser.received
-        ), f"Peer's own local client was never notified live of the federated demotion - undelivered={undelivered!r}"
+        ), f"Peer's own local client was never notified live of the federated demotion - take reason={reason!r}"
         assert browser.received[-1]["mode"] == "read-only"
         assert browser.received[-1]["reason"] == "demoted"
     finally:
@@ -2932,3 +2940,162 @@ async def test_pre_auth_mpath_and_heartbeat_frames_ignored_on_server_role():
     await a._process_control_command(conn_id, cast(Any, w), "ACK:123.456")
     st = a._hb_state.get(conn_id)
     assert st and st.get("last_ack_ts", 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# issue #59 Part 2: origin-side FEDRW TAKE arbitration + proxy spec builder
+
+
+class _TakePort:
+    def __init__(self):
+        self.connected_clients: List[Dict[str, Any]] = []
+
+
+class _TakePM:
+    def __init__(self, port: _TakePort):
+        self.ports = {"p1": port}
+        self.promote_fail_for: set = set()
+
+    def get_port(self, name):
+        return self.ports.get(name)
+
+    async def promote_client(self, port_name: str, client_id: str) -> bool:
+        if client_id in self.promote_fail_for:
+            return False
+        for c in self.ports[port_name].connected_clients:
+            if c["client_id"] == client_id:
+                c["mode"] = "read-write"
+                return True
+        return False
+
+    async def demote_client(self, port_name: str, client_id: str) -> bool:
+        for c in self.ports[port_name].connected_clients:
+            if c["client_id"] == client_id:
+                c["mode"] = "read-only"
+                return True
+        return False
+
+
+def _take_setup(taker: str = "fed:peerA:3", taker_at: float = 10.0) -> tuple:
+    """Origin holding three RW writers; the taker's mirror is the newest."""
+    port = _TakePort()
+    port.connected_clients = [
+        {"client_id": "local1", "username": "local1", "mode": "read-write", "connected_at": 1.0},
+        {"client_id": "fed:peerB:5", "username": "peerBuser", "mode": "read-write", "connected_at": 5.0},
+        {"client_id": taker, "username": "taker", "mode": "read-write", "connected_at": taker_at},
+    ]
+    # The taker's mirror starts read-only so a take visibly transfers the slot.
+    port.connected_clients[-1]["mode"] = "read-only"
+    pm = _TakePM(port)
+    a = UnifiedMuxConAdapter("origin", {"listeners": []})
+    a.main_port_manager = pm
+    a.console_manager = None
+    return a, pm, port
+
+
+@pytest.mark.asyncio
+async def test_origin_take_latest_picks_newest_other_holder():
+    a, pm, port = _take_setup()
+    await a._handle_fedrw_take("conn", pm, "p1", "fed:peerA:3", "latest")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    # The newest OTHER holder (fed:peerB:5, attached later than local1) is
+    # demoted; the taker's mirror is promoted.
+    assert modes["fed:peerB:5"] == "read-only"
+    assert modes["fed:peerA:3"] == "read-write"
+
+
+@pytest.mark.asyncio
+async def test_origin_take_own_spec_targets_requesting_peers_own_mirror():
+    a, pm, port = _take_setup()
+    await a._handle_fedrw_take("conn", pm, "p1", "fed:peerA:3", "own:7")
+    # "own:7" names fed:peerA:7 - which is NOT in holders, so nothing is demoted
+    # and nothing is promoted (no eligible holder matches).
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes["fed:peerA:3"] == "read-only"
+
+
+@pytest.mark.asyncio
+async def test_origin_take_fed_spec_targets_another_peers_mirror():
+    a, pm, port = _take_setup()
+    await a._handle_fedrw_take("conn", pm, "p1", "fed:peerA:3", "fed:peerB:5")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes["fed:peerB:5"] == "read-only"
+    assert modes["fed:peerA:3"] == "read-write"
+
+
+@pytest.mark.asyncio
+async def test_origin_take_restores_victim_when_taker_promote_fails():
+    a, pm, port = _take_setup()
+    # Only the taker's promote fails (its seat vanished in flight); the
+    # victim's restore promote must still succeed so the writer is not lost.
+    pm.promote_fail_for.add("fed:peerA:3")
+    await a._handle_fedrw_take("conn", pm, "p1", "fed:peerA:3", "latest")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    # Victim demoted, taker promote failed -> victim restored, taker still RO.
+    assert modes["fed:peerB:5"] == "read-write"
+    assert modes["fed:peerA:3"] == "read-only"
+
+
+@pytest.mark.asyncio
+async def test_origin_take_no_eligible_holder_is_a_noop():
+    a, pm, port = _take_setup()
+    # Every other holder is already read-only: nothing to take.
+    for c in port.connected_clients:
+        if c["client_id"] != "fed:peerA:3":
+            c["mode"] = "read-only"
+    await a._handle_fedrw_take("conn", pm, "p1", "fed:peerA:3", "latest")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes["fed:peerA:3"] == "read-only"
+
+
+@pytest.mark.asyncio
+async def test_origin_request_dispatch_take_and_legacy_force_alias(monkeypatch):
+    a, pm, port = _take_setup()
+    conn_id = "out:1.2.3.4:4000:1"
+    w = FakeWriter()
+    a.connections[conn_id] = {"writer": w, "auth_ok": True}
+    a._wire_state[conn_id] = {"send_next": 1}
+    # Pin the derived peer key so the taker's mirror id matches _take_setup's.
+    monkeypatch.setattr(a, "_derive_peer_key_from_conn_id", lambda _conn_id: "peerA")
+    a._local_session_map["peerA"] = {3: "p1"}
+
+    # TAKE:latest routes to the arbiter and replies with the resulting mode.
+    await a._handle_fedrw_request(conn_id, cast(Any, w), "FEDRW:p1:3:TAKE:latest")
+    assert b"FEDRWACK:p1:3:read-write" in w.buffer
+
+    # Reset and try the legacy FORCE alias (must not hang; routes to TAKE:latest).
+    for c in port.connected_clients:
+        c["mode"] = "read-only" if c["client_id"] == "fed:peerA:3" else "read-write"
+    w2 = FakeWriter()
+    a.connections[conn_id] = {"writer": w2, "auth_ok": True}
+    a._wire_state[conn_id] = {"send_next": 1}
+    await a._handle_fedrw_request(conn_id, cast(Any, w2), "FEDRW:p1:3:FORCE")
+    assert b"FEDRWACK:p1:3:read-write" in w2.buffer
+
+
+@pytest.mark.asyncio
+async def test_proxy_take_builds_correct_spec(monkeypatch):
+    a = UnifiedMuxConAdapter("peer", {"listeners": []})
+    proxy = a.RemotePortProxy(a, "out:1.2.3.4:4000:1", "p1", type("M", (), {"description": "d", "max_rw_users": 1})())
+    proxy._client_sessions = {"browser1": 9}
+    proxy.connected_clients = [
+        {"client_id": "browser1", "username": "u", "mode": "read-only"},
+        {"client_id": "fed:otherpeer:5", "username": "v", "mode": "read-write"},
+    ]
+
+    captured: List[str] = []
+
+    async def fake_request_fedrw(client_id, action, timeout):
+        captured.append(action)
+        return "read-write"
+
+    monkeypatch.setattr(proxy, "_request_fedrw", fake_request_fedrw)
+
+    await proxy.take_write_slot_for_client("browser1")
+    assert captured == ["TAKE:latest"]
+
+    await proxy.take_write_slot_for_client("browser1", target_client_id="fed:otherpeer:5")
+    assert captured[-1] == "TAKE:fed:otherpeer:5"
+
+    await proxy.take_write_slot_for_client("browser1", target_client_id="browser1")
+    assert captured[-1] == "TAKE:own:9"

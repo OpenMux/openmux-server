@@ -543,10 +543,10 @@ class ConsoleUI:
                 )
 
             elif command == "f":
-                # Force-take read-write access, demoting the current holder(s)
-                await self._request_access_mode(
-                    "force_read_write", "[Force-take read-write is not supported by this connection]"
-                )
+                # Take the port's write slot from the current holder (issue #59
+                # Part 2): the server demotes that one holder and promotes this
+                # client, restoring the holder if the promotion fails.
+                await self._request_access_mode("force_read_write", "[Take control is not supported by this connection]")
 
             elif command == "i":
                 # Information dump
@@ -766,7 +766,7 @@ class ConsoleUI:
             "\r\n[OpenMux Console Commands]\r\n"
             + ".         disconnect\r\n"
             + "a         request read-write access\r\n"
-            + "f         force-take read-write access (demotes current holder)\r\n"
+            + "f         take the write slot from the current holder\r\n"
             + "s         release read-write access / switch to read-only\r\n"
             + "i         information dump\r\n"
             + "w         show who holds read-write access on this port\r\n"

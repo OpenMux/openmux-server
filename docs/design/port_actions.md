@@ -177,7 +177,7 @@ an action attaches to `PortManager` exactly like a console client does, through
     REQUEST). If the origin denies it (held by another local or federated client), the
     action client is detached and the run fails fast with "Origin server did not grant
     the read-write slot" — before any keystroke is sent. An action never preempts
-    (no FEDRW FORCE); a human still has the Force-take control for that.
+    (no FEDRW TAKE); a human still has the Take control for that.
   - Auto-restore on a federated port re-requests the launcher's origin slot and promotes
     locally only when the origin grants it. If the slot moved on in the meantime, the
     launcher stays read-only (first-come first-served, per the restore rules above) and
@@ -190,7 +190,7 @@ an action attaches to `PortManager` exactly like a console client does, through
   `console_manager.send_control_frame_to_client()`) to the self-demoted client on both
   the demote (`reason: "action_self_demoted"`) and the auto-restore
   (`reason: "action_restored"`) — the same delivery mechanism already used for
-  force-take demotion notices. The console page's own WebSocket connection learns its
+  takeover demotion notices. The console page's own WebSocket connection learns its
   `client_id` from the initial `client_mode` frame the server sends on connect, and
   passes it back as `client_id` in the action run request so the runner can target it.
 
@@ -332,7 +332,7 @@ label". This is a second, separate channel from the device I/O already covered a
 
 **Implemented**: "Taking over as operator" — `ActionRunner.take_over_operator(run_id,
 new_client_id)` reassigns `ActionRun.operator_client_id` mid-run (mirroring the port's
-own "Force take read-write") and publishes an `operator_changed` structured event
+own "Take control") and publishes an `operator_changed` structured event
 (`operator_client_id`, `previous_operator_client_id`) on the run's normal live event
 stream — every subscriber, including the previous operator, sees the change the same
 way they see any other event, no separate notification channel needed. A viewer sends

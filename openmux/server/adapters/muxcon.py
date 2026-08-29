@@ -755,7 +755,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.debug(f"Failed relaying VIEWERS for {port_name}", exc_info=True)
 
     async def _handle_fedrw_request(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
-        """Handle an inbound `FEDRW:<port_name>:<stream_id>:<REQUEST|RELEASE|FORCE>` frame.
+        """Handle an inbound `FEDRW:<port_name>:<stream_id>:<action>` frame.
+
+        Actions: `REQUEST` / `RELEASE`, and `TAKE:<spec>` - the single
+        write-slot takeover of issue #59 Part 2, where `<spec>` names the one
+        holder to demote (`latest` | `own:<sid>` | verbatim `fed:` id; see
+        `RemotePortProxy.take_write_slot_for_client` for the spec grammar).
 
         Arbitrates the shared read-write slot on THIS (origin) server, since only
         the origin has full visibility into every RW holder for a port it owns -
@@ -783,15 +788,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await pm.promote_client(port_name, fed_client_id)
         elif action == "RELEASE":
             await pm.demote_client(port_name, fed_client_id)
+        elif action.startswith("TAKE:"):
+            await self._handle_fedrw_take(conn_id, pm, port_name, fed_client_id, action[len("TAKE:") :])
         elif action == "FORCE":
-            # Force-take: demote every OTHER current read-write holder this
-            # origin knows about - local clients and other federated peers
-            # alike, not just ones visible to the requesting peer's own
-            # mirrored client list - then promote the requester. This is what
-            # makes force-take work across federation boundaries, unlike a
-            # plain REQUEST which the origin denies once the slot is full.
-            await self._force_demote_other_rw_holders(conn_id, pm, port_name, fed_client_id)
-            await pm.promote_client(port_name, fed_client_id)
+            # Compatibility alias for pre-Part-2 peers that still speak the old
+            # whole-holder FORCE. Routes onto the SAME single arbiter: on the
+            # one-writer ports that matter the outcome is identical (demote the
+            # latest holder, promote the taker); nothing is implemented twice.
+            self.logger.debug(f"[{conn_id}] FEDRW FORCE (legacy) from {peer_key}; routing to takeover (latest)")
+            await self._handle_fedrw_take(conn_id, pm, port_name, fed_client_id, "latest")
         else:
             self.logger.debug(f"[{conn_id}] Unknown FEDRW action {action!r} for {port_name}")
             return
@@ -811,38 +816,107 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             self.logger.debug(f"[{conn_id}] Failed to send FEDRWACK for {port_name}", exc_info=True)
 
-    async def _force_demote_other_rw_holders(self, conn_id: str, pm: Any, port_name: str, fed_client_id: str) -> None:
-        """Demote every current read-write holder on `port_name` except `fed_client_id`.
+    def _resolve_fedrw_take_target(self, pm: Any, port_name: str, fed_client_id: str, spec: str) -> Optional[Dict[str, Any]]:
+        """Pick the one holder a FEDRW TAKE demotes (issue #59 Part 2, origin side).
 
-        Called by `_handle_fedrw_request`'s FORCE action. A genuinely local holder
-        (not another federated peer's mirrored "fed:" client) is routed through
-        ConsoleManager so it also gets a live `client_mode` push - otherwise its
-        own console silently stays showing read-write until it reconnects, since a
-        raw `PortManager.demote_client()` only flips the mode server-side.
+        Candidates are every current read-write holder except the taker's own
+        mirror (``fed_client_id``) - genuinely local clients and every peer's
+        ``fed:`` mirror. Spec grammar, set by the requesting peer (which checked
+        taker entitlement locally; the origin only arbitrates capacity):
+
+        - ``latest``: the most recently attached candidate (max
+          ``connected_at``);
+        - ``own:<stream_id>``: the requesting peer's OWN mirror on that stream,
+          i.e. ``fed:<requesting peer_key>:<stream_id>`` (the victim is a local
+          user on the requesting server who attached through one of its proxies);
+        - ``fed:<peer>:<stream_id>``: another peer's mirror, verbatim - the id
+          shape and stream ids are shared both directions by design.
+
+        Returns the connected_clients record, or None when no eligible holder
+        matches (the caller then leaves the port untouched).
         """
         try:
             port = pm.get_port(port_name)
-            console_manager = getattr(self, "console_manager", None)
-            for c in list(getattr(port, "connected_clients", None) or []):
-                other_id = c.get("client_id")
-                if c.get("mode") != "read-write" or other_id == fed_client_id:
-                    continue
-                if console_manager is not None and not str(other_id).startswith("fed:"):
-                    try:
-                        await console_manager.demote_client_to_read_only(other_id, port_name)
-                        await console_manager.send_control_frame_to_client(
-                            other_id,
-                            {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"},
-                        )
-                    except Exception:
-                        self.logger.debug(
-                            f"[{conn_id}] Failed to demote/notify local RW holder {other_id} on {port_name}",
-                            exc_info=True,
-                        )
-                else:
-                    await pm.demote_client(port_name, other_id)
         except Exception:
-            self.logger.debug(f"[{conn_id}] Failed to demote other RW holders on {port_name}", exc_info=True)
+            return None
+        candidates = [
+            c
+            for c in (getattr(port, "connected_clients", None) or [])
+            if c.get("mode") == "read-write" and c.get("client_id") != fed_client_id
+        ]
+        if not candidates:
+            return None
+        if not spec or spec == "latest":
+            return max(candidates, key=lambda c: (c.get("connected_at") or 0.0))
+        if spec.startswith("own:"):
+            # The requesting peer's other mirrors share fed_client_id's
+            # "fed:<peer_key>" prefix (peer_key may itself contain colons, so
+            # split from the right).
+            want = f"{fed_client_id.rsplit(':', 1)[0]}:{spec[len('own:'):]}"
+            for c in candidates:
+                if c.get("client_id") == want:
+                    return c
+            return None
+        if spec.startswith("fed:"):
+            for c in candidates:
+                if c.get("client_id") == spec:
+                    return c
+            return None
+        return None
+
+    async def _handle_fedrw_take(self, conn_id: str, pm: Any, port_name: str, fed_client_id: str, spec: str) -> None:
+        """Arbitrate ONE write-slot takeover on this origin (issue #59 Part 2).
+
+        Demotes exactly one held holder and promotes the taker's mirror, in
+        that order, so the one-writer count is invariant. The victim is
+        demoted FIRST and only promoted BACK if the taker's promote fails
+        (e.g. it raced off the port in flight) - the port is never left with
+        zero writers when one was held before. The requesting peer already
+        checked that the taker (as a local user over there) is write-entitled;
+        the origin enforces capacity and sees every holder, local or peer.
+
+        No dedicated audit frame is sent: the requester's console manager
+        writes the audit line from its side, and both sides already log the
+        promote/demote lifecycle events.
+        """
+        victim = self._resolve_fedrw_take_target(pm, port_name, fed_client_id, spec)
+        if victim is None:
+            self.logger.warning(
+                f"[{conn_id}] FEDRW TAKE on {port_name}: no eligible read-write holder (spec={spec!r}); holding"
+            )
+            return
+        victim_id = victim.get("client_id")
+        victim_username = victim.get("username", "unknown")
+        console_manager = getattr(self, "console_manager", None)
+        if console_manager is not None and not str(victim_id).startswith("fed:"):
+            # A genuinely LOCAL holder gets the live client_mode push (and its
+            # presence broadcast) through ConsoleManager, as the legacy whole-holder force did.
+            try:
+                await console_manager.demote_client_to_read_only(victim_id, port_name)
+            except Exception:
+                self.logger.debug(f"[{conn_id}] FEDRW TAKE: local demote of {victim_id} failed", exc_info=True)
+        else:
+            await pm.demote_client(port_name, victim_id)
+        # Notify the victim's own console (cross-adapter for local holders,
+        # FEDRWACK relay for peer mirrors).
+        try:
+            if console_manager is not None:
+                await console_manager.send_control_frame_to_client(
+                    victim_id,
+                    {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"},
+                )
+        except Exception:
+            self.logger.debug(f"[{conn_id}] FEDRW TAKE: victim notice to {victim_id} failed", exc_info=True)
+        promoted = await pm.promote_client(port_name, fed_client_id)
+        if not promoted:
+            # Restore the victim: the transfer never happened.
+            await pm.promote_client(port_name, victim_id)
+            self.logger.warning(f"[{conn_id}] FEDRW TAKE on {port_name}: taker promote failed; victim {victim_id} restored")
+            return
+        self.logger.info(
+            f"WRITE-SLOT TAKEOVER (federation, origin) port={port_name} "
+            f"taker={fed_client_id} victim={victim_username}:{victim_id} time={time.time():.3f}"
+        )
 
     async def _handle_fedrw_ack(self, conn_id: str, payload: str) -> None:
         """Handle an inbound `FEDRWACK:<port_name>:<stream_id>:<mode>` from the origin.
@@ -989,7 +1063,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
     def set_console_manager(self, console_manager) -> None:
         """Wire in the shared ConsoleManager.
 
-        Lets a FEDRW FORCE demotion (see `_handle_fedrw_request`) notify a
+        Lets a FEDRW TAKE demotion (see `_handle_fedrw_request`) notify a
         genuinely local (non-federated) RW holder's own live session, instead
         of only flipping its mode server-side and leaving its console stuck
         silently showing read-write until it reconnects (issue #52 follow-up).
@@ -2716,9 +2790,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 await pm.add_client_to_port(port_name, fed_client_id, f"federation:{peer_key}", "read-only")
                                 # Also make this pseudo-client reachable through ConsoleManager's
                                 # generic demote/notify machinery, so a LOCALLY initiated
-                                # force-take against a federated holder actually demotes it
+                                # write-slot takeover against a federated holder actually demotes it
                                 # (and notifies the owning peer) instead of silently no-oping
-                                # (see ConsoleManager.force_promote_client).
+                                # (see ConsoleManager.take_write_slot).
                                 console_manager = getattr(self, "console_manager", None)
                                 if console_manager is not None:
                                     console_manager.register_client_port(fed_client_id, port_name)
@@ -5675,7 +5749,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     # read-only and nothing else re-sends FEDRW, so without this a
                     # pre-outage writer stays write-dead on the origin (its local
                     # record still says read-write, so every write is silently
-                    # rejected at the origin's mode gate) until a human force-takes.
+                    # rejected at the origin's mode gate) until a human takes the slot.
                     try:
                         await self._regrant_proxy_read_write(existing, conn_id)
                     except Exception:  # justification: re-grant on reuse is best-effort
@@ -5794,7 +5868,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         Stream reopens on reconnect register the federated clients read-only on
         the origin, and nothing else re-sends the FEDRW request. A plain REQUEST
-        (not FORCE) is used: if the slot is legitimately held by another user
+        (not TAKE) is used: if the slot is legitimately held by another user
         (origin-local or via another peer), the grant is denied and the client
         is demoted locally to match, instead of every write being silently
         rejected at the origin's mode gate.
@@ -5817,7 +5891,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             if mode != "read-write":
                 self.logger.warning(
                     f"Origin did not re-grant read-write for {cid} on {proxy.remote_port_name} "
-                    "after reconnect; demoting locally (slot held by another user? force-take to override)"
+                    "after reconnect; demoting locally (slot held by another user? take the slot to override)"
                 )
                 try:
                     await pm.demote_client(proxy.remote_port_name, cid)
@@ -6254,17 +6328,53 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             """
             return await self._request_fedrw(client_id, "RELEASE", timeout)
 
-        async def force_read_write_for_client(self, client_id: str, timeout: float = 3.0) -> str:
-            """Ask the origin to demote every other read-write holder and promote this client.
+        async def take_write_slot_for_client(
+            self, client_id: str, target_client_id: Optional[str] = None, timeout: float = 3.0
+        ) -> str:
+            """Ask the origin to arbitrate the single write-slot takeover (issue #59 Part 2).
 
-            A plain `request_read_write_for_client()` is denied by the origin once
-            the slot is full - it has no notion of "force". This is what makes
-            force-take work across federation: the origin is the only party that
-            can see (and demote) EVERY current holder, including local-to-origin
-            clients or ones attached via a different federated peer, which this
-            proxy's own connected_clients mirror never sees (issue #52 follow-up).
+            The origin demotes ONE chosen holder (never all of them) and
+            promotes this client's own mirror; the one-writer count stays
+            invariant. This is what makes takeover work across federation: the
+            origin is the only party that can see (and demote) EVERY current
+            holder, including local-to-origin clients or ones attached via a
+            different federated peer, which this proxy's own connected_clients
+            mirror never sees (issue #52 follow-up).
+
+            The victim spec on the wire is origin-relative:
+
+            - "latest" - the most recently attached other holder (any kind);
+            - "own:<stream_id>" - a holder from THIS server that attached
+              through one of our proxies (its origin mirror sits on our
+              stream for it);
+            - "fed:<peer>:<stream_id>" - another peer's mirror, verbatim:
+              the id shape and stream ids are shared in both directions by
+              design.
+
+            Returns the resulting taker mode ("read-write" or "read-only");
+            any failure (old origin, timeout, no eligible holder) fails safely
+            closed as "read-only".
             """
-            return await self._request_fedrw(client_id, "FORCE", timeout)
+            spec = "latest"
+            if target_client_id:
+                rec = None
+                for c in getattr(self, "connected_clients", None) or []:
+                    if c.get("client_id") == target_client_id:
+                        rec = c
+                        break
+                if rec is not None:
+                    cid = str(rec.get("client_id") or "")
+                    if cid.startswith("fed:"):
+                        # A holder mirrored from ANOTHER peer: the origin knows
+                        # it verbatim by the same "fed:<peer>:<sid>" shape.
+                        spec = cid
+                    else:
+                        # A LOCAL user on this server who attached through one
+                        # of our proxies: its origin mirror is on OUR stream
+                        # for that user, so "own:<our sid>" names it there.
+                        sid = (getattr(self, "_client_sessions", None) or {}).get(cid)
+                        spec = f"own:{sid}" if sid is not None else "latest"
+            return await self._request_fedrw(client_id, f"TAKE:{spec}", timeout)
 
         async def _request_fedrw(self, client_id: str, action: str, timeout: float) -> str:
             """Send a `FEDRW:<port>:<stream_id>:<action>` request and await the ack."""

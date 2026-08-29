@@ -51,7 +51,7 @@ class ActionRun:
     events: List[Dict[str, Any]] = field(default_factory=list)
     # Who may answer a pending session.wait_for_input()/confirm() prompt (see "Operator
     # input" in the design doc) - the run's launcher by default, reassignable mid-run via
-    # ActionRunner.take_over_operator() (mirrors the port's own "Force take read-write").
+    # ActionRunner.take_over_operator() (mirrors the port's own "Take control").
     operator_client_id: Optional[str] = None
 
     @property
@@ -254,7 +254,7 @@ class ActionRunner:
         return True
 
     def take_over_operator(self, run_id: str, new_client_id: str) -> bool:
-        """Reassign who may answer this run's prompts (mirrors "Force take read-write").
+        """Reassign who may answer this run's prompts (mirrors "Take control").
 
         Any connected viewer may take over - there is no separate permission check beyond
         being a WS client with an identified `client_id`, matching the allow-list-only

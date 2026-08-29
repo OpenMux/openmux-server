@@ -1,7 +1,9 @@
-"""Tests for ConsoleManager.force_promote_client / get_rw_holders_display / _resolve_client_ip."""
+"""Tests for ConsoleManager.take_write_slot / get_rw_holders_display / _resolve_client_ip."""
 
+import asyncio
+import itertools
+import logging
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -9,8 +11,42 @@ from openmux.server.console_manager import ConsoleManager
 
 
 class FakePort:
-    def __init__(self, connected_clients: Optional[List[Dict[str, Any]]] = None):
+    def __init__(self, connected_clients: Optional[List[Dict[str, Any]]] = None, mode: str = "one"):
         self.connected_clients = connected_clients or []
+        self.max_read_write_users = mode
+        self.read_write_groups = []
+        self.read_only_groups = []
+
+    async def demote_client(self, client_id: str) -> bool:
+        # Idempotent stand-in for the unified port wrapper: ConsoleManager only
+        # falls back to this when the PortManager-level demote already failed.
+        self._set_mode(client_id, "read-only")
+        return True
+
+    async def promote_client(self, client_id: str) -> bool:
+        self._set_mode(client_id, "read-write")
+        return True
+
+    def _set_mode(self, client_id: str, mode: str) -> bool:
+        for c in self.connected_clients:
+            if c.get("client_id") == client_id:
+                c["mode"] = mode
+                return True
+        return False
+
+
+class FakeAuthManager:
+    """Minimal auth stand-in: per-user global permission + groups."""
+
+    def __init__(self):
+        self.permissions: Dict[str, Optional[str]] = {"alice": "read-write", "bob": "read-write", "root": "admin"}
+        self.groups: Dict[str, set] = {}
+
+    def get_user_permissions(self, username: str) -> Optional[str]:
+        return self.permissions.get(username, "read-write")
+
+    def get_user_groups(self, username: str) -> set:
+        return set(self.groups.get(username, ()))
 
 
 class FakePortManager:
@@ -26,10 +62,13 @@ class FakePortManager:
         port = self.ports.get(port_name)
         if port is None:
             return False
-        for c in port.connected_clients:
-            if c["client_id"] == client_id:
-                c["mode"] = "read-write"
-                return True
+        try:
+            for c in port.connected_clients:
+                if c["client_id"] == client_id:
+                    c["mode"] = "read-write"
+                    return True
+        except Exception:
+            return False  # a broken wrapper surfaces as a failed promote
         return False
 
     async def demote_client(self, port_name: str, client_id: str) -> bool:
@@ -66,37 +105,40 @@ def port_manager() -> FakePortManager:
 
 @pytest.fixture
 def cm(port_manager: FakePortManager) -> ConsoleManager:
-    return ConsoleManager(port_manager, MagicMock())
+    return ConsoleManager(port_manager, FakeAuthManager())
+
+
+_attach_seq = itertools.count(1)
 
 
 def _attach(cm: ConsoleManager, port: FakePort, port_name: str, client_id: str, username: str, mode: str):
-    port.connected_clients.append({"client_id": client_id, "username": username, "mode": mode})
+    port.connected_clients.append(
+        {"client_id": client_id, "username": username, "mode": mode, "connected_at": float(next(_attach_seq))}
+    )
     cm.client_port_map[client_id] = port_name
 
 
 # ---------------------------------------------------------------------------
-# force_promote_client
+# take_write_slot (issue #59 Part 2)
 
 
 @pytest.mark.asyncio
-async def test_force_promote_demotes_other_holder_and_promotes_target(cm, port_manager):
+async def test_take_demotes_other_holder_and_promotes_target(cm, port_manager):
     port = FakePort()
     port_manager.ports["p1"] = port
     _attach(cm, port, "p1", "A", "alice", "read-write")
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, undelivered = await cm.force_promote_client("B", "p1")
+    ok, reason = await cm.take_write_slot("B", "p1")
 
-    assert ok is True
+    assert (ok, reason) == (True, "ok")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
     assert modes["A"] == "read-only"
     assert modes["B"] == "read-write"
-    # No adapter registered for A -> cross-notify fails -> falls back to caller.
-    assert undelivered == ["A"]
 
 
 @pytest.mark.asyncio
-async def test_force_promote_cross_notifies_via_client_to_manager(cm, port_manager):
+async def test_take_cross_notifies_via_client_to_manager(cm, port_manager):
     port = FakePort()
     port_manager.ports["p1"] = port
     _attach(cm, port, "p1", "A", "alice", "read-write")
@@ -104,19 +146,22 @@ async def test_force_promote_cross_notifies_via_client_to_manager(cm, port_manag
     other_adapter = FakeAdapterChannel(accept=True)
     cm.client_to_manager["A"] = other_adapter
 
-    ok, undelivered = await cm.force_promote_client("B", "p1")
+    ok, reason = await cm.take_write_slot("B", "p1")
 
-    assert ok is True
-    assert undelivered == []
+    assert (ok, reason) == (True, "ok")
     # Presence broadcasts (issue #48) also land on this channel now; filter down to
-    # the demotion notice this test actually cares about.
-    client_mode_frames = [p for p in other_adapter.received if p.get("type") == "client_mode"]
-    assert client_mode_frames == [{"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}]
+    # the demotion notice this test actually cares about. The victim gets a
+    # single client_mode frame: reason "demoted" (rendered as "read-write was
+    # taken") plus "taken_by" naming the taker.
+    demotion_frames = [p for p in other_adapter.received if p.get("type") == "client_mode" and p.get("reason")]
+    assert demotion_frames == [
+        {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted", "taken_by": "bob"}
+    ]
 
 
 @pytest.mark.asyncio
-async def test_force_promote_demotes_and_notifies_a_federated_holder(cm, port_manager):
-    """A locally initiated force-take must reach a federated ("fed:") RW holder too.
+async def test_take_demotes_and_notifies_a_federated_holder(cm, port_manager):
+    """A locally initiated takeover must reach a federated ("fed:") RW holder too.
 
     Regression test: `fed:<peer_key>:<stream_id>` pseudo-clients are added
     directly to PortManager by UnifiedMuxConAdapter (never through
@@ -124,25 +169,28 @@ async def test_force_promote_demotes_and_notifies_a_federated_holder(cm, port_ma
     `register_client_channel` at stream-open, `demote_client_to_read_only`
     silently no-ops for them (not in `client_port_map`) and the origin's own
     promote_client then denies the local caller because the port still looks
-    full - a local force-take against a federated holder simply failed.
+    full - a local takeover against a federated holder simply failed.
     """
     port = FakePort()
     port_manager.ports["p1"] = port
-    port.connected_clients.append({"client_id": "fed:peerA:7", "username": "federation:peerA", "mode": "read-write"})
+    port.connected_clients.append(
+        {"client_id": "fed:peerA:7", "username": "federation:peerA", "mode": "read-write", "connected_at": 1.0}
+    )
     cm.register_client_port("fed:peerA:7", "p1")
     muxcon_adapter = FakeAdapterChannel(accept=True)
     cm.register_client_channel("fed:peerA:7", muxcon_adapter)
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, undelivered = await cm.force_promote_client("B", "p1")
+    ok, reason = await cm.take_write_slot("B", "p1")
 
-    assert ok is True
-    assert undelivered == []
+    assert (ok, reason) == (True, "ok")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
     assert modes["fed:peerA:7"] == "read-only"
     assert modes["B"] == "read-write"
-    client_mode_frames = [p for p in muxcon_adapter.received if p.get("type") == "client_mode"]
-    assert client_mode_frames == [{"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}]
+    demotion_frames = [p for p in muxcon_adapter.received if p.get("type") == "client_mode" and p.get("reason")]
+    assert demotion_frames == [
+        {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted", "taken_by": "bob"}
+    ]
 
     cm.unregister_client_port("fed:peerA:7")
     cm.unregister_client_channel("fed:peerA:7")
@@ -151,26 +199,374 @@ async def test_force_promote_demotes_and_notifies_a_federated_holder(cm, port_ma
 
 
 @pytest.mark.asyncio
-async def test_force_promote_no_other_holders_just_promotes(cm, port_manager):
+async def test_take_with_no_holder_refuses(cm, port_manager):
+    """Nothing to take: no other holder means there is no slot to transfer."""
     port = FakePort()
     port_manager.ports["p1"] = port
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, undelivered = await cm.force_promote_client("B", "p1")
+    ok, reason = await cm.take_write_slot("B", "p1")
 
-    assert ok is True
-    assert undelivered == []
-    assert port.connected_clients[0]["mode"] == "read-write"
+    assert (ok, reason) == (False, "no_holder")
+    assert port.connected_clients[0]["mode"] == "read-only"
 
 
 @pytest.mark.asyncio
-async def test_force_promote_returns_false_when_promote_fails(cm, port_manager):
+async def test_take_not_attached_refuses(cm, port_manager):
     port = FakePort()
     port_manager.ports["p1"] = port
-    # Client never attached (not in client_port_map) -> promote_client_to_read_write fails.
-    ok, undelivered = await cm.force_promote_client("ghost", "p1")
-    assert ok is False
-    assert undelivered == []
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+
+    ok, reason = await cm.take_write_slot("ghost", "p1")
+
+    assert (ok, reason) == (False, "not_attached")
+    assert port.connected_clients[0]["mode"] == "read-write"
+
+
+# ---------------------------------------------------------------------------
+# take_write_slot: entitlement denials (issue #59 Part 2, closes SEC-07)
+
+
+def _deny_cm(mode: str = "one") -> ConsoleManager:
+    """A console manager that denies read-write for every non-admin user."""
+    cm = ConsoleManager(FakePortManager(), FakeAuthManager())
+    cm.auth_manager.permissions = {"alice": "read-only", "bob": "read-only"}
+    return cm
+
+
+def _deny_setup(port: FakePort) -> None:
+    port.read_write_groups = ["ops"]
+    port.read_only_groups = ["viewers"]
+
+
+@pytest.mark.asyncio
+async def test_take_read_only_global_user_denied():
+    """A read-only global permission can never take, even though it is attached."""
+    cm = _deny_cm()
+    port = FakePort()
+    cm.port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    assert (ok, reason) == (False, "not_entitled")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes["A"] == "read-write"
+    assert modes["B"] == "read-only"
+
+
+@pytest.mark.asyncio
+async def test_take_ro_group_user_denied_even_over_entitled_holder():
+    cm = _deny_cm()
+    port = FakePort()
+    _deny_setup(port)
+    cm.port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+    cm.auth_manager.groups["bob"] = {"viewers"}
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    assert (ok, reason) == (False, "not_entitled")
+    assert {c["client_id"]: c["mode"] for c in port.connected_clients}["A"] == "read-write"
+
+
+@pytest.mark.asyncio
+async def test_take_unlisted_user_denied_by_group_acl():
+    """Group lists are a closed boundary: an unlisted user is denied to take."""
+    cm = _deny_cm()
+    port = FakePort()
+    _deny_setup(port)
+    cm.port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    assert (ok, reason) == (False, "denied_by_group_acl")
+
+
+@pytest.mark.asyncio
+async def test_take_denied_by_server_access_default_deny():
+    pm = FakePortManager()
+    cm = ConsoleManager(pm, FakeAuthManager())
+    port = FakePort()
+    pm.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+    class _DenyPolicy:
+        def get_access_default(self):
+            return "deny"
+
+    cm.security_policy = _DenyPolicy()
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    assert (ok, reason) == (False, "denied_by_access_default")
+
+
+@pytest.mark.asyncio
+async def test_take_admin_allowed_to_take():
+    """Admin bypasses access control and may take an entitled holder's slot."""
+    pm = FakePortManager()
+    cm = ConsoleManager(pm, FakeAuthManager())
+    port = FakePort()
+    pm.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "R", "root", "read-only")
+
+    ok, reason = await cm.take_write_slot("R", "p1")
+
+    assert (ok, reason) == (True, "ok")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes["R"] == "read-write"
+    assert modes["A"] == "read-only"
+
+
+# ---------------------------------------------------------------------------
+# take_write_slot: write-capacity mode gates
+
+
+def _mode_cm(mode: str):
+    pm = FakePortManager()
+    cm = ConsoleManager(pm, FakeAuthManager())
+    port = FakePort(mode=mode)
+    pm.ports["p1"] = port
+    return pm, cm, port
+
+
+@pytest.mark.asyncio
+async def test_take_multiple_mode_already_rw_when_holding():
+    pm, cm, port = _mode_cm("multiple")
+    _attach(cm, port, "p1", "B", "bob", "read-write")
+    ok, reason = await cm.take_write_slot("B", "p1")
+    assert (ok, reason) == (True, "already_rw")
+
+
+@pytest.mark.asyncio
+async def test_take_none_mode_no_holder_to_take():
+    pm, cm, port = _mode_cm("none")
+    _attach(cm, port, "p1", "A", "alice", "read-only")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+    ok, reason = await cm.take_write_slot("B", "p1")
+    assert (ok, reason) == (False, "no_holder")
+    assert all(c["mode"] == "read-only" for c in port.connected_clients)
+
+
+# ---------------------------------------------------------------------------
+# take_write_slot: targeted selection
+
+
+def _three_holder(cm, pm: FakePortManager, port: FakePort):
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "M", "moe", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+
+@pytest.mark.asyncio
+async def test_take_target_specific_holder(cm, port_manager):
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _three_holder(cm, port_manager, port)
+
+    ok, reason = await cm.take_write_slot("B", "p1", target="A")
+
+    assert (ok, reason) == (True, "ok")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes == {"A": "read-only", "M": "read-write", "B": "read-write"}
+
+
+@pytest.mark.asyncio
+async def test_take_target_invalid_refuses(cm, port_manager):
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _three_holder(cm, port_manager, port)
+
+    ok, reason = await cm.take_write_slot("B", "p1", target="B")  # cannot take own seat
+
+    assert (ok, reason) == (False, "invalid_target")
+    ok, reason = await cm.take_write_slot("B", "p1", target="ghost")  # never a holder
+    assert (ok, reason) == (False, "invalid_target")
+
+
+@pytest.mark.asyncio
+async def test_take_without_target_picks_most_recent_holder(cm, port_manager):
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _three_holder(cm, port_manager, port)
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    assert (ok, reason) == (True, "ok")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    assert modes == {"A": "read-write", "M": "read-only", "B": "read-write"}
+
+
+# ---------------------------------------------------------------------------
+# take_write_slot: slot-count invariance + victim restore
+
+
+def _make_broken_cm():
+    """A cm/pm/port triple where the test may swap out ``promote_client``
+    to force the taker's promote to fail (victim-restore path)."""
+    pm = FakePortManager()
+    cm = ConsoleManager(pm, FakeAuthManager())
+    port = FakePort()
+    pm.ports["p1"] = port
+    return pm, cm, port
+
+
+@pytest.mark.asyncio
+async def test_take_restores_victim_when_taker_promote_fails():
+    """Transfer-not-creation: if the taker cannot be promoted, the victim is
+    restored so the port is never left with zero writers."""
+    pm, cm, port = _make_broken_cm()
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+    # The taker's own promote is the single point of failure; the victim's
+    # restore promote must still succeed so the writer is not lost.
+    real_promote = pm.promote_client
+
+    async def flaky_promote(port_name, client_id):
+        if client_id == "B":
+            return False
+        return await real_promote(port_name, client_id)
+
+    pm.promote_client = flaky_promote
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    assert (ok, reason) == (False, "promote_failed")
+    modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
+    # Alice was demoted, then restored to read-write because bob's promote failed.
+    assert modes["A"] == "read-write"
+    assert modes["B"] == "read-only"
+
+
+@pytest.mark.asyncio
+async def test_take_keeps_slot_count_invariant():
+    """A take never creates a second writer: exactly one read-write holder
+    exists both before and after."""
+    pm, cm, port = _make_broken_cm()
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+    assert sum(1 for c in port.connected_clients if c["mode"] == "read-write") == 1
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    assert (ok, reason) == (True, "ok")
+    assert sum(1 for c in port.connected_clients if c["mode"] == "read-write") == 1
+
+
+# ---------------------------------------------------------------------------
+# take_write_slot: audit line + DataLogger event
+
+
+class _AuditPortManager(FakePortManager):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_take_writes_audit_line_and_data_logger_event(cm, port_manager, monkeypatch):
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+    logs: List[str] = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord):
+            logs.append(record.getMessage())
+
+    handler = _CaptureHandler()
+    cm.logger.addHandler(handler)
+    old_level = cm.logger.level
+    cm.logger.setLevel(logging.INFO)  # tests inherit the WARNING root level by default
+
+    from openmux.server import data_logger as dl_mod
+
+    recorded: List[Dict[str, Any]] = []
+
+    class _RecLogger:
+        def record_meta(self, **kwargs):
+            recorded.append(kwargs)
+
+    monkeypatch.setattr(dl_mod.DataLogger, "get", classmethod(lambda cls: _RecLogger()))
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+    cm.logger.removeHandler(handler)
+    cm.logger.setLevel(old_level)
+
+    assert (ok, reason) == (True, "ok")
+    assert any("WRITE-SLOT TAKEOVER" in m and "port=p1" in m for m in logs)
+    assert any(r.get("event") == "write_slot_takeover" for r in recorded)
+
+
+# ---------------------------------------------------------------------------
+# take_write_slot: federated (origin-arbitrated) path
+
+
+class _StubProxy:
+    """Stands in for a muxcon RemotePortProxy on the request side.
+
+    Carries ``connected_clients`` (for the taker's username lookup) and
+    ``max_read_write_users`` (for ``_taker_entitled``) so that the entitlement
+    check can run, and the federation branch then just returns the stub's mode.
+    """
+
+    def __init__(self, result: str):
+        self.result = result
+        self.connected_clients = [
+            {"client_id": "A", "username": "alice", "mode": "read-write"},
+            {"client_id": "B", "username": "bob", "mode": "read-only"},
+        ]
+        self.max_read_write_users = "one"
+        self.read_write_groups = []
+        self.read_only_groups = []
+
+    async def take_write_slot_for_client(self, client_id: str, target_client_id=None, timeout: float = 3.0) -> str:
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_take_federated_origin_grants(cm, port_manager):
+    port = _StubProxy("read-write")
+    port_manager.ports["p1"] = port
+    cm.client_port_map["B"] = "p1"
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    assert (ok, reason) == (True, "ok")
+
+
+@pytest.mark.asyncio
+async def test_take_federated_origin_denies(cm, port_manager):
+    port = _StubProxy("read-only")
+    port_manager.ports["p1"] = port
+    cm.client_port_map["B"] = "p1"
+
+    ok, reason = await cm.take_write_slot("B", "p1")
+
+    assert (ok, reason) == (False, "federation_denied")
+
+
+# ---------------------------------------------------------------------------
+# take_write_slot: unresolvable identity
+
+
+@pytest.mark.asyncio
+async def test_take_taker_without_username_is_not_entitled(cm, port_manager):
+    """A client with no username and no resolvable permission cannot take."""
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "A", "alice", "read-write")
+    _attach(cm, port, "p1", "ghost", "", "read-only")
+
+    ok, reason = await cm.take_write_slot("ghost", "p1")
+
+    assert (ok, reason) == (False, "not_entitled")
 
 
 # ---------------------------------------------------------------------------

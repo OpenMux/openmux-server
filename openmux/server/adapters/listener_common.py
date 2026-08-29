@@ -145,7 +145,7 @@ def feed_escape_byte(state: EscapeState, b: bytes) -> Tuple[bytes, Optional[str]
 CONTROL_MENU_HELP = (
     "\r\n--- OpenMux Control Menu ---\r\n"
     "a  Request read-write access\r\n"
-    "f  Force-take read-write access\r\n"
+    "f  Take the write slot from the current holder\r\n"
     "s  Release read-write access (switch to read-only)\r\n"
     "w  Show who holds read-write access\r\n"
     "u  Show who is viewing this port\r\n"
@@ -185,7 +185,12 @@ def format_rw_notice(payload: Dict[str, Any]) -> str:
     ok = payload.get("ok")
     mode = payload.get("mode")
     if payload.get("reason") == "demoted":
-        return "\r\n[Your read-write access was taken by another user]\r\n"
+        # "taken_by" names the taker when the demotion was a write-slot
+        # takeover (issue #59 Part 2) - local takes send it; a federation
+        # relay of the same takeover does not, so fall back to the generic
+        # "another user".
+        by = str(payload.get("taken_by")) if payload.get("taken_by") else "another user"
+        return "\r\n[Your read-write access was taken by " + by + "]\r\n"
     if ok and mode == "read-write":
         return "\r\n[Read-write access granted]\r\n"
     if ok and mode == "read-only":
@@ -193,7 +198,7 @@ def format_rw_notice(payload: Dict[str, Any]) -> str:
     if not ok:
         holders = payload.get("rw_holders") or []
         if holders:
-            return "\r\n[Read-write request denied (held by: " + ", ".join(holders) + ") - use force-take if needed]\r\n"
+            return "\r\n[Read-write request denied (held by: " + ", ".join(holders) + ") - use Take control if needed]\r\n"
         return "\r\n[Read-write is not available on this port]\r\n"
     return "\r\n[Access mode updated]\r\n"
 

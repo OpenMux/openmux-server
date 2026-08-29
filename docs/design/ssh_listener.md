@@ -40,7 +40,7 @@ instead of a plaintext socket.
   attached client and its read-write/read-only mode, see GitHub issue #48),
   shared via `listener_common.py`'s
   `EscapeState`/`feed_escape_byte`/`format_rw_notice`.
-  A force-take from any adapter type notifies this session in-band.
+  A takeover from any adapter type notifies this session in-band.
 - **Session Model**: Raw pass-through only. `exec` and subsystem requests
   (e.g. `ssh host command`, SFTP, git-over-ssh) are rejected with an error
   and the channel is closed; only an interactive shell session is served.
@@ -96,15 +96,15 @@ A client picks a port either interactively (`ssh alice@host -p 2023`, then
   non-matching key, wrong username), `require_auth: false` anonymous mode,
   embedded login, menu mode, ACL denial, exec/subsystem rejection, the
   read-only warning banner, and the full Ctrl+E,c control menu (help,
-  version/info, request/release/force-take read-write, show holders,
-  cross-session force-take notification, changing the escape sequence, and
+  version/info, request/release read-write and take the write slot, show holders,
+  cross-session takeover notification, changing the escape sequence, and
   read-only-listener rejection of `a`/`f`), using real `asyncssh` client
   connections against a loopback server.
 - `tests/server/test_listener_common.py` unit-tests the shared
   `EscapeState`/`feed_escape_byte`/`format_rw_notice` helpers (also used by
   `telnet_listener.py`) without any network I/O.
 - `tests/server/test_console_manager.py` covers
-  `ConsoleManager.force_promote_client`/`get_rw_holders_display`.
+  `ConsoleManager.take_write_slot`/`get_rw_holders_display`.
 
 ## Future Extensions
 - Per-listener host key override (currently one shared key for all

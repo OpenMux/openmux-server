@@ -148,6 +148,7 @@ function updateViewersBadge(viewers) {
   if (viewersBadge) viewersBadge.title = others === 1 ? '1 other viewer' : `${others} other viewers`;
   if (viewersMenuList) {
     viewersMenuList.innerHTML = '';
+    const canTakeNow = clientMode !== 'read-write';
     list.forEach((v) => {
       const row = document.createElement('div');
       const mine = !!myClientId && v.client_id === myClientId;
@@ -156,6 +157,24 @@ function updateViewersBadge(viewers) {
       const who = `${v.username || 'unknown'}@${v.ip || 'unknown'}`;
       const label = `${v.server_id ? `${v.server_id}/${who}` : who} (${v.mode === 'read-write' ? 'read-write' : 'read-only'})`;
       row.textContent = mine ? `${label} (me)` : label;
+      // Per-holder takeover (issue #59 Part 2): named "Take control" for a
+      // read-write holder that is not the viewer itself, on a LOCAL port
+      // (federated remote entries carry server_id; their takeover has no
+      // local client_id to target). The server re-checks entitlement and
+      // demotes that one holder, restoring it if the promotion fails.
+      if (canTakeNow && !mine && v.mode === 'read-write' && v.client_id && !v.server_id) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ro-menu-item';
+        btn.textContent = 'Take control';
+        btn.style.marginTop = '2px';
+        btn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          closeViewersMenu();
+          try { ws && ws.send('OMXCTRL ' + JSON.stringify({ type: 'force_promote', client_id: v.client_id })); } catch (_) {}
+        });
+        row.appendChild(btn);
+      }
       viewersMenuList.appendChild(row);
     });
     viewersMenuList.style.display = list.length ? '' : 'none';
@@ -1404,11 +1423,15 @@ function connectSelected() {
               try { term.write('\r\n[read-write is not available on this port – it has no write slots (capacity: none)]\r\n'); } catch (_) {}
             } else {
               const who = (lastRwHolders.length ? ' (held by: ' + lastRwHolders.join(', ') + ')' : '');
-              try { term.write('\r\n[read-write request denied' + who + ' – use Force take if needed]\r\n'); } catch (_) {}
+              try { term.write('\r\n[read-write request denied' + who + ' – use Take control if needed]\r\n'); } catch (_) {}
             }
           }
           if (msg.reason === 'demoted') {
-            try { term.write('\r\n[Your read-write access was taken by another user]\r\n'); } catch (_) {}
+            // "taken_by" names the taker on a local write-slot takeover
+            // (issue #59 Part 2); federation relays of the same takeover omit
+            // it, so fall back to the generic "another user".
+            const by = msg.taken_by ? msg.taken_by : 'another user';
+            try { term.write('\r\n[Your read-write access was taken by ' + by + ']\r\n'); } catch (_) {}
           } else if (msg.reason === 'action_self_demoted') {
             try { term.write('\r\n[Your read-write access was set aside to run a Port Action]\r\n'); } catch (_) {}
           } else if (msg.reason === 'action_restored') {

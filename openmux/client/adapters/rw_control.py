@@ -33,7 +33,12 @@ def apply_client_mode_response(adapter: Any, payload: Dict[str, Any]) -> str:
     reason = payload.get("reason")
     lines = []
     if reason == "demoted":
-        lines.append("[Your read-write access was taken by another user]")
+        # "taken_by" names the taker when the demotion was a write-slot
+        # takeover (issue #59 Part 2) - local takes send it; a federation
+        # relay of the same takeover does not, so fall back to the generic
+        # "another user".
+        by = payload.get("taken_by") or "another user"
+        lines.append(f"[Your read-write access was taken by {by}]")
     elif ok is False:
         if payload.get("max_rw_users") == 0:
             # 0 = the port's write-slot capacity is "none" (issue #59): it has
@@ -42,7 +47,7 @@ def apply_client_mode_response(adapter: Any, payload: Dict[str, Any]) -> str:
         else:
             holders = payload.get("rw_holders") or []
             who = f" (held by: {', '.join(holders)})" if holders else ""
-            lines.append(f"[Read-write request denied{who} - use force-take if needed]")
+            lines.append(f"[Read-write request denied{who} - use Take control if needed]")
     elif mode == "read-write":
         lines.append("[Read-write access granted]")
     else:

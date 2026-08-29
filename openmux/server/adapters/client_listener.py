@@ -654,22 +654,15 @@ class TcpServerAdapter(BaseGenericAdapter):
                 resp["ok"] = True
                 resp["mode"] = "read-only"
             elif req_type == "force_promote":
-                ok, undelivered = await self.console_manager.force_promote_client(client.client_id, port_name)
+                # Single write-slot takeover (issue #59 Part 2); the frame name
+                # is kept for old clients, the target is optional (default: the
+                # most recently attached holder).
+                target = req.get("client_id") if isinstance(req.get("client_id"), str) else None
+                ok, reason = await self.console_manager.take_write_slot(client.client_id, port_name, target)
                 resp["ok"] = bool(ok)
                 resp["mode"] = "read-write" if ok else "read-only"
-                if ok:
-                    demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
-                    for other_id in undelivered:
-                        # Cross-adapter routing unavailable; fall back to same-adapter delivery
-                        other_client = self.clients.get(other_id)
-                        if other_client is not None:
-                            try:
-                                await other_client.send_raw_data(
-                                    CTRL_MARKER + json.dumps(demotion, separators=(",", ":")).encode("utf-8") + b"\n"
-                                )
-                                other_client.mode = "read-only"
-                            except Exception:
-                                pass
+                if reason:
+                    resp["reason"] = reason
                 else:
                     max_rw = self._max_rw_users_for_port(port_name)
                     if max_rw is not None:

@@ -721,7 +721,7 @@ class SshListenerAdapter(BaseGenericAdapter):
             return
         ok = False
         if cm:
-            ok, _undelivered = await cm.force_promote_client(session.client_id, session.port_name)
+            ok, _reason = await cm.take_write_slot(session.client_id, session.port_name)
         if ok:
             session.port_mode = "read-write"
         await self._write_session(session, format_rw_notice({"type": "client_mode", "ok": ok, "mode": session.port_mode}))

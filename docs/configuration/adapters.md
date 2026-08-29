@@ -28,6 +28,8 @@ Every port of every type supports the same access-control settings (issues #58 a
 
 A full port never rejects: a write-entitled user on a full `one` port demotes to read-only; a `none` port demotes everyone to read-only. Note `none` decides who may *drive*; `access_default` decides who may be *present*. They are orthogonal.
 
+Takeover transfers the one write slot from a current holder to another client. Only a write-entitled client may do it — entitlement is re-checked at the moment of the take, so an attached read-only seat can never take the slot, and a `none` port gives no one a slot to take. The operation demotes exactly one holder and promotes the taker; it is audit-logged (`WRITE-SLOT TAKEOVER` and a `write_slot_takeover` data-log event) and the demoted holder is restored if the taker's promotion fails. The target of the take is the named holder, or — when none is named — the most recently attached other read-write holder. On a federated port the origin node (not the requesting node) decides, because only the origin sees every holder; the requesting client's own entitlement is still checked on its own node first. Clients surface it as "Take control" (web console viewer menu, or the no-target fallback), the `f` menu command, or the CLI `force_promote` frame. The demoted client sees a notice that names the taker.
+
 Loopback ports follow these same rules; they get no special treatment (the three modes included: a `none` loopback attaches read-only for everyone). Denial reasons surfaced to clients: `no_permissions` (unknown identity), `denied_by_group_acl`, `denied_by_access_default`. See `docs/ARCHITECTURE.md` §17 and `config/security.yaml`.
 
 ## Loopback Adapter (`loopback_ports`)
