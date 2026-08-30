@@ -74,24 +74,16 @@ no `AUTH api <key>` scheme — auth is Ed25519 public-key challenge/response
 only. Setting `auth_required: false` skips steps 3-5 entirely (useful for
 same-host loopback testing; not recommended over an untrusted network).
 
-TLS is independent of this handshake: `use_tls: true` (the default for both
-listeners and initiators) wraps the TCP connection before HELLO. `tls_autogen:
-true` (default) generates a self-signed cert/key under `tls_dir` on first
-start; the cert CN is the node's `server.id` and the cert has no SAN. An
-initiator that cannot build its TLS context fails closed: it retries after
-backoff instead of dialing in plaintext.
-
-The initiator resolves one verification mode per peer (first match wins):
-`ssl_verify: false` (off), `ssl_ca_cert` (ca), `tls_pin_fingerprint` (pin),
-`tls_tofu` (tofou, default), otherwise the system trust store (system). In
-pin, tofou, and off modes the TLS-level check is relaxed (`CERT_NONE`) and the
-post-handshake fingerprint gate protects the link. This is what lets a default
-initiator reach a default listener, whose autogen cert is self-signed. A peer
-that presents no certificate is rejected while a pin or ToFU is active.
-
-`tls_tofu` (Trust-On-First-Use) stores the peer's `sha256:<hex>` fingerprint
-in `<tls_dir>/known_peers.yaml` on first connect (logged at WARNING) and
-rejects a different certificate later. Set `tls_pin_fingerprint` to pin an
+TLS is independent of this handshake: `use_tls: true` (the default for
+listeners) wraps the TCP connection before HELLO. `tls_autogen: true`
+generates a self-signed cert/key under `tls_dir` on first start; the cert
+CN is the node's `server.id` and it has no SAN. TLS failure is fail-closed
+on both sides: a listener that cannot build its TLS context refuses to
+start a plaintext listener, and an initiator that cannot build its TLS
+context retries after backoff instead of dialing in plaintext.
+`tls_tofu: true` on an initiator (Trust-On-First-Use) pins the listener's
+certificate fingerprint into `<tls_dir>/known_peers.yaml` on first connect
+and rejects a different certificate later; `tls_pin_fingerprint` pins an
 exact `sha256:<hex>` up front instead.
 
 ## 3. Wire protocol (frames)
@@ -182,15 +174,11 @@ remote proxy's minimal metadata is written to `federated_cache_path`
 (marked disconnected) after this node restarts, even before the peer
 reconnects. If `federated_cache_ttl_sec > 0`, a background loop purges
 proxies that have been disconnected longer than that TTL (default `0.0`:
-never expires by time).
-
-Cached proxies are registered through
-`PortManager.register_federated_port` on load (and re-registered in the
-reuse path of `_register_remote_port_from_dict` if a proxy in the port map
-still has `data_callback is None`). That wiring is what routes inbound
-port data to attached client queues; a proxy without the data callback
-only fills its own `data_queue`, which nothing consumes on this side, so
-the port would be a silent black hole after a full restart (issue #56).
+never expires by time). Cached proxies register through
+`PortManager.register_federated_port` on load (and re-register in the reuse
+path if `data_callback is None`) — without that callback inbound data just
+fills the proxy's own `data_queue`, which nothing consumes here (issue
+#56), so the port black-holes.
 
 ### 4.3 Origin-side stream sessions (pumps)
 
@@ -289,45 +277,19 @@ Numbering is per peer, so a peer **restart** is the one case where numbering
 really does restart: the peer's TX counter comes back at 1 while keeping the
 same stable `server_id` (same `peer_key`), and our per-peer RX `expected`
 counter, reorder buffer, TX counter, unacked send buffer and retransmission
-counters all survive the restart (they are only cleared when the whole
-multipath group empties). Left alone, every frame from the restarted peer has
-`seq < expected` and is dropped as a "duplicate" while still being ACKed —
-permanent one-direction data loss.
+counters all survive the restart. Left alone, every frame from the
+restarted peer has `seq < expected` and is dropped as a "duplicate" while
+still being ACKed — permanent one-direction data loss. Both handshake roles
+record the peer's `instance_id` on the connection; the first DATA frame from
+a different generation resets all peer-scoped sequence state
+(`_maybe_resync_peer_generation`). Two guards keep the reset precise: a
+failover between two paths of the *same* peer process never resets, and a
+frame from an **older path** (a connection opened before the generation
+currently adopted) is dropped, not buffered, so the dying old-generation
+connection cannot roll the counters back or wedge the new generation's
+reorder window.
 
-Both handshake roles record the peer's `instance_id` on the connection.
-`_maybe_resync_peer_generation` (called from `_handle_inbound_data`) watches
-for the `instance_id` to change under an unchanged `peer_key`. The first DATA
-frame from a new generation resets all peer-scoped sequence state and logs
-one WARNING. Two guards keep the reset precise:
-
-- **Same generation** (including a failover between two paths of the *same*
-  peer process) never resets — the counters continue.
-- A frame from an **older path** (a connection opened before the generation
-  currently adopted) is dropped, not buffered, so the dying old-generation
-  connection cannot roll the counters back or wedge the new generation's
-  reorder window.
-
-### 6.2 Stuck reorder gap flush
-
-A missing seq that the sender never refills would otherwise wedge in-order
-delivery forever: every later frame for the peer sits in the reorder buffer.
-Since the sender's retransmission window is bounded by `retx_max_ms`, a gap
-older than `gap_stuck_sec` (`2 x retx_max_ms`, default 4s, minimum 1s) is
-treated as permanent — most likely a frame lost without a RETX request.
-`_flush_stuck_gap` drops the missing seq and delivers the buffered tail in
-order, logging an ERROR, instead of wedging the whole peer. A gap that fills
-in time is never flushed.
-
-### 6.3 Duplicate drop warning
-
-A `seq < expected` frame is dropped (already delivered, or the peer restarted
-mid-stream and the generation resync has not seen a newer frame yet). This is
-now surfaced as a rate-limited WARNING (at most one per peer per second) via
-`_warn_stale_data_drop`, reusing the same rate-limit table as
-`_log_no_mapping_drop` under a `"dup"` slot, so a silent one-direction loss is
-diagnosable instead of invisible.
-
-### 6.4 Sequence state survives path loss
+### 6.2 Sequence state survives path loss
 
 The peer-scoped sequence state (`_peer_tx_seq`, `_peer_rx_state`,
 `_peer_sendbuf`, `_peer_retx_count`) is tied to the peer *identity*
@@ -345,6 +307,26 @@ until process exit. The only in-process reset is a peer generation change
 (same `server_id`, new `instance_id` — a restart): the first DATA frame
 from the new generation resyncs all state for that peer
 (`_maybe_resync_peer_generation`).
+
+### 6.3 Stuck reorder gap flush
+
+A missing seq that the sender never refills would otherwise wedge in-order
+delivery forever: every later frame for the peer sits in the reorder buffer.
+Since the sender's retransmission window is bounded by `retx_max_ms`, a gap
+older than `gap_stuck_sec` (`2 x retx_max_ms`, default 4s, minimum 1s) is
+treated as permanent — most likely a frame lost without a RETX request.
+`_flush_stuck_gap` drops the missing seq and delivers the buffered tail in
+order, logging an ERROR, instead of wedging the whole peer. A gap that fills
+in time is never flushed.
+
+### 6.4 Duplicate drop warning
+
+A `seq < expected` frame is dropped (already delivered, or the peer
+restarted mid-stream and the generation resync has not seen a newer frame
+yet). This is surfaced as a rate-limited WARNING (at most one per peer per
+second) via `_warn_stale_data_drop`, reusing the same rate-limit table as
+`_log_no_mapping_drop` under a `"dup"` slot, so a silent one-direction loss
+is diagnosable instead of invisible.
 
 ### 6.5 Reconnect recovery: stale stream CLOSE and read-write re-grant
 
@@ -380,15 +362,11 @@ peer's entries are merged into that port's `_RemotePortProxy.remote_viewers`
 and relayed one hop further upstream, adding any genuinely-local viewers at
 this hop — this is what makes the console's viewers badge show
 `<server_id>/<username>@<ip>` correctly across a multi-hop federation
-chain.
-
-`get_viewers_display()` skips `connected_clients` entries whose
-`client_id` starts with `fed:` — these are internal pseudo-clients the
-origin registers for RW arbitration (see section on federated RW
-enforcement), not real distinct viewers. The same remote viewer already
-appears, correctly formatted, via `remote_viewers`; counting both would
-double-count it and show a malformed `federation:<peer_key>@unknown` entry.
-
+chain. `get_viewers_display()` skips `connected_clients` entries whose
+`client_id` starts with `fed:` — internal pseudo-clients, not real viewers:
+the same remote viewer already appears via `remote_viewers`, and counting
+both would double-count it and show a malformed
+`federation:<peer_key>@unknown` entry.
 
 ## 8. Status, monitoring, and fault injection (`web_status` adapter)
 
