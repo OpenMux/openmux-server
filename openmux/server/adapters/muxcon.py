@@ -5166,7 +5166,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         try:
             await asyncio.sleep(1.0)
-            rto = max(0.15, (self.heartbeat_interval or 0.3) / 4)
+            # Start at retx_initial_ms, NOT heartbeat_interval/4: before the
+            # first heartbeat RTT sample (up to heartbeat_interval after a
+            # (re)connect; _hb_state is per-connection) a 7.5s retransmit
+            # loses the race to the receiver's gap-flush backstop (~4s) and
+            # the lost frame's bytes are discarded. The loop below adapts
+            # rto to 2.5x RTT once a sample exists.
+            rto = max(0.15, self.retx_initial_ms / 1000.0)
             while not self._stop_event.is_set():
                 now = time.time()
                 for peer_key, buf in list(self._peer_sendbuf.items()):
@@ -5472,11 +5478,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Continuously forward data from a local port to the remote stream.
 
         This coroutine runs while the session mapping remains intact and the
-        adapter is not stopping. It polls the ``main_port_manager`` for new data
-        (non‑blocking) and sends DATA frames upstream. On termination the local
+        adapter is not stopping. It waits on the port wrapper's output queue
+        (falling back to a non-blocking poll read on managers that lack the
+        async read) and sends DATA frames upstream. On termination the local
         mapping for the stream is removed, but only if this task still owns the
         slot - a replacement pump or an in-flight teardown may own it now
         (issue #54).
+
+        The queue wait is deliberate: the pump is the wrapper queue's single
+        consumer, so a put_nowait wakes it instantly and each chunk is relayed
+        without polling delay (the old 50 ms poll cycle added a 0-50 ms
+        constant lag to every local output burst). Teardown cancels the task
+        while it is blocked in the read.
 
         Args:
             peer_key: Stable peer grouping key the stream is pumped toward.
@@ -5496,8 +5509,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             self.logger.debug(f"Failed to add federation buffering hold for {port_name}", exc_info=True)
         try:
-            # Send via currently selected path dynamically
-            # Simple loop until mapping is removed or connection closes
+            # Send via currently selected path dynamically; loop until the
+            # mapping is removed or the adapter stops.
+            can_await_queue = hasattr(self.main_port_manager or None, "get_port_data_async")
             while (
                 peer_key in self._local_session_map
                 and self._local_session_map[peer_key].get(stream_id) == port_name
@@ -5507,13 +5521,19 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if not hasattr(self, "main_port_manager") or not self.main_port_manager:
                         await asyncio.sleep(0.2)
                         continue
-                    data = await self.main_port_manager.get_port_data(port_name)
-                    if data:
+                    if can_await_queue:
+                        data = await self.main_port_manager.get_port_data_async(port_name)
+                    else:
+                        data = await self.main_port_manager.get_port_data(port_name)
+                    if not data:
+                        # No chunk right now. With the async read we are
+                        # already blocked in the queue and the next
+                        # put_nowait wakes us; the poll read sleeps instead
+                        # to avoid a busy loop.
+                        await asyncio.sleep(0.05)
+                    else:
                         self.logger.debug(f"[{peer_key}] PUMP local->{port_name} sid={stream_id} bytes={len(data)}")
                         await self._send_data_mpath(peer_key, stream_id, data)
-                    else:
-                        # No data available right now; avoid busy loop
-                        await asyncio.sleep(0.05)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
