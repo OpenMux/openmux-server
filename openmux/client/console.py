@@ -24,6 +24,7 @@ import os
 import sys
 import termios
 import tty
+from typing import Optional
 
 from .adapters import BaseClientAdapter
 
@@ -511,6 +512,77 @@ class ConsoleUI:
             sys.stdout.write(f"\r\n{unsupported_message}\r\n")
             sys.stdout.flush()
 
+    async def _read_take_target_input(self) -> str:
+        """Prompt for the client_id a write-slot takeover should target (issue #61).
+
+        Mirrors the telnet/SSH `f` prompt. Each byte echoes as typed; the
+        first CR/LF ends the input. The client_id is the id shown by `w`
+        in its ``[id] username@ip (rw)`` holder label. Enter sends the
+        no-target fallback (the most recently attached other holder).
+
+        Returns:
+            str: The target id, or "" for the no-target fallback.
+        """
+        sys.stdout.write("[Take from holder (client_id, or Enter for latest): ]")
+        sys.stdout.flush()
+        target = ""
+        while True:
+            await asyncio.sleep(0.01)
+            if not self._is_data_available():
+                continue
+            if self._stdin_fd is not None:
+                import os as _os
+
+                ch = _os.read(self._stdin_fd, 1).decode("latin1", errors="ignore")
+            else:
+                ch = sys.stdin.read(1)
+            if ch in ("\r", "\n"):
+                sys.stdout.write("\r\n")
+                sys.stdout.flush()
+                return target
+            if ch in ("\x7f", "\b"):
+                if target:
+                    target = target[:-1]
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+                continue
+            target += ch
+            sys.stdout.write(ch)
+            sys.stdout.flush()
+
+    async def _force_access_mode(self, target: Optional[str] = None):
+        """Send a write-slot takeover request and report send failures.
+
+        The grant/denial itself rides the asynchronous server response and is
+        shown by `_read_from_server()` (via the adapter's `access_mode`
+        state or its takeover notice), so this only reports whether the
+        request itself could be sent.
+
+        Args:
+            target: Optional holder ``client_id`` to take the slot from
+                (issue #61); ``None`` takes the most recently attached other
+                holder. An adapter that predates the parameter falls back to
+                the no-target form.
+        """
+        method = getattr(self.connection, "force_read_write", None)
+        sent = False
+        if method is not None:
+            try:
+                if target:
+                    sent = bool(await method(target))
+                else:
+                    sent = bool(await method())
+            except TypeError:
+                try:
+                    sent = bool(await method())
+                except Exception:
+                    sent = False
+            except Exception:
+                sent = False
+        if not sent:
+            sys.stdout.write("\r\n[Take control is not supported by this connection]\r\n")
+            sys.stdout.flush()
+
     async def _process_escape_command(self, command: str):
         """Execute a parsed escape command.
 
@@ -543,10 +615,13 @@ class ConsoleUI:
                 )
 
             elif command == "f":
-                # Take the port's write slot from the current holder (issue #59
-                # Part 2): the server demotes that one holder and promotes this
-                # client, restoring the holder if the promotion fails.
-                await self._request_access_mode("force_read_write", "[Take control is not supported by this connection]")
+                # Take the port's write slot (issue #59 Part 2, issue #61):
+                # pick the holder by client_id, or Enter for the most
+                # recently attached holder. The server demotes that one
+                # holder and promotes this client, restoring the holder if
+                # the promotion fails.
+                target = await self._read_take_target_input()
+                await self._force_access_mode(target or None)
 
             elif command == "i":
                 # Information dump
@@ -766,7 +841,7 @@ class ConsoleUI:
             "\r\n[OpenMux Console Commands]\r\n"
             + ".         disconnect\r\n"
             + "a         request read-write access\r\n"
-            + "f         take the write slot from the current holder\r\n"
+            + "f         take the write slot (prompt: holder id, or Enter for latest)\r\n"
             + "s         release read-write access / switch to read-only\r\n"
             + "i         information dump\r\n"
             + "w         show who holds read-write access on this port\r\n"

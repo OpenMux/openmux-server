@@ -366,6 +366,96 @@ async def test_forward_payload_readonly_reannounces_on_enter():
     assert b"[WARNING: console is in read-only mode]" in session.writer.buffer
 
 
+# ---------------------------------------------------------------------------
+# _cmd_force_rw: targeted takeover prompt (issue #61)
+
+
+class _FakeCm:
+    def __init__(self, take_result=(True, "ok")):
+        self.take_calls = []
+        self.take_result = take_result
+
+    async def take_write_slot(self, client_id, port_name, target=None):
+        self.take_calls.append((client_id, port_name, target))
+        return self.take_result
+
+
+@pytest.mark.asyncio
+async def test_force_rw_prompts_and_passes_target():
+    adapter = make_adapter(["loopback1"])
+    session = make_session(read_only=False)
+    session.reader = FakeReader([b"f", b"4", b"\n"])
+    cm = _FakeCm((True, "takeover from alice [f4]"))
+    adapter.console_manager = cm
+
+    await adapter._cmd_force_rw(session, cm)
+
+    assert cm.take_calls == [("c1", "loopback1", "f4")]
+    out = session.writer.buffer.decode()
+    assert "[Take from holder" in out
+    assert "Read-write access granted" in out
+    assert "[Taken from: alice [f4]]" in out
+    assert session.port_mode == "read-write"
+
+
+@pytest.mark.asyncio
+async def test_force_rw_enter_is_no_target_fallback():
+    adapter = make_adapter(["loopback1"])
+    session = make_session(read_only=False)
+    session.reader = FakeReader([b"\n"])
+    cm = _FakeCm((True, "ok"))
+    adapter.console_manager = cm
+
+    await adapter._cmd_force_rw(session, cm)
+
+    assert cm.take_calls == [("c1", "loopback1", None)]
+    out = session.writer.buffer.decode()
+    assert "granted" in out.lower()
+    assert "Taken from" not in out
+
+
+@pytest.mark.asyncio
+async def test_force_rw_invalid_target_refusal_text():
+    adapter = make_adapter(["loopback1"])
+    session = make_session(read_only=False)
+    session.reader = FakeReader([b"ghost", b"\n"])
+    cm = _FakeCm((False, "invalid_target"))
+    adapter.console_manager = cm
+
+    await adapter._cmd_force_rw(session, cm)
+
+    assert session.port_mode != "read-write"
+    out = session.writer.buffer.decode()
+    assert "does not hold read-write" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_force_rw_read_only_listener_rejects_before_prompt():
+    adapter = make_adapter(["loopback1"])
+    session = make_session(read_only=True)
+    session.reader = FakeReader([b"f", b"4", b"\n"])
+    cm = _FakeCm()
+    adapter.console_manager = cm
+
+    await adapter._cmd_force_rw(session, cm)
+
+    assert cm.take_calls == []
+    assert b"This listener is configured read-only" in session.writer.buffer
+
+
+@pytest.mark.asyncio
+async def test_force_rw_eof_mid_prompt_stops_session():
+    adapter = make_adapter(["loopback1"])
+    session = make_session(read_only=False)
+    session.reader = FakeReader([b"f4"])  # EOF, no newline
+    cm = _FakeCm()
+    adapter.console_manager = cm
+
+    await adapter._cmd_force_rw(session, cm)
+
+    assert cm.take_calls == []  # the take must NOT run
+
+
 @pytest.mark.asyncio
 async def test_forward_payload_readonly_silent_without_enter():
     adapter = make_adapter(["loopback1"])

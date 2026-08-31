@@ -19,6 +19,7 @@ from openmux.server.access_control import (
     InvalidWriteMode,
     capacity_from_wire,
     capacity_to_wire,
+    holder_id_short,
     parse_write_mode,
     wire_to_mode,
     write_capacity,
@@ -79,6 +80,29 @@ class TestParseWriteMode:
 
     def test_write_modes_constant(self):
         assert WRITE_MODES == ("none", "one", "multiple")
+
+
+class TestHolderIdShort:
+    """The client_id shown next to a holder label (issue #61): it is the exact
+    value a targeted takeover's ``client_id`` field matches on, so long local
+    ids are shortened for display while federated ids (the wire spec the
+    origin resolves) stay verbatim."""
+
+    def test_short_local_id_kept(self):
+        assert holder_id_short("A") == "A"
+        assert holder_id_short("abcdef12") == "abcdef12"
+
+    def test_long_local_id_keeps_last_eight(self):
+        assert holder_id_short("0123456789abcdef") == "89abcdef"
+        assert holder_id_short("holder-abcdefgh-123456") == "h-123456"
+
+    def test_federated_id_kept_verbatim(self):
+        # fed:<peer>:<stream> is the TAKE spec grammar (issue #59 Part 2).
+        assert holder_id_short("fed:peerA:3") == "fed:peerA:3"
+
+    def test_empty_and_none(self):
+        assert holder_id_short("") == ""
+        assert holder_id_short(None) == ""
 
 
 class TestCapacityMapping:

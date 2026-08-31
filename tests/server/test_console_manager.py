@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from openmux.server.access_control import holder_id_short
 from openmux.server.console_manager import ConsoleManager
 
 
@@ -441,15 +442,29 @@ def _three_holder(cm, pm: FakePortManager, port: FakePort):
 
 @pytest.mark.asyncio
 async def test_take_target_specific_holder(cm, port_manager):
+    # Targeted take (issue #61): the success reason names the demoted
+    # holder so the taker's console can show "taken from <holder>".
     port = FakePort()
     port_manager.ports["p1"] = port
     _three_holder(cm, port_manager, port)
 
     ok, reason = await cm.take_write_slot("B", "p1", target="A")
 
-    assert (ok, reason) == (True, "ok")
+    assert (ok, reason) == (True, "takeover from alice [A]")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
     assert modes == {"A": "read-only", "M": "read-write", "B": "read-write"}
+
+
+@pytest.mark.asyncio
+async def test_take_target_reason_shortens_long_holder_id(cm, port_manager):
+    port = FakePort()
+    port_manager.ports["p1"] = port
+    _attach(cm, port, "p1", "holder-abcdefgh-123456", "carol", "read-write")
+    _attach(cm, port, "p1", "B", "bob", "read-only")
+
+    ok, reason = await cm.take_write_slot("B", "p1", target="holder-abcdefgh-123456")
+
+    assert (ok, reason) == (True, f"takeover from carol [{holder_id_short('holder-abcdefgh-123456')}]")
 
 
 @pytest.mark.asyncio
@@ -467,6 +482,7 @@ async def test_take_target_invalid_refuses(cm, port_manager):
 
 @pytest.mark.asyncio
 async def test_take_without_target_picks_most_recent_holder(cm, port_manager):
+    # No-target takes keep the plain "ok" reason (no victim named).
     port = FakePort()
     port_manager.ports["p1"] = port
     _three_holder(cm, port_manager, port)
@@ -740,17 +756,33 @@ async def test_take_taker_without_username_is_not_entitled(cm, port_manager):
 # get_rw_holders_display / _resolve_client_ip
 
 
-def test_get_rw_holders_display_unknown_ip_without_adapter(cm, port_manager):
+def test_get_rw_holders_display_label_shape(cm, port_manager):
+    # Label (issue #61): "[client_id] username@ip (rw)" - the id in brackets
+    # is the exact value a targeted takeover's client_id field matches on.
     port = FakePort([{"client_id": "A", "username": "alice", "mode": "read-write"}])
     port_manager.ports["p1"] = port
-    assert cm.get_rw_holders_display("p1") == ["alice@unknown"]
+    assert cm.get_rw_holders_display("p1") == ["[A] alice@unknown (rw)"]
 
 
 def test_get_rw_holders_display_resolves_ip_via_adapter(cm, port_manager):
     port = FakePort([{"client_id": "A", "username": "alice", "mode": "read-write"}])
     port_manager.ports["p1"] = port
     cm.client_to_manager["A"] = FakeAdapterChannel(ip="10.0.0.5")
-    assert cm.get_rw_holders_display("p1") == ["alice@10.0.0.5"]
+    assert cm.get_rw_holders_display("p1") == ["[A] alice@10.0.0.5 (rw)"]
+
+
+def test_get_rw_holders_display_shortens_long_local_ids(cm, port_manager):
+    # Long local client_ids keep their last 8 characters in the label.
+    port = FakePort([{"client_id": "abcdef1234567890", "username": "alice", "mode": "read-write"}])
+    port_manager.ports["p1"] = port
+    assert cm.get_rw_holders_display("p1") == ["[34567890] alice@unknown (rw)"]
+
+
+def test_get_rw_holders_display_keeps_federated_ids_verbatim(cm, port_manager):
+    # fed: ids are the wire spec the origin resolves - never shortened.
+    port = FakePort([{"client_id": "fed:peerA:3", "username": "peerAuser", "mode": "read-write"}])
+    port_manager.ports["p1"] = port
+    assert cm.get_rw_holders_display("p1") == ["[fed:peerA:3] peerAuser@unknown (rw)"]
 
 
 def test_get_rw_holders_display_excludes_read_only_clients(cm, port_manager):
@@ -761,7 +793,7 @@ def test_get_rw_holders_display_excludes_read_only_clients(cm, port_manager):
         ]
     )
     port_manager.ports["p1"] = port
-    assert cm.get_rw_holders_display("p1") == ["alice@unknown"]
+    assert cm.get_rw_holders_display("p1") == ["[A] alice@unknown (rw)"]
 
 
 def test_get_rw_holders_display_empty_for_unknown_port(cm):

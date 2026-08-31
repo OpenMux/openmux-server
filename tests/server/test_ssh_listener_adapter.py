@@ -640,6 +640,16 @@ async def test_escape_menu_force_take_demotes_other_session(tmp_path, monkeypatc
 
             p2.stdin.write(b"\x05cf")
             await p2.stdin.drain()
+            # The `f` command now prompts for a target (issue #61). Consume
+            # and confirm the prompt line (the first bracketed output), THEN
+            # answer - a real user only types the id once the prompt shows,
+            # so answering blindly can race the chunk pump and be eaten as
+            # plain port data. Enter keeps the no-target (latest holder)
+            # fallback.
+            prompt = await asyncio.wait_for(p2.stdout.readuntil(b"latest): ]"), timeout=5)
+            assert b"Take from holder" in prompt
+            p2.stdin.write(b"\n")
+            await p2.stdin.drain()
 
             demotion = await asyncio.wait_for(p1.stdout.readuntil(b"]\r\n"), timeout=5)
             assert b"taken by another user" in demotion
@@ -728,3 +738,130 @@ async def test_match_ssh_pubkey_true_and_false(tmp_path, monkeypatch):
     auth = FakeAuthManager(pubkeys={"alice": {"k1": pub}})
     assert _match_ssh_pubkey(auth, "alice", presented) is True
     assert _match_ssh_pubkey(auth, "bob", presented) is False
+
+
+# ---------------------------------------------------------------------------
+# _cmd_force_rw: targeted takeover prompt (issue #61) - lightweight unit test
+
+
+class _FakeSshReader:
+    """Streams queued bytes one `read(n)`-sized slice at a time."""
+
+    def __init__(self, chunks=None):
+        self.pending = bytearray()
+        self.chunks = list(chunks or [])
+
+    async def read(self, n):
+        if not self.pending:
+            await asyncio.sleep(0)
+            if not self.chunks:
+                return b""
+            self.pending = bytearray(self.chunks.pop(0))
+        out = bytes(self.pending[:n])
+        del self.pending[:n]
+        return out
+
+
+class _FakeSshStdout:
+    def __init__(self):
+        self.buffer = bytearray()
+
+    def write(self, data):
+        self.buffer += data
+
+    async def drain(self):
+        await asyncio.sleep(0)
+
+
+class _FakeSshProcess:
+    def __init__(self, chunks=None):
+        self.stdin = _FakeSshReader(chunks)
+        self.stdout = _FakeSshStdout()
+
+
+class _FakeSshCm:
+    def __init__(self, take_result=(True, "ok")):
+        self.take_calls = []
+        self.take_result = take_result
+
+    async def take_write_slot(self, client_id, port_name, target=None):
+        self.take_calls.append((client_id, port_name, target))
+        return self.take_result
+
+
+def _make_ssh_session(read_only=False, chunks=None):
+    listener = ListenerConfig(name="s1", bind_host="0.0.0.0", bind_port=2200, target="loop1", read_only=read_only)
+    from openmux.server.adapters.ssh_listener import SshSession
+
+    return SshSession(
+        client_id="c1",
+        listener=listener,
+        process=_FakeSshProcess(chunks),
+        port_name="loop1",
+        read_only=read_only,
+        remote_host="127.0.0.1",
+        username="bob",
+        port_mode="read-only",
+    )
+
+
+@pytest.mark.asyncio
+async def test_ssh_force_rw_prompts_and_passes_target():
+    from openmux.server.adapters.ssh_listener import SshListenerAdapter
+
+    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
+    session = _make_ssh_session(read_only=False, chunks=[b"f4", b"\n"])
+    cm = _FakeSshCm((True, "takeover from alice [f4]"))
+
+    await adapter._cmd_force_rw(session, cm)
+
+    assert cm.take_calls == [("c1", "loop1", "f4")]
+    out = session.process.stdout.buffer.decode()
+    assert "[Take from holder" in out
+    assert "Read-write access granted" in out
+    assert "[Taken from: alice [f4]]" in out
+    assert session.port_mode == "read-write"
+
+
+@pytest.mark.asyncio
+async def test_ssh_force_rw_enter_is_no_target_fallback():
+    from openmux.server.adapters.ssh_listener import SshListenerAdapter
+
+    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
+    session = _make_ssh_session(read_only=False, chunks=[b"\n"])
+    cm = _FakeSshCm((True, "ok"))
+
+    await adapter._cmd_force_rw(session, cm)
+
+    assert cm.take_calls == [("c1", "loop1", None)]
+    out = session.process.stdout.buffer.decode()
+    assert "granted" in out.lower()
+    assert "Taken from" not in out
+
+
+@pytest.mark.asyncio
+async def test_ssh_force_rw_invalid_target_refusal():
+    from openmux.server.adapters.ssh_listener import SshListenerAdapter
+
+    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
+    session = _make_ssh_session(read_only=False, chunks=[b"ghost", b"\n"])
+    cm = _FakeSshCm((False, "invalid_target"))
+
+    await adapter._cmd_force_rw(session, cm)
+
+    assert session.port_mode != "read-write"
+    assert "does not hold read-write" in session.process.stdout.buffer.decode().lower()
+
+
+@pytest.mark.asyncio
+async def test_ssh_force_rw_read_only_listener_rejects_before_prompt():
+    from openmux.server.adapters.ssh_listener import SshListenerAdapter
+
+    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
+    session = _make_ssh_session(read_only=True, chunks=[b"f4", b"\n"])
+    cm = _FakeSshCm()
+
+    await adapter._cmd_force_rw(session, cm)
+
+    assert cm.take_calls == []
+    assert b"configured read-only" in session.process.stdout.buffer

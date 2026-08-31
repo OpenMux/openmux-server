@@ -38,7 +38,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from aiohttp import web
 
-from openmux.server.access_control import capacity_display_label, capacity_to_wire
+from openmux.server.access_control import capacity_display_label, capacity_to_wire, holder_id_short
 from openmux.server.data_logger import DataLogger
 from openmux.server.port_utils import natural_sort_key, safe_get_port
 from openmux.server.web_plugins import ADAPTER_APP_KEY
@@ -974,7 +974,13 @@ async def handle_readyz(request: web.Request) -> web.Response:
 
 
 def _rw_holders_for_port(adapter: Any, port_name: str) -> list:
-    """Return list of 'username@ip' strings for all read-write clients on a port."""
+    """Return holder labels for all read-write clients on a port.
+
+    Format: ``[<id>] username@ip (rw)`` (issue #61), identical to the
+    telnet/SSH `w` command and the CLI client's holder lines. The `client_id`
+    in brackets is the value the per-holder "Take control" button and a
+    targeted takeover's `client_id` field match on.
+    """
     holders: list = []
     try:
         pm = getattr(getattr(adapter, "console_manager", None), "port_manager", None)
@@ -991,7 +997,7 @@ def _rw_holders_for_port(adapter: Any, port_name: str) -> list:
                         ip = meta.get("ip") or "unknown"
                     except Exception:
                         pass
-                    holders.append(f"{username}@{ip}")
+                    holders.append(f"[{holder_id_short(cid)}] {username}@{ip} (rw)")
     except Exception:
         pass
     return holders
@@ -1216,6 +1222,11 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 }
                                 if ok and reason == "already_rw":
                                     resp.pop("reason")
+                                if ok and reason.startswith("takeover from "):
+                                    # Targeted takeover (issue #61): the victim's
+                                    # holder label rides along so the taker's
+                                    # console can show "taken from <holder>".
+                                    resp["takeover"] = reason.removeprefix("takeover from ")
                                 if not ok:
                                     max_rw = _max_rw_users_for_port(adapter, port_name)
                                     if max_rw is not None:

@@ -57,6 +57,11 @@ Changes since v1.0.2 (2026-08-27).
   - The victim sees `taken by <user>` (or `taken by another user`).
   - "Take control" on an empty slot promotes the taker. A named target that matches no holder is refused.
   - Takeovers are audit-logged (`write_slot_takeover`).
+- **Targeted write-slot takeover** (issue #61, #59 part 3). Non-web clients can name which holder to take the slot from.
+  - CLI `f` and the telnet/SSH `f` menu command now prompt for the holder's `client_id`; Enter keeps the no-target (most-recently-attached) fallback.
+  - The `w` holder list and the web "Held by:" lines show the `client_id` as `[<id>] username@ip (rw)`. The id in brackets is the exact value to pass to `f`. Long local ids show their last 8 characters; federated `fed:` ids stay verbatim.
+  - A successful targeted take shows `Taken from: <holder>`. A refused take (bad id, no slot, or the origin declining) shows the reason.
+  - No config change. The `force_promote` wire frame already carried an optional `client_id`; the CLI, telnet, and SSH consoles now send it.
 - **Federated takeover fixes.** The origin node arbitrates a takeover. The taker now writes immediately after a take on a federated port (previously: write-blocked until reconnect). The legacy `FORCE` wire action maps to `TAKE:latest`, so mixed-version peers keep working.
 - **MuxCon federation relay is faster** (0a546ef). The local port pump now waits on the port queue instead of polling every 50 ms. The initial retransmit timeout starts at 0.35 s instead of up to one heartbeat interval. There is no wire-protocol change.
 - **A serial device is opened by only one port** (issue #57). Two `serial_ports` entries no longer point at the same `device`.

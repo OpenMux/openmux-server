@@ -168,8 +168,13 @@ class BaseClientAdapter(ABC):
         """
         return False
 
-    async def force_read_write(self) -> bool:
-        """Ask the server to demote other read-write holders and promote this client.
+    async def force_read_write(self, target: Optional[str] = None) -> bool:
+        """Ask the server to demote a read-write holder and promote this client.
+
+        Args:
+            target: Optional ``client_id`` of the specific holder to take the
+                slot from (issue #61). ``None`` takes the most recently
+                attached other holder. Old servers ignore the field.
 
         Returns:
             bool: True if the request was sent; False if unsupported or the

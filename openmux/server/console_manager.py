@@ -12,7 +12,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 # Import the helper module to set the console manager reference
-from openmux.server.access_control import wire_to_mode, write_capacity
+from openmux.server.access_control import holder_id_short, wire_to_mode, write_capacity
 from openmux.server.console_manager_helper import set_console_manager
 from openmux.server.data_logger import DataLogger
 
@@ -1045,9 +1045,13 @@ class ConsoleManager:
 
         Returns:
             Tuple[bool, str]: (success, reason). Success reasons: ``"ok"``,
-                ``"already_rw"``. Failure reasons include ``not_attached``,
-                ``port_missing``, ``not_entitled``, ``denied_by_group_acl``,
-                ``denied_by_access_default``, ``no_holder``,
+                ``"already_rw"`` (taker already has the slot; nobody was
+                demoted), and ``takeover from <username> [<id>]`` when a
+                named target was demoted (issue #61: the taker's client
+                renders this as its "taken from" line). Failure reasons
+                include ``not_attached``, ``port_missing``, ``not_entitled``,
+                ``denied_by_group_acl``, ``denied_by_access_default``,
+                ``no_holder``,
                 ``invalid_target``, ``victim_not_current``, ``promote_failed``,
                 ``federation_denied``. ``no_holder`` applies to ``none``
                 ports and to named targets that match no holder.
@@ -1119,7 +1123,7 @@ class ConsoleManager:
                     )
                     return False, "promote_failed"
                 self._log_takeover_audit(port, port_name, taker_id, taker_username, target or "(latest)")
-                return True, "ok"
+                return True, (self._takeover_success_reason(port, target) or "ok")
             return False, "federation_denied"
 
         # Local port: the mode gate, then the targeted transfer.
@@ -1131,7 +1135,13 @@ class ConsoleManager:
 
         victim, reason = self._resolve_take_target(port, port_name, taker_id, target)
         if victim is not None:
-            return await self._take_slot_local(port, port_name, taker_id, taker_username, victim)
+            ok, take_reason = await self._take_slot_local(port, port_name, taker_id, taker_username, victim)
+            if not ok:
+                return False, take_reason
+            # Targeted take names the demoted holder in the success reason so
+            # the taker's console can show "taken from <holder>"; the no-target
+            # take keeps the plain "ok" reason (see _takeover_success_reason).
+            return True, (self._takeover_success_reason(port, target) or "ok")
         # No holder to demote. A no-target take takes the EMPTY slot: the
         # taker becomes the writer directly (legacy force behavior). A named
         # target that matched no holder is still refused - the named victim
@@ -1144,6 +1154,28 @@ class ConsoleManager:
             return False, "promote_failed"
         self._log_empty_slot_grant(port, port_name, taker_id, taker_username)
         return True, "ok"
+
+    def _takeover_success_reason(self, port: Any, target: Optional[str]) -> Optional[str]:
+        """Best-effort `takeover from <username> [<id>]` reason for a successful
+        targeted takeover (issue #61).
+
+        Returns the labeled reason when ``target`` is a non-empty client_id
+        that resolves to a record in ``port.connected_clients`` (matched by
+        id regardless of current mode - the victim is demoted by the time this
+        runs, so mode is not filtered). Returns ``None`` otherwise, and the
+        caller falls back to ``"ok"``. On a federated port the demoted holder
+        lives on the origin and is not in the local ``connected_clients``, so
+        this returns None there and the taker simply sees "granted" - the
+        victim still gets its own demotion notice.
+        """
+        if not target:
+            return None
+        for c in getattr(port, "connected_clients", []) or []:
+            if c.get("client_id") == target:
+                victim_id = str(c.get("client_id") or "")
+                victim_username = str(c.get("username") or "unknown")
+                return f"takeover from {victim_username} [{holder_id_short(victim_id)}]"
+        return None
 
     def _client_permissions(self, port_name: str, client_id: str) -> Optional[str]:
         """Recover the global permission for an attached client whose adapter
@@ -1193,17 +1225,22 @@ class ConsoleManager:
         return [c for c in getattr(port, "connected_clients", []) if c.get("mode") == "read-write"]
 
     def get_rw_holders_display(self, port_name: str) -> List[str]:
-        """Return 'username@ip' strings for all read-write clients on a port.
+        """Return one entry per read-write client on a port, labeled
+        ``[id] username@ip (rw)`` (see `holder_id_short` for the id form).
 
         Resolves IPs across adapter types via each owning adapter's
         `_resolve_client_meta`, so e.g. a telnet client can see that a web
-        console user currently holds read-write access.
+        console user currently holds read-write access. The label format is
+        shared by every console (telnet/SSH `w`, the TCP/WebSocket
+        `rw_holders` control frames, the web holder lines - issue #61); it
+        doubles as the target for a takeover: the `client_id` in brackets is
+        exactly the value the `force_promote` target field matches on.
         """
         holders: List[str] = []
         for c in self._read_write_holders(port_name):
             cid = c.get("client_id", "")
             username = c.get("username", "unknown")
-            holders.append(f"{username}@{self._resolve_client_ip(cid)}")
+            holders.append(f"[{holder_id_short(cid)}] {username}@{self._resolve_client_ip(cid)} (rw)")
         return holders
 
     def _resolve_client_ip(self, client_id: str) -> str:

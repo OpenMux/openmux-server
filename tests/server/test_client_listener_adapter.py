@@ -415,3 +415,178 @@ async def test_handle_client_connection_lifecycle(monkeypatch):
     await adapter.handle_client_connection(cast(Any, reader), cast(Any, writer))
     # Client should be disconnected and removed
     assert not adapter.clients
+
+
+# ---------------------------------------------------------------------------
+# Access-mode control frames: holder labels + targeted takeover (issue #61)
+
+
+class _TakeCm:
+    """Console-manager stand-in that records take_write_slot calls and
+    serves a fixed holder list / port capacity for the label paths."""
+
+    def __init__(self, port_clients, take_result=(True, "ok")):
+        self.take_calls = []
+        self.take_result = take_result
+        self.holder_list = port_clients
+        self.client_to_manager: Any = {}
+        self.port_manager = _TakePm(port_clients)
+
+    async def take_write_slot(self, taker_id, port_name, target=None):
+        self.take_calls.append((taker_id, port_name, target))
+        return self.take_result
+
+
+class _TakePm:
+    def __init__(self, port_clients):
+        self.ports = {"p1": type("P", (), {"connected_clients": port_clients, "max_read_write_users": "one"})()}
+
+
+async def _make_attached_client(adapter: TcpServerAdapter, writer: FakeWriter) -> ClientSession:
+    class _Cm:
+        port_manager = _TakePm([])
+        client_to_manager = {}
+
+        async def connect_client_to_port(self, cid, port, user):
+            return True, "read-write", None
+
+    adapter.set_console_manager(_Cm())
+    client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
+    client.username = "u"
+    await adapter.handle_port_connection_request_text(client, "p1")
+    assert client.connected_port == "p1"
+    return client
+
+
+from openmux.server.adapters.client_listener import CTRL_MARKER
+
+
+def _ctrl_frame(payload: Dict[str, Any]) -> bytes:
+    return CTRL_MARKER + json.dumps(payload).encode() + b"\n"
+
+
+def _last_ctrl_json(writer: FakeWriter) -> Dict[str, Any]:
+    """Parse the last OMXCTRL response line written to `writer`."""
+    data = bytes(writer.buffer)
+    idx = data.rfind(CTRL_MARKER)
+    assert idx != -1, f"no control frame in {data!r}"
+    line = data[idx + len(CTRL_MARKER) :].split(b"\n", 1)[0]
+    return json.loads(line)
+
+
+@pytest.mark.asyncio
+async def test_force_promote_frame_defaults_to_no_target():
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = await _make_attached_client(adapter, writer)
+    cm = _TakeCm([], take_result=(True, "ok"))
+    adapter.set_console_manager(cm)
+
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "force_promote"}))
+
+    assert handled is True
+    assert cm.take_calls == [("c1", "p1", None)]
+    resp = _last_ctrl_json(writer)
+    assert resp["type"] == "client_mode"
+    assert resp["ok"] is True
+    assert resp.get("takeover") is None
+
+
+@pytest.mark.asyncio
+async def test_force_promote_frame_passes_target_and_surfaces_victim():
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = await _make_attached_client(adapter, writer)
+    cm = _TakeCm([], take_result=(True, "takeover from alice [A]"))
+    adapter.set_console_manager(cm)
+
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "force_promote", "client_id": "A"}))
+
+    assert handled is True
+    assert cm.take_calls == [("c1", "p1", "A")]
+    resp = _last_ctrl_json(writer)
+    assert resp["ok"] is True
+    # The victim's label rides along; the reason is carried too.
+    assert resp["takeover"] == "alice [A]"
+    assert resp["reason"].startswith("takeover from ")
+
+
+@pytest.mark.asyncio
+async def test_force_promote_frame_non_string_client_id_is_no_target():
+    # A numeric client_id is not a holder id: treat as no-target fallback.
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = await _make_attached_client(adapter, writer)
+    cm = _TakeCm([])
+    adapter.set_console_manager(cm)
+
+    await adapter._handle_control_frame(client, _ctrl_frame({"type": "force_promote", "client_id": 42}))
+
+    assert cm.take_calls == [("c1", "p1", None)]
+
+
+def test_rw_holders_label_format_and_id_shortening():
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    clients = [
+        {"client_id": "0123456789abcdef", "username": "alice", "mode": "read-write"},
+        {"client_id": "fed:peerA:3", "username": "peerAuser", "mode": "read-write"},
+        {"client_id": "ro1", "username": "carol", "mode": "read-only"},  # excluded
+    ]
+    adapter.set_console_manager(_TakeCm(clients))
+
+    labels = adapter._rw_holders_for_port("p1")
+
+    # Long local id shortened; federated id kept verbatim; read-only excluded.
+    assert labels == ["[89abcdef] alice@unknown (rw)", "[fed:peerA:3] peerAuser@unknown (rw)"]
+
+
+@pytest.mark.asyncio
+async def test_client_mode_denial_carries_holder_labels():
+    # A request_rw denial lists the current holders with their take-target
+    # labels (issue #61): "[id] username@ip (rw)".
+    clients = [{"client_id": "A", "username": "alice", "mode": "read-write"}]
+    adapter = _TakeAdapter(clients)
+    writer = FakeWriter()
+    client = ClientSession("c9", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.adapter.logger)
+    client.username = "u"
+    client.connected_port = "p1"
+
+    await adapter.adapter._handle_control_frame(client, _ctrl_frame({"type": "request_rw"}))
+
+    resp = _last_ctrl_json(writer)
+    assert resp["type"] == "client_mode"
+    assert resp["ok"] is False
+    assert resp["rw_holders"] == ["[A] alice@unknown (rw)"]
+
+
+@pytest.mark.asyncio
+async def test_force_promote_refusal_carries_reason_not_takeover():
+    # A refused take (invalid_target): the frame carries the reason so the
+    # client can show a specific refusal, and no takeover field.
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
+    client.connected_port = "p1"
+    adapter.set_console_manager(_TakeCm([], take_result=(False, "invalid_target")))
+
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "force_promote", "client_id": "ghost"}))
+
+    assert handled is True
+    resp = _last_ctrl_json(writer)
+    assert resp["ok"] is False
+    assert resp["reason"] == "invalid_target"
+    assert "takeover" not in resp
+
+
+class _TakeAdapter:
+    """A TcpServerAdapter with a console manager wired for holder labels."""
+
+    def __init__(self, clients):
+        self.adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+        cm = _TakeCm(clients)
+
+        async def _promote(self, cid, port_name):
+            return False  # the denial branch attaches the holder list
+
+        cm.promote_client_to_read_write = _promote.__get__(cm, type(cm))
+        self.adapter.set_console_manager(cm)

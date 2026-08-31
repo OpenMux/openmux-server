@@ -40,16 +40,37 @@ def apply_client_mode_response(adapter: Any, payload: Dict[str, Any]) -> str:
         by = payload.get("taken_by") or "another user"
         lines.append(f"[Your read-write access was taken by {by}]")
     elif ok is False:
-        if payload.get("max_rw_users") == 0:
+        if reason == "invalid_target":
+            # Targeted takeover (issue #61) where the named client_id is not
+            # (or no longer) a read-write holder: no slot moved.
+            lines.append("[Take refused: that user does not hold read-write access (check the id in the holders list)]")
+        elif reason == "federation_denied":
+            lines.append("[Take refused: the origin server did not grant the takeover]")
+        elif reason == "no_holder":
+            # "none"-capacity port, or a named target on a holder-less port.
+            lines.append("[Take refused: this port has no read-write holder to take from]")
+        elif payload.get("max_rw_users") == 0:
             # 0 = the port's write-slot capacity is "none" (issue #59): it has
             # no driver at all.
             lines.append("[Read-write is not available on this port (it has no write slots: capacity 'none')]")
         else:
-            holders = payload.get("rw_holders") or []
+            # Covers a plain request_rw denial and a takeover whose promote
+            # hit capacity ("promote_failed"): either way the seat is full or
+            # missing. Prefer the frame's holders, else the last holders the
+            # adapter saw (the server only attaches them to request_rw
+            # denials).
+            holders = payload.get("rw_holders") or getattr(adapter, "rw_holders", None) or []
             who = f" (held by: {', '.join(holders)})" if holders else ""
-            lines.append(f"[Read-write request denied{who} - use Take control if needed]")
+            if reason == "promote_failed":
+                lines.append(f"[Request denied: no free read-write seat{who}]")
+            else:
+                lines.append(f"[Read-write request denied{who} - use Take control if needed]")
     elif mode == "read-write":
         lines.append("[Read-write access granted]")
+        # Targeted takeover success (issue #61): `takeover` is the demoted
+        # holder's label ("[id] username@ip (rw)").
+        if payload.get("takeover"):
+            lines.append(f"[Taken from: {payload['takeover']}]")
     else:
         lines.append("[Switched to read-only mode]")
 

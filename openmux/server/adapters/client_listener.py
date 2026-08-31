@@ -20,7 +20,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Set
 
-from openmux.server.access_control import capacity_to_wire
+from openmux.server.access_control import capacity_to_wire, holder_id_short
 from openmux.server.port_utils import resolve_port_connected_state, safe_get_port
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
@@ -656,11 +656,15 @@ class TcpServerAdapter(BaseGenericAdapter):
             elif req_type == "force_promote":
                 # Single write-slot takeover (issue #59 Part 2); the frame name
                 # is kept for old clients, the target is optional (default: the
-                # most recently attached holder).
+                # most recently attached holder). A named target (issue #61)
+                # returns its victim's holder label in `takeover` so the client
+                # can show "taken from <holder>".
                 target = req.get("client_id") if isinstance(req.get("client_id"), str) else None
                 ok, reason = await self.console_manager.take_write_slot(client.client_id, port_name, target)
                 resp["ok"] = bool(ok)
                 resp["mode"] = "read-write" if ok else "read-only"
+                if reason and ok and reason.startswith("takeover from "):
+                    resp["takeover"] = reason.removeprefix("takeover from ")
                 if reason:
                     resp["reason"] = reason
                 else:
@@ -699,14 +703,20 @@ class TcpServerAdapter(BaseGenericAdapter):
         return []
 
     def _rw_holders_for_port(self, port_name: Optional[str]) -> List[str]:
-        """Return 'username@ip' strings for all read-write clients on a port."""
+        """Return holder labels for all read-write clients on a port.
+
+        Format: ``[<id>] username@ip (rw)`` - the same label the telnet/SSH
+        `w` command and the web holder lines show (issue #61). The `client_id`
+        in brackets is the exact value a targeted takeover's `client_id`
+        field matches on.
+        """
         holders: List[str] = []
         for c in self._connected_clients_for_port(port_name):
             if c.get("mode") != "read-write":
                 continue
             cid = c.get("client_id", "")
             username = c.get("username", "unknown")
-            holders.append(f"{username}@{self._resolve_client_ip(cid)}")
+            holders.append(f"[{holder_id_short(cid)}] {username}@{self._resolve_client_ip(cid)} (rw)")
         return holders
 
     def _resolve_client_ip(self, client_id: str) -> str:

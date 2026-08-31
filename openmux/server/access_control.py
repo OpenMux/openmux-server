@@ -29,6 +29,25 @@ WIRE_MULTIPLE = 2147483647
 WIRE_CAPACITY: Dict[str, int] = {"none": 0, "one": 1, "multiple": WIRE_MULTIPLE}
 
 
+def holder_id_short(client_id: str) -> str:
+    """Short form of a client_id for display next to a holder's `username@ip`
+    (issue #61): it is the id a targeted takeover (`force_promote` with
+    `client_id`, the CLI/telnet `f` + target prompt) passes back to the
+    server, which matches on the exact `client_id`.
+
+    Local clients keep their last 8 hex characters; a federated mirror
+    (`fed:<peer>:<stream>` or `own`-mapped) keeps its whole `fed:` tail -
+    those ids are the wire spec the origin resolves (issue #59 Part 2), so
+    shortening them would break the target lookup.
+    """
+    cid = str(client_id or "")
+    if cid.startswith("fed:"):
+        return cid
+    if len(cid) > 8:
+        return cid[-8:]
+    return cid
+
+
 class InvalidWriteMode(ValueError):
     """Raised when a max_read_write_users value is neither a mode nor a legacy integer."""
 

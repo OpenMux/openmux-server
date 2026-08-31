@@ -145,7 +145,7 @@ def feed_escape_byte(state: EscapeState, b: bytes) -> Tuple[bytes, Optional[str]
 CONTROL_MENU_HELP = (
     "\r\n--- OpenMux Control Menu ---\r\n"
     "a  Request read-write access\r\n"
-    "f  Take the write slot from the current holder\r\n"
+    "f  Take the write slot (ask which holder, or latest)\r\n"
     "s  Release read-write access (switch to read-only)\r\n"
     "w  Show who holds read-write access\r\n"
     "u  Show who is viewing this port\r\n"
@@ -155,6 +155,68 @@ CONTROL_MENU_HELP = (
     ".  Disconnect\r\n"
     "?  Show this menu\r\n"
 )
+
+#: Prompt shown by the `f` control-menu command before a targeted takeover
+#: (issue #61). The `w` command's `[id] username@ip (rw)` labels carry the
+#: client_id to type here; Enter takes the most recently attached holder.
+TAKE_TARGET_PROMPT = "[Take from holder (client_id, or Enter for latest): ]"
+
+
+async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], bool]:
+    """Prompt for the client_id a write-slot takeover should target (issue #61).
+
+    Shared by the telnet and SSH listeners' `f` command: both feed stdin
+    through an `asyncio.StreamReader`-style `read(n)`, so the prompt loop is
+    transport-agnostic. Echoes each typed byte, strips CR/LF, and stops at
+    the first newline.
+
+    Args:
+        reader: Object with `async read(n)` returning bytes (``b""`` at EOF).
+        writer: Object with `write(bytes)`; the prompt and byte echoes go
+            straight to the session transport (NOT through the port
+            forwarding path, which would leak them to the port).
+
+    Returns:
+        Tuple[Optional[str], bool]: (target or None for the no-target
+        fallback, keep_going). `keep_going` is False only when the client
+        disconnected while answering; the caller should stop pumping.
+    """
+    writer.write(TAKE_TARGET_PROMPT.encode())
+    try:
+        await writer.drain()
+    except Exception:
+        pass
+    target = ""
+    while True:
+        try:
+            data = await reader.read(1)
+        except Exception:
+            return None, True
+        if not data:
+            return None, False  # client left mid-prompt
+        ch = data[:1]
+        if ch in (b"\r", b"\n"):
+            writer.write(b"\r\n")
+            try:
+                await writer.drain()
+            except Exception:
+                pass
+            return target or None, True
+        if ch in (b"\x7f", b"\x08"):  # backspace: erase the echoed byte
+            writer.write(b"\b \b")
+            try:
+                await writer.drain()
+            except Exception:
+                pass
+            if target:
+                target = target[:-1]
+            continue
+        writer.write(ch)
+        try:
+            await writer.drain()
+        except Exception:
+            pass
+        target += ch.decode("latin1", errors="ignore")
 
 
 def format_rw_notice(payload: Dict[str, Any]) -> str:
@@ -184,7 +246,8 @@ def format_rw_notice(payload: Dict[str, Any]) -> str:
 
     ok = payload.get("ok")
     mode = payload.get("mode")
-    if payload.get("reason") == "demoted":
+    reason = payload.get("reason")
+    if reason == "demoted":
         # "taken_by" names the taker when the demotion was a write-slot
         # takeover (issue #59 Part 2) - local takes send it; a federation
         # relay of the same takeover does not, so fall back to the generic
@@ -192,10 +255,29 @@ def format_rw_notice(payload: Dict[str, Any]) -> str:
         by = str(payload.get("taken_by")) if payload.get("taken_by") else "another user"
         return "\r\n[Your read-write access was taken by " + by + "]\r\n"
     if ok and mode == "read-write":
+        # A targeted takeover adds the demoted holder's label (issue #61):
+        # show it after the grant so the taker sees who was displaced.
+        takeover = payload.get("takeover")
+        if takeover:
+            return "\r\n[Read-write access granted]\r\n[Taken from: " + str(takeover) + "]\r\n"
         return "\r\n[Read-write access granted]\r\n"
     if ok and mode == "read-only":
         return "\r\n[Switched to read-only mode]\r\n"
     if not ok:
+        if reason == "invalid_target":
+            # The named client_id is not (or no longer) a read-write holder:
+            # no slot moved (issue #61).
+            return "\r\n[Take refused: that user does not hold read-write access (check the id in the holders list)]\r\n"
+        if reason == "federation_denied":
+            return "\r\n[Take refused: the origin server did not grant the takeover]\r\n"
+        if reason == "promote_failed":
+            # Capacity refused the seat (e.g. an old client on a full port,
+            # or a port with no write slots) - "Take control" cannot help
+            # here, the slot simply has no room.
+            holders = payload.get("rw_holders") or []
+            if holders:
+                return "\r\n[Request denied: no free read-write seat (held by: " + ", ".join(holders) + ")]\r\n"
+            return "\r\n[Request denied: this port has no free read-write seat]\r\n"
         holders = payload.get("rw_holders") or []
         if holders:
             return "\r\n[Read-write request denied (held by: " + ", ".join(holders) + ") - use Take control if needed]\r\n"

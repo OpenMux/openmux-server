@@ -1419,8 +1419,19 @@ function connectSelected() {
           if (msg.client_id) myClientId = msg.client_id;
           updateCtrlMenuButtons();
           if (Array.isArray(msg.rw_holders) || msg.max_rw_users !== undefined) updateRoMenuInfo(msg.rw_holders || [], msg.max_rw_users);
+          if (msg.takeover) {
+            // Targeted takeover success (issue #61): the `takeover` field is
+            // the demoted holder's label `[id] username@ip (rw)`.
+            try { term.write('\r\n[Taken from: ' + msg.takeover + ']\r\n'); } catch (_) {}
+          }
           const silentReasons = ['demoted', 'action_self_demoted', 'action_restored', 'action_restore_denied'];
-          if (msg.ok === false && !silentReasons.includes(msg.reason)) {
+          if (msg.reason === 'invalid_target') {
+            // Targeted takeover where the named client_id is not (or no
+            // longer) a read-write holder: no slot moved, say so.
+            try { term.write('\r\n[Take refused: that user does not hold read-write access (check the id in the holders list)]\r\n'); } catch (_) {}
+          } else if (msg.reason === 'federation_denied') {
+            try { term.write('\r\n[Take refused: the origin server did not grant the takeover]\r\n'); } catch (_) {}
+          } else if (msg.ok === false && !silentReasons.includes(msg.reason)) {
             if (msg.max_rw_users === 0) {
               // 0 = the port's write-slot capacity is 'none' (issue #59): it has no driver at all.
               try { term.write('\r\n[read-write is not available on this port – it has no write slots (capacity: none)]\r\n'); } catch (_) {}

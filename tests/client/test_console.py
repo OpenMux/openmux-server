@@ -3,6 +3,7 @@ Tests for the OpenMux client console UI
 """
 
 import asyncio
+import io
 import os
 import select
 import sys
@@ -356,3 +357,100 @@ class TestConsoleUI:
 
             # Verify termios.tcsetattr was called
             mock_tcsetattr.assert_called_once_with(sys.stdin, termios.TCSADRAIN, "test_settings")
+
+
+class TestTakeTargetInput:
+    """The `f` command's targeted-takeover prompt (issue #61)."""
+
+    @pytest.fixture
+    def console(self):
+        connection = AsyncMock(spec=BaseClientAdapter)
+        connection.is_connected = True
+        ui = ConsoleUI(connection)
+        ui._stdin_fd = None
+        return ui
+
+    @pytest.mark.asyncio
+    async def test_reads_id_strips_crlf(self, console):
+        # "f4\r\n" -> "f4"
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(console, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.side_effect = ["f", "4", "\r", "\n"]
+            result = await console._read_take_target_input()
+        assert result == "f4"
+
+    @pytest.mark.asyncio
+    async def test_enter_is_no_target(self, console):
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(console, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.return_value = "\n"
+            result = await console._read_take_target_input()
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_backspace_edits(self, console):
+        # "ab" then backspace then "c" -> "ac"
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(console, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.side_effect = ["a", "b", "\x7f", "c", "\n"]
+            result = await console._read_take_target_input()
+        assert result == "ac"
+
+    @pytest.mark.asyncio
+    async def test_process_escape_f_sends_no_target_when_enter(self, console):
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(console, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.return_value = "\n"
+            await console._process_escape_command("f")
+        console.connection.force_read_write.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_process_escape_f_sends_target_when_given(self, console):
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(console, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.side_effect = ["f", "4", "\n"]
+            await console._process_escape_command("f")
+        console.connection.force_read_write.assert_awaited_once_with("f4")
+
+    @pytest.mark.asyncio
+    async def test_force_access_mode_falls_back_on_old_adapter(self, console):
+        # An adapter whose force_read_write predates the target parameter:
+        # calling it WITH a target raises TypeError, and the console must
+        # retry without the target so takes still work against old adapters.
+        calls = []
+
+        async def force_read_write():
+            calls.append("no-arg")
+            return True
+
+        console.connection.force_read_write = force_read_write
+        await console._force_access_mode("f4")
+        assert calls == ["no-arg"]  # fell back to the legacy no-target form
+
+    @pytest.mark.asyncio
+    async def test_force_access_mode_unsupported_shows_notice(self, console):
+        console.connection.force_read_write = None
+        with (patch("openmux.client.console.sys.stdout", new=io.StringIO()) as mock_stdout,):
+            await console._force_access_mode("f4")
+        assert "not supported by this connection" in mock_stdout.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_help_mentions_target_prompt(self, console):
+        import openmux.client.console as console_mod
+
+        help_text = ""
+        with patch.object(console_mod.sys, "stdout", new=io.StringIO()) as mock_stdout:
+            await console._show_help()
+            help_text = mock_stdout.getvalue()
+        assert "take the write slot" in help_text
+        assert "holder id" in help_text

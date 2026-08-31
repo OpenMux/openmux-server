@@ -34,6 +34,7 @@ from .listener_common import (
     format_viewers_notice,
     ip_allowed,
     parse_login,
+    read_take_target,
     render_port_list,
 )
 
@@ -719,12 +720,24 @@ class SshListenerAdapter(BaseGenericAdapter):
         if session.listener.read_only:
             await self._write_session(session, "\r\n[This listener is configured read-only]\r\n")
             return
+        # Targeted takeover (issue #61): ask which holder to take the slot
+        # from; Enter keeps the no-target fallback (latest holder). A prompt
+        # the client abandons (disconnect) stops the session pump.
+        target, keep_going = await read_take_target(session.process.stdin, session.process.stdout)
+        if not keep_going:
+            return
         ok = False
+        reason = ""
         if cm:
-            ok, _reason = await cm.take_write_slot(session.client_id, session.port_name)
+            ok, reason = await cm.take_write_slot(session.client_id, session.port_name, target)
         if ok:
             session.port_mode = "read-write"
-        await self._write_session(session, format_rw_notice({"type": "client_mode", "ok": ok, "mode": session.port_mode}))
+        payload: Dict[str, Any] = {"type": "client_mode", "ok": ok, "mode": session.port_mode}
+        if reason:
+            payload["reason"] = reason
+        if ok and reason.startswith("takeover from "):
+            payload["takeover"] = reason.removeprefix("takeover from ")
+        await self._write_session(session, format_rw_notice(payload))
 
     async def _cmd_release_rw(self, session: SshSession, cm: Any) -> None:
         ok = bool(cm and await cm.demote_client_to_read_only(session.client_id, session.port_name))

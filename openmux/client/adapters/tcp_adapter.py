@@ -367,9 +367,18 @@ class TcpClientAdapter(BaseClientAdapter):
         """Ask the server to voluntarily demote this client to read-only."""
         return await self._send_control_frame({"type": "release_rw"})
 
-    async def force_read_write(self) -> bool:
-        """Ask the server to demote other read-write holders and promote this client."""
-        return await self._send_control_frame({"type": "force_promote"})
+    async def force_read_write(self, target: Optional[str] = None) -> bool:
+        """Ask the server to demote a read-write holder and promote this client.
+
+        Args:
+            target: Optional ``client_id`` of the holder to take the slot
+                from (issue #61); absent the server picks the most recently
+                attached other holder.
+        """
+        payload: Dict[str, Any] = {"type": "force_promote"}
+        if target:
+            payload["client_id"] = target
+        return await self._send_control_frame(payload)
 
     async def query_rw_holders(self) -> bool:
         """Ask the server for the current read-write holder(s) of the attached port."""
