@@ -277,7 +277,12 @@ class OpenMuxServer:
                 try:
                     self._apply_logging_from_config()
                 except Exception:
-                    self.logger.warning("Failed to re-apply logging config during init")
+                    # Unexpected fault: the method already logs its own config errors.
+                    # An exception here means logging keeps its prior setup; say so clearly.
+                    self.logger.error(
+                        "Unexpected error re-applying logging config during init; logs keep the prior setup",
+                        exc_info=True,
+                    )
 
             full_config = self.config_manager.config
             if not full_config:
@@ -781,7 +786,7 @@ class OpenMuxServer:
             try:
                 self._apply_logging_from_config()
             except Exception:
-                pass
+                self.logger.error("Unexpected error re-applying logging config", exc_info=True)
 
             # Update core components
             await self.auth_manager.update_config(self.config_manager.get_authentication_config())
@@ -883,7 +888,10 @@ class OpenMuxServer:
             try:
                 self._apply_logging_from_config()
             except Exception:
-                self.logger.warning(f"[reload-soft:{req_id}] Failed to re-apply logging config")
+                self.logger.error(
+                    f"[reload-soft:{req_id}] Unexpected error re-applying logging config; logs keep the prior setup",
+                    exc_info=True,
+                )
         except Exception as e:
             self.logger.error(f"[reload-soft:{req_id}] Config load failed: {e}", exc_info=True)
             return {"error": str(e)}
@@ -1201,7 +1209,10 @@ class OpenMuxServer:
                 try:
                     self._apply_logging_from_config()
                 except Exception:
-                    self.logger.warning(f"[reload-full:{req_id}] Failed to re-apply logging config")
+                    self.logger.error(
+                        f"[reload-full:{req_id}] Unexpected error re-applying logging config; logs keep the prior setup",
+                        exc_info=True,
+                    )
             except Exception as e:
                 self.logger.error(f"Full reload: config load failed: {e}")
                 summary["errors"].append({"phase": "load_config", "error": str(e)})
@@ -1584,7 +1595,7 @@ def _setup_shutdown_handlers(loop, server):
             try:
                 server._apply_logging_from_config()
             except Exception:
-                pass
+                logging.error("Unexpected error re-applying logging config", exc_info=True)
             # Perform server soft reload
             ctx = {"origin": "signal", "user": "signal", "remote": "local", "req_id": "sighup"}
             res = await server.reload_adapters_soft(context=ctx)
