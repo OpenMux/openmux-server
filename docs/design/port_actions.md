@@ -57,7 +57,9 @@ The web plugin exposes, per port, `GET .../actions` (catalog filtered by config)
 `POST .../actions/{action_id}/run` (launches a run, returns immediately with
 `run_id`/`status: "running"`), `GET .../actions/{action_id}/runs` (run history
 summaries), and `GET /ws/actions/{run_id}` (live structured event stream until
-`action_finished`). Runs execute as background asyncio tasks (`ActionRunner.launch_run`),
+`action_finished`). It also exposes a portless `GET /api/port-actions/health`
+route (`action_load_errors` only) - the load errors are directory-scoped, not
+port-scoped. Runs execute as background asyncio tasks (`ActionRunner.launch_run`),
 so a port-busy failure (e.g. read-write slot already held) is only observable
 asynchronously via the runs endpoint or WS stream, not as a synchronous HTTP error
 — only the "another action already running on this port" check is synchronous
@@ -496,19 +498,51 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
   loads action scripts from each directory, in list order. The same action id in two
   directories does not override the earlier entry (first directory wins). The Config
   Editor "Actions" sub-view edits this as a textarea, one directory per line (a single
-  line stores the plain string form). The catalog scans each directory's top level only
-  and skips files whose name starts with `_` (helpers) or `test_` (co-located test
-  files), so helper and test files can live beside the action scripts without polluting
-  the catalog. The plugin also inserts each existing directory at the front of
+  line stores the plain string form). The grants are also the **loader's
+  scope**: a file is imported when its filename (without the `.py`
+  extension) matches an `action_ports` grant id - the filename = id
+  convention. A grant therefore names a file by name, and no other file in
+  the directory is imported, so ungranted files (stray scripts, co-located
+  `test_` files, a helper nobody imported) run no code in the server
+  process and appear nowhere in the health section. A grant whose file
+  loads with a module-level `ACTION` id that differs from the filename is
+  listed as an **id mismatch** (issue #43), because the grant points at a
+  file that cannot serve as that action; the fix is to rename the file to
+  the id or the grant to the filename. A grant that names a file that does
+  not load as an action - a helper file or a `test_` file added to the
+  assignments on purpose - is probed and listed with the load error or the
+  explanatory note (below), so what the grant actually resolves to stays
+  visible. The plugin also inserts each existing directory at the front of
   `sys.path` (idempotent; entries are removed when a directory is no longer
   configured), so an action script can `import` a helper module from the same
-  directory - for example a shared client for an internal provisioning system used by
-   several action scripts. A helper file without an `ACTION` dict is probed by the
-   catalog and skipped, so it can coexist with the scripts that import it.
+  directory - for example a shared client for an internal provisioning
+  system used by several action scripts. A helper file stays importable by
+  its sibling scripts regardless of any grant (the catalog never adds it to
+  the action list), but it is only reported in the health section (below)
+  when some grant names it. A scoped file that does not load as an action
+  is reported as an **action load error** instead of being silently dropped
+  (issue #43): a file with no module-level `ACTION` dict is listed with an
+  explanatory note (underscore-prefixed helper files are logged at INFO,
+  others at ERROR), and a file with a missing/malformed `ACTION`, a syntax
+  error, an unresolvable `import`, or bad `params` is listed with the load
+  error (logged at ERROR).
+   An `action_ports` entry names an action id, not a file: a grant whose id
+   matches no file in the actions directories (a deleted or never-written
+   script) is listed as an unresolved grant, so a broken assignment stays
+   visible without reading the config by hand; a grant that names a file the
+   file-level list already covers (e.g. a helper file) is not double-listed.
+   The entries (`file`, `path`,
+   `error`, and `stale: true` when the catalog still serves the last good
+   version of that file) are served by the portless
+   `GET /api/port-actions/health` route and also remain embedded in the
+   per-port `GET /api/ports/<name>/actions` response. The Config Editor's
+   Actions view ("Script health" section) queries the portless route, since
+   the errors do not depend on any port.
 - **Hot reload of scripts and helpers**: the plugin re-checks the catalog before every
-   catalog listing and every run launch. It `stat()`s each non-skipped `.py` file in the
-   configured directories - including shared helper modules - and re-imports when any
-   mtime moves. Re-importing an action script drops that directory's cached modules from
+   catalog listing and every run launch. It `stat()`s each `.py` file in the
+   configured directories - including ungranted shared helper modules - and
+   re-imports the scoped scripts when any tracked mtime moves, so editing a
+   helper a scoped script imports takes effect on its next use. Re-importing an action script drops that directory's cached modules from
    `sys.modules` first (`registry.py` `_forget_sibling_modules()`), so a script's
    `import` of a changed helper re-executes the helper from its current file. Editing a
    script or one of its helpers therefore takes effect on the next action use, without a

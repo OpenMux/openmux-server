@@ -29,6 +29,11 @@ action to every port name requested, evaluated per-request rather than
 precomputed once, so a port added later is covered without a config reload. A
 port with no grant (or an action id not listed for it) exposes no actions,
 matching the design doc's allow-list security model.
+
+A grant is also the loader's scope: a script file is imported when its
+filename (without the `.py` extension) matches a grant's id - see
+`_load_catalog()`. A file whose `ACTION` id differs from its filename is not
+imported and is listed as an id mismatch in the Script health section.
 """
 
 import asyncio
@@ -59,10 +64,17 @@ class _PortActionsState:
     actions_dir: Optional[List[str]] = None
     # action id -> script file mtime as of its last (re)load; drives _refresh_catalog().
     catalog_mtimes: Dict[str, float] = field(default_factory=dict)
-    # every non-skipped .py file path -> mtime as of the last catalog refresh.
+    # every .py file path -> mtime as of the last catalog refresh.
     # Also covers shared helper modules (imported by bare name), so editing a
     # helper re-imports the action scripts from its directory.
     script_mtimes: Dict[str, float] = field(default_factory=dict)
+    # script file path -> load-error message (issue #43): every probed .py
+    # file in the actions directories that did not load as an action is
+    # recorded here (import failure, syntax error, malformed run/params, no
+    # module-level ACTION dict, or an ACTION id that differs from the file
+    # name), so a broken script a grant points at stays visible instead of
+    # being silently dropped from the catalog.
+    load_errors: Dict[str, str] = field(default_factory=dict)
 
 
 def _normalize_action_dirs(value: Any) -> List[str]:
@@ -90,14 +102,39 @@ def _normalize_action_dirs(value: Any) -> List[str]:
     return dirs
 
 
-def _is_catalog_skipped(filename: str) -> bool:
-    """Whether a `.py` file in an actions directory is not an action script.
+def _missing_action_note(path: Path) -> str:
+    """Error message for a scoped `.py` file without an `ACTION` dict.
 
-    Files starting with `_` (helpers) or `test_` (test modules co-located with
-    the scripts they test) are skipped, so a directory can hold both actions
-    and their tests without the catalog trying to load the tests as actions.
+    Only reached when a grant names the file, so this is where an admin sees
+    that the grant resolves to a helper-like file (underscore prefixed or
+    imported by bare name, legitimately imported by sibling scripts) rather
+    than to an action: listed with an explanatory note instead of a "broken"
+    error (issue #43).
     """
-    return filename.startswith("_") or filename.startswith("test_")
+    if path.name.startswith("_"):
+        return "no module-level ACTION dict; helper-like file - imported by sibling scripts, not loaded as an action"
+    return "no module-level ACTION dict; not an action script"
+
+
+def _record_load_failure(path: Path, exc: ActionValidationError, errors: Dict[str, str]) -> bool:
+    """Record one failed probe of `path` in `errors` and log it (issue #43).
+
+    Returns True when the file lacks a module-level ACTION dict: underscore
+    prefixed helper files are logged at INFO, other validation/import
+    failures at ERROR. The file is always listed in `errors`, so the
+    directory contents stay visible in the load errors list.
+    """
+    msg = str(exc)
+    if "missing a module-level ACTION dict" in msg:
+        errors[str(path)] = _missing_action_note(path)
+        if path.name.startswith("_"):
+            logger.info("Skipping non-action file %s", path.name)
+        else:
+            logger.error("Skipping file without an ACTION dict %s", path)
+        return True
+    errors[str(path)] = msg
+    logger.error("Skipping invalid action script %s: %s", path, exc)
+    return False
 
 
 # Action-script directories this plugin inserted into `sys.path` (see
@@ -136,19 +173,63 @@ def _sync_action_paths(actions_dirs: Optional[List[str]]) -> None:
 STATE_APP_KEY: Final = web.AppKey("openmux_port_actions_state", _PortActionsState)
 
 
-def _load_catalog(actions_dirs: Optional[List[str]], mtimes: Optional[Dict[str, float]] = None) -> Dict[str, ActionScript]:
+def _evict_stale_siblings(state: _PortActionsState) -> None:
+    """Drop cached sibling-helper modules that no longer point at a current directory.
+
+    Action scripts import sibling helpers by bare name, so the first import
+    binds the module in `sys.modules` (see `registry._forget_sibling_modules()`
+    for the same issue scoped to one script's directory). A module cached
+    from a previous load - for example a helper from an actions directory
+    that is no longer configured, as when a test or a config reload swaps
+    directories in one process - would otherwise keep serving stale code to
+    every re-imported script, because a per-script directory check never
+    looks outside that script's own directory. Evict any cached module whose
+    bare name matches a `.py` file in the current directories but whose file
+    lives outside them, so the next import re-resolves via sys.path.
+    """
+    current_dirs = {str(Path(d).resolve()) for d in (state.actions_dir or []) if Path(d).is_dir()}
+    bare_names = {p.stem for d in current_dirs for p in Path(d).glob("*.py")}
+    for name in list(sys.modules):
+        module_file = getattr(sys.modules[name], "__file__", None)
+        if name in bare_names and module_file and str(Path(module_file).resolve().parent) not in current_dirs:
+            del sys.modules[name]
+
+
+def _load_catalog(
+    actions_dirs: Optional[List[str]],
+    mtimes: Optional[Dict[str, float]] = None,
+    scoped_stems: Optional[Set[str]] = None,
+) -> Tuple[Dict[str, ActionScript], Dict[str, str]]:
+    """Load the scoped action scripts under `actions_dirs`; report load errors.
+
+    A script file is imported when its filename stem matches an `action_ports`
+    grant id (the filename = id convention). A grant points at a file by name
+    before anything inside the file is known, so a file whose `ACTION` id
+    differs from its filename is not imported and is listed as an id-mismatch
+    load error instead (issue #43).
+    """
     catalog: Dict[str, ActionScript] = {}
+    errors: Dict[str, str] = {}
     for base in (Path(d) for d in (actions_dirs or [])):
         if not base.is_dir():
             logger.warning("port_actions actions_dir %s is not a directory; no actions loaded from it", base)
             continue
-        for path in sorted(base.glob("*.py")):
-            if _is_catalog_skipped(path.name):
-                continue
+        for path in sorted(path for path in base.glob("*.py") if scoped_stems is None or path.stem in scoped_stems):
             try:
                 action = load_action_from_file(str(path))
             except ActionValidationError as exc:
-                logger.error("Skipping invalid action script %s: %s", path, exc)
+                # A file without an ACTION dict is listed (not just dropped)
+                # when it is a grant's own file: that is the fault of the
+                # script the grant points at, not of an unrelated file (#43).
+                _record_load_failure(path, exc, errors)
+                continue
+            if action.id != path.stem:
+                errors[str(path)] = (
+                    f"id mismatch: filename stem is {path.stem!r} but the module-level ACTION id is "
+                    f"{action.id!r}; a grant names the file by filename, so rename the file to match "
+                    "the id or the grant to match the filename"
+                )
+                logger.error("Skipping action script with an id/stem mismatch %s: %s", path.name, action.id)
                 continue
             catalog[action.id] = action
             if mtimes is not None:
@@ -156,15 +237,14 @@ def _load_catalog(actions_dirs: Optional[List[str]], mtimes: Optional[Dict[str, 
                     mtimes[action.id] = path.stat().st_mtime
                 except OSError:
                     pass
-    return catalog
+    return catalog, errors
 
 
 def _catalog_file_mtimes(actions_dirs: Optional[List[str]]) -> Dict[str, float]:
-    """Map every loadable .py file in the actions directories to its mtime.
+    """Map every .py file in the actions directories to its mtime.
 
-    Skips `_`/`test_` files (see `_is_catalog_skipped()`). Shared helper
-    modules (imported by a script by bare name) are included, so a change to
-    them triggers a catalog rebuild.
+    Covers all files, including shared helper modules (imported by a script
+    by bare name), so a change to one triggers a catalog rebuild.
     """
     mtimes: Dict[str, float] = {}
     for base in (Path(d) for d in (actions_dirs or [])):
@@ -172,8 +252,6 @@ def _catalog_file_mtimes(actions_dirs: Optional[List[str]]) -> Dict[str, float]:
             logger.warning("port_actions actions_dir %s is not a directory; skipping", base)
             continue
         for path in sorted(base.glob("*.py")):
-            if _is_catalog_skipped(path.name):
-                continue
             try:
                 mtimes[str(path)] = path.stat().st_mtime
             except OSError:
@@ -183,46 +261,59 @@ def _catalog_file_mtimes(actions_dirs: Optional[List[str]]) -> Dict[str, float]:
 
 def _rebuild_catalog(
     state: _PortActionsState, current_mtimes: Dict[str, float]
-) -> Tuple[Dict[str, ActionScript], Dict[str, float]]:
-    """Re-import every action script; keep the last good version of a file that now fails to load.
+) -> Tuple[Dict[str, ActionScript], Dict[str, float], Dict[str, str]]:
+    """Re-import the scoped action scripts; keep the last good version of a file that now fails.
 
-    A script whose file was removed drops out of the catalog. A renamed script
-    (different `id`) replaces the old entry for the same file.
+    Only files a grant can name are imported (the granted-stem scope, see
+    `_load_catalog()`), so a script removed from `action_ports` is dropped
+    from the catalog on the next refresh. The mtime map itself still tracks
+    every file in the directory (including shared helpers), so a change to a
+    helper still triggers a rebuild. A file that now fails to load is
+    reported in the returned errors dict (issue #43) while the catalog keeps
+    its last good version; a file whose ACTION id no longer matches its
+    filename is reported as an id mismatch.
     """
     catalog: Dict[str, ActionScript] = {}
     mtimes: Dict[str, float] = {}
+    errors: Dict[str, str] = {}
+    scoped_stems = set(state.action_ports)
     for path_str, mtime in sorted(current_mtimes.items()):
-        path = Path(path_str)
+        if Path(path_str).stem not in scoped_stems:
+            continue
         try:
-            action = load_action_from_file(str(path))
+            action = load_action_from_file(str(path_str))
         except ActionValidationError as exc:
-            # Probing a helper module (no ACTION dict) is normal; a real syntax
-            # error in a script is not.
-            if "missing a module-level ACTION dict" in str(exc):
-                logger.info("Skipping non-action file %s", path.name)
-            else:
-                logger.error("Skipping invalid action script %s: %s", path, exc)
-            stale = next((a for a in state.catalog.values() if a.module_path == str(path)), None)
-            if stale is not None:
+            is_helper = _record_load_failure(Path(path_str), exc, errors)
+            stale = next((a for a in state.catalog.values() if a.module_path == path_str), None)
+            if stale is not None and not is_helper:
                 catalog[stale.id] = stale
                 mtimes[stale.id] = state.catalog_mtimes.get(stale.id, mtime)
             continue
+        if action.id != Path(path_str).stem:
+            errors[path_str] = (
+                f"id mismatch: filename stem is {Path(path_str).stem!r} but the module-level ACTION id "
+                f"is {action.id!r}; a grant names the file by filename, so rename the file to match "
+                "the id or the grant to match the filename"
+            )
+            logger.error("Skipping action script with an id/stem mismatch %s: %s", Path(path_str).name, action.id)
+            continue
         catalog[action.id] = action
         mtimes[action.id] = mtime
-    return catalog, mtimes
+    return catalog, mtimes, errors
 
 
 def _refresh_catalog(state: _PortActionsState) -> None:
     """Re-import action scripts that changed on disk, including sibling helper modules.
 
-    Cheap when nothing changed: this only `stat()`s each non-skipped file in the
+    Cheap when nothing changed: this only `stat()`s each `.py` file in the
     configured actions directories, and re-imports only when some mtime moved.
     Helper modules imported by bare name are stat'ed too, so editing one
-    re-imports the action scripts from its directory. A script with a syntax
-    error is logged and skipped, keeping whatever version last loaded
-    successfully. Called before serving the catalog and before launching a
-    run, so edits take effect on a script's very next use - no server reload
-    needed.
+    re-imports the action scripts from its directory - and the file-level load
+    error list (issue #43) stays current alongside the catalog. A script with
+    a syntax error is logged and skipped, keeping whatever version last loaded
+    successfully. Called before serving the catalog or the health list and
+    before launching a run, so edits take effect on a script's very next use -
+    no server reload needed.
     """
     if not state.actions_dir:
         return
@@ -232,9 +323,54 @@ def _refresh_catalog(state: _PortActionsState) -> None:
     current_mtimes = _catalog_file_mtimes(state.actions_dir)
     if current_mtimes == state.script_mtimes:
         return
-    state.catalog, state.catalog_mtimes = _rebuild_catalog(state, current_mtimes)
+    _evict_stale_siblings(state)
+    state.catalog, state.catalog_mtimes, state.load_errors = _rebuild_catalog(state, current_mtimes)
     state.script_mtimes = current_mtimes
     logger.info("Port actions catalog rebuilt after script changes")
+
+
+def _action_file_stems(state: _PortActionsState) -> Set[str]:
+    """Stems of every `.py` file the scan probed (issue #43).
+
+    Every such file is either in the catalog (loaded) or in `load_errors`
+    (failed), so their union covers all on-disk file names the file-level
+    list can name.
+    """
+    stems = {Path(a.module_path).stem for a in state.catalog.values()}
+    stems.update(Path(path).stem for path in state.load_errors)
+    return stems
+
+
+def _load_errors_payload(state: _PortActionsState) -> List[Dict[str, Any]]:
+    """Render `state.load_errors` plus unresolved `action_ports` grants (issue #43).
+
+    An `action_ports` entry names an action id, not a file. A grant whose id
+    matches no on-disk file (the script was deleted, or a never-written id
+    was configured) is flagged, so a broken grant is visible without reading
+    the config by hand. A grant that names a file the file-level list already
+    covers (e.g. a helper file) is not double-listed.
+    """
+    out: List[Dict[str, Any]] = []
+    for path, message in sorted(state.load_errors.items()):
+        entry: Dict[str, Any] = {"file": Path(path).name, "path": path, "error": message}
+        # A still-cataloged copy is "stale" for a load failure; a file without
+        # an ACTION dict is never in the catalog, so it never flags as stale.
+        if any(a.module_path == path for a in state.catalog.values()):
+            entry["stale"] = True
+        out.append(entry)
+    stems_on_disk = _action_file_stems(state)
+    for action_id, ports in sorted(state.action_ports.items()):
+        if action_id in state.catalog or action_id in stems_on_disk:
+            continue
+        assigned_to = f"unresolved action id: assigned to {', '.join(ports)} in action_ports"
+        out.append(
+            {
+                "file": action_id,
+                "path": "",
+                "error": f"{assigned_to}, but no script in the actions directories loads with this id",
+            }
+        )
+    return out
 
 
 def _action_summary(action: ActionScript) -> Dict[str, Any]:
@@ -277,7 +413,27 @@ async def _handle_list_actions(request: web.Request) -> web.Response:
     _refresh_catalog(state)
     actions = [_action_summary(a) for a in _allowed_actions(state, port_name).values()]
     active_run = state.runner.get_active_run(port_name) if state.runner else None
-    return web.json_response({"actions": actions, "active_run": active_run.summary() if active_run else None})
+    return web.json_response(
+        {
+            "actions": actions,
+            "active_run": active_run.summary() if active_run else None,
+            "action_load_errors": _load_errors_payload(state),
+        }
+    )
+
+
+async def _handle_action_health(request: web.Request) -> web.Response:
+    """Portless load-error listing (issue #43: the errors are directory-scoped).
+
+    The per-port catalog route also carries `action_load_errors`, but the
+    errors do not depend on the port, so the Config Editor queries this route
+    instead of borrowing a port name from the assignments table.
+    """
+    adapter = request.app[ADAPTER_APP_KEY]
+    state = request.app[STATE_APP_KEY]
+    adapter._require_permission(request, ("read-write", "admin"))
+    _refresh_catalog(state)
+    return web.json_response({"action_load_errors": _load_errors_payload(state)})
 
 
 async def _handle_run_action(request: web.Request) -> web.Response:
@@ -421,10 +577,14 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
         actions_dir=_normalize_action_dirs(section.get("actions_dir")),
     )
     # Before the first catalog load, so a script's `import` of a sibling
-    # helper module resolves (see `_sync_action_paths()`).
+    # helper module resolves (see `_sync_action_paths()`); and so a stale
+    # helper cached from a previous directory set is evicted first.
     _sync_action_paths(state.actions_dir)
-    state.catalog = _load_catalog(state.actions_dir, state.catalog_mtimes)
-    # Baseline for `_refresh_catalog()` (covers helper modules too).
+    _evict_stale_siblings(state)
+    state.catalog, state.load_errors = _load_catalog(
+        state.actions_dir, state.catalog_mtimes, scoped_stems=set(state.action_ports)
+    )
+    # Baseline for `_refresh_catalog()` (tracks every file, not just scoped ones).
     state.script_mtimes = _catalog_file_mtimes(state.actions_dir)
     if state.runner is None:
         logger.warning("port_actions plugin registered without a PortManager; actions will not be runnable")
@@ -435,4 +595,6 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     app.router.add_post(base + "/{action_id}/run", _handle_run_action)
     app.router.add_get(base + "/{action_id}/runs", _handle_list_runs)
     app.router.add_get("/ws/actions/{run_id}", _handle_ws_run_events)
+    # Portless: the load errors are directory-scoped, not port-scoped (issue #43).
+    app.router.add_get("/api/port-actions/health", _handle_action_health)
     return {}

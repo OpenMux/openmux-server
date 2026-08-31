@@ -566,7 +566,10 @@ def test_normalize_action_dirs_accepts_string_or_list() -> None:
     assert _normalize_action_dirs({"x": 1}) == []
 
 
-def test_load_catalog_reads_multiple_directories_and_skips_non_actions(tmp_path: Path) -> None:
+def test_load_catalog_only_probes_granted_scripts(tmp_path: Path) -> None:
+    """A grant is also the loader's scope: only files whose stem matches a
+    grant id are imported; a file no grant names is never probed (its
+    module-level code and dev imports must not run in the server process)."""
     from openmux.server.web_plugins.port_actions import _load_catalog
 
     dir_a = tmp_path / "examples"
@@ -575,15 +578,50 @@ def test_load_catalog_reads_multiple_directories_and_skips_non_actions(tmp_path:
     dir_b.mkdir()
     _write_action(dir_a, "act_a")
     _write_action(dir_b, "act_b")
-    (dir_b / "test_act_b.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    # A co-located test file that imports pytest: only touched if a grant
+    # names it.
+    (dir_b / "test_act_b.py").write_text("import pytest\n\n\ndef test_x():\n    assert True\n", encoding="utf-8")
     (dir_b / "_helper.py").write_text("VALUE = 1\n", encoding="utf-8")
 
-    catalog = _load_catalog([str(dir_a), str(dir_b)])
+    # Scoped to the granted stems: only granted scripts are imported.
+    catalog, errors = _load_catalog([str(dir_a), str(dir_b)], scoped_stems={"act_a", "act_b"})
     assert set(catalog) == {"act_a", "act_b"}
-    # A fresh load from one directory sees only that directory's actions.
-    assert set(_load_catalog([str(dir_a)])) == {"act_a"}
+    assert errors == {}
+    # A fresh load from one directory sees only that directory's granted actions.
+    assert set(_load_catalog([str(dir_a), str(dir_b)], scoped_stems={"act_a"})[0]) == {"act_a"}
+    # A grant that names an ungranted file forces the probe (the user's
+    # explicit choice): pytest files run their imports; non-action files are
+    # listed as such (issue #43).
+    catalog, errors = _load_catalog([str(dir_a), str(dir_b)], scoped_stems={"test_act_b", "_helper"})
+    assert catalog == {}
+    assert set(errors) == {str(dir_b / "_helper.py"), str(dir_b / "test_act_b.py")}
+    assert "helper-like" in errors[str(dir_b / "_helper.py")]
+    assert "not an action script" in errors[str(dir_b / "test_act_b.py")]
     # A directory that does not exist is skipped without failing the load.
-    assert set(_load_catalog([str(dir_a), str(tmp_path / "missing")])) == {"act_a"}
+    assert set(_load_catalog([str(dir_a), str(tmp_path / "missing")], scoped_stems={"act_a"})[0]) == {"act_a"}
+
+
+def test_load_catalog_flags_id_stem_mismatch(tmp_path: Path) -> None:
+    """A grant names a file by filename: an ACTION id that differs from the
+    filename stem is not imported and is listed as an id mismatch (issue #43)."""
+    from openmux.server.web_plugins.port_actions import _load_catalog
+
+    (tmp_path / "renamed.py").write_text(
+        'ACTION = {\n    "id": "actual_name",\n    "name": "actual_name",\n'
+        '    "description": "test action",\n    "timeout": 10.0,\n    "params": [],\n}\n\n\n'
+        'async def run(session):\n    session.log("done")\n',
+        encoding="utf-8",
+    )
+    # Grant the filename: the file is found, but its id does not match.
+    catalog, errors = _load_catalog([str(tmp_path)], scoped_stems={"renamed"})
+    assert catalog == {}
+    assert list(errors) == [str(tmp_path / "renamed.py")]
+    assert "id mismatch" in errors[str(tmp_path / "renamed.py")]
+    # Grant the id instead: no file of that name exists, so nothing is
+    # probed here - the health list flags the grant as unresolved (#43).
+    catalog, errors = _load_catalog([str(tmp_path)], scoped_stems={"actual_name"})
+    assert catalog == {}
+    assert errors == {}
 
 
 def test_rebuild_catalog_keeps_last_good_version_of_broken_script(tmp_path: Path) -> None:
@@ -593,15 +631,18 @@ def test_rebuild_catalog_keeps_last_good_version_of_broken_script(tmp_path: Path
 
     script = tmp_path / "act.py"
     _write_action(tmp_path, "act")
-    state = _PortActionsState(actions_dir=[str(tmp_path)])
-    state.catalog, state.catalog_mtimes = _rebuild_catalog(state, _catalog_file_mtimes(state.actions_dir))
+    state = _PortActionsState(actions_dir=[str(tmp_path)], action_ports={"act": ["p1"]})
+    state.catalog, state.catalog_mtimes, state.load_errors = _rebuild_catalog(state, _catalog_file_mtimes(state.actions_dir))
     first = state.catalog["act"]
 
     later = time.time() + 2
     script.write_text("def broken(:\n", encoding="utf-8")
     os.utime(script, (later, later))
-    state.catalog, state.catalog_mtimes = _rebuild_catalog(state, _catalog_file_mtimes(state.actions_dir))
+    state.catalog, state.catalog_mtimes, state.load_errors = _rebuild_catalog(state, _catalog_file_mtimes(state.actions_dir))
     assert state.catalog["act"] is first
+    # The broken file is reported (issue #43), not just dropped.
+    assert list(state.load_errors) == [str(script)]
+    assert "invalid syntax" in state.load_errors[str(script)]
 
 
 @pytest.mark.asyncio
@@ -658,7 +699,8 @@ def test_sync_action_paths_adds_and_removes_dirs(tmp_path: Path) -> None:
 async def test_action_imports_sibling_helper_module(tmp_path: Path):
     """An action script can `import` a helper module from its own actions directory:
     the plugin puts each configured directory on `sys.path` before loading the
-    catalog. A helper without an ACTION dict is probed by the catalog and skipped."""
+    catalog. The helper itself is not a load target (no grant names it), so its
+    import only ever happens as a dependency of the action script."""
     dir_custom = tmp_path / "custom_actions"
     dir_custom.mkdir()
     (dir_custom / "helper_mod.py").write_text("MAGIC = 4242\n", encoding="utf-8")
@@ -794,6 +836,135 @@ async def test_cancel_run_ws_ignored_from_non_operator():
                         break
 
             assert events[-1]["status"] == "success"
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_catalog_response_surfaces_action_load_errors(tmp_path: Path):
+    """A script that fails to load is reported in the catalog response
+    (`action_load_errors`) instead of being silently dropped (issue #43):
+    a bad script no longer means an admin must find the log line by hand."""
+    dir_custom = tmp_path / "bad_action_actions"
+    dir_custom.mkdir()
+    _write_action(dir_custom, "custom_action")
+    # A genuine syntax error in a real action script.
+    (dir_custom / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+    web_adapter, pm, loop_adapter = await _start_console(
+        8972, {"custom_action": ["p1"], "broken": ["p1"]}, actions_dir=[str(dir_custom)]
+    )
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get("http://127.0.0.1:8972/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+                # The good action is still served.
+                assert [a["id"] for a in data["actions"]] == ["custom_action"]
+                errs = data.get("action_load_errors")
+                assert errs is not None, "action_load_errors key missing from catalog response"
+                assert len(errs) == 1
+                entry = errs[0]
+                assert entry["file"] == "broken.py"
+                assert entry["path"] == str(dir_custom / "broken.py")
+                assert "invalid syntax" in entry["error"]
+                assert entry.get("stale") is None
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_portless_health_route_and_grant_errors(tmp_path: Path):
+    """The load errors follow the grants, not the ports (issue #43): the
+    portless route lists them. An ungranted file in the directory is never
+    probed (empty list with zero assignments); an assignment that names a
+    helper file is listed through the scoped probe; an assignment whose id
+    no script loads with (a missing script) is listed as an unresolved grant."""
+    dir_custom = tmp_path / "health_actions"
+    dir_custom.mkdir()
+    _write_action(dir_custom, "custom_action")
+    (dir_custom / "shared_helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    # No assignments at all: nothing is probed, so the list is empty - even
+    # though a non-action file sits in the directory.
+    web_adapter, pm, loop_adapter = await _start_console(8974, {}, actions_dir=[str(dir_custom)])
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get("http://127.0.0.1:8974/api/port-actions/health", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["action_load_errors"] == []
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+    # Grants may name a helper file, a loaded action, or a missing script:
+    # the helper is probed (the grant is its scope) and listed once, the
+    # loaded action is not listed at all, and the missing script is listed
+    # as an unresolved grant.
+    web_adapter, pm, loop_adapter = await _start_console(
+        8975,
+        {"shared_helper": ["p1"], "custom_action": ["p1"], "does_not_exist": ["p1"]},
+        actions_dir=[str(dir_custom)],
+    )
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get("http://127.0.0.1:8975/api/port-actions/health", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                errs = (await resp.json())["action_load_errors"]
+                assert [e["file"] for e in errs] == ["shared_helper.py", "does_not_exist"]
+                assert "unresolved action id" in errs[1]["error"]
+                assert errs[1]["path"] == ""
+            # The per-port route still carries the same errors (console page).
+            async with session.get("http://127.0.0.1:8975/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+                assert [a["id"] for a in data["actions"]] == ["custom_action"]
+                assert [e["file"] for e in data["action_load_errors"]] == ["shared_helper.py", "does_not_exist"]
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_broken_action_flagged_stale_and_error_clears_on_fix(tmp_path: Path):
+    """A previously working script that breaks is flagged `stale` (the last good
+    version is still loadable and served); fixing the file clears the error
+    and the fresh version loads (issue #43)."""
+    dir_custom = tmp_path / "stale_action_actions"
+    dir_custom.mkdir()
+    script = _write_action(dir_custom, "stale_action")
+
+    web_adapter, pm, loop_adapter = await _start_console(8973, {"stale_action": ["p1"]}, actions_dir=[str(dir_custom)])
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            first = "http://127.0.0.1:8973/api/ports/p1/actions"
+            async with session.get(first, headers=AUTH_HEADER) as resp:
+                data = await resp.json()
+            assert [a["id"] for a in data["actions"]] == ["stale_action"]
+            assert data.get("action_load_errors") == []
+
+            # Break the script; it must be reported as stale (last good wins).
+            script.write_text("def broken(:\n", encoding="utf-8")
+            later = time.time() + 2
+            os.utime(script, (later, later))
+            async with session.get(first, headers=AUTH_HEADER) as resp:
+                data = await resp.json()
+                assert [a["id"] for a in data["actions"]] == ["stale_action"], "stale last-good version must still be served"
+                errs = data.get("action_load_errors")
+                assert len(errs) == 1
+                assert errs[0]["file"] == "stale_action.py"
+                assert errs[0]["stale"] is True
+
+            # Fix it: error clears, catalog entry returns to fresh.
+            _write_action(dir_custom, "stale_action")
+            later2 = later + 2
+            os.utime(script, (later2, later2))
+            async with session.get(first, headers=AUTH_HEADER) as resp:
+                data = await resp.json()
+                assert [a["id"] for a in data["actions"]] == ["stale_action"]
+                assert data.get("action_load_errors") == []
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()

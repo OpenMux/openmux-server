@@ -1577,6 +1577,66 @@ if(formRoot){
   formRoot.addEventListener('change', markDirty);
 }
 
+// Script-health panel for the Actions view (issue #43): every file in the
+// actions directories that fails to load (no ACTION dict, syntax error, bad
+// params) is listed here instead of only the server log.
+async function loadActionHealth(){
+  const panel = document.getElementById('actionsLoadErrors');
+  if(!panel) return;
+  panel.innerHTML = '';
+  try{
+    const r = await fetch(withBase('/api/port-actions/health'));
+    if(r.status === 403){ panel.innerHTML = ''; return; }
+    const j = await r.json();
+    renderActionHealth(panel, j.action_load_errors || []);
+  }catch(_e){
+    const el=document.createElement('div');
+    el.className='tag bad';
+    el.textContent='Could not load script health';
+    panel.appendChild(el);
+  }
+}
+function renderActionHealth(panel, entries){
+  panel.innerHTML = '';
+  if(!entries.length){
+    const el=document.createElement('div');
+    el.className='tag ok';
+    el.textContent='All action scripts load';
+    panel.appendChild(el);
+    return;
+  }
+  const ul=document.createElement('ul');
+  ul.style.margin='4px 0';
+  ul.style.paddingLeft='18px';
+  entries.forEach(e=>{
+    const li=document.createElement('li');
+    li.style.marginBottom='4px';
+    li.style.background='var(--status-err-bg)';
+    li.style.color='var(--status-err-text)';
+    li.style.padding='3px 6px';
+    li.style.borderRadius='4px';
+    const name=document.createElement('span');
+    name.textContent = e.file || e.path || 'unknown';
+    li.appendChild(name);
+    if(e.stale){
+      const stale=document.createElement('span');
+      stale.textContent=' (stale: last good version is still loaded)';
+      li.appendChild(stale);
+    }
+    const detail=document.createElement('div');
+    detail.textContent=e.error || '';
+    detail.style.color='inherit';
+    li.appendChild(detail);
+    const path=document.createElement('div');
+    path.textContent=e.path || '';
+    path.style.fontSize='11px';
+    path.style.opacity='0.8';
+    li.appendChild(path);
+    ul.appendChild(li);
+  });
+  panel.appendChild(ul);
+}
+
 fetchCSRF();
 initStatic();
 injectHelps();
@@ -1585,4 +1645,5 @@ injectDefaultHints();
 setWritableMetadata(INITIAL_WRITABLE_SECTIONS, INITIAL_WRITABLE_ENFORCED);
 loadCurrent();
 updateView();
+loadActionHealth();
     })();
