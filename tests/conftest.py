@@ -74,6 +74,63 @@ def pytest_collection_modifyitems(config, items):
 
 
 # Common fixtures
+
+
+def _close_handler_quietly(handler):
+    try:
+        handler.close()
+    except Exception:  # justification: closing a test artifact is best-effort
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _isolate_openmux_logging():
+    """Remove the server logging handlers after every test.
+
+    `openmux.server.main._setup_basic_logging` (and therefore
+    `OpenMuxServer.__init__`) attaches RotatingFileHandlers to the process-
+    global root and `openmux.*` loggers. Those handlers are tagged with
+    `_openmux_logging`; drop and close them after each test so they cannot
+    leak into other test modules (issue #47). Untagged handlers from pytest
+    (e.g. `caplog`) are left untouched.
+    """
+    try:
+        yield
+    finally:
+        removed_any = False
+        for name in list(logging.root.manager.loggerDict.keys()) + [""]:
+            logger = logging.getLogger(name) if name else logging.root
+            for handler in list(logger.handlers):
+                if getattr(handler, "_openmux_logging", False):
+                    logger.removeHandler(handler)
+                    _close_handler_quietly(handler)
+                    removed_any = True
+        if removed_any:
+            try:
+                from openmux.server.main import _setup_basic_logging
+
+                for attr in (
+                    "_configured",
+                    "_log_dir",
+                    "_log_file",
+                    "_max_bytes",
+                    "_backup_count",
+                    "_console_enabled",
+                    "_console_handler",
+                ):
+                    if hasattr(_setup_basic_logging, attr):
+                        delattr(_setup_basic_logging, attr)
+            except Exception:  # justification: cleanup is best-effort
+                pass
+        try:
+            from openmux.server.data_logger import DataLogger
+
+            if DataLogger.get().base_dir is not None:
+                DataLogger.get().base_dir = None
+        except Exception:  # justification: cleanup is best-effort
+            pass
+
+
 @pytest.fixture
 def event_loop():
     """Create an instance of the default event loop for each test"""

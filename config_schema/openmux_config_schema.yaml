@@ -22,12 +22,26 @@ properties:
     type: object
     additionalProperties: false
     properties:
-      level: { type: string }
-      console: { type: boolean }
-      file: { type: string }
-      log_dir: { type: string }
-      max_log_size: { type: integer, minimum: 0 }
-      log_backup_count: { type: integer, minimum: 0 }
+      level:
+        type: string
+        description: "Log level for the root and openmux.* loggers. Hot-applies on SIGHUP/soft reload."
+      console:
+        type: boolean
+        description: "Mirror log records to stdout. Default true."
+      file:
+        type: string
+        description: "Full path of the main aggregate server log. Default {log_dir}/openmux.log. Takes effect on SIGHUP/soft or full reload."
+      log_dir:
+        type: string
+        description: "Base directory for all server logs, including the ports/ subdirectory for per-port and action-run logs. Default logs (cwd-relative). Takes effect on SIGHUP/soft or full reload."
+      max_log_size:
+        type: integer
+        minimum: 0
+        description: "Rotation threshold in bytes for every rotating log file. Default 10485760 (10 MB)."
+      log_backup_count:
+        type: integer
+        minimum: 0
+        description: "Number of rotated backup files to keep. Default 5."
   client_listener:
     type: object
     additionalProperties: false

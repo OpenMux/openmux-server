@@ -58,7 +58,8 @@ class DataLogger:
 
     Filenames are resolved as:
       1) port-specific config key: port.config.get("log_file") if present
-      2) default pattern: logs/ports/{port_name}.log
+      2) default pattern: {log_dir}/ports/{port_name}.log, where `log_dir` is the base
+         directory set via `set_base_dir()` (config `logging.log_dir`), defaulting to `logs`
 
     Writes are buffered through an asyncio.Queue and a single background task.
     """
@@ -89,6 +90,10 @@ class DataLogger:
         self._files: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self.enabled = True  # can be toggled later via config
+        # Base directory for the default `{base}/ports/{port_name}.log` pattern. Null
+        # means the historical cwd-relative `logs/ports` (issue #47: the server sets this
+        # from config `logging.log_dir` at startup and on each reload).
+        self.base_dir: Optional[str] = None
         self.logger = logging.getLogger("openmux.server.data_logger")
         # Format configuration
         # Supported formats: 'line' (default), 'jsonl'
@@ -103,7 +108,7 @@ class DataLogger:
     def _default_path(self, port_name: str) -> Path:
         """Return default log path for a port.
 
-        Creates parent directories as needed under `logs/ports`.
+        Creates parent directories as needed under `{base_dir or "logs"}/ports` (issue #47).
 
         Args:
             port_name: Logical port name.
@@ -111,7 +116,7 @@ class DataLogger:
         Returns:
             Path: Filesystem path for the port log file.
         """
-        base = Path("logs/ports")
+        base = Path(self.base_dir or "logs") / "ports"
         base.mkdir(parents=True, exist_ok=True)
         return base / f"{port_name}.log"
 
@@ -287,6 +292,41 @@ class DataLogger:
         """
         if enabled is not None:
             self.enabled = bool(enabled)
+
+    def set_base_dir(self, base: Optional[str]) -> None:
+        """Set the base directory for default per-port log files (issue #47).
+
+        Args:
+            base: Directory that holds the `ports/` subdirectory, e.g. the resolved
+                config `logging.log_dir`; `None` falls back to `logs/ports`.
+
+        When the base directory changes, the open file handles and line buffers
+        belonging to the previous base are closed and dropped, so the next write
+        after the swap reopens the files under the new directory.
+        """
+        base = str(base).strip() if base is not None else None
+        if base == "":
+            base = None
+        if base == self.base_dir:
+            return
+        # Close file handles under the previous base (default `logs/ports`
+        # when none was ever set) BEFORE repointing, so a swap never keeps a
+        # write-target handle open under the old directory.
+        previous_base = str(Path(self.base_dir).resolve()) if self.base_dir is not None else str(Path("logs").resolve())
+        self.base_dir = base
+        try:
+            previous_ports = Path(previous_base) / "ports"
+            for key in list(self._files.keys()):
+                if Path(key).is_relative_to(previous_ports):
+                    fh = self._files.pop(key, None)
+                    if fh is not None:
+                        try:
+                            fh.close()
+                        except Exception:  # justification: best-effort close of stale handles
+                            pass
+                    self._line_buffers.pop(key, None)
+        except Exception:  # justification: stale-handle cleanup must never break records
+            pass
 
     def _resolve_format_for_port(self, port_name: str, port_obj: Optional[Any]) -> str:
         """Resolve output format for a port.

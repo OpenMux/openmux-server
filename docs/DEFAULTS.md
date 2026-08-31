@@ -34,13 +34,14 @@ authentication
 security.yaml (runtime defaults from openmux/server/security_policy.py; the file is optional and defaults to allow-everything when absent)
 - security.yaml access_default: allow (server-wide default for console ports with no group lists; `deny` restricts those ports to admin; applies from the next connection, hot-applies on SIGHUP/soft reload)
 
-logging (runtime defaults from openmux/server/logging_manager.py)
-- logging.log_level: INFO (key name is log_level in code)
-- logging.log_dir: logs
-- logging.max_log_size: 10485760 (10 MB)
+logging (runtime defaults in _setup_basic_logging in openmux/server/main.py)
+- logging.level: WARNING at process start; overridden by -v/-vv on the CLI or by the config value, whichever comes last
+- logging.console: true (stdout handler can be turned off with false)
+- logging.log_dir: logs (cwd-relative; the base directory for all server logs, including the ports/ subdirectory)
+- logging.file: none (the main aggregate log goes to {log_dir}/openmux.log)
+- logging.max_log_size: 10485760 (10 MB, rotation threshold per log file)
 - logging.log_backup_count: 5
-- logging.console: no default (console logging is always configured)
-- logging.file: no default file path; rotating file handlers are created in log_dir
+- logging paths apply on SIGHUP/soft reload or full reload; level applies the same way
 
 client_listener (TCP console) (runtime defaults from openmux/server/adapters/client_listener.py)
 - client_listener.host: 127.0.0.1

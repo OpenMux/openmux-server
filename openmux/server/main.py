@@ -11,13 +11,19 @@ import os
 import signal
 import stat
 import sys
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 
 from .auth_manager import AuthManager
 from .config_manager import ConfigManager
 from .console_manager import ConsoleManager
+from .data_logger import DataLogger
 from .port_manager import PortManager
 from .security_policy import SecurityPolicyError
+
+_LOGGER_COMPONENTS = ["server", "client", "serial", "auth", "config", "console"]
 
 
 class OpenMuxServer:
@@ -41,8 +47,19 @@ class OpenMuxServer:
         Args:
             config_path: Path to the server configuration YAML file.
         """
-        # Set up basic logging early; default overridden after config load
-        _setup_basic_logging(level_name=log_level)
+        # Set up basic logging early; default overridden after config load.
+        # Pre-read the `logging:` block so the first file handlers already land
+        # where `logging.log_dir`/`logging.file` point (issue #47).
+        pre_log_cfg = _read_logging_block(config_path)
+        pre_rot = _resolve_log_rotation(pre_log_cfg)
+        _setup_basic_logging(
+            level_name=log_level,
+            log_dir=pre_log_cfg.get("log_dir"),
+            log_file=pre_log_cfg.get("file"),
+            max_log_size=pre_rot["max_bytes"],
+            log_backup_count=pre_rot["backup_count"],
+            console_enabled=pre_log_cfg.get("console", True),
+        )
         self.logger = logging.getLogger("openmux.server")
 
         # Load configuration
@@ -54,21 +71,42 @@ class OpenMuxServer:
         self.security_policy = None
         self._reload_config_from_disk()
 
-        # After loading config, re-evaluate logging level from config.logging.level (if present)
+        # After loading config, re-apply logging level and paths from config.logging
+        # (issue #47; covers the case where the early pre-read differed from the
+        # final config or failed)
         try:
             cfg = getattr(self.config_manager, "config", {}) or {}
             logging_cfg = cfg.get("logging", {}) if isinstance(cfg, dict) else {}
-            cfg_level = logging_cfg.get("level")
-            # If CLI requested -v (DEBUG), keep DEBUG; else prefer config level when provided
-            effective_level = None
-            if log_level and str(log_level).upper() == "DEBUG":
-                effective_level = "DEBUG"
-            elif cfg_level:
-                effective_level = str(cfg_level).upper()
-            if effective_level:
-                _setup_basic_logging(level_name=effective_level)
+        except Exception:
+            logging_cfg = {}
+        cfg_level = logging_cfg.get("level")
+        # If CLI requested -v (DEBUG), keep DEBUG; else prefer config level when provided
+        effective_level = None
+        if log_level and str(log_level).upper() == "DEBUG":
+            effective_level = "DEBUG"
+        elif cfg_level:
+            effective_level = str(cfg_level).upper()
+        rot = _resolve_log_rotation(logging_cfg)
+        try:
+            _setup_basic_logging(
+                level_name=effective_level,
+                log_dir=logging_cfg.get("log_dir"),
+                log_file=logging_cfg.get("file"),
+                max_log_size=rot["max_bytes"],
+                log_backup_count=rot["backup_count"],
+                console_enabled=logging_cfg.get("console", True),
+            )
         except Exception:
             # Non-fatal if logging recompute fails; continue with prior setup
+            pass
+
+        # Point the DataLogger default ports/ directory at the resolved log base
+        # (issue #47); per-port `log_file` overrides are unaffected
+        try:
+            base, _main_file = _resolve_logging_paths(logging_cfg.get("log_dir"), logging_cfg.get("file"))
+            DataLogger.get().set_base_dir(str(base))
+        except Exception:
+            # Best-effort repoint; keep the default location on failure
             pass
 
         # Initialize core components
@@ -168,6 +206,40 @@ class OpenMuxServer:
         self._refresh_security_policy()
         return cfg
 
+    def _apply_logging_from_config(self) -> None:
+        """Re-apply the `logging:` block after a config reload (issue #47).
+
+        Applies the level always (as before) and re-points the file handlers
+        when `logging.file`/`logging.log_dir` changed. Changing paths requires
+        a reload (SIGHUP soft reload, SIGUSR1 full reload, or the Config
+        Editor reload actions) and takes effect from the next log record. The
+        DataLogger ports/ base dir is re-pointed as well, closing stale
+        per-port file handles under the old directory.
+        """
+        cfg = getattr(self.config_manager, "config", {}) or {}
+        logging_cfg = cfg.get("logging", {}) if isinstance(cfg, dict) else {}
+        lvl = logging_cfg.get("level")
+        level = lvl.strip().upper() if isinstance(lvl, str) and lvl.strip() else None
+        rot = _resolve_log_rotation(logging_cfg)
+        try:
+            _setup_basic_logging(
+                level_name=level,
+                log_dir=logging_cfg.get("log_dir"),
+                log_file=logging_cfg.get("file"),
+                max_log_size=rot["max_bytes"],
+                log_backup_count=rot["backup_count"],
+                console_enabled=logging_cfg.get("console", True),
+            )
+        except Exception:
+            self.logger.error("Failed to re-apply logging configuration", exc_info=True)
+            return
+        # Repoint per-port logs when the base dir moved
+        try:
+            base, _main_file = _resolve_logging_paths(logging_cfg.get("log_dir"), logging_cfg.get("file"))
+            DataLogger.get().set_base_dir(str(base))
+        except Exception:
+            self.logger.error("Failed to re-point DataLogger base dir", exc_info=True)
+
     async def _initialize_server_components(self):
         """Initialize server components and monitor shutdown event.
 
@@ -201,6 +273,11 @@ class OpenMuxServer:
             # Get the full configuration
             if not self.config_manager.config:
                 self._reload_config_from_disk()
+                # Re-apply logging in case the early pre-read differed (issue #47)
+                try:
+                    self._apply_logging_from_config()
+                except Exception:
+                    self.logger.warning("Failed to re-apply logging config during init")
 
             full_config = self.config_manager.config
             if not full_config:
@@ -700,6 +777,12 @@ class OpenMuxServer:
             # Load new configuration
             self._reload_config_from_disk()
 
+            # Re-apply logging config (level and file paths) - issue #47
+            try:
+                self._apply_logging_from_config()
+            except Exception:
+                pass
+
             # Update core components
             await self.auth_manager.update_config(self.config_manager.get_authentication_config())
             # Config reload for unified adapters would require adapter restart
@@ -796,6 +879,11 @@ class OpenMuxServer:
             _t0 = _t.time()
             new_cfg = self._reload_config_from_disk()
             self.logger.info(f"[reload-soft:{req_id}] Config loaded in {_t.time()-_t0:.3f}s")
+            # Re-apply logging config (level and file paths) - issue #47
+            try:
+                self._apply_logging_from_config()
+            except Exception:
+                self.logger.warning(f"[reload-soft:{req_id}] Failed to re-apply logging config")
         except Exception as e:
             self.logger.error(f"[reload-soft:{req_id}] Config load failed: {e}", exc_info=True)
             return {"error": str(e)}
@@ -1109,6 +1197,11 @@ class OpenMuxServer:
                 _t0 = _t.time()
                 self._reload_config_from_disk()
                 self.logger.info(f"[reload-full:{req_id}] Config loaded in {_t.time()-_t0:.3f}s")
+                # Re-apply logging config (level and file paths) - issue #47
+                try:
+                    self._apply_logging_from_config()
+                except Exception:
+                    self.logger.warning(f"[reload-full:{req_id}] Failed to re-apply logging config")
             except Exception as e:
                 self.logger.error(f"Full reload: config load failed: {e}")
                 summary["errors"].append({"phase": "load_config", "error": str(e)})
@@ -1485,14 +1578,11 @@ def _setup_shutdown_handlers(loop, server):
 
     async def soft_reload_coroutine():
         try:
-            # Reload config (for logging level and runtime settings)
+            # Reload config (for logging level/paths and runtime settings)
             server._reload_config_from_disk()
-            # Reconfigure logging level from config if provided
+            # Reconfigure logging (level and file paths) from config (issue #47)
             try:
-                cfg = getattr(server.config_manager, "config", {}) or {}
-                lvl = (cfg.get("logging", {}) or {}).get("level")
-                if isinstance(lvl, str) and lvl.strip():
-                    _setup_basic_logging(level_name=lvl.strip().upper())
+                server._apply_logging_from_config()
             except Exception:
                 pass
             # Perform server soft reload
@@ -1545,57 +1635,213 @@ def _cleanup_event_loop(loop):
                 task.cancel()
 
 
-def _setup_basic_logging(level_name: Optional[str] = None):
-    """Set up basic logging configuration with flexible levels.
+def _read_logging_block(config_path: Optional[str]) -> Dict[str, Any]:
+    """Read the `logging:` block from a config file without failing startup.
 
-    - Level precedence: explicit arg > default WARNING
-    - Handlers are set to NOTSET so they never filter; root logger controls level
-    - Applies chosen level to all existing `openmux.*` loggers and their handlers
+    Issue #47: `file`, `log_dir`, `max_log_size`, `log_backup_count` and `console`
+    are honored from this block (plus `level` for the log level). Parses the YAML
+    directly, without full config validation, so a bad logging section or a
+    missing auth sidecar never blocks server start. Returns ``{}`` on any error.
     """
-    already_configured = getattr(_setup_basic_logging, "_configured", False)
+    if not config_path or not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f.read()) or {}
+    except Exception:  # justification: pre-config logging read is best-effort
+        return {}
+    log_cfg = cfg.get("logging") if isinstance(cfg, dict) else None
+    return log_cfg if isinstance(log_cfg, dict) else {}
 
-    log_dir = "logs"
-    os.makedirs(log_dir, exist_ok=True)
+
+def _resolve_log_rotation(log_cfg: Dict[str, Any]) -> Dict[str, int]:
+    """Resolve rotation limits from a logging config block, int-coerced."""
+    max_bytes = log_cfg.get("max_log_size", 10 * 1024 * 1024)
+    backup_count = log_cfg.get("log_backup_count", 5)
+    try:
+        max_bytes = int(max_bytes)
+    except Exception:
+        max_bytes = 10 * 1024 * 1024
+    try:
+        backup_count = int(backup_count)
+    except Exception:
+        backup_count = 5
+    return {"max_bytes": max(0, max_bytes), "backup_count": max(0, backup_count)}
+
+
+def _logging_paths_changed(log_dir: Optional[str], log_file: Optional[str]) -> bool:
+    """True when the resolved main log file or base dir moved since last setup."""
+    old_dir = getattr(_setup_basic_logging, "_log_dir", None)
+    old_file = getattr(_setup_basic_logging, "_log_file", None)
+    new_dir, new_file = _resolve_logging_paths(log_dir, log_file)
+    return (old_dir != str(new_dir)) or (old_file != str(new_file))
+
+
+def _resolve_logging_paths(log_dir: Optional[str], log_file: Optional[str]) -> "Tuple[Path, Path]":
+    """Resolve (base_dir, main_file) from config values (issue #47).
+
+    `log_dir` is the base directory for all server logs. `file` is the full
+    path of the main aggregate log; when `log_dir` is unset, the main file's
+    own directory becomes the base. Both unset keeps the historical `logs/`
+    + `logs/openmux.log` dev behavior.
+    """
+    from pathlib import Path
+
+    base = (log_dir or "").strip()
+    main_file = (log_file or "").strip()
+    if base:
+        base_path = Path(base)
+        file_path = Path(main_file) if main_file else base_path / "openmux.log"
+        return base_path, file_path
+    if main_file:
+        file_path = Path(main_file)
+        return file_path.parent, file_path
+    return Path("logs"), Path("logs") / "openmux.log"
+
+
+def _remove_stale_file_handlers() -> None:
+    """Remove and close the rotating file handlers from a previous location."""
+    from logging.handlers import RotatingFileHandler
+
+    def _close(h) -> None:
+        try:
+            h.close()
+        except Exception:  # justification: handler close is best-effort on swap
+            pass
 
     root = logging.getLogger()
-    # Resolve desired level name (may be re-invoked to adjust level)
+    for h in list(root.handlers):
+        if isinstance(h, RotatingFileHandler):
+            root.removeHandler(h)
+            _close(h)
+    for name in list(logging.root.manager.loggerDict.keys()):
+        if isinstance(name, str) and (name == "openmux" or name.startswith("openmux.")):
+            lg = logging.getLogger(name)
+            for h in list(lg.handlers):
+                if isinstance(h, RotatingFileHandler):
+                    lg.removeHandler(h)
+                    _close(h)
+
+
+def _setup_basic_logging(
+    level_name: Optional[str] = None,
+    log_dir: Optional[str] = None,
+    log_file: Optional[str] = None,
+    max_log_size: Optional[int] = None,
+    log_backup_count: Optional[int] = None,
+    console_enabled: Optional[bool] = True,
+):
+    """Set up basic logging configuration with flexible levels and paths.
+
+    - Level precedence: explicit arg > default WARNING
+    - Paths (issue #47): `log_dir`/`log_file` from config `logging:` (defaults
+      `logs/` + `logs/openmux.log`); when unset the cwd-relative `logs/` dir
+      is kept for dev runs.
+    - Handlers are set to NOTSET so they never filter; root logger controls level
+    - Applies chosen level to all existing `openmux.*` loggers and their handlers
+    - If `log_file`'s name matches a component file name in the same dir, no
+      separate handler is created for that component (its records still reach
+      the file once, via propagation to root)
+    - The console handler honors `console` from the logging block (default True)
+    """
+    from logging.handlers import RotatingFileHandler
+
+    already_configured = getattr(_setup_basic_logging, "_configured", False)
+    base, main_file = _resolve_logging_paths(log_dir, log_file)
+
+    # Detect a location change so a reload can swap the file handlers
+    path_changed = _logging_paths_changed(log_dir, log_file)
+
+    if max_log_size is not None:
+        try:
+            setattr(_setup_basic_logging, "_max_bytes", max(0, int(max_log_size)))
+        except Exception:
+            pass
+    if log_backup_count is not None:
+        try:
+            setattr(_setup_basic_logging, "_backup_count", max(0, int(log_backup_count)))
+        except Exception:
+            pass
+    if console_enabled is not None:
+        setattr(_setup_basic_logging, "_console_enabled", bool(console_enabled))
+
+    try:
+        max_bytes = getattr(_setup_basic_logging, "_max_bytes", 10 * 1024 * 1024)
+        backup_count = getattr(_setup_basic_logging, "_backup_count", 5)
+    except Exception:
+        max_bytes, backup_count = 10 * 1024 * 1024, 5
+
+    root = logging.getLogger()
     resolved_name = level_name or "WARNING"
     log_level = getattr(logging, str(resolved_name).upper(), logging.INFO)
 
-    if not root.handlers and not already_configured:
+    console_enabled = getattr(_setup_basic_logging, "_console_enabled", True)
+
+    # Create (or re-create) the file handlers when this process has created
+    # none of its own yet, or when a reload moved the resolved location.
+    # Gating on our tagged handlers (not on *any* root handler) means an
+    # embedder or a test harness that attached a handler first does not
+    # suppress our own file logs, and a path change always re-points them.
+    have_our_handlers = any(getattr(h, "_openmux_logging", False) for h in root.handlers)
+    need_file_setup = path_changed or not have_our_handlers
+
+    # When the base dir moved, drop the old handlers before (re)creating them,
+    # so a swap never ends up with duplicate console or file handlers
+    if already_configured and path_changed:
+        _remove_stale_file_handlers()
+        old_console = getattr(_setup_basic_logging, "_console_handler", None)
+        if old_console is not None and old_console in root.handlers:
+            root.removeHandler(old_console)
+
+    if need_file_setup:
         root.setLevel(log_level)
 
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.NOTSET)
-        console_format = logging.Formatter(
-            "%(asctime)s.%(msecs)03d %(name)s %(filename)s:%(lineno)d %(levelname)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-        console_handler.setFormatter(console_format)
-        root.addHandler(console_handler)
+        console_handler = None
+        if console_enabled:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(logging.NOTSET)
+            console_format = logging.Formatter(
+                "%(asctime)s.%(msecs)03d %(name)s %(filename)s:%(lineno)d %(levelname)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+            console_handler.setFormatter(console_format)
+            root.addHandler(console_handler)
 
-        # Main log file
-        from logging.handlers import RotatingFileHandler
+        # Main log file (issue #47: config-driven path, fallback to logs/openmux.log)
+        try:
+            main_file.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(str(main_file), maxBytes=max_bytes, backupCount=backup_count)
+        except OSError:
+            logging.warning("Could not create log dir %s; continuing console-only", main_file.parent, exc_info=True)
+            file_handler = None
+        if file_handler is not None:
+            file_format = logging.Formatter(
+                "%(asctime)s.%(msecs)03d %(filename)s:%(lineno)d %(name)s %(levelname)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+            file_handler.setFormatter(file_format)
+            file_handler.setLevel(logging.NOTSET)
+            file_handler._openmux_logging = True
+            root.addHandler(file_handler)
 
-        main_file = os.path.join(log_dir, "openmux.log")
-        file_handler = RotatingFileHandler(main_file, maxBytes=10 * 1024 * 1024, backupCount=5)
-        file_format = logging.Formatter(
-            "%(asctime)s.%(msecs)03d %(filename)s:%(lineno)d %(name)s %(levelname)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-        file_handler.setFormatter(file_format)
-        file_handler.setLevel(logging.NOTSET)
-        root.addHandler(file_handler)
-
-        # Component specific loggers (server, client, serial, auth, config, console)
-        components = ["server", "client", "serial", "auth", "config", "console"]
-        for comp in components:
-            logger = logging.getLogger(f"openmux.{comp}")
-            comp_file = os.path.join(log_dir, f"openmux_{comp}.log")
-            comp_handler = RotatingFileHandler(comp_file, maxBytes=10 * 1024 * 1024, backupCount=5)
-            comp_handler.setFormatter(file_format)
-            comp_handler.setLevel(logging.NOTSET)
-            logger.addHandler(comp_handler)
+            # Component specific loggers (server, client, serial, auth, config, console)
+            # Skip any component whose file name collides with the main file's name.
+            main_stem = main_file.name
+            for comp in _LOGGER_COMPONENTS:
+                if f"openmux_{comp}.log" == main_stem and base == main_file.parent:
+                    continue
+                comp_logger = logging.getLogger(f"openmux.{comp}")
+                comp_file = base / f"openmux_{comp}.log"
+                try:
+                    comp_file.parent.mkdir(parents=True, exist_ok=True)
+                    comp_handler = RotatingFileHandler(str(comp_file), maxBytes=max_bytes, backupCount=backup_count)
+                except OSError:
+                    logging.warning("Could not create log dir %s; skipping component log", comp_file.parent, exc_info=True)
+                    continue
+                comp_handler.setFormatter(file_format)
+                comp_handler.setLevel(logging.NOTSET)
+                comp_handler._openmux_logging = True
+                comp_logger.addHandler(comp_handler)
 
     # Update root and existing component loggers to the desired level
     try:
@@ -1612,6 +1858,17 @@ def _setup_basic_logging(level_name: Optional[str] = None):
 
     try:
         setattr(_setup_basic_logging, "_configured", True)
+        setattr(_setup_basic_logging, "_log_dir", str(base))
+        setattr(_setup_basic_logging, "_log_file", str(main_file))
+        setattr(_setup_basic_logging, "_max_bytes", max_bytes)
+        setattr(_setup_basic_logging, "_backup_count", backup_count)
+        setattr(_setup_basic_logging, "_console_enabled", bool(console_enabled))
+        if console_handler is not None:
+            setattr(_setup_basic_logging, "_console_handler", console_handler)
+        elif path_changed:
+            # Console was disabled (or file setup failed); forget any stale ref
+            if hasattr(_setup_basic_logging, "_console_handler"):
+                delattr(_setup_basic_logging, "_console_handler")
     except Exception:  # justification: best-effort idempotence flag; safe to ignore failure
         pass
 
@@ -1632,20 +1889,11 @@ def main():
     elif args.verbose == 1:
         cli_level = "INFO"
 
-    config_level = None
-    try:
-        cm = ConfigManager(
-            config_path,
-            auth_config_path=auth_config,
-            security_config_path=security_config,
-        )
-        cfg = cm.load_config()
-        log_cfg = (cfg or {}).get("logging", {})
-        lvl = log_cfg.get("level")
-        if isinstance(lvl, str) and lvl.strip():
-            config_level = lvl.strip().upper()
-    except Exception:
-        config_level = None
+    # Pre-read the logging block (level, and file/log_dir handed to the server
+    # constructor so initial file handlers land in the configured location)
+    log_cfg = _read_logging_block(config_path)
+    lvl = log_cfg.get("level")
+    config_level = lvl.strip().upper() if isinstance(lvl, str) and lvl.strip() else None
 
     initial_level = cli_level or config_level or "WARNING"
     server = OpenMuxServer(

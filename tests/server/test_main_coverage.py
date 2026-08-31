@@ -1,6 +1,8 @@
 import asyncio
+import logging
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, cast
 
@@ -8,10 +10,13 @@ import pytest
 import yaml
 
 from openmux.server.adapters.base_adapter import AdapterCapability, BaseGenericAdapter
+from openmux.server.data_logger import DataLogger
 from openmux.server.main import (
     OpenMuxServer,
     _find_config_file,
     _parse_arguments,
+    _read_logging_block,
+    _resolve_logging_paths,
     _setup_basic_logging,
 )
 
@@ -159,6 +164,110 @@ def test_setup_basic_logging_idempotent(tmp_path, caplog):
         assert (tmp_path / "logs").exists()
     finally:
         os.chdir(old_cwd)
+
+
+def test_resolve_logging_paths_combinations(tmp_path):
+    # Both unset: historical cwd-relative default
+    base, main = _resolve_logging_paths(None, None)
+    assert base == Path("logs") and main == Path("logs") / "openmux.log"
+
+    # log_dir only: main file is {log_dir}/openmux.log
+    base, main = _resolve_logging_paths(str(tmp_path), None)
+    assert base == tmp_path and main == tmp_path / "openmux.log"
+
+    # file only: base becomes the file's own directory
+    base, main = _resolve_logging_paths(None, str(tmp_path / "custom" / "main.log"))
+    assert base == tmp_path / "custom" and main == tmp_path / "custom" / "main.log"
+
+    # both: base from log_dir, file verbatim
+    base, main = _resolve_logging_paths(str(tmp_path / "logs"), str(tmp_path / "elsewhere" / "x.log"))
+    assert base == tmp_path / "logs" and main == tmp_path / "elsewhere" / "x.log"
+
+
+def test_setup_basic_logging_honors_log_dir_and_file(tmp_path):
+    log_dir = str(tmp_path / "srvlogs")
+    _setup_basic_logging("INFO", log_dir=log_dir)
+    assert (tmp_path / "srvlogs" / "openmux.log").exists()
+    assert (tmp_path / "srvlogs" / "openmux_server.log").exists()
+
+
+def test_setup_basic_logging_file_collision_skips_component(tmp_path, caplog):
+    # `file` named like a component log in the same dir: one writer, one file
+    d = tmp_path / "collide"
+    _setup_basic_logging("INFO", log_dir=str(d), log_file=str(d / "openmux_server.log"))
+    root = logging.getLogger()
+    main_handlers = [h for h in root.handlers if getattr(h, "baseFilename", None) == str(d / "openmux_server.log")]
+    assert len(main_handlers) == 1
+    comp = logging.getLogger("openmux.server")
+    assert not [h for h in comp.handlers if getattr(h, "baseFilename", None) == str(d / "openmux_server.log")]
+    # A record from the colliding component lands exactly once
+    comp.info("collision-marker-line")
+    content = (d / "openmux_server.log").read_text()
+    assert content.count("collision-marker-line") == 1
+
+
+def test_setup_basic_logging_path_swap_no_duplicate_handlers(tmp_path):
+    import logging.handlers
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    _setup_basic_logging("INFO", log_dir=str(a))
+    _setup_basic_logging("INFO", log_dir=str(b))
+    root = logging.getLogger()
+    # exactly one root rotating handler, pointing at the new location (no dup)
+    rot = [h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+    root_stale = [h for h in rot if h.baseFilename.startswith(str(a))]
+    assert not root_stale, f"stale handlers: {[h.baseFilename for h in root_stale]}"
+    mains = [h for h in rot if h.baseFilename == str(b / "openmux.log")]
+    assert len(mains) == 1
+    assert (b / "openmux.log").exists()
+    # component loggers were repointed too, with exactly one handler each
+    comp = logging.getLogger("openmux.client")
+    comp_handlers = [
+        h
+        for h in comp.handlers
+        if isinstance(h, logging.handlers.RotatingFileHandler) and h.baseFilename == str(b / "openmux_client.log")
+    ]
+    stale = [
+        h for h in comp.handlers if isinstance(h, logging.handlers.RotatingFileHandler) and h.baseFilename.startswith(str(a))
+    ]
+    assert len(stale) == 0
+    assert len(comp_handlers) == 1
+
+
+def test_read_logging_block(tmp_path):
+    cfg_text = yaml.safe_dump({"logging": {"level": "DEBUG", "log_dir": "x", "file": "y.log", "console": False}})
+    cfg_path = tmp_path / "server.yaml"
+    cfg_path.write_text(cfg_text)
+    block = _read_logging_block(str(cfg_path))
+    assert block == {"level": "DEBUG", "log_dir": "x", "file": "y.log", "console": False}
+    # Missing file or missing block: non-fatal empty dict
+    assert _read_logging_block(str(tmp_path / "nope.yaml")) == {}
+    empty_path = tmp_path / "empty.yaml"
+    empty_path.write_text("server: {}\n")
+    assert _read_logging_block(str(empty_path)) == {}
+
+
+def test_server_repoints_data_logger_base_dir(tmp_path):
+    """OpenMuxServer applies logging.log_dir to the DataLogger default path."""
+    log_dir = tmp_path / "srvlogs"
+    server_cfg = {
+        "server": {"host": "127.0.0.1", "port": 0},
+        "logging": {"level": "INFO", "log_dir": str(log_dir)},
+    }
+    server_path = tmp_path / "server.yaml"
+    server_path.write_text(yaml.safe_dump(server_cfg, sort_keys=False))
+    # ConfigManager requires the authentication sidecar next to the server config
+    (tmp_path / "authentication.yaml").write_text(
+        yaml.safe_dump({"users": [{"username": "u", "password_hash": "x", "permissions": "admin"}]})
+    )
+
+    OpenMuxServer(str(server_path), log_level="INFO")
+    assert DataLogger.get().base_dir == str(log_dir)
+    assert DataLogger.get()._default_path("p1") == log_dir / "ports" / "p1.log"
+    # Main component logs landed in the configured dir
+    assert (log_dir / "openmux.log").exists()
+    assert (log_dir / "openmux_server.log").exists()
 
 
 @pytest.mark.asyncio

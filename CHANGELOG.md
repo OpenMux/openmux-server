@@ -22,6 +22,13 @@ Changes since v1.0.2 (2026-08-27).
   - `none` binds everyone to read-only, including admin. Admin bypasses access control, not capacity.
   - Legacy integers still load, with a one-time deprecation warning per port: `0` maps to `none`, `1` to `one`, `>= 2` to `multiple`. Any other value is a hard error at port creation.
   - Update your configs to the mode strings to remove the warning.
+- **`logging.file` and `logging.log_dir` are honored** (issue #47). Both keys were previously ignored: the server always wrote logs to `logs/` relative to the working directory.
+  - `logging.log_dir` is the base directory for all server logs; `logging.file` is the main aggregate log (default `{log_dir}/openmux.log`).
+  - Per-port logs and action-run transcripts move with it: `{log_dir}/ports/*.log`.
+  - On the Debian package, logs now go to `/var/log/openmux/` as the packaged config already asked for, instead of `/var/lib/openmux/logs/`.
+  - If `logging.file`'s name matches a component log name (`openmux_server.log`, etc.) in the same directory, both write to that one file (written once, rotated once). This is what the packaged default does.
+  - Log level, path, rotation and console changes apply on SIGHUP/soft reload or full reload — not live, not on restart.
+  - `logging.max_log_size` (bytes) and `logging.log_backup_count` are now honored for all rotating log files (defaults 10 MB / 5, same as before). `logging.console` (default true) now actually disables the stdout handler when false.
 - **Port-action scripts load by grant scope** (issue #43). A script file is imported only when its filename (without `.py`) matches a grant id in `action_ports`.
   - The `ACTION` id must equal the filename. A mismatch is reported.
   - Ungranted files (`test_*` scripts, helper modules) never run and appear nowhere.
