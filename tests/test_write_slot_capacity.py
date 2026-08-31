@@ -14,9 +14,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from openmux.server.access_control import (
-    InvalidWriteMode,
     WIRE_MULTIPLE,
     WRITE_MODES,
+    InvalidWriteMode,
     capacity_from_wire,
     capacity_to_wire,
     parse_write_mode,
@@ -24,7 +24,6 @@ from openmux.server.access_control import (
     write_capacity,
 )
 from openmux.server.console_manager import ConsoleManager
-
 
 # ---------------------------------------------------------------------------
 # Parse / migration matrix

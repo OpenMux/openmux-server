@@ -75,8 +75,9 @@ def test_about_version_split(monkeypatch):
 
 
 def test_login_page_shows_server_version(monkeypatch):
-    import openmux.server.web_console as wc
     from jinja2 import Environment, FileSystemLoader
+
+    import openmux.server.web_console as wc
 
     adapter = _make_adapter(0)
     # tests/ -> repo root, so templates live at <repo>/templates/web_console
@@ -136,18 +137,32 @@ def test_login_page_never_shows_logged_in_motd():
     # logged_in_motd renders at the top of the status page
     status = adapter._jinja_env.get_template("status.html.j2")
     html = status.render(
-        base_path="", realm="R", user_permission="admin", plugin_nav=[], ports=[],
-        motd=adapter.logged_in_motd, total_ports=0, connected_ports=0,
-        federation={}, multipath={}, ports_by_name={}, data={},
-        sort_key="name", sort_dir="asc",
-        sort_query="", status_path="/", server_version="", server_uptime="",
+        base_path="",
+        realm="R",
+        user_permission="admin",
+        plugin_nav=[],
+        ports=[],
+        motd=adapter.logged_in_motd,
+        total_ports=0,
+        connected_ports=0,
+        federation={},
+        multipath={},
+        ports_by_name={},
+        data={},
+        sort_key="name",
+        sort_dir="asc",
+        sort_query="",
+        status_path="/",
+        server_version="",
+        server_uptime="",
     )
     assert "status-motd" in html
     assert "rack B42" in html
     # and no longer appears in the sidebar (layout) or the Ctrl+E menu (console)
     layout = adapter._jinja_env.get_template("layout.html.j2")
-    html = layout.render(base_path="", realm="R", user_permission="admin",
-                         plugin_nav=[], ports=[], motd=adapter.logged_in_motd)
+    html = layout.render(
+        base_path="", realm="R", user_permission="admin", plugin_nav=[], ports=[], motd=adapter.logged_in_motd
+    )
     assert "sidebar-motd" not in html
 
 
@@ -183,11 +198,7 @@ async def test_about_page_shows_server_version():
 @pytest.mark.asyncio
 async def test_about_page_shows_hardware_info(tmp_path):
     hw = tmp_path / "hw"
-    hw.write_text(
-        'OPENMUX_MANUFACTURER="FTDI Ltd."\n'
-        'OPENMUX_PRODUCT="Basic RS232-HS"\n'
-        'OPENMUX_SERIAL="OMH123"\n'
-    )
+    hw.write_text('OPENMUX_MANUFACTURER="FTDI Ltd."\n' 'OPENMUX_PRODUCT="Basic RS232-HS"\n' 'OPENMUX_SERIAL="OMH123"\n')
     adapter = _make_adapter(8912, hardware_info_file=str(hw))
     assert await adapter.start()
     try:
@@ -234,8 +245,7 @@ def test_get_user_groups_includes_explicit_groups():
     auth = AuthManager(
         {
             "users": [
-                {"username": "u", "password_hash": _USER_HASH, "permissions": "read-write",
-                 "groups": ["tech", "serials"]},
+                {"username": "u", "password_hash": _USER_HASH, "permissions": "read-write", "groups": ["tech", "serials"]},
             ]
         }
     )
