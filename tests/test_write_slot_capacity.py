@@ -467,6 +467,182 @@ class TestAdapterValidation:
         port2 = CommandPort("p2", {"name": "p2", "command": "sh", "max_read_write_users": "none"}, adapter=None)
         assert port2.max_read_write_users == "none"
 
+    def test_tcp_initiator_validate_config_rejects_invalid_mode(self):
+        """Issue #60: TCP initiator ports take the same tri-value."""
+        from openmux.server.adapters.tcp_initiator import TcpInitiatorAdapter
+
+        bad = {"tcp_initiator_ports": [{"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "two"}]}
+        assert TcpInitiatorAdapter.validate_config(bad) is False
+        good = {"tcp_initiator_ports": [{"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "multiple"}]}
+        assert TcpInitiatorAdapter.validate_config(good) is True
+        # Legacy ints stay valid.
+        legacy = {"tcp_initiator_ports": [{"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": 2}]}
+        assert TcpInitiatorAdapter.validate_config(legacy) is True
+
+    @pytest.mark.asyncio
+    async def test_tcp_initiator_port_stores_mode_and_migrates_legacy(self, caplog):
+        from openmux.server.adapters.tcp_initiator import TcpInitiatorPort
+
+        with caplog.at_level(logging.WARNING):
+            port = TcpInitiatorPort(
+                "p1",
+                {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": 3, "connect_on_demand": True},
+                adapter=None,
+            )
+        assert port.max_read_write_users == "multiple"
+        assert any("legacy integer" in r.getMessage() for r in caplog.records)
+        port2 = TcpInitiatorPort(
+            "p2",
+            {"name": "p2", "host": "127.0.0.1", "port": 1, "max_read_write_users": "none", "connect_on_demand": True},
+            adapter=None,
+        )
+        assert port2.max_read_write_users == "none"
+        # Unset keeps the one default (consistent with serial/loopback/command).
+        port3 = TcpInitiatorPort("p3", {"name": "p3", "host": "127.0.0.1", "port": 1, "connect_on_demand": True}, adapter=None)
+        assert port3.max_read_write_users == "one"
+
+
+# ---------------------------------------------------------------------------
+# TCP initiator: reconcile detects a mode change (issue #60)
+# ---------------------------------------------------------------------------
+
+
+class TestTcpInitiatorReconcile:
+    @pytest.mark.asyncio
+    async def test_mode_change_triggers_recreate_legacy_int_stays_unchanged(self):
+        from openmux.server.adapters.tcp_initiator import TcpInitiatorAdapter, TcpInitiatorPort
+
+        adapter = TcpInitiatorAdapter("tcp", {})
+        port = TcpInitiatorPort("p1", {"name": "p1", "host": "h", "port": 1, "max_read_write_users": "one"}, adapter=None)
+        adapter.ports["p1"] = port
+
+        destroyed, created = [], []
+
+        async def fake_destroy(n):
+            destroyed.append(n)
+            adapter.ports.pop(n, None)
+
+        async def fake_create(n, cfg):
+            created.append((n, cfg.get("max_read_write_users")))
+            adapter.ports[n] = TcpInitiatorPort(n, dict(cfg, connect_on_demand=True), adapter)
+            return adapter.ports[n]
+
+        adapter.destroy_port = fake_destroy
+        adapter.create_port = fake_create
+
+        # Identical config -> unchanged.
+        res = await adapter.reconcile_ports([{"name": "p1", "host": "h", "port": 1}])
+        assert res["unchanged"] == ["p1"] and not res["updated"]
+        # A legacy int equal to the stored mode -> unchanged (silent normalization).
+        res = await adapter.reconcile_ports([{"name": "p1", "host": "h", "port": 1, "max_read_write_users": 1}])
+        assert res["unchanged"] == ["p1"] and not res["updated"]
+        # A different mode -> recreate.
+        res = await adapter.reconcile_ports([{"name": "p1", "host": "h", "port": 1, "max_read_write_users": "multiple"}])
+        assert res["updated"] == ["p1"] and destroyed == ["p1"] and created == [("p1", "multiple")]
+
+
+# ---------------------------------------------------------------------------
+# End-to-end with the real PortManager + TcpInitiatorAdapter (issue #60)
+# ---------------------------------------------------------------------------
+
+
+class TestTcpInitiatorCapacityEndToEnd:
+    """Real stack so the mode threads through port, wrapper, and manager.
+
+    Ports use ``connect_on_demand`` so no real connection is attempted.
+    """
+
+    async def _make_manager(self, monkeypatch, port_config: Dict[str, Any], auth_config: Dict[str, Any]):
+        from openmux.server import data_logger as dl_mod
+        from openmux.server.adapters.tcp_initiator import TcpInitiatorAdapter
+        from openmux.server.auth_manager import AuthManager
+        from openmux.server.port_manager import PortManager
+
+        class _DummyDataLogger:
+            def record(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(dl_mod.DataLogger, "get", classmethod(lambda cls: _DummyDataLogger()))
+
+        cfg = dict(port_config, connect_on_demand=True)
+        pm = PortManager([])
+        adapter = TcpInitiatorAdapter("tcp", {"tcp_initiator_ports": [cfg]})
+        adapter.main_port_manager = pm
+        pm.set_unified_adapters([adapter])
+        assert await adapter.start() is True
+
+        auth = AuthManager(auth_config)
+        return ConsoleManager(pm, auth)
+
+    @pytest.mark.asyncio
+    async def test_tcp_initiator_default_mode_is_one(self, monkeypatch):
+        # Unconfigured TCP initiator defaults to "one" (consistent with
+        # serial/loopback/command) - previously the missing attribute fell
+        # through to the seat-accounting default, which happened to be one.
+        cm = await self._make_manager(monkeypatch, {"name": "p1", "host": "127.0.0.1", "port": 1}, {})
+        port = cm.port_manager.ports["p1"].unified_port
+        assert port.max_read_write_users == "one"
+
+    @pytest.mark.asyncio
+    async def test_tcp_initiator_none_admin_is_read_only(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "none"},
+            {"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "root")
+        assert (ok, mode, reason) == (True, "read-only", None)
+
+    @pytest.mark.asyncio
+    async def test_tcp_initiator_none_second_user_and_promotion_refused(self, monkeypatch):
+        """No driver at all: read-write attach falls back, promotion is refused."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "none"},
+            {"users": [{"username": "alice", "password_hash": "x"}]},
+        )
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        assert (ok, mode, reason) == (True, "read-only", None)
+        assert await cm.promote_client_to_read_write("c1", "p1") is False
+        # The seat stayed read-only.
+        port = cm.port_manager.ports["p1"]
+        assert all(c["mode"] == "read-only" for c in port.connected_clients)
+
+    @pytest.mark.asyncio
+    async def test_tcp_initiator_multiple_two_writers_no_demotion(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "multiple"},
+            {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
+        )
+        ok1, m1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok2, m2, _ = await cm.connect_client_to_port("c2", "p1", "bob")
+        assert (ok1, m1) == (True, "read-write")
+        assert (ok2, m2) == (True, "read-write")
+
+    @pytest.mark.asyncio
+    async def test_tcp_initiator_one_second_write_demotes(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "one"},
+            {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
+        )
+        ok1, m1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok2, m2, _ = await cm.connect_client_to_port("c2", "p1", "bob")
+        assert (ok1, m1) == (True, "read-write")
+        assert (ok2, m2) == (True, "read-only")
+
+    @pytest.mark.asyncio
+    async def test_tcp_initiator_legacy_int_two_maps_to_multiple(self, monkeypatch):
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": 2},
+            {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
+        )
+        ok1, m1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok2, m2, _ = await cm.connect_client_to_port("c2", "p1", "bob")
+        assert m1 == "read-write" and m2 == "read-write"
+
 
 # ---------------------------------------------------------------------------
 # MuxCon wire: local mode travels, remote side evaluates

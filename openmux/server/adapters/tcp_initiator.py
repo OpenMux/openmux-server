@@ -28,6 +28,7 @@ import logging
 import ssl
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
+from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortLifecycleEvent, PortState
 from .protocols import get_handler
@@ -77,6 +78,13 @@ class TcpInitiatorPort:
         self.auto_reconnect = config.get("auto_reconnect", True)
         self.reconnect_delay = config.get("reconnect_delay", 5.0)
         self.enabled = bool(config.get("enabled", True))
+        # Write-slot capacity mode (issue #59/#60): "one" (default) / "multiple" /
+        # "none". Legacy ints (0/1/>=2) still work and log a one-time deprecation
+        # line; any other value raises (create_port fails the port with an error
+        # log), exactly like serial, loopback, and command.
+        self.max_read_write_users: str = parse_write_mode(
+            config.get("max_read_write_users", 1), port_name=name, logger=self.logger
+        )
         # Console-group access control (issue #24): empty on both = open to all
         # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
         self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
@@ -428,6 +436,22 @@ class TcpInitiatorPort:
                     break
 
 
+def _valid_write_mode(port_config: Dict[str, Any]) -> bool:
+    """Return True when the write-slot capacity value is accepted (issue #60).
+
+    The key holds ``"one"``, ``"multiple"``, or ``"none"`` (unset = valid). Legacy
+    integers are accepted during migration. Any other value is a hard error so a
+    typo fails fast at load time, matching serial/loopback/command (issue #59).
+    """
+    if "max_read_write_users" not in port_config:
+        return True
+    try:
+        parse_write_mode(port_config["max_read_write_users"])
+    except InvalidWriteMode:
+        return False
+    return True
+
+
 class TcpInitiatorAdapter(BaseGenericAdapter):
     """Unified TCP Initiator Adapter
 
@@ -494,6 +518,9 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 sbs = item["scrollback_size"]
                 if not isinstance(sbs, int) or sbs < 0:
                     return False
+            # Write-slot capacity (issue #59/#60): hard error so typos fail fast.
+            if not _valid_write_mode(item):
+                return False
             # For compat sections (openmux_client_ports), inject protocol sub-key
             # before delegating to the handler's validate_config
             validate_item = cls._inject_openmux_protocol(item) if is_openmux_compat and "protocol" not in item else item
@@ -683,6 +710,9 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             protocol_cfg = cfg.get("protocol", {})
             protocol_type = (protocol_cfg.get("type", "") or "plain").lower()
             _default_batching = protocol_type == "plain"
+            # Silent normalization (wire_to_mode) so a raw legacy int compares equal
+            # to its migrated mode string (issue #59/#60).
+            mru = wire_to_mode(cfg.get("max_read_write_users", 1))
             return {
                 "host": cfg.get("host", ""),
                 "port": cfg.get("port", 0),
@@ -691,6 +721,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 "timeout": cfg.get("timeout", 10.0),
                 "auto_reconnect": cfg.get("auto_reconnect", True),
                 "reconnect_delay": cfg.get("reconnect_delay", 5.0),
+                "max_read_write_users": mru,
                 "enable_batching": cfg.get("enable_batching", _default_batching),
                 "batch_size": cfg.get("batch_size", 1024),
                 "batch_timeout": cfg.get("batch_timeout", 0.015),
@@ -717,6 +748,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                         "timeout": getattr(port, "timeout", None),
                         "auto_reconnect": getattr(port, "auto_reconnect", None),
                         "reconnect_delay": getattr(port, "reconnect_delay", None),
+                        "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", 1)),
                         # Note: these fields are stored under private names in TcpInitiatorPort
                         "enable_batching": getattr(port, "_batching_enabled", None),
                         "batch_size": getattr(port, "_batch_size", None),

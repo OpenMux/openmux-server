@@ -191,6 +191,14 @@ properties:
         timeout: { type: number, minimum: 0, default: 10.0 }
         auto_reconnect: { type: boolean, default: true }
         reconnect_delay: { type: number, minimum: 0, default: 5.0 }
+        # Write-slot capacity (issue #59/#60); default is 'one' (consistent with
+        # serial, loopback, and command). Legacy ints are accepted during
+        # migration (0 -> none, 1 -> one, >= 2 -> multiple).
+        max_read_write_users:
+          oneOf:
+            - { type: string, enum: [none, one, multiple] }
+            - { type: integer, minimum: 0 }
+          default: one
         enable_batching: { type: boolean }
         batch_size: { type: integer, minimum: 1, default: 1024 }
         batch_timeout: { type: number, minimum: 0, default: 0.015 }

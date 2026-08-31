@@ -101,6 +101,23 @@ command_ports (per-port) (schema defaults)
 - cwd, env, interactive, always_buffer: no defaults
 - read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
 
+tcp_initiator_ports (per-port) (schema defaults)
+- use_tls: false
+- ssl_verify: true
+- timeout: 10.0 (seconds)
+- auto_reconnect: true
+- reconnect_delay: 5.0
+- batch_size: 1024
+- batch_timeout: 0.015 (seconds)
+- enabled: true
+- connect_on_demand: false
+- disconnect_when_idle: false
+- idle_disconnect_delay: 30.0
+- protocol.type: plain; protocol.telnet_negotiation: none
+- max_read_write_users: one
+- scrollback_size: 0
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
+
 muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapters/muxcon.py)
 - auth_required: true (inbound peers must pass the Ed25519 challenge; the listener logs a warning when false)
 - listeners[*]:

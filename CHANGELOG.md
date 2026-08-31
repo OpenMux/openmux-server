@@ -22,6 +22,10 @@ Changes since v1.0.2 (2026-08-27).
   - `none` binds everyone to read-only, including admin. Admin bypasses access control, not capacity.
   - Legacy integers still load, with a one-time deprecation warning per port: `0` maps to `none`, `1` to `one`, `>= 2` to `multiple`. Any other value is a hard error at port creation.
   - Update your configs to the mode strings to remove the warning.
+- **`tcp_initiator_ports` gains `max_read_write_users`** (issue #60, #59 part 2). Same tri-value as the other local adapters: `none`, `one` (default), or `multiple`.
+  - Previously the key was rejected by the config schema, and every TCP initiator port silently behaved as `one`. The default is unchanged; the knob now works.
+  - Legacy integers map the same way (`0` → `none`, `1` → `one`, `>= 2` → `multiple`); any other value is a hard error.
+  - The Config Editor shows the "Write slots" column on the TCP-initiator table. Changing the value on a running port recreates the port's connection.
 - **`logging.file` and `logging.log_dir` are honored** (issue #47). Both keys were previously ignored: the server always wrote logs to `logs/` relative to the working directory.
   - `logging.log_dir` is the base directory for all server logs; `logging.file` is the main aggregate log (default `{log_dir}/openmux.log`).
   - Per-port logs and action-run transcripts move with it: `{log_dir}/ports/*.log`.

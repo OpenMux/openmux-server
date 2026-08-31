@@ -209,6 +209,7 @@ Supported options per port:
 - `timeout`: Connection timeout in seconds (default: 10.0)
 - `auto_reconnect`: Auto-reconnect when disconnected (default: true)
 - `reconnect_delay`: Delay between reconnect attempts (default: 5.0)
+- `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above)
 
 Examples:
 ```yaml

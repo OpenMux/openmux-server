@@ -950,6 +950,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'protocol_password', label:'Password', type:'string', hiddenList:true},
           {key:'protocol_remote_port', label:'Remote port', type:'string', hiddenList:true},
           {key:'protocol_api_key', label:'API key', type:'string', hiddenList:true},
+          {key:'max_read_write_users', label:'Write slots', type:'enum', enum:['one','multiple','none']},
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
           {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
           {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
