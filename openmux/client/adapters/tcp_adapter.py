@@ -305,7 +305,10 @@ class TcpClientAdapter(BaseClientAdapter):
             return await self._connect_to_port_standard(port_name)
 
         except Exception as e:
-            self.logger.error(f"Failed to connect to port: {e}", exc_info=True)
+            # No traceback: the error message already carries the connect
+            # failure detail, and the auto-reconnect loop re-invokes this
+            # with the same failure each cycle, so a stack trace adds noise.
+            self.logger.error(f"Failed to connect to port: {e}")
             return False
 
     async def send_data(self, data: Union[str, bytes]) -> bool:

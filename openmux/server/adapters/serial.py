@@ -306,7 +306,10 @@ class SerialPortWrapper:
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to connect to {self.config.device}: {e}", exc_info=True)
+            # No traceback: the error message already carries the errno detail
+            # (e.g. termios EIO), and the connect loop retries with this same
+            # failure every cycle, so a stack trace only adds noise.
+            self.logger.error(f"Failed to connect to {self.config.device}: {e}")
             return False
 
     async def _disconnect(self) -> None:
