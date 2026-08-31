@@ -373,6 +373,9 @@ function renderInfo(p) {
   rows.push(`<tr><th>Name</th><td><strong>${p.name || ''}</strong></td></tr>`);
   rows.push(`<tr><th>Adapter</th><td>${adapter ? `<span class=\"tag\">${adapter}</span>` : '<span class=\"muted\">—</span>'}</td></tr>`);
   rows.push(`<tr><th>Description</th><td>${valueOrDash(p.description)}</td></tr>`);
+  if (p.status_message) {
+    rows.push(`<tr><th>Status</th><td><span class=\"tag bad\">unstartable</span> <span class=\"muted\">${escapeHtml(String(p.status_message))}</span></td></tr>`);
+  }
   rows.push(`<tr><th>Connected</th><td>${connected ? '<span class=\"tag ok\">yes</span>' : '<span class=\"tag bad\">no</span>'} &nbsp; <span class=\"tag\">${clientMode}</span></td></tr>`);
   // Serial configuration rows
   rows.push(`<tr><th>Device</th><td>${valueOrDash(sc.device)}</td></tr>`);
@@ -1477,6 +1480,12 @@ function connectSelected() {
           applyIf('line_status');
           applyIf('server_chain');
           applyIf('last_seen');
+          // status_message (issue #57): the server omits the key when the port
+          // is healthy, so drop it explicitly when a snapshot clears it.
+          if (Object.prototype.hasOwnProperty.call(msg, 'status_message')) {
+            if (msg.status_message) merged.status_message = msg.status_message;
+            else delete merged.status_message;
+          }
           if (idx >= 0) {
             ports[idx] = merged;
           } else {

@@ -72,7 +72,9 @@ async def test_reload_serial_ports_incremental(tmp_path):
         # Post reload via adapter reconcile: add consoleB, change consoleA baudrate, remove nothing
         new_serial_ports = [
             {"name": "consoleA", "description": "A2", "device": "/dev/null", "baudrate": 115200},
-            {"name": "consoleB", "description": "B", "device": "/dev/null", "baudrate": 9600},
+            # A different device path: two ports on the same unix device are
+            # flagged unstartable (issue #57), which is not what tests here.
+            {"name": "consoleB", "description": "B", "device": str(tmp_path / "ttyB"), "baudrate": 9600},
         ]
         summary = await serial.reconcile_ports({"serial_ports": new_serial_ports})
         # consoleB should be added, consoleA should be updated
@@ -89,3 +91,75 @@ async def test_reload_serial_ports_incremental(tmp_path):
     # Cleanup
     await wc.stop()
     await serial.stop()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_serial_device_flagged_in_api_ports(tmp_path):
+    """Issue #57: two ports on the same unix device - only the first opens it.
+
+    The duplicate stays listed in /api/ports but reports connected=False and
+    a status_message naming the claimant.
+    """
+    wc_cfg = {
+        "web_console": {
+            "host": "127.0.0.1",
+            "port": 8911,
+            "enable_ui": False,
+        }
+    }
+    auth = AuthManager(
+        {
+            "users": [
+                {
+                    "username": "admin",
+                    "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
+                    "permissions": "admin",
+                }
+            ]
+        }
+    )
+
+    pm = PortManager([])
+    cm = ConsoleManager(pm, auth)
+
+    ser_cfg = {
+        "serial_ports": [
+            {"name": "consoleA", "description": "A", "device": "/dev/null", "baudrate": 9600},
+            {"name": "consoleB", "description": "B", "device": "/dev/null", "baudrate": 9600},
+        ]
+    }
+    serial = SerialAdapter("serial_ports", ser_cfg)
+    serial.main_port_manager = pm
+    pm.set_unified_adapters([serial])
+
+    assert await serial.start()
+
+    # The duplicate is registered (visible) but unstartable
+    b = serial.serial_ports["consoleB"]
+    assert b.status_message and "consoleA" in b.status_message
+    assert b.connection_task is None
+
+    wc = WebConsoleAdapter("wc", wc_cfg)
+    wc.set_auth_manager(auth)
+    wc.set_console_manager(cm)
+    assert await wc.start()
+
+    token = base64.b64encode(b"admin:password").decode()
+    headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+
+    async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+        async with session.get("http://127.0.0.1:8911/api/ports", headers=headers) as resp:
+            assert resp.status == 200
+            data = json.loads(await resp.text())
+            by_name = {p.get("name"): p for p in data.get("ports", [])}
+            assert set(by_name) >= {"consoleA", "consoleB"}
+            assert by_name["consoleB"]["connected"] is False
+            assert by_name["consoleB"]["status_message"]
+            assert "consoleA" in by_name["consoleB"]["status_message"]
+            assert "status_message" not in by_name["consoleA"]
+
+    # Cleanup
+    await wc.stop()
+    await serial.stop()
+    # Both connection supervisors (only consoleA has one) are stopped
+    assert serial.serial_ports == {}

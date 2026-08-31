@@ -48,6 +48,10 @@ Changes since v1.0.2 (2026-08-27).
   - Takeovers are audit-logged (`write_slot_takeover`).
 - **Federated takeover fixes.** The origin node arbitrates a takeover. The taker now writes immediately after a take on a federated port (previously: write-blocked until reconnect). The legacy `FORCE` wire action maps to `TAKE:latest`, so mixed-version peers keep working.
 - **MuxCon federation relay is faster** (0a546ef). The local port pump now waits on the port queue instead of polling every 50 ms. The initial retransmit timeout starts at 0.35 s instead of up to one heartbeat interval. There is no wire-protocol change.
+- **A serial device is opened by only one port** (issue #57). Two `serial_ports` entries no longer point at the same `device`.
+  - The first entry claims the device. Later entries stay listed but unstartable. The startup log prints the reason.
+  - The flag re-checks after every port create, destroy, and soft reload. The port starts again when the duplicate goes away.
+  - Fix it by removing the extra port or giving it a different `device`.
 
 ### Web console and observability
 
@@ -55,6 +59,7 @@ Changes since v1.0.2 (2026-08-27).
 - The login page and status page show the messages of the day.
 - The Config Editor marks each field with its reload requirement (`live`, `soft`, `full`, `sighup`, `restart`) and shows the read-only `access_default` row.
 - The Port Actions sub-view has a "Script health" panel that lists action-script load errors for the whole `actions_dir`.
+- Unstartable ports show their reason: a red "unstartable" tag on the status page, a Status row in the console info panel, and a "Device health" panel on the Config Editor ports view (checks on load, after save, and on every table edit).
 - The selected port is centered in the sidebar port list after a port switch.
 - Logs: repeated connect failures (serial adapter, client `connect_to_port`) no longer print a full stack trace. The error message keeps the detail. Unexpected faults still print tracebacks from the outer loops.
 
@@ -65,4 +70,5 @@ Changes since v1.0.2 (2026-08-27).
 3. Optional: set `access_default: deny` in `security.yaml` for a fail-closed posture on no-list ports.
 4. Update legacy integer `max_read_write_users` values to `none`, `one`, or `multiple`.
 5. Port-action setups: verify `action_ports` grant ids match the script filenames, then check the "Script health" panel (or `GET /api/port-actions/health`) after first start.
-6. No data migration is required. Old configs load unchanged.
+6. Serial setups: check that no two `serial_ports` entries name the same `device`. The later entry is unstartable until the duplicate is fixed.
+7. No data migration is required. Old configs load unchanged.

@@ -15,7 +15,7 @@ import stat
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
-from ..access_control import InvalidWriteMode, WRITE_MODES, parse_write_mode, wire_to_mode
+from ..access_control import WRITE_MODES, InvalidWriteMode, parse_write_mode, wire_to_mode
 from ..data_logger import DataLogger
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
@@ -98,7 +98,10 @@ class SerialPortWrapper:
         name: Convenience alias of ``config.name``.
         description: Human friendly description string.
         max_read_write_users: Write-slot capacity mode ("none"/"one"/"multiple").
-        is_connected: True while active connection is established.
+        is_connected: True while active connection is established; always False
+            while unstartable.
+        status_message: Non-empty while the port is unstartable (issue #57),
+            then cleared on the next successful connect.
         data_callback: Callback set by PortManager; called with (port_name, data).
     """
 
@@ -145,6 +148,11 @@ class SerialPortWrapper:
         # Timestamp (monotonic) of the last "device does not exist" warning;
         # used to rate-limit the message to at most once per hour.
         self._last_missing_warn_ts: Optional[float] = None
+        # Duplicate-device reason (issue #57): non-empty while another port
+        # in this adapter opens the same device. ``start()`` skips the
+        # connection supervisor while it is set; the status snapshot shows it.
+        # Owned by ``SerialAdapter._recompute_duplicate_device_flags``.
+        self.status_message: str = ""
 
     async def start(self) -> bool:
         """Start (or schedule) serial port connection management.
@@ -154,6 +162,11 @@ class SerialPortWrapper:
         """
         if self.is_connected:
             return True
+        if self.status_message:
+            # Duplicate device (issue #57): another port in this adapter opens
+            # the same device. Stay listed and reported, but never open it.
+            self.state = PortState.DEGRADED
+            return False
 
         self.logger.info(f"Starting serial port {self.config.name} on {self.config.device}")
         self.state = PortState.CREATING
@@ -162,6 +175,22 @@ class SerialPortWrapper:
         self.connection_task = asyncio.create_task(self._connect_loop())
         self.state = PortState.ACTIVE
         return True
+
+    def resume_if_idle(self) -> None:
+        """Start the connection supervisor if it is not running (issue #57).
+
+        A port flagged for a duplicate device never started its supervisor, so
+        clearing the flag leaves the port stopped. Call this after the flag
+        clears to begin connecting again.
+        """
+        if self.is_connected:
+            return
+        if self.connection_task is not None and not self.connection_task.done():
+            return
+        self.logger.info(f"Resuming serial port {self.config.name} on {self.config.device}")
+        self.state = PortState.CREATING
+        self.connection_task = asyncio.create_task(self._connect_loop())
+        self.state = PortState.ACTIVE
 
     async def stop(self) -> None:
         """Stop connection supervision and close the port.
@@ -427,8 +456,8 @@ class SerialPortWrapper:
             raise
 
     def get_status_snapshot(self) -> Dict[str, Any]:
-        """Return static config details for port listings."""
-        return {
+        """Return config details and the unstartable reason for port listings."""
+        snapshot: Dict[str, Any] = {
             "serial_config": {
                 "device": self.config.device,
                 "baudrate": self.config.baudrate,
@@ -441,6 +470,11 @@ class SerialPortWrapper:
                 "rts": self.config.rts,
             }
         }
+        if self.status_message:
+            # Surfaces in /api/ports, the status page, and the console info
+            # overlay (issue #57).
+            snapshot["status_message"] = self.status_message
+        return snapshot
 
 
 class SerialAdapter(BaseGenericAdapter):
@@ -549,6 +583,36 @@ class SerialAdapter(BaseGenericAdapter):
 
         return _notif
 
+    def _recompute_duplicate_device_flags(self) -> None:
+        """Enforce one port per unix device (issue #57).
+
+        A serial device can be opened by only one port, so each port past the
+        first that names a device is marked unstartable with a message. Flags
+        are also cleared when a device becomes unique again (the other port
+        was removed or renamed). Run after every change to the port set.
+        """
+        claimed: Dict[str, str] = {}
+        flagged: Set[str] = set()
+        for name, wrapper in self.serial_ports.items():
+            device = wrapper.config.device
+            holder = claimed.get(device)
+            if holder is None:
+                claimed[device] = name
+            else:
+                flagged.add(name)
+                wrapper.status_message = (
+                    f"device {device} is already used by port '{holder}'. " f"A serial device can be used by only one port"
+                )
+        for name, wrapper in self.serial_ports.items():
+            if name in flagged:
+                if wrapper.state in (PortState.CONFIGURED, PortState.CREATING, PortState.ACTIVE):
+                    self.logger.error(f"Serial port {name} is unstartable: {wrapper.status_message}")
+                wrapper.state = PortState.DEGRADED
+            elif wrapper.status_message:
+                self.logger.info(f"Serial port {name} no longer duplicates a device; connecting again")
+                wrapper.status_message = ""
+                wrapper.resume_if_idle()
+
     def _parse_port_configs(self) -> None:
         """Parse configuration and build ``SerialPortWrapper`` objects.
 
@@ -611,6 +675,10 @@ class SerialAdapter(BaseGenericAdapter):
                 port_name = port_config.get("name", "unknown") if isinstance(port_config, dict) else "unknown"
                 self.logger.error(f"Failed to configure serial port {port_name}: {e}", exc_info=True)
                 raise
+
+        # One port per unix device (issue #57): flag ports that share a device
+        # with an earlier port, before ``start()`` opens anything.
+        self._recompute_duplicate_device_flags()
 
     async def start(self) -> bool:
         """Start all configured serial ports.
@@ -710,6 +778,11 @@ class SerialAdapter(BaseGenericAdapter):
             notifier = self._make_notifier()
             wrapper = SerialPortWrapper(serial_cfg, self.logger, meta_notify=notifier)
             self.serial_ports[serial_cfg.name] = wrapper
+            # One port per unix device (issue #57): recompute after the new port
+            # joins the set so a duplicate is flagged before ``start()`` below
+            # would open the device. The flagged port stays registered and
+            # visible, but its connection supervisor never starts.
+            self._recompute_duplicate_device_flags()
             await wrapper.start()
             if self.main_port_manager:
                 await self.main_port_manager.register_unified_port(serial_cfg.name, wrapper, self)
@@ -729,6 +802,10 @@ class SerialAdapter(BaseGenericAdapter):
                     self.logger.warning(f"Failed to unregister unified port {port_name}")
             await port_wrapper.stop()
             del self.serial_ports[port_name]
+            # One port per unix device (issue #57): the freed device may make a
+            # previously flagged port startable again; recompute so its flag
+            # (and status page message) clears and its connect loop resumes.
+            self._recompute_duplicate_device_flags()
 
     def get_port_configurations(self) -> Dict[str, Dict[str, Any]]:
         """Return mapping of port names to raw configuration dictionaries."""

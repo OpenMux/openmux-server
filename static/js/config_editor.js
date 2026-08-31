@@ -898,7 +898,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
           {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
           {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
-        ])));
+        ])), {onAfterChange:()=>{ updateSerialDeviceHealth(); }});
 
         tables['loopback_ports'] = buildTable('loopback_ports', annotateColumnsWithDefaults('loopback_ports', annotateColumnsWithHelp('loopback_ports', [
           {key:'name', label:'Name', type:'string', required:true},
@@ -1332,6 +1332,88 @@ async function refreshSidebarPorts() {
   } catch (_e) {}
 }
 
+// --- Serial device health (issue #57): one unix device per port ---
+// One panel, two lists: the running server (fetched from /api/ports after
+// save) and the editor draft (recomputed on every table edit, before save).
+function findDuplicateDevices(entries){
+  const seen = {};
+  const dups = {};
+  (entries || []).forEach(e=>{
+    const dev = e && e.device ? String(e.device) : '';
+    if(!dev) return;
+    if(seen[dev]===undefined){ seen[dev] = null; }
+    else if(!dups[dev]){ dups[dev] = [seen[dev]]; }
+    if(dups[dev]) dups[dev].push(e.name || '(unnamed)');
+  });
+  return dups;
+}
+function renderSerialDeviceHealth(panel, serverDups, serverOk, draftDups, serverBusy){
+  panel.innerHTML = '';
+  const addList = (title, dups, emptyText) => {
+    const label = document.createElement('div');
+    label.className = 'subtle';
+    label.textContent = title;
+    panel.appendChild(label);
+    const list = document.createElement('ul');
+    list.style.margin = '2px 0 10px 0';
+    list.style.paddingLeft = '18px';
+    const names = Object.keys(dups || {});
+    if(!names.length){
+      const li = document.createElement('li');
+      const tag = document.createElement('span');
+      tag.className = (serverBusy && dups===undefined) ? 'tag warn' : 'tag ok';
+      tag.textContent = serverBusy && dups===undefined ? 'checking…' : emptyText;
+      li.appendChild(tag);
+      list.appendChild(li);
+    } else {
+      names.forEach(dev=>{
+        const li = document.createElement('li');
+        li.style.marginBottom = '3px';
+        li.style.color = 'var(--status-err-text)';
+        const b = document.createElement('b');
+        b.textContent = dev;
+        li.appendChild(b);
+        li.appendChild(document.createTextNode(' is used by: ' + (dups[dev] || []).join(', ')));
+        list.appendChild(li);
+      });
+    }
+    panel.appendChild(list);
+  };
+  addList(serverBusy ? 'Running server (checking…)' : 'Running server', serverDups, serverOk ? 'No duplicate devices' : 'Not available');
+  addList('Editor draft (unsaved)', draftDups, 'No duplicate devices');
+}
+function updateSerialDeviceHealth(){
+  // Cheap recomputation of the editor draft only (runs on every table edit);
+  // the server list keeps its last fetched state.
+  const panel = document.getElementById('serialDeviceHealth');
+  if(!panel) return;
+  const rows = tables['serial_ports'] && tables['serial_ports']._get ? tables['serial_ports']._get() : [];
+  renderSerialDeviceHealth(panel, panel._serverDups || {}, panel._serverOk === true, findDuplicateDevices(rows), false);
+}
+async function refreshSerialDeviceHealth(){
+  const panel = document.getElementById('serialDeviceHealth');
+  if(!panel) return;
+  const token = (panel._refreshToken = (panel._refreshToken || 0) + 1);
+  const draft = () => findDuplicateDevices(tables['serial_ports'] && tables['serial_ports']._get ? tables['serial_ports']._get() : []);
+  renderSerialDeviceHealth(panel, undefined, false, draft(), true);
+  try{
+    const r = await fetch(withBase('/api/ports'), {credentials: 'same-origin'});
+    if(r.ok){
+      const j = await r.json();
+      const entries = (j.ports || []).filter(p=>p && String(p.adapter||'').toLowerCase()==='serial')
+        .map(p=>({name: p.name, device: (p.serial_config||{}).device, flagged: !!p.status_message}));
+      // Surface running ports the server already flagged (status_message,
+      // set after the save this refresh follows) as server findings.
+      const dups = findDuplicateDevices(entries);
+      entries.forEach(p=>{ if(p.flagged && p.device) dups[p.device] = dups[p.device] || [p.name]; });
+      panel._serverDups = dups;
+      panel._serverOk = true;
+    }
+  } catch(_e){ /* server list stays "not available" */ }
+  if(panel._refreshToken !== token) return; // a newer refresh superseded it
+  renderSerialDeviceHealth(panel, panel._serverDups || {}, panel._serverOk === true, draft(), false);
+}
+
 async function saveConfig(){
   let payload;
   try{ payload=buildConfig(); }
@@ -1348,6 +1430,7 @@ async function saveConfig(){
       refreshSidebarPorts();
       const reloadOutcome = await requestReload('soft');
       setReloadStatus(reloadOutcome.ok, reloadOutcome.payload);
+      refreshSerialDeviceHealth();
       if(reloadOutcome.ok){
         const detail = typeof reloadOutcome.payload === 'string' ? reloadOutcome.payload : 'Soft reload completed';
         setStatus(true, `Saved; ${detail}`);
@@ -1646,4 +1729,5 @@ setWritableMetadata(INITIAL_WRITABLE_SECTIONS, INITIAL_WRITABLE_ENFORCED);
 loadCurrent();
 updateView();
 loadActionHealth();
+refreshSerialDeviceHealth();
     })();

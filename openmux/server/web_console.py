@@ -25,8 +25,8 @@ import importlib
 import json
 import logging
 import os
-import re
 import platform
+import re
 import secrets
 import ssl
 import sys
@@ -2437,6 +2437,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
             ls_seen = info.get("last_seen")
             if ls_seen is not None:
                 meta["last_seen"] = ls_seen
+            # Unstartable reason (issue #57, e.g. duplicate serial device); the
+            # snapshot omits the key when the port is healthy.
+            status_msg = info.get("status_message")
+            if status_msg:
+                meta["status_message"] = status_msg
             payload = "OMXCTRL " + json.dumps(meta, separators=(",", ":"))
             for cid in list(subs):
                 try:

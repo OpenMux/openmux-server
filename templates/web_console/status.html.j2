@@ -36,6 +36,15 @@
             {% if adapter %}<span class="tag tiny">{{ adapter }}</span>{% else %}<span class="muted">—</span>{% endif %}
           </td>
         </tr>
+        {% if p.status_message %}
+          <tr>
+            <th>Status</th>
+            <td>
+              <span class="tag tiny bad">unstartable</span>
+              <span class="muted">{{ p.status_message }}</span>
+            </td>
+          </tr>
+        {% endif %}
         <tr>
           <th>Serial</th>
           <td>
@@ -161,6 +170,9 @@
         <td>
           {% set conn = (p.connected if ('connected' in p) else (p.is_running or false)) %}
           <span class="tag {% if conn %}ok{% else %}bad{% endif %}">{{ conn and 'connected' or 'down' }}</span>
+          {% if p.status_message %}
+            <span class="tag bad" title="{{ p.status_message }}">{{ 'unstartable' }}</span>
+          {% endif %}
         </td>
         <td>
           {% set cnt = p.client_count %}
