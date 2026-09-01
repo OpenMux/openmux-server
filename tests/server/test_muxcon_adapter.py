@@ -3115,3 +3115,469 @@ async def test_proxy_take_builds_correct_spec(monkeypatch):
 
     await proxy.take_write_slot_for_client("browser1", target_client_id="browser1")
     assert captured[-1] == "TAKE:own:9"
+
+
+# =============================================================================
+# Issue #62: muxcon link-down reason (RemotePortProxy.link_reason)
+# =============================================================================
+
+
+def test_remote_port_proxy_get_status_link_reason_wins_over_origin():
+    """`link_reason` overrides the origin's stale `status_message` when the link is down."""
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    m = _status_meta(status_message="Connection refused by h:1")
+    proxy = a.RemotePortProxy(a, "node:peer1", m.name, m)
+    assert "status_message" in proxy.get_status()
+
+    proxy.link_reason = "MuxCon link to peer1 is down"
+    snap = proxy.get_status()
+    assert snap["status_message"] == "MuxCon link to peer1 is down"
+    assert snap["connected"] is True  # unchanged: is_connected is not flipped here
+
+
+def test_remote_port_proxy_get_status_no_link_reason_keeps_origin():
+    """With no link reason, the origin's `status_message` is surfaced unchanged."""
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    m = _status_meta(status_message="Process exited with code 7")
+    proxy = a.RemotePortProxy(a, "node:peer1", m.name, m)
+    assert proxy.get_status()["status_message"] == "Process exited with code 7"
+
+
+def test_remote_port_proxy_get_status_link_reason_clears_origin_reason():
+    """When the origin's reason is absent but the link is down, the link reason still shows."""
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    m = _status_meta(status_message=None)
+    proxy = a.RemotePortProxy(a, "node:peer1", m.name, m)
+    assert "status_message" not in proxy.get_status()
+    proxy.link_reason = "MuxCon link to peer1 is down"
+    assert proxy.get_status()["status_message"] == "MuxCon link to peer1 is down"
+
+
+@pytest.mark.asyncio
+async def test_link_state_flips_clear_link_reason_on_recover():
+    """`_update_peer_proxies_live_state` clears `link_reason` when a path goes live again."""
+    import time as _time
+
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    m = _status_meta(status_message=None)
+    proxy = a.RemotePortProxy(a, "node:p1", m.name, m)
+    a._peer_proxies["node:p1"] = {m.name: proxy}
+    a.main_port_manager = FakePM()
+
+    # No live paths, proxy was disconnected: set "stale" window wide so we land
+    # in the all-stale branch.
+    proxy.is_connected = True
+    a._mpath_groups["node:p1"] = {
+        "conns": OrderedDict({
+            "c1": {"opened_at": _time.time() - 9999, "last_rx_seen": _time.time() - 9999},
+        }),
+        "primary": "c1",
+        "rr_index": 0,
+    }
+    a._hb_state["c1"] = {"last_req_ts": _time.time() - 9999, "last_ack_ts": _time.time() - 9999, "missed": 99, "rtt_ms": 999}
+
+    a._update_peer_proxies_live_state("node:p1")
+    assert proxy.is_connected is False
+    # server_id comes from the metadata's origin_server, which _status_meta
+    # sets to "peer1" (the peer_key is a separate internal grouping key).
+    assert proxy.link_reason == "MuxCon link to peer1 is down"
+
+    # Now make the path live: refresh timestamps and flip to connected.
+    a._mpath_groups["node:p1"]["conns"]["c1"]["last_rx_seen"] = _time.time()
+    a._hb_state["c1"]["last_ack_ts"] = _time.time()
+    proxy.is_connected = False  # already set False; flip to live by re-running
+    # Force "live" transition by first marking as live from this run's perspective.
+    a._update_peer_proxies_live_state("node:p1")
+    assert proxy.is_connected is True
+    assert proxy.link_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_load_federated_cache_offline_proxy_gets_link_reason(tmp_path):
+    """Cold-start: an offline cached proxy gets `link_reason` set to 'link is down'."""
+    import json as _json
+
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    a.main_port_manager = FakePM()
+    cache_path = tmp_path / "cache.json"
+    a.federated_cache_path = str(cache_path)
+    a.federated_cache_enabled = True
+
+    # Pre-populate cache with an offline remote port record.
+    cache_path.write_text(_json.dumps({
+        "peers": {
+            "node:peer1": {
+                "rport": {
+                    "connected": False,
+                    "last_seen": 0,
+                    "origin_server_id": "peer1",
+                    "description": "remote",
+                    "max_rw_users": 1,
+                    "serial_config": None,
+                    "line_status": None,
+                    "read_write_groups": [],
+                    "read_only_groups": [],
+                    # Origin's reason at cache-save time: preserved on metadata
+                    # but should be preempted by the fresh "link is down" reason.
+                    "status_message": "Connection refused by p1:1234",
+                },
+            },
+        },
+    }))
+
+    await a._load_federated_cache()
+    p = a._peer_proxies["node:peer1"]["rport"]
+    assert p.is_connected is False
+    assert p.link_reason == "MuxCon link to peer1 is down"
+    snap = p.get_status()
+    assert snap["status_message"] == "MuxCon link to peer1 is down"
+
+
+# =============================================================================
+# Issue #62: status_message propagation to federated peers
+# =============================================================================
+
+
+def _status_meta(name="remote1", status_message=None):
+    """Build a `PortMetadata` suitable for origin-build / remote-parse tests."""
+    from openmux.common.federation_types import PortMetadata, ServerInfo, ServerType
+
+    si = ServerInfo(server_id="peer1", hostname="peer1", port=0, server_type=ServerType.LEAF, description="")
+    return PortMetadata(
+        name=name,
+        original_name=name,
+        description="Remote",
+        adapter_type="remote_muxcon",
+        origin_server=si,
+        server_chain=[si],
+        status="disconnected" if status_message else "connected",
+        max_rw_users=1,
+        status_message=status_message,
+    )
+
+
+def test_port_metadata_to_dict_and_federation_dict_emit_status_message():
+    """Round-trip: `status_message` set is present in both serialization paths."""
+    m = _status_meta(status_message="Connection refused by h:1")
+    # to_dict is used for local /api/ports enrichment from a remote metadata.
+    d = m.to_dict()
+    assert d.get("status_message") == "Connection refused by h:1"
+    fd = m.to_federation_dict()
+    assert fd.get("status_message") == "Connection refused by h:1"
+
+
+def test_port_metadata_omits_status_message_when_unset():
+    """Round-trip: `status_message=None` is omitted from the wire (mixed-version peers)."""
+    m = _status_meta(status_message=None)
+    d = m.to_dict()
+    assert "status_message" not in d
+    fd = m.to_federation_dict()
+    assert "status_message" not in fd
+
+
+@pytest.mark.asyncio
+async def test_origin_port_list_forwards_status_message(monkeypatch):
+    """Origin build: a local port dict with `status_message` is emitted in `PortMetadata`."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    ports_with_reasons = [
+        {"name": "healthy", "adapter_type": "loopback", "connected": True, "max_rw_users": 1},
+        {
+            "name": "offlined",
+            "adapter_type": "tcp_initiator",
+            "connected": False,
+            "status_message": "Connection refused by h:1",
+            "max_rw_users": 1,
+        },
+    ]
+
+    class PM:
+        ports = {}
+
+        async def get_port_list_with_federation(self):
+            return ports_with_reasons
+
+        def get_port(self, name):
+            return self.ports.get(name)
+
+    pm = PM()
+    a.main_port_manager = pm
+    a.server_id = "origin-srv"
+    conn_id = "out:peer:1:1"
+    w = FakeWriter()
+    a.connections[conn_id] = {"writer": w, "auth_ok": True}
+    a._wire_state[conn_id] = {"send_next": 1}
+
+    # Intercept the actual `metas` list produced by the origin builder. We can't
+    # easily wrap `PortMetadata` construction, so we parse the wire payload —
+    # `sent_bytes` from FakeWriter carries the full PORTS:FEDERATED response
+    # frame, and each port appears as a JSON line.
+    await a._send_local_port_list(conn_id, cast(Any, w))
+
+    text = w.buffer.decode("utf-8", errors="replace")
+    assert text.startswith("#0:C:")
+    # Extract the payload segment between the header and END:PORTS
+    assert "PORTS:FEDERATED:2" in text
+    start = text.index("PORTS:FEDERATED:2")
+    end = text.index("END:PORTS")
+    body = text[start : end + len("END:PORTS")]
+    # Body format: "PORTS:FEDERATED:2\n<json1>\n<json2>\nEND:PORTS"
+    lines = body.split("\n")
+    port_lines = [ln.strip() for ln in lines[1 : len(lines) - 1] if ln.strip()]
+    assert len(port_lines) == 2
+    parsed = [json.loads(ln) for ln in port_lines]
+    by_name = {p["name"]: p for p in parsed}
+    assert "healthy" in by_name and "offlined" in by_name
+    # Healthy: `status_message` key is omitted (mixed-version safe)
+    assert "status_message" not in by_name["healthy"]
+    # Offlined: carries the reason
+    assert by_name["offlined"]["status_message"] == "Connection refused by h:1"
+
+
+@pytest.mark.asyncio
+async def test_register_remote_port_dict_captures_status_message():
+    """Parse path: a federated port dict carrying `status_message` sets the field on the proxy metadata."""
+    from openmux.server.port_manager import PortManager
+
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = PortManager([])
+    ad.main_port_manager = pm
+    pd = {
+        "name": "remote1",
+        "description": "Remote port",
+        "adapter_type": "remote_muxcon",
+        "origin_server": {"server_id": "peer1", "hostname": "peer1", "port": 0, "server_type": "leaf"},
+        "status": "disconnected",
+        "max_rw_users": 1,
+        "status_message": "Process exited with code 42",
+    }
+    conn_id = "in:127.0.0.1:9999:1"
+    await ad._register_remote_port_from_dict(conn_id, pd)
+    proxy = pm.get_port("remote1")
+    assert proxy is not None
+    assert proxy.metadata.status_message == "Process exited with code 42"
+    # `get_status` on the proxy must also carry the text (so web_console and UI render it)
+    s = proxy.get_status()
+    assert s.get("status_message") == "Process exited with code 42"
+
+
+@pytest.mark.asyncio
+async def test_register_remote_port_dict_without_status_message_is_absent():
+    """Parse path with no `status_message` key: field stays None (older peers don't emit it)."""
+    from openmux.server.port_manager import PortManager
+
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = PortManager([])
+    ad.main_port_manager = pm
+    pd = {
+        "name": "remote2",
+        "description": "Remote port",
+        "adapter_type": "remote_muxcon",
+        "origin_server": {"server_id": "peer1", "hostname": "peer1", "port": 0, "server_type": "leaf"},
+        "status": "connected",
+        "max_rw_users": 1,
+    }
+    conn_id = "in:127.0.0.1:9999:2"
+    await ad._register_remote_port_from_dict(conn_id, pd)
+    proxy = pm.get_port("remote2")
+    assert proxy is not None
+    assert proxy.metadata.status_message is None
+    assert "status_message" not in proxy.get_status()
+
+
+@pytest.mark.asyncio
+async def test_save_and_load_federated_cache_preserves_status_message(tmp_path):
+    """`_save_federated_cache` / `_load_federated_cache` round-trip carries `status_message`."""
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = FakePM()
+    a.main_port_manager = pm
+    a.federated_cache_enabled = True
+    cache_path = str(tmp_path / "federated_cache.json")
+    a.federated_cache_path = cache_path
+    # Seed a peer proxy with a metadata that has a status_message
+    peer_key = "node:peer1"
+    meta = _status_meta(name="remote1", status_message="Connection closed by remote")
+    proxy = a.RemotePortProxy(a, peer_key, "remote1", meta)
+    a._peer_proxies = {peer_key: {"remote1": proxy}}
+    a._save_federated_cache()
+    # Inspect the on-disk JSON
+    with open(cache_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    ent = data["peers"][peer_key]["remote1"]
+    assert ent["status_message"] == "Connection closed by remote"
+
+    # Now load into a fresh adapter instance
+    b = UnifiedMuxConAdapter("b", {"muxcon": {}})
+    b.main_port_manager = FakePM()
+    b.federated_cache_enabled = True
+    b.federated_cache_path = cache_path
+    await b._load_federated_cache()
+    loaded_meta = b._peer_proxies[peer_key]["remote1"].metadata
+    assert loaded_meta.status_message == "Connection closed by remote"
+
+
+def test_parse_port_status_frame():
+    """`_parse_port_status_frame` returns (port, msg) for a valid payload, None on malformed."""
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    parsed = UnifiedMuxConAdapter._parse_port_status_frame('PORT_STATUS:remote1\n{"status_message":"Connection refused"}')
+    assert parsed == ("remote1", "Connection refused")
+    # Malformed: no PORT_STATUS prefix
+    assert UnifiedMuxConAdapter._parse_port_status_frame("VIEWERS:p1\n[]") is None
+    # Malformed: missing body
+    assert UnifiedMuxConAdapter._parse_port_status_frame("PORT_STATUS:p1") is None
+    # Empty-string body (healthy transition)
+    # Body must be a JSON line.  Empty string encodes as {"status_message": ""}.
+    parsed2 = UnifiedMuxConAdapter._parse_port_status_frame("PORT_STATUS:p1\n{}")
+    assert parsed2 is not None
+    assert parsed2[0] == "p1" and parsed2[1] == ""
+
+
+@pytest.mark.asyncio
+async def test_handle_port_status_frame_updates_metadata_and_notifies_meta(monkeypatch):
+    """Inbound `PORT_STATUS:` updates proxy metadata and fires a meta event.
+
+    This is what lets the web console live-updates the federated port with the
+    fresh reason, without needing a full `PORTS:FEDERATED` refresh (issue #62).
+    """
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = FakePM()
+    a.main_port_manager = pm
+    # Register a fake proxy (we use the real proxy so metadata is a PortMetadata)
+    conn_id = "in:127.0.0.1:9999:3"
+    a.connections[conn_id] = {"writer": FakeWriter(), "auth_ok": True}
+    peer_key = a._derive_peer_key_from_conn_id(conn_id)
+    meta = _status_meta(status_message=None)
+    proxy = a.RemotePortProxy(a, conn_id, "remote1", meta)
+    a._peer_proxies = {peer_key: {"remote1": proxy}}
+
+    notified: List[Tuple[str, Dict[str, Any]]] = []
+
+    def fake_notify(name, payload):
+        notified.append((name, payload or {}))
+
+    pm.notify_meta_updated = fake_notify  # type: ignore[assignment]
+
+    await a._handle_port_status_frame(conn_id, 'PORT_STATUS:remote1\n{"status_message":"Connection refused by h:1"}')
+    # Proxy metadata reflects the fresh reason
+    assert proxy.metadata.status_message == "Connection refused by h:1"
+    # A meta notify fired for the port (so web console re-renders it)
+    assert notified and notified[0][0] == "remote1"
+    assert notified[0][1].get("event") == "federated_status_message_changed"
+
+
+@pytest.mark.asyncio
+async def test_handle_port_status_frame_for_unknown_port_is_noop():
+    """Receiving a `PORT_STATUS:` frame for a port we don't track is a safe no-op."""
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = FakePM()
+    a.main_port_manager = pm
+    notified: List[Tuple[str, Dict[str, Any]]] = []
+    pm.notify_meta_updated = lambda n, p: notified.append((n, p or {}))  # type: ignore[assignment]
+    conn_id = "in:127.0.0.1:9999:4"
+    a.connections[conn_id] = {"writer": FakeWriter(), "auth_ok": True}
+    # No peer_proxies entries
+    a._peer_proxies = {}
+    # Should not raise or notify
+    await a._handle_port_status_frame(conn_id, "PORT_STATUS:ghost\n{}")
+    assert notified == []
+
+
+@pytest.mark.asyncio
+async def test_broadcast_port_status_sends_wire_frame():
+    """`_broadcast_port_status` emits a `PORT_STATUS:<name>` control frame carrying the JSON reason."""
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    a.server_id = "origin"
+
+    # A writer that passes `isinstance(..., asyncio.StreamWriter)` so the
+    # broadcast's writer gate doesn't skip it.
+    class SW(asyncio.StreamWriter):
+        def __init__(self):
+            self.buffer = bytearray()
+            self._closed = False
+
+        def write(self, data: bytes):
+            self.buffer += data
+
+        async def drain(self):  # type: ignore[override]
+            return None
+
+        def close(self):  # type: ignore[override]
+            self._closed = True
+
+        async def wait_closed(self):  # type: ignore[override]
+            return None
+
+        def is_closing(self):  # type: ignore[override]
+            return self._closed
+
+    w = SW()
+    cid = "out:peer:1:1"
+    a.connections[cid] = {"writer": w, "auth_ok": True, "server_id": "peer"}
+    a._wire_state[cid] = {"send_next": 1}
+
+    await a._broadcast_port_status("remote_p", "Connection refused by h:1")
+    text = w.buffer.decode("utf-8", errors="replace")
+    assert "PORT_STATUS:remote_p" in text
+    assert '"status_message":"Connection refused by h:1"' in text
+
+    # Never echo back to the owning peer: a conn whose server_id == self is skipped.
+    w.buffer.clear()
+    a.connections[cid] = {"writer": w, "auth_ok": True, "server_id": "origin"}
+    await a._broadcast_port_status("remote_p", "some reason")
+    assert not w.buffer
+
+
+@pytest.mark.asyncio
+async def test_on_port_meta_for_status_relay_broadcasts_for_local_ports(monkeypatch):
+    """Meta listener: a local port's `status_message` change is pushed to peers
+    via `_broadcast_port_status`, and re-published federated proxies are ignored
+    (to avoid re-broadcasting reasons we received from an origin).
+    """
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = FakePM()
+    a.main_port_manager = pm
+    a.server_id = "origin"
+
+    class LocalPort:
+        name = "local_p"
+
+    local = LocalPort()
+    pm.ports["local_p"] = local
+
+    remote_meta = _status_meta(name="remote_p", status_message="from origin")
+    remote_proxy = a.RemotePortProxy(a, "node:peer", "remote_p", remote_meta)
+    pm.ports["remote_p"] = remote_proxy
+    # FakePM has no get_port -> provide one so the ownership guard can classify ports.
+    pm.get_port = lambda name: pm.ports.get(name)  # type: ignore[assignment]
+
+    broadcast_calls: List[Tuple[str, str]] = []
+
+    async def fake_broadcast(port_name: str, msg: str):
+        broadcast_calls.append((port_name, msg))
+
+    monkeypatch.setattr(a, "_broadcast_port_status", fake_broadcast)
+
+    # Local port change: broadcast with the fresh reason.
+    payload_local = {"event": "tcp_disconnected", "status_message": "Connection timeout"}
+    await a._on_port_meta_for_status_relay("local_p", payload_local)
+    assert broadcast_calls == [("local_p", "Connection timeout")]
+
+    # Federated proxy change (re-published): ownership guard skips the broadcast.
+    payload_remote = {"event": "federated_status_message_changed", "status_message": "re-publish"}
+    await a._on_port_meta_for_status_relay("remote_p", payload_remote)
+    assert len(broadcast_calls) == 1  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_on_port_meta_for_status_relay_ignores_unrelated_events(monkeypatch):
+    """A meta event without a `status_message` key passes through silently."""
+    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = FakePM()
+    a.main_port_manager = pm
+    broadcast_calls: List[Tuple[str, str]] = []
+    monkeypatch.setattr(a, "_broadcast_port_status", lambda port_name, msg: broadcast_calls.append((port_name, msg)))
+    # No status_message key -> no broadcast
+    await a._on_port_meta_for_status_relay("local_p", {"event": "federated_disconnected"})
+    assert broadcast_calls == []
+    # Non-dict payload -> no broadcast
+    await a._on_port_meta_for_status_relay("local_p", None)
+    assert broadcast_calls == []

@@ -155,9 +155,38 @@ class CommandPort:
         self.restart_count = 0
 
         self._stopped_notice_sent = False
+        # Human-readable reason the process is not running (issue #62):
+        # spawn failure, process exit with non-zero code, or max-restarts.
+        # Empty while the process is active or the port is in a resting state.
+        self.status_message: str = ""
+        self._status_changed: Optional[bool] = None
 
         if not self.command:
             raise ValueError(f"Command port {name} requires 'command' configuration")
+
+    def _set_status_message(self, message: str) -> None:
+        """Set or clear the process-down reason and push a meta refresh on state change.
+
+        Args:
+            message: New status message (empty string clears).
+        """
+        new_state = bool(message)
+        if self._status_changed is None or self._status_changed != new_state:
+            self._status_changed = new_state
+            # Set the reason first so the meta payload carries the final text;
+            # muxcon listeners read it to push live updates to peers (#62).
+            self.status_message = str(message or "")
+            try:
+                mpm = getattr(getattr(self, "adapter", None), "main_port_manager", None)
+                if mpm and hasattr(mpm, "notify_meta_updated"):
+                    mpm.notify_meta_updated(
+                        self.name,
+                        {"event": "command_status_changed", "status_message": self.status_message},
+                    )
+            except Exception:
+                pass
+        else:
+            self.status_message = str(message or "")
 
     async def write_data(self, data: bytes) -> int:
         """Standardized write API: return number of bytes accepted.
@@ -460,18 +489,30 @@ class CommandPort:
             if self.use_pty and self._output_batching_enabled:
                 if self._output_flush_task is None or self._output_flush_task.done():
                     self._output_flush_task = asyncio.create_task(self._output_flush_buffer_loop())
+            # Process is running again; clear any prior offline reason (issue #62).
+            self._set_status_message("")
             return True
+        except FileNotFoundError as e:
+            self.logger.error(f"Error spawning process for {self.name}: {e}", exc_info=True)
+            self._set_status_message(f"Process not found: {e}")
+            return False
         except Exception as e:
             self.logger.error(f"Error spawning process for {self.name}: {e}", exc_info=True)
+            self._set_status_message(f"Process spawn failed: {e}")
             return False
 
     def get_status_snapshot(self) -> Dict[str, Any]:
-        """Return static config details for port listings."""
-        return {
+        """Return config details and the offline reason for port listings."""
+        snapshot: Dict[str, Any] = {
             "serial_config": {
                 "device": f"shell:{self.command}",
             }
         }
+        if self.status_message:
+            # Surfaces in /api/ports, the status page, and the console info
+            # overlay (issue #62).
+            snapshot["status_message"] = self.status_message
+        return snapshot
 
     def _build_preexec_fn(self):
         if not self.use_pty:
@@ -647,16 +688,24 @@ class CommandPort:
             try:
                 if not self.process:
                     break
-                await self.process.wait()
+                exit_code = await self.process.wait()
                 self.process_active = False
+                # Capture the exit reason (issue #62). Code 0 means a normal
+                # shutdown and gets no message; non-zero is reported.
+                if exit_code and exit_code != 0:
+                    self._set_status_message(f"Process exited with code {exit_code}")
                 if not self.is_running:
                     break
                 if not self.auto_restart:
                     self.logger.info(f"Process exited for {self.name}; not restarting")
+                    if not self.status_message:
+                        self._set_status_message(f"Process exited (code {exit_code}, auto_restart off)")
                     self.state = PortState.DEGRADED
                     break
                 if self.max_restarts and self.restart_count >= self.max_restarts:
                     self.logger.error(f"Max restarts reached for {self.name}; not restarting")
+                    if not self.status_message:
+                        self._set_status_message(f"Max restarts reached ({self.max_restarts})")
                     self.state = PortState.DEGRADED
                     break
                 self.restart_count += 1
@@ -745,6 +794,9 @@ class CommandPort:
             self._writer = None
             self.process = None
             self.client_count = 0
+            # An intentional stop is a resting state, not a failure; clear the
+            # offline reason so the port does not show a stale exit code.
+            self._set_status_message("")
             self.is_running = False
             self.process_active = False
             self.state = PortState.CONFIGURED

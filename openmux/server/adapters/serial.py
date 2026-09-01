@@ -98,10 +98,11 @@ class SerialPortWrapper:
         name: Convenience alias of ``config.name``.
         description: Human friendly description string.
         max_read_write_users: Write-slot capacity mode ("none"/"one"/"multiple").
-        is_connected: True while active connection is established; always False
-            while unstartable.
-        status_message: Non-empty while the port is unstartable (issue #57),
-            then cleared on the next successful connect.
+        is_connected: True while active connection is established; always
+            False while the port is offline.
+        status_message: Non-empty while the port is offline with a reason:
+            blocked start (issue #57, duplicate device), disconnected, or
+            failed to connect (issue #62). Cleared on a successful connect or stop.
         data_callback: Callback set by PortManager; called with (port_name, data).
     """
 
@@ -152,7 +153,41 @@ class SerialPortWrapper:
         # in this adapter opens the same device. ``start()`` skips the
         # connection supervisor while it is set; the status snapshot shows it.
         # Owned by ``SerialAdapter._recompute_duplicate_device_flags``.
+        # Also set on disconnect / failed connect (issue #62) so the web
+        # console can show why the port is offline; cleared on successful connect.
         self.status_message: str = ""
+        self._status_changed: Optional[bool] = None
+
+    def _set_status_message(self, message: str, connected: bool = False) -> None:
+        """Set or clear the offline reason and push a meta refresh on state change.
+
+        Mirrors the ``command`` and ``tcp_initiator`` adapters (issue #62) so
+        all port types surface a live "why is this port down" reason to the web
+        console. The state we track ("reasoned/online-ish") is *has a reason* or
+        *not connected*; an empty reason while connected is "online", and
+        anything else is "offline".
+
+        Args:
+            message: New status text (empty string clears).
+            connected: Current connection state. Used to treat an empty reason
+                while the port is down as "still offline".
+        """
+        new_state = bool(message) or not connected
+        if self._status_changed is None or self._status_changed != new_state:
+            self._status_changed = new_state
+            # Set the reason first so the meta payload carries the final text;
+            # muxcon listeners read it to push live updates to peers (#62).
+            self.status_message = str(message or "")
+            if self._meta_notify:
+                try:
+                    self._meta_notify(
+                        self.config.name,
+                        {"event": "serial_status_changed", "status_message": self.status_message},
+                    )
+                except Exception:
+                    self.logger.debug("Meta notify failed on serial status change", exc_info=True)
+        else:
+            self.status_message = str(message or "")
 
     async def start(self) -> bool:
         """Start (or schedule) serial port connection management.
@@ -220,6 +255,10 @@ class SerialPortWrapper:
 
         # Close connection
         await self._disconnect()
+        # Intentional stop is a resting state, not a failure (issue #62):
+        # clear any "Disconnected from ..." reason from a prior drop so the
+        # port is not shown with a stale reason after the user disconnects.
+        self._set_status_message("")
         self.state = PortState.DESTROYED
 
     async def _connect_loop(self) -> None:
@@ -286,6 +325,7 @@ class SerialPortWrapper:
                     self._last_missing_warn_ts = now
                 else:
                     self.logger.debug(f"Serial device {self.config.device} still not found")
+                self._set_status_message(f"Serial device {self.config.device} not found", connected=False)
                 return False
 
             # Check device type on POSIX systems
@@ -306,6 +346,7 @@ class SerialPortWrapper:
                 self.logger.error(
                     "pyserial-asyncio not installed (required for serial adapter). Install with: pip install pyserial-asyncio"
                 )
+                self._set_status_message("pyserial-asyncio not installed", connected=False)
                 return False
 
             # Create serial connection
@@ -326,6 +367,10 @@ class SerialPortWrapper:
 
             self.is_connected = True
             self.logger.info(f"Successfully connected to {self.config.device}")
+            # Reason for a previous failed cycle no longer applies now that we
+            # are connected (issue #62); also clears the "Disconnected from ..."
+            # reason on reconnect after a drop.
+            self._set_status_message("", connected=True)
             try:
                 if self._meta_notify and self._last_notified_connected is not True:
                     self._meta_notify(self.config.name, {"event": "serial_connected", "connected": True})
@@ -339,6 +384,7 @@ class SerialPortWrapper:
             # (e.g. termios EIO), and the connect loop retries with this same
             # failure every cycle, so a stack trace only adds noise.
             self.logger.error(f"Failed to connect to {self.config.device}: {e}")
+            self._set_status_message(f"Failed to open {self.config.device}: {e}", connected=False)
             return False
 
     async def _disconnect(self) -> None:
@@ -384,6 +430,8 @@ class SerialPortWrapper:
                 if not data:
                     # Empty read typically means connection closed
                     self.logger.warning("Serial connection closed (empty read)")
+                    # Reason for the drop (issue #62) so the banner can show it
+                    self._set_status_message(f"Disconnected from {self.config.device}")
                     # Proactively mark down and notify before breaking, to update UI immediately
                     try:
                         # Mark state false immediately to reduce race window
@@ -420,6 +468,8 @@ class SerialPortWrapper:
                 break
             except Exception as e:
                 self.logger.error(f"Error reading from {self.config.device}: {e}", exc_info=True)
+                # Reason for the drop (issue #62) so the banner can show it
+                self._set_status_message(f"Read error on {self.config.device}: {e}")
                 # Proactively notify disconnect on read error
                 try:
                     # Mark state false immediately to reduce race window
@@ -456,7 +506,7 @@ class SerialPortWrapper:
             raise
 
     def get_status_snapshot(self) -> Dict[str, Any]:
-        """Return config details and the unstartable reason for port listings."""
+        """Return config details and the offline reason for port listings."""
         snapshot: Dict[str, Any] = {
             "serial_config": {
                 "device": self.config.device,
@@ -587,7 +637,7 @@ class SerialAdapter(BaseGenericAdapter):
         """Enforce one port per unix device (issue #57).
 
         A serial device can be opened by only one port, so each port past the
-        first that names a device is marked unstartable with a message. Flags
+        first that names a device is marked offline with a message. Flags
         are also cleared when a device becomes unique again (the other port
         was removed or renamed). Run after every change to the port set.
         """
@@ -606,7 +656,7 @@ class SerialAdapter(BaseGenericAdapter):
         for name, wrapper in self.serial_ports.items():
             if name in flagged:
                 if wrapper.state in (PortState.CONFIGURED, PortState.CREATING, PortState.ACTIVE):
-                    self.logger.error(f"Serial port {name} is unstartable: {wrapper.status_message}")
+                    self.logger.error(f"Serial port {name} is offline: {wrapper.status_message}")
                 wrapper.state = PortState.DEGRADED
             elif wrapper.status_message:
                 self.logger.info(f"Serial port {name} no longer duplicates a device; connecting again")

@@ -31,6 +31,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Creating | `start()` is running; the port is not ready yet. | — |
 | Active | The port is ready and accepts data. | connected, online |
 | Degraded | The port exists but works with reduced function (for example, a disconnected device that retries). | — |
+| Offline | The UI tag shown for a port that is not connected and carries a reason (a failed start, a dropped connection, or a blocked start such as a duplicate serial device). The reason text is always shown next to it. | unstartable (use offline for every port type) |
 | Destroying | `stop()` is running; cleanup is not done yet. | — |
 | Destroyed | The port is stopped. Do not reuse the instance. | removed, dead |
 

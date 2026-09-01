@@ -164,6 +164,8 @@ await port.stop()
 | `on_client_count_changed(count)` | Called by PM when the number of connected read-write clients changes. |
 | `adapter_type` | String identifying the adapter class. Surfaced in port listings. |
 | `scrollback_size` | `int` bytes of recent output to retain for client-requested scrollback replay; `0` (default) disables it. The `UnifiedPortWrapper` reads this attribute once at registration and owns the actual ring buffer (`_scrollback`) and replay (`get_scrollback()`) — a port only needs to read `scrollback_size` from its config in `__init__` and expose it; see `serial.py`, `command.py`, `loopback.py`, and `tcp_initiator.py` for the pattern. |
+| `status_message` | `str` (empty while healthy or in a resting state). Human-readable reason the port is offline. When non-empty the port includes it in its `get_status_snapshot()` return, so it surfaces in `/api/ports`, the web status page, the console info overlay, the "Port is disconnected on server" banner, and — for federated peers — the `PortMetadata.status_message` field. Set on the failure path, cleared on recovery or intentional stop (`serial.py` issue #57 duplicate-device and issue #62 disconnect / open failure, `tcp_initiator.py` / `command.py` issue #62). |
+| `get_status_snapshot()` | `Callable[[], Dict[str, Any]]` (no args, sync). Called by `UnifiedPortWrapper.get_status()` when building each port's listing. Return key/value pairs to merge into the snapshot. Use it to expose adapter-specific config and/or `status_message`. |
 
 ---
 

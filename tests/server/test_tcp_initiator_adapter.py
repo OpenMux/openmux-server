@@ -195,6 +195,77 @@ async def test_port_disconnect(monkeypatch):
     assert port.is_connected is False
 
 
+@pytest.mark.asyncio
+async def test_status_message_clears_on_successful_connect(monkeypatch):
+    """Successful connect: status_message is empty after and snapshot omits key."""
+
+    async def fake_open_connection(host, port, ssl=None):  # type: ignore[override]
+        return FakeReader([b""]), FakeWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    adapter = TcpInitiatorAdapter("ti", {})
+    port = TcpInitiatorPort("p", {"host": "h", "port": 1}, adapter)
+    await port._connect()
+    assert port.status_message == ""
+    assert "status_message" not in port.get_status_snapshot()
+    await port.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_message_set_on_connection_error(monkeypatch):
+    """Refused connect: status_message is populated, in the snapshot, and in the meta payload."""
+
+    async def fake_fail(host, port, ssl=None):  # type: ignore[override]
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_fail)
+    adapter = TcpInitiatorAdapter("ti", {})
+    port = TcpInitiatorPort("p", {"host": "h", "port": 1}, adapter)
+
+    # Capture meta pushes so we can assert the payload carries the final text (#62).
+    # Stub _notify_meta to record the (connected, message) pair without needing a
+    # meta_notify callback or a _last_notified_connected state transition.
+    captured_payloads: List[Dict[str, Any]] = []
+
+    def fake_notify(connected: bool) -> None:
+        captured_payloads.append({"connected": connected, "msg": port.status_message})
+
+    port._notify_meta = fake_notify  # type: ignore[method-assign]
+    ok = await port._connect()
+    assert ok is False
+    assert port.status_message.startswith("Connection refused")
+    snap = port.get_status_snapshot()
+    assert "status_message" in snap
+    # The meta payload read by muxcon listeners must carry the final text (#62)
+    assert captured_payloads and captured_payloads[0]["msg"] == port.status_message
+    await port.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_message_set_on_remote_close_and_cleared_on_restart(monkeypatch):
+    """Read loop EOF: 'closed by remote' message, then cleared on successful reconnect."""
+
+    async def fake_open_connection(host, port, ssl=None):  # type: ignore[override]
+        return FakeReader([b""]), FakeWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    adapter = TcpInitiatorAdapter("ti", {})
+    port = TcpInitiatorPort("p", {"host": "h", "port": 7, "auto_reconnect": False}, adapter)
+    ok = await port._connect()
+    assert ok is True and port.status_message == ""
+    # Simulate remote close: feed empty then wait for read loop to see EOF
+    await port._read_loop()
+    assert port.is_connected is False
+    assert "closed by remote" in port.status_message
+    snap = port.get_status_snapshot()
+    assert "status_message" in snap and "closed by remote" in snap["status_message"]
+    # Successful reconnect clears the message
+    await port._connect()
+    assert port.status_message == ""
+    assert "status_message" not in port.get_status_snapshot()
+    await port.stop()
+
+
 def test_adapter_validate_config_variants():
     # Preferred dict with tcp_initiator_ports
     assert TcpInitiatorAdapter.validate_config({"tcp_initiator_ports": [{"name": "a", "host": "h", "port": 1}]})

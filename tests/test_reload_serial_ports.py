@@ -73,7 +73,7 @@ async def test_reload_serial_ports_incremental(tmp_path):
         new_serial_ports = [
             {"name": "consoleA", "description": "A2", "device": "/dev/null", "baudrate": 115200},
             # A different device path: two ports on the same unix device are
-            # flagged unstartable (issue #57), which is not what tests here.
+            # flagged offline (issue #57), which is not what tests here.
             {"name": "consoleB", "description": "B", "device": str(tmp_path / "ttyB"), "baudrate": 9600},
         ]
         summary = await serial.reconcile_ports({"serial_ports": new_serial_ports})
@@ -134,7 +134,7 @@ async def test_duplicate_serial_device_flagged_in_api_ports(tmp_path):
 
     assert await serial.start()
 
-    # The duplicate is registered (visible) but unstartable
+    # The duplicate is registered (visible) but offline
     b = serial.serial_ports["consoleB"]
     assert b.status_message and "consoleA" in b.status_message
     assert b.connection_task is None

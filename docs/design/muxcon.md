@@ -111,9 +111,10 @@ Control-frame payload commands actually handled by
 `AUTH:PK:RESPONSE:...`, `AUTH:OK`, `AUTH:ERROR:...`,
 `MPATH:SHUTDOWN:BEGIN[:reason]`, `MPATH:END`, `HB:REQ:<ts>`/`HB:ACK:<ts>`
 (and bare `REQ:`/`ACK:` for the `HB` command type), `PORTS:LIST:FEDERATED`
-(ignored, see above), `PORTS:FEDERATED:<count>` (section 4), and
-`VIEWERS:<port_name>` (viewer-presence relay, one JSON line per viewer,
-terminated by `END:VIEWERS` — see section 7).
+(ignored, see above), `PORTS:FEDERATED:<count>` (section 4),
+`PORT_STATUS:<port_name>` (offline-reason push — one JSON line, section
+4.3), and `VIEWERS:<port_name>` (viewer-presence relay, one JSON line per
+viewer, terminated by `END:VIEWERS` — see section 7).
 
 A separate, experimental "binary framing mode" is mentioned in the module's
 own docstring ("optional upgrade to a compact binary framing mode") but
@@ -130,12 +131,22 @@ are advertised via `_send_local_port_list`, which pulls the local
 `PortManager`'s port list and applies `advertise_filters` (section 4.1)
 before sending.
 
+Each entry is a `PortMetadata.to_federation_dict()` object. In addition to
+config, description, groups, capacity and line status, the origin's current
+offline reason (`status_message`, set when the port is not healthy; empty
+otherwise) is included in the payload (issue #62). Mixed-version peers
+simply ignore unknown keys.
+
 On receipt, `_handle_ports_federated` applies `accept_filters` per entry,
 then creates or reuses one `_RemotePortProxy` per accepted port
 (`_register_remote_port_from_dict`). The proxy is registered directly into
 the local `PortManager`'s port map, so any client (CLI, web console,
 telnet/SSH) opens a federated port exactly like a local one — no special
-client-side code path exists for remote ports.
+client-side code path exists for remote ports. The proxy's `get_status()`
+surfaces `status_message` from its metadata, and the web console's
+`/api/ports` snapshot forwarder (in `web_console.py::_get_ports_snapshot`)
+folds it into the port entry so the UI renders it exactly like a local
+port.
 
 Reconnection reuses the existing proxy for the same port name + origin
 `server_id` instead of creating a duplicate, re-opens any client streams
@@ -172,15 +183,63 @@ remote proxy's minimal metadata is written to `federated_cache_path`
 (default `<tls_dir>/federated_cache.json`) on every change, and reloaded on
 `start()` — so a federated port a peer previously advertised still shows up
 (marked disconnected) after this node restarts, even before the peer
-reconnects. If `federated_cache_ttl_sec > 0`, a background loop purges
-proxies that have been disconnected longer than that TTL (default `0.0`:
-never expires by time). Cached proxies register through
+reconnects. The snapshot also carries each proxy's `status_message`
+(issue #62): a peer's last-known-offline reason therefore survives a full
+process restart of this node. If `federated_cache_ttl_sec > 0`, a
+background loop purges proxies that have been disconnected longer than that
+TTL (default `0.0`: never expires by time). Cached proxies register through
 `PortManager.register_federated_port` on load (and re-register in the reuse
 path if `data_callback is None`) — without that callback inbound data just
 fills the proxy's own `data_queue`, which nothing consumes here (issue
 #56), so the port black-holes.
 
-### 4.3 Origin-side stream sessions (pumps)
+### 4.3 Live offline-reason push (`PORT_STATUS`)
+
+The `PORTS:FEDERATED` block is a full-catalog refresh that only travels on
+handshake and stale-proxy resync. It is expensive (every line re-encoded,
+every peer re-parsed) and would be wrong to trigger on every local state
+toggle, so the origin additionally pushes a small per-port frame (issue
+#62) when a local port's `status_message` changes:
+
+```
+#0:C:<len>:<seq>:PORT_STATUS:<port_name>\n{\"status_message\":\"...\"}\n
+```
+
+The body is a single JSON line; `""` denotes healthy. Only the origin of a
+port — the node that *owns* it — pushes `PORT_STATUS` for that port. Mid-
+chain relayers receive the frame, apply it to their local `RemotePortProxy`
+metadata, and **do not** re-broadcast upstream: the origin is the single
+authoritative publisher, so there is no echo loop across a multi-hop
+chain.
+
+Implementation: `_broadcast_port_status` (outgoing) +
+`_handle_port_status_frame` (incoming) +
+`_on_port_meta_for_status_relay` (a PortManager meta listener that
+activates only for local ports with a `status_message` key in the meta
+payload, guarded against re-published federated proxies by checking that
+the local port is not a `RemotePortProxy`).
+
+On receipt the proxy's metadata is updated in-place and a local
+`notify_meta_updated` meta event fires, which is what the web console uses
+to re-render the port row without a full `PORTS:FEDERATED` round-trip.
+
+Local link-down reason (not published). `PORT_STATUS` carries the **origin's**
+reason only. A separate concern is the **muxcon link itself** between a leaf
+and its origin: when the last live path to a peer group dies, the leaf sets a
+local reason on each affected `RemotePortProxy` (`link_reason` =
+`"MuxCon link to <server_id> is down"`). It is set in the all-paths-dead path
+(`_on_connection_closed` and the "stale" flip in `_update_peer_proxies_live_state`)
+and cleared on the live flip and on the reconnect re-advertise. It is local to
+the node that observes the outage — link liveness differs per node, so it is
+**never** published over the wire — and is intentionally not persisted in the
+federated cache (a cache restore re-derives it from the restored
+`is_connected` state). `RemotePortProxy.get_status()` prefers `link_reason`
+over the origin's `status_message`, because "the link is down" is always a
+fresher fact than a pre-outage device state. The web console's
+`_get_ports_snapshot` applies the same precedence for the `/api/ports` entry.
+
+### 4.4 Origin-side stream sessions (pumps)
+
 
 When a peer's client opens a federated port, the origin maps the received
 `O` (stream open) to a session slot `(peer_key, stream_id) -> local port`

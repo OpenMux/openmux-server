@@ -40,7 +40,7 @@
           <tr>
             <th>Status</th>
             <td>
-              <span class="tag tiny bad">unstartable</span>
+              <span class="tag tiny bad">offline</span>
               <span class="muted">{{ p.status_message }}</span>
             </td>
           </tr>
@@ -171,7 +171,7 @@
           {% set conn = (p.connected if ('connected' in p) else (p.is_running or false)) %}
           <span class="tag {% if conn %}ok{% else %}bad{% endif %}">{{ conn and 'connected' or 'down' }}</span>
           {% if p.status_message %}
-            <span class="tag bad" title="{{ p.status_message }}">{{ 'unstartable' }}</span>
+            <span class="tag bad" title="{{ p.status_message }}">offline</span>
           {% endif %}
         </td>
         <td>

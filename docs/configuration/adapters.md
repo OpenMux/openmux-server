@@ -233,7 +233,7 @@ Connect to physical serial devices (RS232, USB-to-serial, etc.).
 Supported options per port:
 - `name` (required): Unique port name
 - `description`: Human-readable description
-- `device` (required): Device path (e.g., `/dev/ttyUSB0`). One port per device. A later duplicate entry stays listed but unstartable; the UI shows the reason. Give the later port another path to fix it.
+- `device` (required): Device path (e.g., `/dev/ttyUSB0`). One port per device. A later duplicate entry stays listed but offline; the UI shows the reason. Give the later port another path to fix it.
 - `baudrate`: Baud rate (default: 9600)
 - `bytesize`: 5, 6, 7, 8 (default: 8)
 - `parity`: N, E, O, M, S (default: N)

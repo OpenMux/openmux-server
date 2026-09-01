@@ -128,6 +128,10 @@ class TcpInitiatorPort:
         # Timestamp (monotonic) of the last connection-failure warning;
         # used to rate-limit the message to at most once per hour.
         self._last_failed_warn_ts: Optional[float] = None
+        # Human-readable reason the port is offline (issue #62). Empty while
+        # connected. Set on connect failure or disconnect, cleared on success.
+        self.status_message: str = ""
+        self._status_changed: Optional[bool] = None
 
         # Validate required configuration
         if not self.host:
@@ -135,13 +139,37 @@ class TcpInitiatorPort:
         if not self.port:
             raise ValueError(f"TCP initiator port {self.name} requires 'port' configuration")
 
+    def _set_status_message(self, message: str, connected: bool = False) -> None:
+        """Set or clear the offline reason and push a meta refresh on state change.
+
+        Args:
+            message: New status message (empty string clears). Kept verbatim.
+            connected: True only after a successful connect; used to pair
+                with the message change so clients can show the reason only
+                while the port is actually offline.
+        """
+        new_state = bool(message) or not connected
+        if self._status_changed is None or self._status_changed != new_state:
+            self._status_changed = new_state
+            # Set the reason first so _notify_meta's payload carries the final
+            # text; muxcon listeners read it to push live updates to peers (#62).
+            self.status_message = str(message or "")
+            self._notify_meta(connected)
+        else:
+            self.status_message = str(message or "")
+
     def get_status_snapshot(self) -> Dict[str, Any]:
-        """Return static config details for port listings."""
-        return {
+        """Return config details and the offline reason for port listings."""
+        snapshot: Dict[str, Any] = {
             "serial_config": {
                 "device": f"tcp:{self.host}:{self.port}",
             }
         }
+        if self.status_message:
+            # Surfaces in /api/ports, the status page, and the console info
+            # overlay (issue #62).
+            snapshot["status_message"] = self.status_message
+        return snapshot
 
     async def start(self) -> bool:
         """Start the TCP initiator port (non-blocking)."""
@@ -198,21 +226,26 @@ class TcpInitiatorPort:
             self.reader, self.writer = await self._protocol_handler.establish(self.host, self.port, self.config)
             self.is_connected = True
             self.logger.info(f"Successfully connected to {self.host}:{self.port}")
-            # Reset so the next disconnect logs immediately
+            # Reset so the next disconnect logs immediately; also clear the reason
+            # so the UI drops the offline badge (issue #62).
             self._last_failed_warn_ts = None
-            self._notify_meta(True)
+            self._set_status_message("", connected=True)
             self.read_task = asyncio.create_task(self._read_loop())
             return True
         except asyncio.TimeoutError:
+            self._set_status_message(f"Connection timeout to {self.host}:{self.port} (after {self.timeout}s)")
             self._log_connect_failure(f"Connection timeout to {self.host}:{self.port} (after {self.timeout}s)")
             return False
         except ConnectionRefusedError as e:
+            self._set_status_message(f"Connection refused by {self.host}:{self.port}")
             self._log_connect_failure(f"Connection refused to {self.host}:{self.port}: {e}")
             return False
         except ConnectionError as e:
+            self._set_status_message(f"Protocol handshake failed for {self.host}:{self.port}: {e}")
             self._log_connect_failure(f"Protocol handshake failed for {self.host}:{self.port}: {e}")
             return False
         except Exception as e:
+            self._set_status_message(f"Connection failed to {self.host}:{self.port}: {e}")
             self._log_connect_failure(f"Connection failed to {self.host}:{self.port}: {e}")
             return False
 
@@ -242,7 +275,13 @@ class TcpInitiatorPort:
         try:
             if self._meta_notify and self._last_notified_connected is not connected:
                 event = "tcp_connected" if connected else "tcp_disconnected"
-                self._meta_notify(self.name, {"event": event, "connected": connected})
+                # Carry the current reason (already final when called from
+                # _set_status_message) so muxcon relay listeners can push it to
+                # federated peers (issue #62).
+                self._meta_notify(
+                    self.name,
+                    {"event": event, "connected": connected, "status_message": self.status_message},
+                )
                 self._last_notified_connected = connected
         except Exception:
             self.logger.debug("Meta notify failed for %s", self.name, exc_info=True)
@@ -263,7 +302,7 @@ class TcpInitiatorPort:
             self.is_connected = False
             self.reader = None
             self.writer = None
-            self._notify_meta(False)
+            self._set_status_message(f"Disconnected from {self.host}:{self.port}")
 
     async def _read_loop(self) -> None:
         """Continuously read inbound data until connection closes or cancelled."""
@@ -274,7 +313,7 @@ class TcpInitiatorPort:
                     if not data:
                         self.logger.info(f"Connection to {self.host}:{self.port} closed by remote")
                         self.is_connected = False
-                        self._notify_meta(False)
+                        self._set_status_message(f"Connection to {self.host}:{self.port} closed by remote")
                         break
                     decoded = self._protocol_handler.decode(data)
                     if decoded:
@@ -284,7 +323,7 @@ class TcpInitiatorPort:
                 except Exception as e:
                     self.logger.error(f"Error reading from {self.host}:{self.port}: {e}", exc_info=True)
                     self.is_connected = False
-                    self._notify_meta(False)
+                    self._set_status_message(f"Read error on {self.host}:{self.port}: {e}")
                     break
         except asyncio.CancelledError:
             pass

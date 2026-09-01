@@ -586,6 +586,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             if pm is not None and hasattr(pm, "register_meta_listener"):
                 pm.register_meta_listener(self._on_port_meta_for_viewer_presence)
+                # Also subscribe for offline-reason pushes (issue #62) so a
+                # local tcp/command/serial port's status_message reaches peers
+                # immediately, without a full PORTS:FEDERATED round-trip.
+                pm.register_meta_listener(self._on_port_meta_for_status_relay)
         except Exception:
             self.logger.debug("Failed to register viewer-presence meta listener", exc_info=True)
 
@@ -603,6 +607,118 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await self._broadcast_viewer_presence(port_name, changes.get("viewers") or [])
         except Exception:
             self.logger.debug(f"Failed to broadcast VIEWERS presence for {port_name}", exc_info=True)
+
+    async def _on_port_meta_for_status_relay(self, port_name: str, changes: Optional[Dict[str, Any]]) -> None:
+        """PortManager meta listener: push a local port's offline reason to peers.
+
+        Triggered by the tcp/command/serial adapters when a port's
+        ``status_message`` changes (issue #62). Uses the same lightweight
+        frame pattern as VIEWERS so the reason arrives without a full
+        PORTS:FEDERATED refresh. Only events that carry a ``status_message``
+        key are handled.
+        """
+        if not isinstance(changes, dict) or "status_message" not in changes:
+            return
+        # Only push for ports WE own. Re-published remote proxies
+        # (RemotePortProxy) also trigger meta events, and their origin has
+        # already sent (or will send) their own PORT_STATUS - pushing again
+        # here would cause echoes across chains.
+        pm = getattr(self, "main_port_manager", None)
+        local = None
+        try:
+            if pm and hasattr(pm, "get_port"):
+                local = pm.get_port(port_name)
+        except Exception:
+            local = None
+        if local is not None and hasattr(local, "remote_port_name"):
+            return
+        try:
+            await self._broadcast_port_status(port_name, changes.get("status_message") or "")
+        except Exception:
+            self.logger.debug(f"Failed to broadcast PORT_STATUS for {port_name}", exc_info=True)
+
+    async def _broadcast_port_status(self, port_name: str, status_message: str) -> None:
+        """Send a ``PORT_STATUS:<port>`` control update to every active peer.
+
+        The body is a single JSON line (empty string for "healthy").
+        Echo loop avoided: each peer only relays status changes for ports it
+        owns locally, and the receiver only relays further UPSTREAM.
+        """
+        for cid, conn in list(self.connections.items()):
+            if not self._is_conn_authenticated(cid):
+                continue
+            writer = conn.get("writer")
+            if not isinstance(writer, asyncio.StreamWriter):
+                continue
+            # Never send a port's reason back to the peer that owns it.
+            peer_server_id = conn.get("server_id")
+            if peer_server_id and peer_server_id == self.server_id:
+                continue
+            body = f"PORT_STATUS:{port_name}\n{json.dumps({'status_message': status_message or ''}, separators=(',', ':'))}"
+            try:
+                seq = self._next_frame_seq(cid)
+                frame = self.proto.create_control_frame(0, seq, body)
+                await self._send_protocol_frame(writer, frame)
+            except Exception:
+                self.logger.debug(f"[{cid}] Failed to send PORT_STATUS frame for {port_name}", exc_info=True)
+
+    @staticmethod
+    def _parse_port_status_frame(payload: str) -> Optional[Tuple[str, str]]:
+        """Parse an inbound ``PORT_STATUS:<port>`` control frame body.
+
+        Returns (port_name, status_message) or None on malformed input.
+        """
+        lines = payload.split("\n")
+        if not lines or not lines[0].startswith("PORT_STATUS:"):
+            return None
+        port_name = lines[0][len("PORT_STATUS:") :]
+        if len(lines) < 2 or not lines[1].strip():
+            return None
+        try:
+            msg = json.loads(lines[1]).get("status_message") or ""
+        except Exception:
+            return None
+        return port_name, str(msg)
+
+    async def _handle_port_status_frame(self, conn_id: str, payload: str) -> None:
+        """Handle an inbound ``PORT_STATUS:`` control frame from a peer.
+
+        Updates the matching RemotePortProxy's metadata, bumps the local
+        meta channel, and relays the update UPSTREAM when this server is
+        the origin peer in a multi-hop chain (the port we re-publish).
+        """
+        try:
+            parsed = self._parse_port_status_frame(payload)
+        except Exception:
+            parsed = None
+        if parsed is None:
+            self.logger.debug(f"[{conn_id}] Malformed PORT_STATUS frame")
+            return
+        port_name, status_message = parsed
+        peer_key = self._derive_peer_key_from_conn_id(conn_id)
+        proxy = (self._peer_proxies.get(peer_key) or {}).get(port_name)
+        if proxy is None:
+            self.logger.debug(f"[{conn_id}] PORT_STATUS for unknown remote port '{port_name}'")
+            return
+        try:
+            meta = getattr(proxy, "metadata", None)
+            if meta is not None:
+                try:
+                    meta.status_message = status_message or None
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Bump the local meta channel so the web console re-renders the port
+        # with the fresh reason. (No upstream relay: re-publishing of remote
+        # ports is filtered out of PORTS:FEDERATED, so a mid-chain update only
+        # reaches further peers on the next full resync - acceptable.)
+        try:
+            pm = getattr(self, "main_port_manager", None)
+            if pm and hasattr(pm, "notify_meta_updated"):
+                pm.notify_meta_updated(port_name, {"event": "federated_status_message_changed"})
+        except Exception:
+            pass
 
     async def _broadcast_viewer_presence(
         self, port_name: str, viewers: List[Dict[str, Any]], exclude_conn_id: Optional[str] = None
@@ -2999,6 +3115,21 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             proxy.is_connected = live
                         except Exception:
                             pass
+                        # Local offline reason (issue #62): set on the flip to
+                        # "no live path", keep while still down, clear on recover.
+                        try:
+                            if live:
+                                proxy.link_reason = ""
+                            else:
+                                src_server = None
+                                meta = getattr(proxy, "metadata", None)
+                                if meta is not None:
+                                    origin = getattr(meta, "origin_server", None)
+                                    src_server = getattr(origin, "server_id", None)
+                                src_server = src_server or "unknown"
+                                proxy.link_reason = f"MuxCon link to {src_server} is down"
+                        except Exception:
+                            pass
                         # When transitioning to disconnected, best-effort notify via data queue
                         if not live:
                             try:
@@ -3255,6 +3386,17 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     try:
                         if hasattr(proxy, "is_connected"):
                             proxy.is_connected = False
+                        # Local offline reason (issue #62): the banner and status
+                        # page need a reason the moment the last muxcon path dies.
+                        try:
+                            src_server = None
+                            meta = getattr(proxy, "metadata", None)
+                            origin = getattr(meta, "origin_server", None) if meta is not None else None
+                            src_server = getattr(origin, "server_id", None) if origin is not None else None
+                            src_server = src_server or "unknown"
+                            proxy.link_reason = f"MuxCon link to {src_server} is down"
+                        except Exception:
+                            pass
                         if hasattr(proxy, "disconnect") and callable(proxy.disconnect):
                             if asyncio.iscoroutinefunction(proxy.disconnect):
                                 await proxy.disconnect()
@@ -3466,6 +3608,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         line_status = None
                         rw_groups = None
                         ro_groups = None
+                        status_msg = None
                         if meta is not None:
                             try:
                                 origin = getattr(meta, "origin_server", None)
@@ -3476,6 +3619,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 line_status = getattr(meta, "line_status", None)
                                 rw_groups = getattr(meta, "read_write_groups", None)
                                 ro_groups = getattr(meta, "read_only_groups", None)
+                                # Offline reason (issue #62): cached so a peer that is
+                                # down stays annotated after a full-reload cold start.
+                                status_msg = getattr(meta, "status_message", None)
                             except Exception:
                                 pass
                         ent[pname] = {
@@ -3488,6 +3634,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             "line_status": line_status,
                             "read_write_groups": rw_groups,
                             "read_only_groups": ro_groups,
+                            "status_message": status_msg,
                         }
                     except Exception:
                         continue
@@ -3551,9 +3698,17 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             line_status=rec.get("line_status"),
                             read_write_groups=rec.get("read_write_groups") or None,
                             read_only_groups=rec.get("read_only_groups") or None,
+                            # Offline reason (issue #62): restored from cache.
+                            status_message=rec.get("status_message") or None,
                         )
                         proxy = self.RemotePortProxy(self, peer_key, pname, metadata)
                         proxy.is_connected = bool(rec.get("connected", False))
+                        # Offline cache: the fresh process has no live muxcon link to
+                        # this origin yet, and no one will set link_reason until a
+                        # path is established and then lost, so set it here to keep
+                        # the banner accurate right after a cold start (issue #62).
+                        if not proxy.is_connected:
+                            proxy.link_reason = f"MuxCon link to {origin_id} is down"
                         try:
                             proxy.last_seen = float(rec.get("last_seen", 0) or 0)
                         except Exception:
@@ -3697,6 +3852,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 max_rw = capacity_to_wire(p.get("max_read_write_users", p.get("max_rw_users", 1)))
                 rw_groups = p.get("read_write_groups") or None
                 ro_groups = p.get("read_only_groups") or None
+                # Offline reason (issue #62): forwarded to federated peers so the
+                # remote status page / info panel can surface the same text the
+                # origin shows (empty string stays None and is omitted from the wire).
+                status_message = p.get("status_message") or None
                 # Optional serial details for local serial or loopback ports
                 serial_cfg = None
                 line_status = None
@@ -3750,6 +3909,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         line_status=line_status,
                         read_write_groups=rw_groups,
                         read_only_groups=ro_groups,
+                        status_message=status_message,
                     )
                 )
 
@@ -4183,6 +4343,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if not self._is_conn_authenticated(conn_id):
                     return
                 await self._handle_viewers_frame(conn_id, payload)
+                return
+            if payload.startswith("PORT_STATUS:"):
+                if not self._is_conn_authenticated(conn_id):
+                    return
+                await self._handle_port_status_frame(conn_id, payload)
                 return
             if payload.startswith("FEDRW:"):
                 if not self._is_conn_authenticated(conn_id):
@@ -5680,6 +5845,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             line_status = None
         rw_groups = pd.get("read_write_groups") or None
         ro_groups = pd.get("read_only_groups") or None
+        # Offline reason (issue #62): forwarded from the origin over the wire;
+        # missing on older peers (treated as None).
+        status_msg = pd.get("status_message") or None
 
         metadata = PortMetadata(
             name=name,
@@ -5695,6 +5863,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             line_status=line_status,
             read_write_groups=rw_groups,
             read_only_groups=ro_groups,
+            status_message=status_msg,
         )
 
         # Reuse existing proxy if present to preserve clients and sessions
@@ -5730,6 +5899,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         pass
                     if hasattr(existing, "is_connected"):
                         existing.is_connected = True
+                    # Link is back: drop the local "MuxCon link ... is down" reason
+                    # so the origin's freshly-advertised reason (or no reason)
+                    # surfaces again (issue #62).
+                    try:
+                        if hasattr(existing, "link_reason"):
+                            existing.link_reason = ""
+                    except Exception:
+                        pass
                     # A proxy loaded from the federated cache may have been
                     # registered without its data callback (issue #56): inbound
                     # data would then fall back to the proxy's own data_queue,
@@ -6164,6 +6341,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # Track last emitted federated-link notice to prevent duplicates
             self._last_link_notice: Optional[str] = None  # one of {"stale","disconnected","restored"}
             self._last_link_notice_ts: float = 0.0
+            # Local "why is this port unreachable" reason for THIS node (issue #62).
+            # Set while the muxcon link to the origin is down and cleared on
+            # reconnect. Local only: link state is per-node, so it is never
+            # published over the wire (the origin's own reason is).
+            self.link_reason: str = ""
 
         def set_data_callback(self, callback):
             """Register a callback to receive inbound data.
@@ -6192,6 +6374,21 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 state, client counts, adapter type, connection id and port name.
             """
             try:
+                # Offline reason (issue #62): surfaced from the (live) port metadata
+                # so federated peers show the same reason text the origin advertises.
+                status_message = ""
+                try:
+                    meta = getattr(self, "metadata", None)
+                    if meta is not None:
+                        status_message = getattr(meta, "status_message", "") or ""
+                except Exception:
+                    status_message = ""
+                # A down muxcon link takes precedence over the origin's last
+                # advertised reason: the most useful fact right now is that the
+                # link is down, not the device state from before the outage.
+                link_reason = getattr(self, "link_reason", "") or ""
+                if link_reason:
+                    status_message = link_reason
                 return {
                     "name": self.name,
                     "description": self.description,
@@ -6201,6 +6398,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     "adapter_type": "remote_muxcon",
                     "remote_connection_id": self.connection_id,
                     "remote_port_name": self.remote_port_name,
+                    **({"status_message": status_message} if status_message else {}),
                 }
             except Exception:  # justification: status synthesis best-effort for UI; return minimal info
                 return {

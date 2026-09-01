@@ -65,13 +65,23 @@ Changes since v1.0.2 (2026-08-27).
 - **Federated takeover fixes.** The origin node arbitrates a takeover. The taker now writes immediately after a take on a federated port (previously: write-blocked until reconnect). The legacy `FORCE` wire action maps to `TAKE:latest`, so mixed-version peers keep working.
 - **MuxCon federation relay is faster** (0a546ef). The local port pump now waits on the port queue instead of polling every 50 ms. The initial retransmit timeout starts at 0.35 s instead of up to one heartbeat interval. There is no wire-protocol change.
 - **A serial device is opened by only one port** (issue #57). Two `serial_ports` entries no longer point at the same `device`.
-  - The first entry claims the device. Later entries stay listed but unstartable. The startup log prints the reason.
+  - The first entry claims the device. Later entries stay listed but offline. The startup log prints the reason.
   - The flag re-checks after every port create, destroy, and soft reload. The port starts again when the duplicate goes away.
   - Fix it by removing the extra port or giving it a different `device`.
 - **An uncreatable log directory stops the logging spam** (issue #42).
   - If the log directory (default `logs/`, or `logging.log_dir`) cannot be created, the server emits one warning and continues with console-only logging. It no longer reprints a `PermissionError` traceback on every startup, every config reload, and every port log write.
   - The client behaves the same: it keeps console output and attaches no file handler instead of raising.
   - No config change. A directory that still cannot be created warns once more on the next process start.
+- **Offline reason is shown for all port types** (issue #62).
+  - Serial ports now report the offline reason in every case, not only for a duplicate device. A serial port reports:
+    - `serial`: device not found, pyserial-asyncio missing, device open failure, connection closed (empty read), or read error.
+  - And now `tcp_initiator` and `command` ports report the reason as well:
+    - `tcp_initiator`: connection refused, timeout, protocol handshake failure, connection closed by remote, read error, or manual disconnect.
+    - `command`: process spawn failure (binary not found, generic error), non-zero exit code, max restarts reached, or process exited with auto_restart off.
+  - The reason clears automatically when the port recovers (reconnect, new process spawn, intentional stop). An intentional `stop()` is a resting state and does not set a reason.
+  - Federated peers now see the same reason text: the value travels inside the `PORTS:FEDERATED` catalog and is pushed live over a new lightweight `PORT_STATUS:` control channel (no full re-advertise needed). The value survives a peer restart via the existing federated cache.
+  - A federated port also reports when the muxcon link to its origin is down, as a local reason of its own ("MuxCon link to <server_id> is down"). It is set when the last link path dies, shown as long as no path is live, and cleared when the link recovers. The link reason takes precedence over the origin's last reason, because the link outage is the freshest fact. It is local to the node that sees the outage and is never published over the wire.
+  - Mixed-version peers: an older peer that does not know the field simply ignores it. No wire-protocol version bump, no config change.
 
 ### Web console and observability
 
@@ -79,7 +89,8 @@ Changes since v1.0.2 (2026-08-27).
 - The login page and status page show the messages of the day.
 - The Config Editor marks each field with its reload requirement (`live`, `soft`, `full`, `sighup`, `restart`) and shows the read-only `access_default` row.
 - The Port Actions sub-view has a "Script health" panel that lists action-script load errors for the whole `actions_dir`.
-- Unstartable ports show their reason: a red "unstartable" tag on the status page, a Status row in the console info panel, and a "Device health" panel on the Config Editor ports view (checks on load, after save, and on every table edit).
+- Ports show their offline reason: a red "offline" tag on the status page, a Status row in the console info panel, and a "Device health" panel on the Config Editor ports view (checks on load, after save, and on every table edit).
+- The reason now covers serial disconnect and failed-connect reasons, not just duplicate-device reasons (issue #62). For serial ports that were connected and then dropped (e.g. device yanked, read error), the status page shows the reason text under the port. Every port type with a reason shows the red "offline" tag with the reason text. The tag updates live when the reason changes; federated ports show the reason their origin advertised. The centered "Port is disconnected on server" banner in the web console also shows the reason on a muted second line when one is available.
 - The selected port is centered in the sidebar port list after a port switch.
 - Logs: repeated connect failures (serial adapter, client `connect_to_port`) no longer print a full stack trace. The error message keeps the detail. Unexpected faults still print tracebacks from the outer loops.
 
@@ -90,5 +101,5 @@ Changes since v1.0.2 (2026-08-27).
 3. Optional: set `access_default: deny` in `security.yaml` for a fail-closed posture on no-list ports.
 4. Update legacy integer `max_read_write_users` values to `none`, `one`, or `multiple`.
 5. Port-action setups: verify `action_ports` grant ids match the script filenames, then check the "Script health" panel (or `GET /api/port-actions/health`) after first start.
-6. Serial setups: check that no two `serial_ports` entries name the same `device`. The later entry is unstartable until the duplicate is fixed.
+6. Serial setups: check that no two `serial_ports` entries name the same `device`. The later entry is offline until the duplicate is fixed.
 7. No data migration is required. Old configs load unchanged.

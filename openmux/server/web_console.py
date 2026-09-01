@@ -2448,11 +2448,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
             ls_seen = info.get("last_seen")
             if ls_seen is not None:
                 meta["last_seen"] = ls_seen
-            # Unstartable reason (issue #57, e.g. duplicate serial device); the
-            # snapshot omits the key when the port is healthy.
-            status_msg = info.get("status_message")
-            if status_msg:
-                meta["status_message"] = status_msg
+            # Offline reason (issue #62). Always emit the key — even when
+            # empty — so the web console can clear a stale reason on the
+            # next frame (e.g. when a port recovers). Older peers simply
+            # ignore the extra empty field on the wire.
+            meta["status_message"] = info.get("status_message") or ""
             payload = "OMXCTRL " + json.dumps(meta, separators=(",", ":"))
             for cid in list(subs):
                 try:
@@ -3342,6 +3342,27 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                     # Federation type if present
                                     ftype = getattr(meta, "federation_type", None)
                                     info["federation_type"] = getattr(ftype, "value", ftype) if ftype is not None else None
+                                    # Offline reason (issue #62): surface the origin's
+                                    # advertised reason on the federated port entry.
+                                    # get_status() normally already carries this from the
+                                    # same metadata, but this keeps the field present
+                                    # even if a future snapshot change drops it.
+                                    # A down muxcon link takes precedence over the
+                                    # origin's last reason (same rule as
+                                    # RemotePortProxy.get_status): the freshest
+                                    # fact is the link outage, not a stale reason.
+                                    try:
+                                        sm = getattr(meta, "status_message", None)
+                                        if sm:
+                                            info["status_message"] = sm
+                                    except Exception:
+                                        pass
+                                    try:
+                                        lr = getattr(port, "link_reason", None)
+                                        if lr:
+                                            info["status_message"] = lr
+                                    except Exception:
+                                        pass
                                 except Exception:
                                     pass
                         except Exception:

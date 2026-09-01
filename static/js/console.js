@@ -374,7 +374,7 @@ function renderInfo(p) {
   rows.push(`<tr><th>Adapter</th><td>${adapter ? `<span class=\"tag\">${adapter}</span>` : '<span class=\"muted\">—</span>'}</td></tr>`);
   rows.push(`<tr><th>Description</th><td>${valueOrDash(p.description)}</td></tr>`);
   if (p.status_message) {
-    rows.push(`<tr><th>Status</th><td><span class=\"tag bad\">unstartable</span> <span class=\"muted\">${escapeHtml(String(p.status_message))}</span></td></tr>`);
+    rows.push(`<tr><th>Status</th><td><span class=\"tag bad\">offline</span> <span class=\"muted\">${escapeHtml(String(p.status_message))}</span></td></tr>`);
   }
   rows.push(`<tr><th>Connected</th><td>${connected ? '<span class=\"tag ok\">yes</span>' : '<span class=\"tag bad\">no</span>'} &nbsp; <span class=\"tag\">${clientMode}</span></td></tr>`);
   // Serial configuration rows
@@ -1271,9 +1271,22 @@ function openLogsWindow() {
   window.open(url.toString(), '_blank', 'noopener');
 }
 if (logsBtn) logsBtn.addEventListener('click', openLogsWindow);
-function showBanner(msg, kind='error') {
+function showBanner(msg, kind='error', detail=null) {
   if (!bannerEl) return;
-  bannerEl.textContent = msg;
+  // Always clear any previous content (including a prior muted detail line)
+  // before rebuilding, so re-showing does not stack leftover lines (issue #62).
+  bannerEl.innerHTML = '';
+  // Optional second line (detail, e.g. the live offline reason) renders on its
+  // own muted line below the main message instead of inline (issue #62).
+  const main = document.createElement('div');
+  main.textContent = msg;
+  bannerEl.appendChild(main);
+  if (detail) {
+    const sub = document.createElement('div');
+    sub.className = 'muted';
+    sub.textContent = detail;
+    bannerEl.appendChild(sub);
+  }
   bannerEl.classList.remove('error','warn');
   bannerEl.classList.add(kind === 'warn' ? 'warn' : 'error');
   bannerEl.style.display = 'block';
@@ -1513,7 +1526,12 @@ function connectSelected() {
                 portDownTimer = setTimeout(() => {
                   // Re-check conditions before showing
                   if (isConnected() && currentPort() === msg.name && !portIsUp) {
-                    showBanner('Port is disconnected on server. Data will resume when it becomes available.', 'warn');
+                    // Issue #62: show the live reason (e.g. "Connection refused by
+                    // host:port") as a second muted line when we have one, so the
+                    // banner explains *why* the port is down.
+                    const p = ports.find(x => x.name === currentPort()) || null;
+                    const reason = (p && p.status_message ? p.status_message : null);
+                    showBanner('Port is disconnected on server. Data will resume when it becomes available.', 'warn', reason);
                   }
                   portDownTimer = null;
                 }, 1000);

@@ -195,7 +195,7 @@ def _make_real_adapter_with_ports(ports: dict) -> SerialAdapter:
 @pytest.mark.asyncio
 async def test_parse_port_configs_flags_duplicate_device():
     """Issue #57: at load time the first port claims a device; later
-    duplicates are flagged unstartable before anything opens the device."""
+    duplicates are flagged offline before anything opens the device."""
     adapter = SerialAdapter(
         "serial_ports",
         {"serial_ports": [{"name": "a", "device": "/dev/ttyUSB0"}, {"name": "b", "device": "/dev/ttyUSB0"}]},
@@ -239,9 +239,9 @@ async def test_recompute_duplicate_device_flags_flags_and_clears():
 
 
 @pytest.mark.asyncio
-async def test_create_port_duplicate_device_unstartable(monkeypatch):
+async def test_create_port_duplicate_device_offline(monkeypatch):
     """Issue #57: create_port (soft-reload add path) leaves the duplicate
-    registered and unstartable; destroying the claimant clears the flag."""
+    registered and offline; destroying the claimant clears the flag."""
     adapter = _make_adapter()
     adapter.main_port_manager = None
     adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0")

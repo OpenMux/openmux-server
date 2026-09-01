@@ -192,6 +192,11 @@ class PortMetadata:
             None/empty means open to all authenticated users.
         read_only_groups: Console groups granted read-only access (issue #24);
             None/empty means open to all authenticated users.
+        status_message: Optional human-readable reason the port is offline
+            (e.g., a serial device claimed by another port, a tcp host that
+            refuses, or a command whose process exited). Empty/None omits the
+            field so federated peers only see it when the origin is reporting
+            a real reason (issue #62).
     """
 
     name: str
@@ -227,6 +232,11 @@ class PortMetadata:
     # so a remote server can enforce the same per-console ACL as the origin.
     read_write_groups: Optional[List[str]] = None
     read_only_groups: Optional[List[str]] = None
+
+    # Optional human-readable offline reason (issue #62). Propagated across
+    # muxcon federation so a federated peer can display the same status text
+    # as the origin. Mixed-version peers: older peers simply ignore the field.
+    status_message: Optional[str] = None
 
     def get_display_name(self) -> str:
         """Return the user‑facing port name.
@@ -279,6 +289,7 @@ class PortMetadata:
             **({"line_status": self.line_status} if self.line_status is not None else {}),
             **({"read_write_groups": self.read_write_groups} if self.read_write_groups else {}),
             **({"read_only_groups": self.read_only_groups} if self.read_only_groups else {}),
+            **({"status_message": self.status_message} if self.status_message else {}),
         }
 
     def to_federation_dict(self) -> Dict[str, Any]:
@@ -306,4 +317,5 @@ class PortMetadata:
             **({"line_status": self.line_status} if self.line_status is not None else {}),
             **({"read_write_groups": self.read_write_groups} if self.read_write_groups else {}),
             **({"read_only_groups": self.read_only_groups} if self.read_only_groups else {}),
+            **({"status_message": self.status_message} if self.status_message else {}),
         }
