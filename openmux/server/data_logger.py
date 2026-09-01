@@ -82,15 +82,23 @@ class DataLogger:
         return cls._instance
 
     def __init__(self) -> None:
-        """Initialize the logger with defaults and an empty queue.
+        """Initialize the logger with defaults (the queue is created lazily on first use).
 
         Sets default format to `line` and prepares internal caches for
         line buffering and direction filtering.
         """
-        self.queue: "asyncio.Queue[LogEvent]" = asyncio.Queue(maxsize=1000)
+        # Loop-bound primitives are created lazily in _ensure_task (NOT here). In
+        # Python 3.9 an asyncio.Queue binds its futures to events.get_event_loop()
+        # at construction time. This process-wide singleton is constructed during
+        # OpenMuxServer.__init__, before main() calls new_event_loop()/set_event_loop(),
+        # so an eager asyncio.Queue() would bind to a throwaway loop. When the writer
+        # task later runs on the real loop, Queue.get() then raises "Future attached
+        # to a different loop". Defer creation to the first use on the running loop.
+        self.queue: Optional["asyncio.Queue[LogEvent]"] = None
+        self._queue_loop: Optional[asyncio.AbstractEventLoop] = None
         self._task: Optional[asyncio.Task] = None
+        self._task_loop: Optional[asyncio.AbstractEventLoop] = None
         self._files: Dict[str, Any] = {}
-        self._lock = asyncio.Lock()
         self.enabled = True  # can be toggled later via config
         # Base directory for the default `{base}/ports/{port_name}.log` pattern. Null
         # means the historical cwd-relative `logs/ports` (issue #47: the server sets this
@@ -191,12 +199,14 @@ class DataLogger:
     async def _writer_loop(self) -> None:
         """Background task that serializes events to per-port files.
 
-        Consumes `LogEvent` items from the queue, opens/locks file handles
-        per path, and writes either JSONL or line-formatted records. Errors
-        are logged and dropped to avoid blocking producers.
+        Uses the `queue` that the matching `_ensure_task` call created on this
+        same event loop (guaranteed non-None at this point). Captured locally so
+        the loop doesn't re-read an attribute that may be rebuilt later.
         """
+        queue = self.queue
+        assert queue is not None  # _ensure_task sets it before creating this task
         while True:
-            ev = await self.queue.get()
+            ev = await queue.get()
             try:
                 port_obj = getattr(ev, "port_obj", None)
                 path = self._resolve_path_for_port(ev.port, port_obj)
@@ -288,12 +298,25 @@ class DataLogger:
                 # Best-effort logging; log traceback then drop
                 self.logger.error("DataLogger writer loop error", exc_info=True)
             finally:
-                self.queue.task_done()
+                queue.task_done()
 
     def _ensure_task(self) -> None:
-        """Ensure the background writer task is running."""
-        if self._task is None or self._task.done():
-            loop = asyncio.get_running_loop()
+        """Ensure the writer queue and task are bound to the running event loop.
+
+        Rebuilds the queue and the writer task whenever the current running loop
+        differs from the loop that created them. In Python 3.9 an asyncio.Queue
+        hands out futures bound to the loop that constructed it, so a queue made on
+        a prior/throwaway loop (or a pre-loop-swap loop) would make Queue.get() raise
+        "Future attached to a different loop". Rebuilding on the running loop keeps
+        the logger working across an event-loop swap (e.g. a full reload).
+        """
+        loop = asyncio.get_running_loop()
+        if self.queue is None or self._queue_loop is not loop:
+            # Constructed while `loop` is running, so asyncio.Queue() binds to `loop`.
+            self.queue = asyncio.Queue(maxsize=1000)
+            self._queue_loop = loop
+        if self._task is None or self._task.done() or self._task_loop is not loop:
+            self._task_loop = loop
             self._task = loop.create_task(self._writer_loop())
 
     def configure(self, enabled: Optional[bool] = None) -> None:

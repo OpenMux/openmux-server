@@ -175,3 +175,51 @@ def test_writer_loop_skips_event_when_path_unresolvable(tmp_path, monkeypatch, c
     assert writer_errors == []
     # Nothing was ever written to the broken directory.
     assert not (tmp_path / "logs" / "ports").exists()
+
+
+def test_constructed_outside_loop_drains_on_real_loop(tmp_path, monkeypatch, caplog):
+    """Regression: constructing DataLogger with no running event loop (as
+    OpenMuxServer.__init__ does, before main() calls new_event_loop()/set_event_loop())
+    must not bind the queue to a throwaway loop. The first record() on the real loop
+    must drain cleanly instead of raising "Future attached to a different loop"."""
+    import asyncio
+    import logging
+
+    from openmux.server.data_logger import DataLogger
+
+    monkeypatch.chdir(tmp_path)
+    # Built with no running loop: this is exactly the ordering that produced the bug
+    # (previously __init__ bound asyncio.Queue to events.get_event_loop() here).
+    dl = DataLogger()
+
+    async def _drive():
+        for i in range(3):
+            dl.record(f"p{i}", b"hello\n", "in", client_id="c")
+        await dl.queue.join()
+        if dl._task is not None:
+            dl._task.cancel()
+            try:
+                await dl._task
+            except (asyncio.CancelledError, Exception):
+                pass
+        for fh in list(dl._files.values()):
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+    loop = asyncio.new_event_loop()
+    try:
+        with caplog.at_level(logging.WARNING, logger=""):
+            loop.run_until_complete(_drive())
+    finally:
+        loop.close()
+
+    # No cross-loop crash in the writer loop.
+    writer_errors = [r for r in caplog.records if "DataLogger writer loop error" in r.getMessage()]
+    assert writer_errors == []
+    # Each port log was actually written on the real loop.
+    for i in range(3):
+        p = tmp_path / "logs" / "ports" / f"p{i}.log"
+        assert p.exists(), f"missing log for p{i}"
+        assert p.read_text(encoding="utf-8").count("hello") == 1
