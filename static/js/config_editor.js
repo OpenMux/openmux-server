@@ -488,12 +488,11 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
               field.appendChild(baudCustom);
               // Bytesize
               const bytesLabel=document.createElement('span'); bytesLabel.className='subtle'; bytesLabel.textContent='Data bits'; field.appendChild(bytesLabel);
-              const bytes=document.createElement('select'); ['','5','6','7','8'].forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; if(String(row['bytesize']||'')===v) o.selected=true; bytes.appendChild(o); }); if(!row['bytesize']) bytes.value='8'; field.appendChild(bytes);
+              const bytes=document.createElement('select'); ['5','6','7','8'].forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; if(String(row['bytesize']||'')===v) o.selected=true; bytes.appendChild(o); }); if(!row['bytesize']) bytes.value='8'; field.appendChild(bytes);
               // Parity (full names)
               const parityLabel=document.createElement('span'); parityLabel.className='subtle'; parityLabel.textContent='Parity'; field.appendChild(parityLabel);
               const parity=document.createElement('select');
               const parityChoices = [
-                {v:'', t:''},
                 {v:'N', t:'None (N)'},
                 {v:'E', t:'Even (E)'},
                 {v:'O', t:'Odd (O)'},
@@ -505,7 +504,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
               field.appendChild(parity);
               // Stopbits (friendly labels)
               const stopLabel=document.createElement('span'); stopLabel.className='subtle'; stopLabel.textContent='Stop bits'; field.appendChild(stopLabel);
-              const stop=document.createElement('select'); const stopChoices=[{v:'',t:''},{v:'1',t:'1 stop bit'},{v:'2',t:'2 stop bits'}]; stopChoices.forEach(({v,t})=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; if(String(row['stopbits']||'')===v) o.selected=true; stop.appendChild(o); }); if(!row['stopbits']) stop.value='1'; field.appendChild(stop);
+              const stop=document.createElement('select'); const stopChoices=[{v:'1',t:'1 stop bit'},{v:'2',t:'2 stop bits'}]; stopChoices.forEach(({v,t})=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; if(String(row['stopbits']||'')===v) o.selected=true; stop.appendChild(o); }); if(!row['stopbits']) stop.value='1'; field.appendChild(stop);
               // Group help
               const ghelp=document.createElement('span'); ghelp.className='help'; ghelp.textContent='Baud/Data bits/Parity/Stop bits. Defaults to 115200 8-N-1. Use "Custom" to enter a non-listed baud.'; field.appendChild(ghelp);
               editor.appendChild(field);

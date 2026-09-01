@@ -88,6 +88,7 @@ Changes since v1.0.2 (2026-08-27).
 - The About page shows the logged-in user: username, global permission, and console groups.
 - The login page and status page show the messages of the day.
 - The Config Editor marks each field with its reload requirement (`live`, `soft`, `full`, `sighup`, `restart`) and shows the read-only `access_default` row.
+- The serial port editor no longer offers an empty choice for Data bits, Parity, or Stop bits. The selects previously carried a blank, meaningless leading option; they now always show a valid value (defaulting to 8-N-1 when unset).
 - The Port Actions sub-view has a "Script health" panel that lists action-script load errors for the whole `actions_dir`.
 - Ports show their offline reason: a red "offline" tag on the status page, a Status row in the console info panel, and a "Device health" panel on the Config Editor ports view (checks on load, after save, and on every table edit).
 - The reason now covers serial disconnect and failed-connect reasons, not just duplicate-device reasons (issue #62). For serial ports that were connected and then dropped (e.g. device yanked, read error), the status page shows the reason text under the port. Every port type with a reason shows the red "offline" tag with the reason text. The tag updates live when the reason changes; federated ports show the reason their origin advertised. The centered "Port is disconnected on server" banner in the web console also shows the reason on a muted second line when one is available.
