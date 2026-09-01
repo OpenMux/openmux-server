@@ -68,6 +68,10 @@ Changes since v1.0.2 (2026-08-27).
   - The first entry claims the device. Later entries stay listed but unstartable. The startup log prints the reason.
   - The flag re-checks after every port create, destroy, and soft reload. The port starts again when the duplicate goes away.
   - Fix it by removing the extra port or giving it a different `device`.
+- **An uncreatable log directory stops the logging spam** (issue #42).
+  - If the log directory (default `logs/`, or `logging.log_dir`) cannot be created, the server emits one warning and continues with console-only logging. It no longer reprints a `PermissionError` traceback on every startup, every config reload, and every port log write.
+  - The client behaves the same: it keeps console output and attaches no file handler instead of raising.
+  - No config change. A directory that still cannot be created warns once more on the next process start.
 
 ### Web console and observability
 

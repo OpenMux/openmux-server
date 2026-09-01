@@ -89,3 +89,89 @@ class SimpleNamespaceLike:
     def __init__(self, **attrs: Any):
         for k, v in attrs.items():
             setattr(self, k, v)
+
+
+def test_default_path_returns_none_when_dir_unwritable(data_logger, tmp_path, monkeypatch, caplog):
+    """issue #42: an uncreatable default dir warns once and yields None (no exception)."""
+    import logging
+
+    monkeypatch.chdir(tmp_path)
+    blocker = tmp_path / "logs"
+    blocker.write_text("a file, not a directory")
+    with caplog.at_level(logging.WARNING, logger=""):
+        assert data_logger._default_path("p1") is None
+        # A second call for a different port re-resolves the same broken dir:
+        # still None, and no new warning is emitted.
+        assert data_logger._default_path("p2") is None
+    warned = [r for r in caplog.records if "cannot create log directory" in r.getMessage().lower()]
+    assert len(warned) == 1
+    assert warned[0].exc_info is None
+
+
+def test_resolve_path_override_honored_when_dir_writable(data_logger, tmp_path):
+    override_dir = tmp_path / "override_dir"
+    override_dir.mkdir()
+    port_obj = SimpleNamespaceLike(config={"log_file": str(override_dir / "p1.log")})
+    p = data_logger._resolve_path_for_port("p1", port_obj)
+    assert p == override_dir / "p1.log"
+
+
+def test_resolve_path_falls_back_to_default_override_dir_unwritable(data_logger, tmp_path, caplog, monkeypatch):
+    """issue #42: an unwritable override dir falls back to the default path."""
+    import logging
+
+    monkeypatch.chdir(tmp_path)
+    blocker = tmp_path / "bad_override"
+    blocker.write_text("a file, not a directory")
+    port_obj = SimpleNamespaceLike(config={"log_file": str(blocker / "p1.log")})
+    with caplog.at_level(logging.WARNING, logger=""):
+        # The override dir cannot be created, so the resolver falls through to
+        # the default `logs/ports` path (creable here).
+        p = data_logger._resolve_path_for_port("p1", port_obj)
+    # The default path is cwd-relative; compare the tail, not the absolute path.
+    tail = tuple(str(seg) for seg in Path(p).parts[-3:])
+    assert tail == ("logs", "ports", "p1.log")
+
+
+def test_writer_loop_skips_event_when_path_unresolvable(tmp_path, monkeypatch, caplog):
+    """issue #42: the writer loop drops the record (no per-event traceback) when the
+    log dir is uncreatable, instead of erroring a line of spam per data event."""
+    import asyncio
+    import logging
+
+    from openmux.server.data_logger import DataLogger
+
+    monkeypatch.chdir(tmp_path)
+    blocker = tmp_path / "logs"
+    blocker.write_text("a file, not a directory")
+
+    async def _drive():
+        # Create the logger inside the running loop so its queue binds to this loop.
+        dl = DataLogger()
+        for i in range(3):
+            dl.record(f"p{i}", b"hello\n", "in", client_id="c")
+        await dl.queue.join()
+        if dl._task is not None:
+            dl._task.cancel()
+            try:
+                await dl._task
+            except (asyncio.CancelledError, Exception):
+                pass
+        for fh in list(dl._files.values()):
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+    loop = asyncio.new_event_loop()
+    try:
+        with caplog.at_level(logging.WARNING, logger=""):
+            loop.run_until_complete(_drive())
+    finally:
+        loop.close()
+
+    # No per-event writer-loop traceback for the unresolvable path.
+    writer_errors = [r for r in caplog.records if "DataLogger writer loop error" in r.getMessage()]
+    assert writer_errors == []
+    # Nothing was ever written to the broken directory.
+    assert not (tmp_path / "logs" / "ports").exists()

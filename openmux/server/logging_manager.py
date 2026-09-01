@@ -9,6 +9,8 @@ import sys
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, Optional
 
+from ..common.fsutil import ensure_directory
+
 
 class TerminalStreamHandler(logging.StreamHandler):
     """A stream handler that ensures proper terminal behavior"""
@@ -173,7 +175,9 @@ class LoggingManager:
 
         # Create log directory if it doesn't exist
         log_dir = self.config.get("log_dir", "logs")
-        os.makedirs(log_dir, exist_ok=True)
+        # issue #42: an uncreatable dir warns once and keeps console-only output.
+        if not ensure_directory(log_dir):
+            return
 
         # Add file handler for main log
         main_log_file = os.path.join(log_dir, "openmux.log")
@@ -190,6 +194,9 @@ class LoggingManager:
     def _setup_component_loggers(self):
         """Set up loggers for each component"""
         log_dir = self.config.get("log_dir", "logs")
+        # issue #42: skip per-component file logs when the dir is not writable.
+        if not ensure_directory(log_dir):
+            return
 
         # Create component loggers
         components = [

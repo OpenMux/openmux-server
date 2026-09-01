@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from ..common.fsutil import ensure_directory
 from .auth_manager import AuthManager
 from .config_manager import ConfigManager
 from .console_manager import ConsoleManager
@@ -24,6 +25,18 @@ from .port_manager import PortManager
 from .security_policy import SecurityPolicyError
 
 _LOGGER_COMPONENTS = ["server", "client", "serial", "auth", "config", "console"]
+
+
+def _openmux_mkdir(path) -> bool:
+    """Create a log directory, warning once if it cannot be created.
+
+    Wraps `ensure_directory` for the server logging paths (issue #42). When the
+    directory is missing and cannot be created (for example a base owned by
+    another user), a single console-only warning is emitted for the life of
+    the process instead of one traceback per setup call. Returns True when the
+    log files may target `path`, False when the caller should skip them.
+    """
+    return ensure_directory(path)
 
 
 class OpenMuxServer:
@@ -1819,12 +1832,14 @@ def _setup_basic_logging(
             root.addHandler(console_handler)
 
         # Main log file (issue #47: config-driven path, fallback to logs/openmux.log)
-        try:
-            main_file.parent.mkdir(parents=True, exist_ok=True)
-            file_handler = RotatingFileHandler(str(main_file), maxBytes=max_bytes, backupCount=backup_count)
-        except OSError:
-            logging.warning("Could not create log dir %s; continuing console-only", main_file.parent, exc_info=True)
-            file_handler = None
+        # issue #42: a dir that cannot be created warns once (see _openmux_mkdir)
+        # and skips the handler, so a reload re-try does not re-spam.
+        file_handler = None
+        if _openmux_mkdir(main_file.parent):
+            try:
+                file_handler = RotatingFileHandler(str(main_file), maxBytes=max_bytes, backupCount=backup_count)
+            except OSError:  # justification: the dir exists; opening the file may still fail
+                logging.warning("Could not open log file %s; continuing console-only", main_file, exc_info=True)
         if file_handler is not None:
             file_format = logging.Formatter(
                 "%(asctime)s.%(msecs)03d %(filename)s:%(lineno)d %(name)s %(levelname)s: %(message)s",
@@ -1843,11 +1858,13 @@ def _setup_basic_logging(
                     continue
                 comp_logger = logging.getLogger(f"openmux.{comp}")
                 comp_file = base / f"openmux_{comp}.log"
+                # issue #42: warns once when the base dir cannot be created.
+                if not _openmux_mkdir(comp_file.parent):
+                    continue
                 try:
-                    comp_file.parent.mkdir(parents=True, exist_ok=True)
                     comp_handler = RotatingFileHandler(str(comp_file), maxBytes=max_bytes, backupCount=backup_count)
-                except OSError:
-                    logging.warning("Could not create log dir %s; skipping component log", comp_file.parent, exc_info=True)
+                except OSError:  # justification: the dir exists; opening the file may still fail
+                    logging.warning("Could not open log file %s; skipping component log", comp_file, exc_info=True)
                     continue
                 comp_handler.setFormatter(file_format)
                 comp_handler.setLevel(logging.NOTSET)

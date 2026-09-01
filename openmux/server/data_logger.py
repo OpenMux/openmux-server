@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from ..common.fsutil import ensure_directory
+
 
 @dataclass
 class LogEvent:
@@ -105,33 +107,50 @@ class DataLogger:
         # Direction filters cache: port_name -> set({'in','out'})
         self._direction_cache = {}
 
-    def _default_path(self, port_name: str) -> Path:
+    def _default_path(self, port_name: str) -> Optional[Path]:
         """Return default log path for a port.
 
-        Creates parent directories as needed under `{base_dir or "logs"}/ports` (issue #47).
+        Creates parent directories as needed under ``{base_dir or "logs"}/ports`` (issue #47).
 
         Args:
             port_name: Logical port name.
 
         Returns:
-            Path: Filesystem path for the port log file.
+            Optional[Path]: Filesystem path for the port log file, or None when the
+                log directory cannot be created (issue #42; already warned once).
         """
         base = Path(self.base_dir or "logs") / "ports"
-        base.mkdir(parents=True, exist_ok=True)
+        if not ensure_directory(base):
+            return None
         return base / f"{port_name}.log"
 
-    def _resolve_path_for_port(self, port_name: str, port_obj: Optional[Any] = None) -> Path:
+    def _override_log_path(self, raw: Optional[str]) -> Optional[Path]:
+        """Return `raw` as a Path when its parent directory can be created.
+
+        Returns None when `raw` is falsy or its parent directory cannot be
+        created, so the caller falls back to the default path (issue #42).
+        """
+        if not raw:
+            return None
+        p = Path(str(raw))
+        if ensure_directory(p.parent):
+            return p
+        return None
+
+    def _resolve_path_for_port(self, port_name: str, port_obj: Optional[Any] = None) -> Optional[Path]:
         """Resolve log file path for a port, honoring config overrides.
 
         Supports `log_file` in the port's `config` (dict or attribute) or
-        a direct `log_file` attribute on the port object.
+        a direct `log_file` attribute on the port object. Port-level `log_file`
+        overrides are honored even when the default log directory is not writable.
 
         Args:
             port_name: Logical port name.
             port_obj: Optional port instance (or wrapper) used to inspect config.
 
         Returns:
-            Path: Filesystem path to write the log entry to.
+            Optional[Path]: Filesystem path to write the log entry to, or None
+                when no log file can be created (issue #42; already warned once).
         """
         # Port-specific configured filename if available
         try:
@@ -140,40 +159,31 @@ class DataLogger:
             if obj is not None and hasattr(obj, "unified_port"):
                 obj = getattr(obj, "unified_port", obj)
 
-            # Check config dict first
             cfg = getattr(obj, "config", None)
-            if isinstance(cfg, dict):
-                path = cfg.get("log_file")
-                if path:
-                    p = Path(str(path))
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    return p
-
-            # If config is an object/dataclass, check attribute
-            if cfg is not None and hasattr(cfg, "log_file"):
-                lf = getattr(cfg, "log_file", None)
-                if lf:
-                    p = Path(str(lf))
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    return p
-
-            # Also allow port object itself to have log_file attribute
-            if obj is not None and hasattr(obj, "log_file"):
-                lf2 = getattr(obj, "log_file", None)
-                if lf2:
-                    p = Path(str(lf2))
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    return p
+            # Check config dict first, then an object/dataclass attribute, then
+            # the port object itself. The first override whose directory can be
+            # created wins; the default path is the last resort.
+            override = self._override_log_path(cfg.get("log_file") if isinstance(cfg, dict) else None)
+            if override is None:
+                override = self._override_log_path(getattr(cfg, "log_file", None))
+            if override is None:
+                override = self._override_log_path(getattr(obj, "log_file", None))
+            if override is not None:
+                return override
         except Exception:
             self.logger.error("Error resolving log path for port", exc_info=True)
         return self._default_path(port_name)
 
-    def get_log_path(self, port_name: str, port_obj: Optional[Any] = None) -> Path:
+    def get_log_path(self, port_name: str, port_obj: Optional[Any] = None) -> Optional[Path]:
         """Return the filesystem path for a port's log file.
 
         This is a thin wrapper around the internal resolver so external
         components (like the Web Console) can discover the same location the
         logger writes to.
+
+        Returns:
+            Optional[Path]: Path, or None when the log directory cannot be created
+            (issue #42; the warning was already emitted once).
         """
 
         return self._resolve_path_for_port(port_name, port_obj)
@@ -190,6 +200,9 @@ class DataLogger:
             try:
                 port_obj = getattr(ev, "port_obj", None)
                 path = self._resolve_path_for_port(ev.port, port_obj)
+                if path is None:
+                    # Log dir is not writable (issue #42); already warned once.
+                    continue
                 fmt = self._resolve_format_for_port(ev.port, port_obj)
                 # Cache open handles per-path
                 fh = self._files.get(str(path))

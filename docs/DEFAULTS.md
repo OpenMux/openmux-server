@@ -42,6 +42,7 @@ logging (runtime defaults in _setup_basic_logging in openmux/server/main.py)
 - logging.max_log_size: 10485760 (10 MB, rotation threshold per log file)
 - logging.log_backup_count: 5
 - logging paths apply on SIGHUP/soft reload or full reload; level applies the same way
+- If the log directory cannot be created, the server warns once and continues with console logging only. It does not spam a traceback on every setup call or every port log write (issue #42)
 
 client_listener (TCP console) (runtime defaults from openmux/server/adapters/client_listener.py)
 - client_listener.host: 127.0.0.1

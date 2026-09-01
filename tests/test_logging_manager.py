@@ -136,3 +136,28 @@ def test_logging_manager_get_logger(tmp_path):
             lg2 = logging.getLogger(f"openmux.{comp}")
             for h in list(lg2.handlers):
                 lg2.removeHandler(h)
+
+
+def test_logging_manager_console_only_when_dir_uncreatable(tmp_path, caplog):
+    """issue #42: an uncreatable log dir keeps the console handler and adds no file
+    handler (and does not raise)."""
+    from openmux.common import fsutil
+
+    fsutil._warned.clear()
+    blocker = tmp_path / "logs"
+    blocker.write_text("a regular file, not a directory")
+    cfg = {"log_level": "INFO", "log_dir": str(tmp_path / "logs")}
+    orig_handlers = snapshot_root_handlers()
+    try:
+        with caplog.at_level(logging.WARNING, logger=""):
+            lm = LoggingManager(cfg)
+        root = logging.getLogger()
+        # The console handler is always present.
+        assert any(isinstance(h, TerminalStreamHandler) for h in root.handlers)
+        # No file handler could be attached because the dir was uncreatable.
+        assert not any(h.__class__.__name__ == "RotatingFileHandler" for h in root.handlers)
+        warned = [r for r in caplog.records if "cannot create log directory" in r.getMessage().lower()]
+        assert len(warned) == 1
+    finally:
+        restore_root_handlers(orig_handlers)
+        fsutil._warned.clear()

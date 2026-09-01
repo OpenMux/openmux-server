@@ -270,6 +270,27 @@ def test_server_repoints_data_logger_base_dir(tmp_path):
     assert (log_dir / "openmux_server.log").exists()
 
 
+def test_setup_basic_logging_warns_once_for_uncreatable_dir(tmp_path, caplog, monkeypatch):
+    """issue #42: a log dir that cannot be created warns once, not per setup call."""
+    import logging
+
+    from openmux.common import fsutil
+
+    fsutil._warned.clear()
+    blocker = tmp_path / "logs"
+    blocker.write_text("a regular file, not a directory")
+    try:
+        _setup_basic_logging("INFO", log_dir=str(tmp_path / "logs"))
+        # A reload re-runs setup against the same broken dir: no second warning.
+        _setup_basic_logging("INFO", log_dir=str(tmp_path / "logs"))
+    finally:
+        fsutil._warned.clear()
+    warned = [r for r in caplog.records if "cannot create log directory" in r.getMessage().lower()]
+    assert len(warned) == 1
+    # The single warning carries no traceback
+    assert warned[0].exc_info is None
+
+
 @pytest.mark.asyncio
 async def test_initialize_unified_adapters_success(tmp_path, monkeypatch):
     cfg_path = write_temp_config(tmp_path)

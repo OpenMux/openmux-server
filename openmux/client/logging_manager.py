@@ -11,6 +11,8 @@ import os
 import sys
 from typing import Any, Dict, Optional
 
+from ..common.fsutil import ensure_directory
+
 
 class ClientLoggingManager:
     """Configure and retrieve logging facilities for client components.
@@ -82,31 +84,32 @@ class ClientLoggingManager:
         # Create log directory if it doesn't exist and file logging is enabled
         if self.config.get("file_logging_enabled", False) or file_only:
             log_dir = self.config.get("log_dir", "logs")
-            os.makedirs(log_dir, exist_ok=True)
+            # issue #42: an uncreatable dir warns once and keeps console-only
+            # output instead of raising (and re-raising on every reconfigure).
+            if ensure_directory(log_dir):
+                # Determine log file name
+                log_file_name = self.config.get("log_file", "openmux_client.log")
+                main_log_file = os.path.join(log_dir, log_file_name)
 
-            # Determine log file name
-            log_file_name = self.config.get("log_file", "openmux_client.log")
-            main_log_file = os.path.join(log_dir, log_file_name)
+                # Check if we should use rotating file handler
+                max_size_mb = int(self.config.get("log_max_size_mb", 10))
+                backup_count = int(self.config.get("log_backups", 5))
 
-            # Check if we should use rotating file handler
-            max_size_mb = int(self.config.get("log_max_size_mb", 10))
-            backup_count = int(self.config.get("log_backups", 5))
+                if max_size_mb > 0 and backup_count > 0:
+                    # Use rotating file handler
+                    file_handler = logging.handlers.RotatingFileHandler(
+                        main_log_file, maxBytes=max_size_mb * 1024 * 1024, backupCount=backup_count
+                    )
+                else:
+                    # Use regular file handler
+                    file_handler = logging.FileHandler(main_log_file)
 
-            if max_size_mb > 0 and backup_count > 0:
-                # Use rotating file handler
-                file_handler = logging.handlers.RotatingFileHandler(
-                    main_log_file, maxBytes=max_size_mb * 1024 * 1024, backupCount=backup_count
-                )
-            else:
-                # Use regular file handler
-                file_handler = logging.FileHandler(main_log_file)
-
-            # Use more detailed formatter for file logs
-            file_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-            file_handler.setFormatter(file_formatter)
-            # Keep handler permissive to avoid suppressing DEBUG
-            file_handler.setLevel(logging.NOTSET)
-            root_logger.addHandler(file_handler)
+                # Use more detailed formatter for file logs
+                file_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+                file_handler.setFormatter(file_formatter)
+                # Keep handler permissive to avoid suppressing DEBUG
+                file_handler.setLevel(logging.NOTSET)
+                root_logger.addHandler(file_handler)
 
         # Apply chosen level to all current openmux.* loggers and their handlers
         try:

@@ -584,7 +584,7 @@ async def handle_logs(request: web.Request) -> web.Response:
             try:
                 logger = DataLogger.get()
                 log_path = logger.get_log_path(port_name, port_obj)
-                if log_path.exists():
+                if log_path is not None and log_path.exists():
                     try:
                         log_lines = [_sanitize_log_line(line) for line in _tail_file(log_path, tail)]
                     except Exception:
