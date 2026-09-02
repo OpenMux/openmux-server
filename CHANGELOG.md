@@ -93,6 +93,7 @@ Changes since v1.0.2 (2026-08-27).
 - The About page shows the logged-in user: username, global permission, and console groups.
 - The login page and status page show the messages of the day.
 - The Config Editor marks each field with its reload requirement (`live`, `soft`, `full`, `sighup`, `restart`) and shows the read-only `access_default` row.
+- The Config Editor TCP-initiator port table is narrower. Six advanced columns (Verify TLS, Timeout, Reconnect delay, Batch writes, Batch size, Batch timeout) are no longer shown in the list. They remain available in the per-port Edit dialog and keep their value when you save.
 - The serial port editor no longer offers an empty choice for Data bits, Parity, or Stop bits. The selects previously carried a blank, meaningless leading option; they now always show a valid value (defaulting to 8-N-1 when unset).
 - Generic Config Editor dropdowns no longer show a pointless blank option when the field has a documented default. The common renderer used to put an empty leading option in every dropdown. This was redundant for fields whose "unset" value means the same as the default (serial Flow, Write slots, TCP-initiator Protocol and Telnet negotiation). Those now preselect the default instead. A dropdown that has no documented default (user and API-key Permissions) keeps its blank option, because leaving that field unset is a different choice.
 - The Port Actions sub-view has a "Script health" panel that lists action-script load errors for the whole `actions_dir`.
