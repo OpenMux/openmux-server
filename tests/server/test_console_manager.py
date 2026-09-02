@@ -977,14 +977,66 @@ class TestConnectClientToPortGroupAcl:
         assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
-    async def test_unknown_user_is_denied_no_permissions(self, monkeypatch):
+    async def test_soft_reload_group_update_applies_to_next_session(self, monkeypatch):
+        """A Soft Reload that only changes the group lists must (1) not create/destroy the
+        port, and (2) take effect for the next connection attempt — no Full Reload needed.
+
+        End-to-end: real LoopbackAdapter + UnifiedPortWrapper + ConsoleManager. The
+        pre-reload access decision is different from the post-reload one for a real
+        user that is not admin, proving that the access ladder is reading the in-place
+        updated wrapper attribute (not a stale snapshot from registration time).
+        """
         cm = await self._make_manager(
             monkeypatch,
-            {"name": "p1", "max_read_write_users": 5},
-            {"users": [{"username": "alice", "password_hash": "x"}]},
+            {
+                "name": "p1",
+                "max_read_write_users": 5,
+                "read_write_groups": [],
+                "read_only_groups": [],
+            },
+            {"users": [
+                {"username": "root", "password_hash": "x", "permissions": "admin"},
+                {"username": "eve", "password_hash": "x"},  # default read-write
+            ]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "ghost")
-        assert (ok, mode, reason) == (False, None, "no_permissions")
+        adapter = cm.port_manager.ports["p1"].adapter
+        wrapper_id = id(cm.port_manager.ports["p1"])
+
+        # Baseline: with no group lists, an unprivileged user gets read-write.
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "eve")
+        assert (ok, mode, reason) == (True, "read-write", None)
+        await cm.disconnect_client_from_port("c1", "p1")
+
+        destroyed: list = []
+        created: list = []
+        async def counting_destroy(name):
+            destroyed.append(name)
+        async def counting_create(name, cfg):
+            created.append(name)
+        # Patch on the adapter instance (not the class) so we do not leak into
+        # the other tests in this suite.
+        monkeypatch.setattr(adapter, "destroy_port", counting_destroy)
+        monkeypatch.setattr(adapter, "create_port", counting_create)
+
+        # Simulate a soft reload: only the group lists change.
+        summary = await adapter.reconcile_ports([
+            {"name": "p1", "max_read_write_users": 5, "read_write_groups": ["ops"]},
+        ])
+        assert summary["unchanged"] == ["p1"], f"groups-only change must not recreate: {summary}"
+        assert summary["updated"] == [] and summary["removed"] == [] and summary["added"] == []
+        assert destroyed == []  # no port lifecycle event on a groups-only change
+        assert created == []
+        assert id(cm.port_manager.ports["p1"]) == wrapper_id  # same wrapper instance
+
+        # Post-reload: the closed boundary kicks in. eve is neither in ops nor admin, so
+        # her next attach must be denied. This only works if the access ladder re-reads
+        # the group list live from the (same) port object the reconcile call mutated.
+        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "eve")
+        assert (ok, mode, reason) == (False, None, "denied_by_group_acl")
+
+        # Sanity: an admin still bypasses the boundary.
+        ok, mode, reason = await cm.connect_client_to_port("c2", "p1", "root")
+        assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
     async def test_loopback_without_acl_follows_slot_rules(self, monkeypatch):
@@ -1327,3 +1379,45 @@ class TestResolveAccessModeLadder:
         cm = self._cm({"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]})
         port = _LadderPort(loopback=True, adapter_type="loopback", ro_groups=("viewers",))
         assert cm._resolve_access_mode(port, "p1", "read-write", "bob") == ("read-only", None)
+
+
+class _AdapterTypeStub:
+    """Bare stand-in for the adapter the wrapper is built against."""
+
+    def get_adapter_type(self):
+        return "loopback"
+
+
+class TestUnifiedPortWrapperGroupAttrsAreLive:
+    """The PM wrapper must not snapshot the group lists at registration time.
+
+    A Soft Reload rewrites the lists on the port object in place; the access
+    ladder (and get_status) must see the new values on the next read, with no
+    re-registration of the port.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wrapper_group_attrs_track_port_in_place(self):
+        from types import SimpleNamespace
+
+        from openmux.server.port_manager import PortManager
+
+        pm = PortManager([])
+        port = SimpleNamespace(
+            name="p1",
+            description="d",
+            read_write_groups=["ops"],
+            read_only_groups=["viewers"],
+        )
+        wrapper = pm._create_unified_port_wrapper(port, _AdapterTypeStub())
+        assert wrapper.read_write_groups == ["ops"]
+        assert wrapper.read_only_groups == ["viewers"]
+
+        # In-place rewrite, as the adapters' reconcile_ports now does.
+        port.read_write_groups = ["oncall"]
+        port.read_only_groups = []
+        assert wrapper.read_write_groups == ["oncall"]
+        assert wrapper.read_only_groups == []
+        status = wrapper.get_status()
+        assert status["read_write_groups"] == ["oncall"]
+        assert status["read_only_groups"] == []

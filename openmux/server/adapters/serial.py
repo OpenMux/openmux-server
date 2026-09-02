@@ -116,8 +116,9 @@ class SerialPortWrapper:
         self.name = config.name  # Add name attribute for port manager compatibility
         self.description = config.description
         self.max_read_write_users = config.max_read_write_users  # For port manager compatibility
-        self.read_write_groups = config.read_write_groups
-        self.read_only_groups = config.read_only_groups
+        # read_write_groups / read_only_groups are exposed as live properties
+        # (see below) that read straight from config, so soft-reload in-place
+        # updates to the config are visible to the access ladder without a copy.
         self.logger = logger.getChild(f"serial.{config.name}")
         # Best-effort callback into PortManager listeners via adapter
         self._meta_notify = meta_notify
@@ -157,6 +158,26 @@ class SerialPortWrapper:
         # console can show why the port is offline; cleared on successful connect.
         self.status_message: str = ""
         self._status_changed: Optional[bool] = None
+
+    @property
+    def read_write_groups(self) -> List[str]:
+        # Live view onto config.read_write_groups. A Soft Reload updates the
+        # dataclass in place; the access ladder (via the PM wrapper's
+        # live property) reads this on connect.
+        return self.config.read_write_groups
+
+    @read_write_groups.setter
+    def read_write_groups(self, value: List[str]) -> None:
+        self.config.read_write_groups = list(value or [])
+
+    @property
+    def read_only_groups(self) -> List[str]:
+        # Live view onto config.read_only_groups (mirrors read_write_groups).
+        return self.config.read_only_groups
+
+    @read_only_groups.setter
+    def read_only_groups(self, value: List[str]) -> None:
+        self.config.read_only_groups = list(value or [])
 
     def _set_status_message(self, message: str, connected: bool = False) -> None:
         """Set or clear the offline reason and push a meta refresh on state change.
@@ -1026,6 +1047,19 @@ class SerialAdapter(BaseGenericAdapter):
                         desc = new_by_name[name].get("description")
                         if isinstance(desc, str) and desc and desc != getattr(spw, "description", None):
                             spw.description = desc
+                    except Exception:
+                        pass
+                    # In-place update for the RW/RO access-group lists. These
+                    # fields are deliberately NOT in _material_config, so a
+                    # groups-only change does not recreate the port; the new
+                    # lists take effect from the next connection attempt.
+                    try:
+                        new_rw = list(new_by_name[name].get("read_write_groups") or [])
+                        new_ro = list(new_by_name[name].get("read_only_groups") or [])
+                        if list(spw.config.read_write_groups or []) != new_rw:
+                            spw.config.read_write_groups = new_rw
+                        if list(spw.config.read_only_groups or []) != new_ro:
+                            spw.config.read_only_groups = new_ro
                     except Exception:
                         pass
                 unchanged.append(name)

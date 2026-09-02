@@ -278,3 +278,117 @@ async def test_create_port_duplicate_device_offline(monkeypatch):
     assert wrapper_b.state is PortState.ACTIVE
     assert wrapper_b.connection_task is not None
     await wrapper_b.stop()
+
+
+def _make_spw_with_groups(**config_overrides) -> SimpleNamespace:
+    """Like _make_spw, but the port also mirrors the group lists on itself.
+
+    A real SerialPortWrapper exposes ``read_write_groups`` / ``read_only_groups``
+    as properties over ``config``; this mock mirrors that so the reconcile
+    in-place update has the same read/write surface (spw.config.* and spw.*).
+    """
+    cfg = _make_spw(**config_overrides).config
+    cfg.read_write_groups = list(config_overrides.get("read_write_groups", []))
+    cfg.read_only_groups = list(config_overrides.get("read_only_groups", []))
+
+    class _Spw:
+        def __init__(self):
+            self.config = cfg
+            self.description = ""
+            self.state = PortState.ACTIVE
+            self.status_message = ""
+            self._stop = None
+
+        @property
+        def read_write_groups(self):
+            return self.config.read_write_groups
+
+        @read_write_groups.setter
+        def read_write_groups(self, value):
+            self.config.read_write_groups = list(value or [])
+
+        @property
+        def read_only_groups(self):
+            return self.config.read_only_groups
+
+        @read_only_groups.setter
+        def read_only_groups(self, value):
+            self.config.read_only_groups = list(value or [])
+
+        async def stop(self):
+            self._stop = True
+
+    return _Spw()
+
+
+@pytest.mark.asyncio
+async def test_serial_wrapper_group_attrs_are_live_views_on_config():
+    """The wrapper's group attrs must track config in both directions.
+
+    This is what lets a Soft Reload's in-place config update become visible to
+    the access ladder through the PM wrapper, with no port re-creation.
+    """
+    spw = _make_spw_with_groups()
+    assert spw.read_write_groups == []
+    assert spw.read_only_groups == []
+
+    # Property write lands in config.
+    spw.read_write_groups = ["ops"]
+    spw.read_only_groups = ["viewers"]
+    assert spw.config.read_write_groups == ["ops"]
+    assert spw.config.read_only_groups == ["viewers"]
+
+    # A direct config rebind (what reconcile does) is visible through the property.
+    spw.config.read_write_groups = ["oncall"]
+    assert spw.read_write_groups == ["oncall"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_updates_groups_in_place_without_restart(monkeypatch):
+    """A groups-only change is not material: no destroy/create; lists update in place.
+
+    The old behavior re-created the port (disconnecting users) only on a Full
+    Reload when a group changed; soft reload must now just rewrite the lists.
+    """
+    adapter = _make_adapter()
+    adapter.serial_ports["a"] = _make_spw_with_groups(  # type: ignore
+        device="/dev/ttyUSB0",
+        read_write_groups=["ops"],
+        read_only_groups=["viewers"],
+    )
+
+    destroyed: list[str] = []
+    created: list[str] = []
+
+    async def fake_destroy(name):
+        destroyed.append(name)
+
+    async def fake_create(name, cfg):
+        created.append(name)
+
+    monkeypatch.setattr(SerialAdapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(SerialAdapter, "create_port", fake_create)
+
+    summary = await adapter.reconcile_ports(
+        {
+            "serial_ports": [
+                {
+                    "name": "a",
+                    "device": "/dev/ttyUSB0",
+                    "baudrate": 9600,
+                    "read_write_groups": ["ops", "oncall"],
+                    "read_only_groups": [],
+                },
+            ]
+        }
+    )
+
+    assert summary["unchanged"] == ["a"], f"groups change must not recreate: {summary}"
+    assert summary["updated"] == []
+    assert summary["removed"] == []
+    assert summary["added"] == []
+    assert destroyed == []
+    assert created == []
+    spw = adapter.serial_ports["a"]
+    assert list(spw.read_write_groups) == ["ops", "oncall"]
+    assert list(spw.read_only_groups) == []

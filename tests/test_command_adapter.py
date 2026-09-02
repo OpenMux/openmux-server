@@ -465,6 +465,52 @@ async def test_adapter_reconcile_ports_unchanged(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_adapter_reconcile_ports_updates_groups_in_place_without_restart(monkeypatch):
+    """A groups-only change must not recreate the port; the lists update in place."""
+    adapter = CommandAdapter("cmd", {"command_ports": [{"name": "a", "command": "echo hi"}]})
+
+    class PortObj:
+        command = "echo hi"
+        shell = False
+        cwd = None
+        env = None
+        auto_restart = False
+        max_read_write_users = "one"
+        interactive = False
+        always_buffer = False
+        scrollback_size = 0
+        read_write_groups: list = ["ops"]
+        read_only_groups: list = ["viewers"]
+
+    adapter.ports["a"] = PortObj()  # type: ignore[assignment]
+
+    destroyed: list = []
+    created: list = []
+
+    async def fake_destroy(name: str) -> None:
+        destroyed.append(name)
+
+    async def fake_create(name: str, cfg: dict) -> None:
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    summary = await adapter.reconcile_ports(
+        [{"name": "a", "command": "echo hi", "read_write_groups": [], "read_only_groups": ["ops"]}]
+    )
+    assert summary["unchanged"] == ["a"], f"groups-only change must not recreate: {summary}"
+    assert summary["updated"] == []
+    assert summary["removed"] == []
+    assert summary["added"] == []
+    assert destroyed == []
+    assert created == []
+    port = adapter.ports["a"]
+    assert list(port.read_write_groups) == []
+    assert list(port.read_only_groups) == ["ops"]
+
+
+@pytest.mark.asyncio
 async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
     """Add, remove, and material-change (command) are all detected correctly."""
     adapter = CommandAdapter("cmd", {"command_ports": []})

@@ -615,3 +615,57 @@ async def test_scrollback_disabled_by_default():
 
     await adapter._handle_port_data("p1", b"hello")
     assert pm.get_scrollback("p1") == b""
+
+
+@pytest.mark.asyncio
+async def test_adapter_reconcile_ports_updates_groups_in_place_without_restart(monkeypatch):
+    """A groups-only change must not recreate the port; the lists update in place."""
+    adapter = TcpInitiatorAdapter("ti", {"tcp_initiator_ports": [{"name": "a", "host": "h1", "port": 1}]})
+
+    class PortObj:
+        host = "h1"
+        port = 1
+        use_tls = False
+        ssl_verify = True
+        timeout = 10.0
+        auto_reconnect = True
+        reconnect_delay = 5.0
+        _batching_enabled = True
+        _batch_size = 1024
+        _batch_timeout = 0.015
+        enabled = True
+        config: dict = {}
+        scrollback_size = 0
+        read_write_groups: List[str] = ["ops"]
+        read_only_groups: List[str] = ["viewers"]
+
+    adapter.ports["a"] = PortObj()  # type: ignore[assignment]
+
+    destroyed: List[str] = []
+    created: List[str] = []
+
+    async def fake_destroy(name):
+        destroyed.append(name)
+
+    async def fake_create(name, cfg):
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    summary = await adapter.reconcile_ports(
+        {
+            "tcp_initiator_ports": [
+                {"name": "a", "host": "h1", "port": 1, "read_write_groups": [], "read_only_groups": ["ops"]},
+            ]
+        }
+    )
+    assert summary["unchanged"] == ["a"], f"groups-only change must not recreate: {summary}"
+    assert summary["updated"] == []
+    assert summary["removed"] == []
+    assert summary["added"] == []
+    assert destroyed == []
+    assert created == []
+    port = adapter.ports["a"]
+    assert list(port.read_write_groups) == []
+    assert list(port.read_only_groups) == ["ops"]

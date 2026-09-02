@@ -453,7 +453,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           const _rkinds=columns.map(c=>reloadHintFor(rootId,c.key)).filter(Boolean);
           const _rstrict=_rkinds.indexOf('full')!==-1 ? 'full' : (_rkinds[0]||null);
           if(_rstrict){
-            const _rtip=_rstrict==='full' ? 'RW/RO group fields need a Full Reload; other fields apply via Soft Reload.' : (RELOAD_TIPS[_rstrict]||'');
+            const _rtip=RELOAD_TIPS[_rstrict]||'';
             lg.appendChild(document.createTextNode(' ')); lg.appendChild(makeReloadHint(_rstrict,_rtip));
           }
           editor.appendChild(lg); const getters=[]; const reqChecks=[]; const errBox=document.createElement('div'); editor.appendChild(errBox);
@@ -788,9 +788,11 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         'serial_ports','loopback_ports','command_ports','tcp_initiator_ports',
         'telnet_listener','ssh_listener','muxcon.listeners','muxcon.initiators','muxcon.public_keys',
       ]);
-      // Access-group fields are NOT included in any port reconcile diff, so they
-      // only take effect when the port is re-created (Full Reload).
-      const FULL_RELOAD_ONLY_COLUMNS = new Set(['read_write_groups', 'read_only_groups']);
+      // No columns require a Full Reload any more. The RW/RO access-group fields
+      // are now applied in place by Soft Reload (they take effect from the next
+      // connection; already-attached sessions keep their mode). If a new field is
+      // added that only takes effect on port re-creation, add it here.
+      const FULL_RELOAD_ONLY_COLUMNS = new Set();
       const RELOAD_TIPS = {
         soft: 'Applied by Soft Reload (or a Full Reload).',
         full: 'Needs a Full Reload. A Soft Reload does not update this.',

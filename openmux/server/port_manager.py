@@ -206,8 +206,10 @@ class PortManager:
                 # (or a legacy int, which consumers map via write_capacity()).
                 self.max_read_write_users = getattr(unified_port, "max_read_write_users", 5)
                 # Console-group access control (issue #24): empty on both = open to all.
-                self.read_write_groups = list(getattr(unified_port, "read_write_groups", None) or [])
-                self.read_only_groups = list(getattr(unified_port, "read_only_groups", None) or [])
+                # Read live from the underlying port (not captured at registration)
+                # so a Soft Reload's in-place group update is visible from the next
+                # connection attempt without requiring the wrapper to be recreated,
+                # matching the pattern used for "description" above.
                 self.adapter_type = adapter_type
                 self.loopback = str(adapter_type).lower() == "loopback"
 
@@ -224,6 +226,17 @@ class PortManager:
                 self.scrollback_size = int(getattr(unified_port, "scrollback_size", 0))
                 self._scrollback = bytearray()
 
+            @property
+            def read_write_groups(self) -> List[str]:
+                # Read live from the underlying port: a Soft Reload may update
+                # this list in place, and the access ladder reads it on connect.
+                return list(getattr(self.unified_port, "read_write_groups", None) or [])
+
+            @property
+            def read_only_groups(self) -> List[str]:
+                # Read live from the underlying port (mirrors read_write_groups).
+                return list(getattr(self.unified_port, "read_only_groups", None) or [])
+
             def get_status(self):
                 """Return a status snapshot for this unified wrapper."""
                 status = {
@@ -238,8 +251,8 @@ class PortManager:
                     "connected": bool(getattr(self.unified_port, "is_connected", self.is_running)),
                     "connected_clients": len(self.connected_clients),
                     "max_read_write_users": self.max_read_write_users,
-                    "read_write_groups": list(self.read_write_groups),
-                    "read_only_groups": list(self.read_only_groups),
+                    "read_write_groups": self.read_write_groups,
+                    "read_only_groups": self.read_only_groups,
                     "dropped_chunks": self.dropped_chunks,
                 }
                 # Include adapter-provided snapshot details when available

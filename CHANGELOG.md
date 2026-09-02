@@ -82,6 +82,11 @@ Changes since v1.0.2 (2026-08-27).
   - Federated peers now see the same reason text: the value travels inside the `PORTS:FEDERATED` catalog and is pushed live over a new lightweight `PORT_STATUS:` control channel (no full re-advertise needed). The value survives a peer restart via the existing federated cache.
   - A federated port also reports when the muxcon link to its origin is down, as a local reason of its own ("MuxCon link to <server_id> is down"). It is set when the last link path dies, shown as long as no path is live, and cleared when the link recovers. The link reason takes precedence over the origin's last reason, because the link outage is the freshest fact. It is local to the node that sees the outage and is never published over the wire.
   - Mixed-version peers: an older peer that does not know the field simply ignores it. No wire-protocol version bump, no config change.
+- **RW/RO access-group lists now apply on Soft Reload.** A change to `read_write_groups` / `read_only_groups` on a serial, loopback, command, or TCP-initiator port no longer needs a Full Reload.
+  - A Soft Reload (SIGHUP, or the Config Editor "Soft Reload") updates the lists in place on the running port. It does not recreate the port and does not drop connected sessions.
+  - The new lists take effect from the next connection. A session already attached keeps the mode it was granted.
+  - The Config Editor now tags these fields `soft`, not `full`.
+  - No config change.
 
 ### Web console and observability
 

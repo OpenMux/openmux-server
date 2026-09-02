@@ -1363,6 +1363,18 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                         setattr(port, "description", desc)
                 except Exception:
                     pass
+                # In-place update for the RW/RO access-group lists. These are
+                # deliberately NOT in _material_cfg, so a groups-only change
+                # does not recreate the port; new lists apply on next connect.
+                try:
+                    new_rw = list(new_by_name[n].get("read_write_groups") or [])
+                    new_ro = list(new_by_name[n].get("read_only_groups") or [])
+                    if list(getattr(port, "read_write_groups", None) or []) != new_rw:
+                        setattr(port, "read_write_groups", new_rw)
+                    if list(getattr(port, "read_only_groups", None) or []) != new_ro:
+                        setattr(port, "read_only_groups", new_ro)
+                except Exception:
+                    pass
                 unchanged.append(n)
             else:
                 updated.append(n)

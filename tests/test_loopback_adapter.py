@@ -235,6 +235,52 @@ async def test_adapter_reconcile_ports_unchanged(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_adapter_reconcile_ports_updates_groups_in_place_without_restart(monkeypatch):
+    """A groups-only change must not recreate the port; the lists update in place.
+
+    The access ladder reads the group lists off the port object (via the PM
+    wrapper). A Soft Reload now rewrites them without touching the session.
+    """
+    adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "a"}]})
+
+    class PortObj:
+        echo_delay = 0.0
+        buffer_size = 1024
+        sanitize_control = True
+        max_read_write_users = "one"
+        scrollback_size = 0
+        read_write_groups: list = ["ops"]
+        read_only_groups: list = ["viewers"]
+
+    adapter.ports["a"] = PortObj()  # type: ignore[assignment]
+
+    destroyed: list = []
+    created: list = []
+
+    async def fake_destroy(name: str) -> None:
+        destroyed.append(name)
+
+    async def fake_create(name: str, cfg: dict) -> None:
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    summary = await adapter.reconcile_ports(
+        [{"name": "a", "read_write_groups": ["oncall"], "read_only_groups": []}]
+    )
+    assert summary["unchanged"] == ["a"], f"groups-only change must not recreate: {summary}"
+    assert summary["updated"] == []
+    assert summary["removed"] == []
+    assert summary["added"] == []
+    assert destroyed == []
+    assert created == []
+    port = adapter.ports["a"]
+    assert list(port.read_write_groups) == ["oncall"]
+    assert list(port.read_only_groups) == []
+
+
+@pytest.mark.asyncio
 async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
     """Add, remove, and material-change (buffer_size) are all detected correctly."""
     adapter = LoopbackAdapter("loop", {"loopback_ports": []})

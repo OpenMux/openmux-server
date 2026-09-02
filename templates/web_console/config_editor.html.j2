@@ -232,7 +232,7 @@
     <div class="section">
       <ul style="margin:0 0 0 18px; padding:0;">
         <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, web console MOTD and realm, edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports, and the console access default (the access_default key in security.yaml).</li>
-        <li>Use <b>Full Reload</b> for: Client listener changes, muxcon advanced settings (heartbeat, multipath, cache, core auth), web status and web console network/TLS settings, web console plugins, and port RW/RO group access fields.</li>
+        <li>Use <b>Full Reload</b> for: Client listener changes, muxcon advanced settings (heartbeat, multipath, cache, core auth), web status and web console network/TLS settings, and web console plugins.</li>
         <li>Use <b>kill -HUP</b> for: the log level only (the Soft Reload button does not change the log level).</li>
         <li>Use a <b>process restart</b> for: the control socket path, PID file path, and the logging file/rotation settings.</li>
         <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>
@@ -243,7 +243,7 @@
 
   <div id="view-ports" class="config-view" style="display:none">
   <div class="config-section" data-config-section="serial_ports">
-    <div class="section-header"><span class="title">Serial ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload; a Full Reload covers the RW/RO groups access fields">SOFT</span> <span class="desc">Physical serial devices</span></div>
+    <div class="section-header"><span class="title">Serial ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload, including the RW/RO access-group fields (applied from the next connection)">SOFT</span> <span class="desc">Physical serial devices</span></div>
     <div id="serial_ports"></div>
     <div class="section" style="margin-top:12px">
       <div class="legend"><span class="title">Device health</span><span class="reload-hint reload-hint-live" title="Checked on load, after save, and on every table edit; a device can be used by only one port">LIVE</span> <span class="desc">A serial device can be opened by only one port</span></div>
@@ -252,17 +252,17 @@
   </div>
 
   <div class="config-section" data-config-section="loopback_ports">
-    <div class="section-header"><span class="title">Loopback ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload; a Full Reload covers the RW/RO groups access fields">SOFT</span> <span class="desc">Software loopbacks</span></div>
+    <div class="section-header"><span class="title">Loopback ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload, including the RW/RO access-group fields (applied from the next connection)">SOFT</span> <span class="desc">Software loopbacks</span></div>
     <div id="loopback_ports"></div>
   </div>
 
   <div class="config-section" data-config-section="command_ports">
-    <div class="section-header"><span class="title">Command ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload; a Full Reload covers the RW/RO groups access fields">SOFT</span> <span class="desc">Process-backed ports</span></div>
+    <div class="section-header"><span class="title">Command ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload, including the RW/RO access-group fields (applied from the next connection)">SOFT</span> <span class="desc">Process-backed ports</span></div>
     <div id="command_ports"></div>
   </div>
 
   <div class="config-section" data-config-section="tcp_initiator_ports">
-    <div class="section-header"><span class="title">TCP initiator ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload; a Full Reload covers the RW/RO groups access fields">SOFT</span> <span class="desc">Outbound TCP adapters</span></div>
+    <div class="section-header"><span class="title">TCP initiator ports</span><span class="reload-hint reload-hint-soft" title="Ports are reconciled by a Soft Reload, including the RW/RO access-group fields (applied from the next connection)">SOFT</span> <span class="desc">Outbound TCP adapters</span></div>
     <div id="tcp_initiator_ports"></div>
   </div>
   </div>
