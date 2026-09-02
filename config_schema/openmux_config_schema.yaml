@@ -101,8 +101,21 @@ properties:
         stopbits: { oneOf: [ { type: integer, enum: [1,2] }, { type: number, enum: [1.5] } ], default: 1 }
         timeout: { type: number, minimum: 0, default: 1.0 }
         flow_control: { type: string, enum: [none, rtscts, dsrdtr, xonxoff], default: none }
-        dtr: { type: boolean, default: true }
-        rts: { type: boolean, default: true }
+        # Signal-line policy (issue #63): absent = "none" (line untouched).
+        # Legacy booleans remain valid as shorthand (true = on, false = off).
+        # presence-on/presence-off drive the line high/low while a client is
+        # attached and low/high while the port is idle. Note: unquoted on/off
+        # parse as booleans under YAML 1.1, which the shorthand covers, so
+        # quoting is optional for every value.
+        dtr:
+          oneOf:
+            - { type: boolean }
+            - { type: string, enum: [none, on, off, presence-on, presence-off] }
+        rts:
+          oneOf:
+            - { type: boolean }
+            - { type: string, enum: [none, on, off, presence-on, presence-off] }
+            # (same YAML 1.1 on/off note as dtr above)
         # Write-slot capacity (issue #59): how many users may write at once.
         # Mode strings are preferred; legacy integers (0/1/>=2) are still accepted
         # during migration and map to none/one/multiple with a deprecation log line.

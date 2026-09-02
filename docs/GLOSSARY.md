@@ -40,6 +40,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Term | Meaning | Do not use |
 |---|---|---|
 | Serial port | A port that connects to a physical or virtual serial device. | COM port (except in Windows-specific text) |
+| Signal line | A RS-232 control line (DTR, RTS) that the serial adapter can drive on request, per the port's `dtr` / `rts` signal-line policy (issue #63). | control line (keep "control line" for the general RS-232 term) |
 | Loopback port | A port that echoes data back to the client for testing. | test port |
 | Command port | A port backed by a local shell command or process. | shell port |
 | TCP initiator port | A port that makes an outbound TCP connection to a remote host, with a pluggable protocol handler (plain, conserver, openmux). | client initiator (legacy name), openmux client port (legacy name) |

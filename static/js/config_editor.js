@@ -461,7 +461,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           const isSerial = rootId==='serial_ports'; const isTcpInitiator = rootId==='tcp_initiator_ports'; let _protTypeInput = null;
           columns.forEach(c=>{
             // Inline group for serial settings
-            if(isSerial && (c.key==='baudrate' || c.key==='bytesize' || c.key==='parity' || c.key==='stopbits')){
+            if(isSerial && (c.key==='baudrate' || c.key==='bytesize' || c.key==='parity' || c.key==='stopbits' || c.key==='dtr' || c.key==='rts' || c.key==='flow_control')){
               // Defer handling to a single grouped row once (on baudrate)
               if(c.key!=='baudrate') return;
               const field=document.createElement('div'); field.className='field';
@@ -505,18 +505,37 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
               // Stopbits (friendly labels)
               const stopLabel=document.createElement('span'); stopLabel.className='subtle'; stopLabel.textContent='Stop bits'; field.appendChild(stopLabel);
               const stop=document.createElement('select'); const stopChoices=[{v:'1',t:'1 stop bit'},{v:'2',t:'2 stop bits'}]; stopChoices.forEach(({v,t})=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; if(String(row['stopbits']||'')===v) o.selected=true; stop.appendChild(o); }); if(!row['stopbits']) stop.value='1'; field.appendChild(stop);
-              // Group help
-              const ghelp=document.createElement('span'); ghelp.className='help'; ghelp.textContent='Baud/Data bits/Parity/Stop bits. Defaults to 115200 8-N-1. Use "Custom" to enter a non-listed baud.'; field.appendChild(ghelp);
+              // Group help (serial 8-N-1)
+              const ghelp=document.createElement('span'); ghelp.className='help'; ghelp.textContent='Defaults to 115200 8-N-1. Use "Custom" to enter a non-listed baud.'; field.appendChild(ghelp);
               editor.appendChild(field);
+              // Signal lines row (own line): flow control + DTR/RTS policy
+              const sfield=document.createElement('div'); sfield.className='field';
+              const slab=document.createElement('label'); slab.textContent='Signal lines'; slab.appendChild(makeReloadHint('soft', RELOAD_TIPS.soft)); sfield.appendChild(slab);
+              const flowLabel=document.createElement('span'); flowLabel.className='subtle'; flowLabel.textContent='Flow'; sfield.appendChild(flowLabel);
+              const flowSel=document.createElement('select'); [{v:'none',t:'none'},{v:'rtscts',t:'rtscts'},{v:'dsrdtr',t:'dsrdtr'},{v:'xonxoff',t:'xonxoff'}].forEach(({v,t})=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; flowSel.appendChild(o); }); const _ef=String(row['flow_control']||'none'); flowSel.value=['none','rtscts','dsrdtr','xonxoff'].includes(_ef)?_ef:'none'; sfield.appendChild(flowSel);
+              // DTR / RTS signal-line policy selects
+              const lineChoices=[{v:'none',t:'untouched (none)'},{v:'on',t:'on (fixed high)'},{v:'off',t:'off (fixed low)'},{v:'presence-on',t:'presence-on (high with users)'},{v:'presence-off',t:'presence-off (low with users)'}];
+              function makeLineSel(key, labelText){ const l=document.createElement('span'); l.className='subtle'; l.textContent=labelText; sfield.appendChild(l); const sel=document.createElement('select'); lineChoices.forEach(({v,t})=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); }); let _e2=row[key]; if(_e2===true) _e2='on'; else if(_e2===false) _e2='off'; _e2=(_e2==null||_e2==='')?'none':String(_e2); sel.value=lineChoices.some(ch=>ch.v===_e2)?_e2:'none'; sfield.appendChild(sel); return sel; }
+              const dtrSel=makeLineSel('dtr','DTR');
+              const rtsSel=makeLineSel('rts','RTS');
+              // RTS vs flow=rtscts conflict warning
+              const rtsConf=document.createElement('span'); rtsConf.className='help'; rtsConf.style.display='none'; rtsConf.textContent='Flow rtscts owns the RTS pin. Set RTS to untouched (none), or use another flow mode. This config will fail to save.'; sfield.appendChild(rtsConf);
+              const _updRtsConf=()=>{ const show=flowSel.value==='rtscts'&&rtsSel.value!=='none'; rtsConf.style.display=show?'':'none'; }; flowSel.addEventListener('change',_updRtsConf); rtsSel.addEventListener('change',_updRtsConf); _updRtsConf();
+              const sghelp=document.createElement('span'); sghelp.className='help'; sghelp.textContent='Leave a line untouched (none) to keep the driver default. DTR works under every flow mode.'; sfield.appendChild(sghelp);
+              editor.appendChild(sfield);
               // Collectors and required checks for the grouped fields
               getters.push(()=>['baudrate', (baudSel.value!==''? Number(baudSel.value): (baudCustom.value!==''? Number(baudCustom.value):undefined))]);
               getters.push(()=>['bytesize', bytes.value!==''? Number(bytes.value):undefined]);
               getters.push(()=>['parity', parity.value||undefined]);
               getters.push(()=>['stopbits', stop.value!==''? Number(stop.value):undefined]);
+              getters.push(()=>['flow_control', flowSel.value]);
+              getters.push(()=>['dtr', dtrSel.value]);
+              getters.push(()=>['rts', rtsSel.value]);
               reqChecks.push(()=>({key:'baudrate', ok: (baudSel.value!=='' || baudCustom.value!=='')}));
               reqChecks.push(()=>({key:'bytesize', ok: bytes.value!==''}));
               reqChecks.push(()=>({key:'parity', ok: parity.value!==''}));
               reqChecks.push(()=>({key:'stopbits', ok: stop.value!==''}));
+              reqChecks.push(()=>{ if(flowSel.value==='rtscts'&&rtsSel.value!=='none'){ errBox.className='err'; errBox.textContent='Flow rtscts owns the RTS pin; set RTS to untouched (none) or use another flow mode.'; return {key:'rts', ok:false}; } return {key:'rts', ok:true}; });
               return; // Skip default handling for grouped fields
             }
             // Default field rendering
@@ -574,8 +593,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           stopbits: 'Number of stop bits.',
           timeout: 'Read timeout in seconds (0 for non-blocking).',
           flow_control: 'Hardware/software flow control (none/rtscts/dsrdtr/xonxoff).',
-          dtr: 'Initial DTR line state.',
-          rts: 'Initial RTS line state.',
+          dtr: 'DTR control-line policy: none = leave untouched (default); on/off = fix the level; presence-on/off = line follows attached users (drops when the last user leaves). Legacy true/false are shorthand for on/off.',
+          rts: 'RTS control-line policy (same values as DTR). Not usable with flow = rtscts, which owns the RTS pin.',
           max_read_write_users: 'How many users may write at once: one = 1, multiple = unlimited, none = no driver (admin included).',
           scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.',
           read_write_groups: 'Console groups granted read-write access. Empty = open to all authenticated users.',
@@ -898,8 +917,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'stopbits', label:'Stop bits', type:'enum', enum:[1,2], required:true},
           {key:'timeout', label:'Timeout', type:'number', min:0, step:0.1},
           {key:'flow_control', label:'Flow', type:'enum', enum:['none','rtscts','dsrdtr','xonxoff']},
-          {key:'dtr', label:'DTR', type:'boolean'},
-          {key:'rts', label:'RTS', type:'boolean'},
+          {key:'dtr', label:'DTR', type:'enum', enum:['none','on','off','presence-on','presence-off'], hiddenList:true},
+          {key:'rts', label:'RTS', type:'enum', enum:['none','on','off','presence-on','presence-off'], hiddenList:true},
           {key:'max_read_write_users', label:'Write slots', type:'enum', enum:['one','multiple','none']},
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
           {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},

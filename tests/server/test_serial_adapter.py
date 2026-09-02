@@ -23,8 +23,8 @@ def _make_spw(**config_overrides) -> SimpleNamespace:
         stopbits=1,
         timeout=1.0,
         flow_control="none",
-        dtr=True,
-        rts=True,
+        dtr=None,  # issue #63: omitted = untouched (was the True default)
+        rts=None,
         max_read_write_users=1,
         log_file=None,
         log_format=None,
@@ -85,7 +85,8 @@ async def test_reconcile_ports_unchanged():
 async def test_reconcile_ports_optional_fields_default():
     """Port with only required fields in YAML matches a running port using all defaults."""
     adapter = _make_adapter()
-    # Running port has all defaults (timeout=1.0, dtr=True, flow_control="none", …)
+    # Running port has all defaults (timeout=1.0, no dtr/rts = untouched,
+    # flow_control="none", …)
     adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0", baudrate=115200)  # type: ignore
 
     # New YAML omits optional fields entirely — must still be unchanged

@@ -239,9 +239,9 @@ Supported options per port:
 - `parity`: N, E, O, M, S (default: N)
 - `stopbits`: 1, 1.5, 2 (default: 1)
 - `timeout`: Read timeout seconds (default: 1.0)
-- `flow_control`: Flow control mode (default: "none")
-- `dtr`: Set DTR on open (default: true)
-- `rts`: Set RTS on open (default: true)
+- `flow_control`: Flow control mode: `none` (default), `rtscts`, `dsrdtr`, `xonxoff`
+- `dtr`: DTR signal-line policy (default: `none`, see Signal lines below)
+- `rts`: RTS signal-line policy (default: `none`, see Signal lines below)
 - `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above); legacy `read_write_users` is still accepted with a warning
 
 Adapter-level performance options:
@@ -267,7 +267,43 @@ serial_ports:
   read_coalesce_max_delay_ms: 4       # coalesce window (2–6ms typical)
   read_coalesce_max_bytes: 65536       # safety cap
 ```
+#### Signal lines (`dtr` / `rts`)
 
+Each of `dtr` and `rts` takes a signal-line policy. The policy applies on
+connect and whenever the connected-client count crosses the threshold between
+zero and one or more clients. A line without a policy stays untouched:
+OpenMux never drives it.
+
+| Value          | Behavior                                                                 |
+| -------------- | ------------------------------------------------------------------------ |
+| `none` (default) | Untouched. The line keeps the driver default from `open()` (pyserial asserts DTR at open; RTS stays off unless the driver changed it). |
+| `on`           | Fixed high. Applied on connect and held.                                |
+| `off`          | Fixed low. Applied on connect and held.                                 |
+| `presence-on`  | High while one or more clients are connected, low while idle.           |
+| `presence-off` | Low while one or more clients are connected, high while idle.           |
+
+Legacy boolean values are a shorthand: `dtr: true` means `on` (the old
+"set on open" behavior), `dtr: false` means `off`.
+
+```yaml
+serial_ports:
+  - name: modem
+    device: /dev/ttyUSB0
+    baudrate: 9600
+    dtr: presence-on          # DTR high while a user is connected
+```
+
+Constraints:
+- `flow_control: rtscts` hands the RTS pin to the kernel handshake
+  (termios CRTSCTS). A configured `rts` value conflicts with it, and the
+  Config Manager rejects the combination at load, save, and reload. DTR is
+  not affected by any flow-control mode.
+- `dsrdtr` and `xonxoff` do not own either pin: pyserial has no kernel
+  flag for DSR/DTR flow control (DSR is polled by applications), and
+  XON/XOFF runs in-band. Either mode works with any `dtr` / `rts` policy.
+- Note: YAML 1.1 parses unquoted `on` / `off` as booleans. Quote policy
+  strings in config files to be safe; the boolean result is the same `on`
+  / `off` shorthand.
 ## OpenMux Client Adapter (`openmux_client_ports`)
 
 Connect to a remote OpenMux server and expose a remote port locally.

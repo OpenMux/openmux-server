@@ -526,6 +526,38 @@ class PortManager:
             pass
         return port_list
 
+    def _fire_client_count_hook(self, port: Any) -> None:
+        """Notify the underlying port's adapters of a client-count change.
+
+        The canonical add/remove client paths in PortManager manage the
+        ``connected_clients`` list directly and bypass ``UnifiedPortWrapper``
+        methods, so the adapter's ``on_client_count_changed`` hook (serial
+        signal lines per issue #63, command ``idle_timeout_sec``, and
+        tcp_initiator ``disconnect_when_idle``) must be called explicitly here.
+        The hook is idempotent on unchanged client counts, so calling it after
+        an in-place re-add of an existing client — which does not change the
+        count — is a safe no-op on the hook side. Hook exceptions are logged
+        and never prevent the client add/remove from completing.
+        """
+        if port is None:
+            return
+        # A wrapper references its underlying adapter port; a bare port is
+        # itself the hook target. The RemotePortProxy and loopback ports
+        # simply do not define the hook; the hasattr check handles that.
+        target = getattr(port, "unified_port", None) or port
+        hook = getattr(target, "on_client_count_changed", None)
+        if not callable(hook):
+            return
+        count = len(getattr(port, "connected_clients", []) or [])
+        try:
+            hook(count)
+        except Exception:
+            # justification: a failing hook must never block the client add/remove
+            self.logger.error(
+                f"on_client_count_changed hook failed for port {getattr(port, 'name', None)}",
+                exc_info=True,
+            )
+
     async def add_client_to_port(
         self,
         port_name: str,
@@ -649,6 +681,12 @@ class PortManager:
                         )
             except Exception as e:
                 self.logger.warning(f"Failed to proactively open remote stream for {port_name}: {e}", exc_info=True)
+            # Fire the adapter client-count hook on the canonical add path
+            # (issue #63): the wrapper's own add_client is never called here,
+            # so serial signal lines / command idle timeout / tcp-initiator
+            # disconnect-when-idle never fired without this. A federated
+            # proxy port has no hook, in which case this is a no-op.
+            self._fire_client_count_hook(port)
             return True
         # If not handled above and still not found, fail
         return False
@@ -721,6 +759,9 @@ class PortManager:
                             f"Federated session cleanup attribute error for {port_name}",
                             exc_info=True,
                         )
+                    # Fire the adapter client-count hook on the canonical
+                    # remove path (issue #63) - mirrors the add path above.
+                    self._fire_client_count_hook(port)
 
                     return True
             return False
@@ -739,6 +780,11 @@ class PortManager:
                 if client["client_id"] == client_id:
                     wrapper_port.remove_client(client)
                     self.logger.debug(f"Removed client {client_id} from unified port {port_name}")
+                    # The wrapper's remove_client fires the hook for the
+                    # underlying port; the legacy branch above fires it for
+                    # ports that bypass the wrapper. Both are idempotent on
+                    # equal counts, so the (defensive) re-fire here is safe.
+                    self._fire_client_count_hook(wrapper_port)
                     return True
 
             self.logger.warning(f"Client {client_id} not found in unified port {port_name}")

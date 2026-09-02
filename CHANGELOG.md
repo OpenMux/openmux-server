@@ -41,6 +41,10 @@ Changes since v1.0.2 (2026-08-27).
   - `motd` shows on the login page (public).
   - `logged_in_motd` shows at the top of the status page for authenticated users.
   - Both apply on soft reload, together with `realm`.
+- **Serial `dtr` and `rts` now take signal-line policies** (`server.yaml`, issue #63). Values: `none` (default: untouched), `on`, `off`, `presence-on`, `presence-off`.
+  - Legacy booleans still load: `true` means `on`, `false` means `off`.
+  - Previously these flags were parsed but never applied to the device: the line state was left at the `open()` default. Omitted lines continue to be untouched, so configs without these keys keep their old behavior exactly.
+  - `flow_control: rtscts` with a managed `rts` value is now a config error at load, save, and reload (the kernel owns the RTS pin in that mode). Set `rts` to `none` or omit it, or use another flow mode. DTR works under every flow mode.
 
 ### Behavior changes (no config change required)
 
@@ -87,6 +91,8 @@ Changes since v1.0.2 (2026-08-27).
   - The new lists take effect from the next connection. A session already attached keeps the mode it was granted.
   - The Config Editor now tags these fields `soft`, not `full`.
   - No config change.
+- **Configured serial signal lines are now applied** (issue #63). A `dtr` / `rts` policy drives the pin on connect, and `presence-on` / `presence-off` track the connected-client count (high or low while one or more clients are attached, the opposite level while idle).
+- **Client attach/detach now notifies the adapter.** `on_client_count_changed` fires on the main client path for every port type. This makes command `idle_timeout_sec` and tcp_initiator `disconnect_when_idle` actually trigger, in addition to the serial signal lines above. Ports without the hook (loopback, federated) are unaffected.
 - **Client listener changes now apply on Soft Reload.** The `client_listener` section is no longer Full-Reload-only.
   - `max_connections` and `connection_timeout` update in place. A rebind is skipped.
   - A change to `host`, `port`, or `enabled` rebinds the socket. Active TCP console sessions are disconnected; clients reconnect.
@@ -99,6 +105,7 @@ Changes since v1.0.2 (2026-08-27).
 - The login page and status page show the messages of the day.
 - The Config Editor marks each field with its reload requirement (`live`, `soft`, `full`, `sighup`, `restart`) and shows the read-only `access_default` row.
 - The Config Editor TCP-initiator port table is narrower. Six advanced columns (Verify TLS, Timeout, Reconnect delay, Batch writes, Batch size, Batch timeout) are no longer shown in the list. They remain available in the per-port Edit dialog and keep their value when you save.
+- The serial port editor row gains Flow control, DTR, and RTS selects for the signal-line policies, and shows an inline conflict warning when Flow control is `rtscts` and RTS is not untouched. Saving such a config fails validation with the same error the server reports.
 - The serial port editor no longer offers an empty choice for Data bits, Parity, or Stop bits. The selects previously carried a blank, meaningless leading option; they now always show a valid value (defaulting to 8-N-1 when unset).
 - Generic Config Editor dropdowns no longer show a pointless blank option when the field has a documented default. The common renderer used to put an empty leading option in every dropdown. This was redundant for fields whose "unset" value means the same as the default (serial Flow, Write slots, TCP-initiator Protocol and Telnet negotiation). Those now preselect the default instead. A dropdown that has no documented default (user and API-key Permissions) keeps its blank option, because leaving that field unset is a different choice.
 - The Port Actions sub-view has a "Script health" panel that lists action-script load errors for the whole `actions_dir`.

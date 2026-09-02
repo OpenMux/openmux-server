@@ -199,6 +199,42 @@ class ConfigManager:
         if not any(method in auth for method in auth_methods):
             raise ValueError("Authentication section must contain 'users', 'api_keys', 'public_keys', or 'external_auth'")
 
+    @staticmethod
+    def _line_policy_managed(value: Any) -> bool:
+        """Return True when a serial ``dtr``/``rts`` config value drives the line.
+
+        Issue #63: ``None``/absent and the string ``"none"`` mean the line is
+        left untouched; anything else (a policy string or a legacy boolean
+        shorthand) drives the pin.
+        """
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return value.strip().lower() not in ("", "none")
+        return True
+
+    def _check_serial_flow_control_combos(self, port: Dict[str, Any]) -> None:
+        """Reject flow-control / signal-line combinations that fight over a pin.
+
+        With ``flow_control: rtscts`` the kernel's CRTSCTS hardware handshake
+        owns the RTS pin, so a manual rts value (issue #63) would put two
+        writers on one pin. DTR is not affected by any flow-control mode and
+        needs no check.
+
+        Args:
+            port: A single serial port config dict.
+
+        Raises:
+            ValueError: When rtscts is combined with a managed rts value.
+        """
+        flow = str(port.get("flow_control", "none") or "none").strip().lower()
+        if flow == "rtscts" and self._line_policy_managed(port.get("rts")):
+            name = port.get("name", "unknown")
+            raise ValueError(
+                f"Serial port '{name}': flow_control rtscts owns the RTS pin; "
+                "remove rts (or set it to none) or use flow_control none"
+            )
+
     def _validate_serial_ports_config(self):
         """Validate the ``serial_ports`` section (if present).
 
@@ -227,6 +263,8 @@ class ConfigManager:
                     raise ValueError(f"Serial port at index {i} is missing required 'name' field")
                 if "device" not in port:
                     raise ValueError(f"Serial port '{port['name']}' is missing required 'device' field")
+                if isinstance(port, dict):
+                    self._check_serial_flow_control_combos(port)
         else:
             # Old format: serial_ports is a list of port dicts
             if not isinstance(serial_config, list):
@@ -235,6 +273,8 @@ class ConfigManager:
             for i, port in enumerate(serial_config):
                 if "name" not in port:
                     raise ValueError(f"Serial port at index {i} is missing required 'name' field")
+                if isinstance(port, dict):
+                    self._check_serial_flow_control_combos(port)
                 # In unified system, adapter type is determined by section name
                 # No need to check for 'adapter' field anymore
 

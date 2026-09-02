@@ -13,7 +13,7 @@ import logging
 import os
 import stat
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from ..access_control import WRITE_MODES, InvalidWriteMode, parse_write_mode, wire_to_mode
 from ..data_logger import DataLogger
@@ -35,8 +35,10 @@ class SerialPortConfig:
         stopbits: Stop bits (1, 1.5, or 2).
         timeout: Read timeout in seconds.
         flow_control: Flow control mode string.
-        dtr: Initial DTR state.
-        rts: Initial RTS state.
+        dtr: DTR line policy (issue #63). None/"none" leaves the line untouched;
+            "on"/"off" fix the level; "presence-on"/"presence-off" follow the
+            client count. Legacy booleans map to on/off.
+        rts: RTS line policy (same values as dtr).
         max_read_write_users: Write-slot capacity mode, "none"/"one"/"multiple".
     """
 
@@ -49,8 +51,15 @@ class SerialPortConfig:
     stopbits: int = 1
     timeout: float = 1.0
     flow_control: str = "none"
-    dtr: bool = True  # vulture: ignore (configured via runtime, accessed through config)
-    rts: bool = True  # vulture: ignore (configured via runtime, accessed through config)
+    # Signal-line policies (issue #63). None = "none" (untouched). A legacy
+    # boolean is kept verbatim on the dataclass as shorthand for on/off and is
+    # interpreted by resolve_line_policy(); the schema default is absent, not
+    # true. Note: pyyaml (YAML 1.1) parses unquoted on/off/On/... as booleans,
+    # so `dtr: on` and `dtr: "on"` both resolve to the same policy thanks to
+    # that bool==on/off shorthand. Only presence-on/presence-off/none survive
+    # unquoting as strings.
+    dtr: Optional[Union[bool, str]] = None
+    rts: Optional[Union[bool, str]] = None
     max_read_write_users: str = "one"  # Write-slot capacity mode: "none"/"one"/"multiple" (issue #59)
     log_file: Optional[str] = None  # Optional per-port data log file path
     log_format: Optional[str] = None  # 'line' or 'jsonl'
@@ -83,6 +92,49 @@ class SerialPortConfig:
             raise ValueError("Stopbits must be 1, 1.5, or 2")
         if self.max_read_write_users not in WRITE_MODES:
             raise ValueError(f"max_read_write_users must be one of {list(WRITE_MODES)}, got {self.max_read_write_users!r}")
+        for key in ("dtr", "rts"):
+            value = getattr(self, key)
+            if value is not None and not isinstance(value, bool) and value not in LINE_POLICY_VALUES:
+                raise ValueError(f"{key} must be none, on, off, presence-on, presence-off, or a boolean, got {value!r}")
+        # The rtscts/managed-rts conflict is rejected authoritatively by
+        # ConfigManager._validate_serial_ports_config; this keeps the dataclass
+        # self-contained when it is built directly (tests, adapters).
+        if str(self.flow_control).strip().lower() == "rtscts" and resolve_line_policy(self.rts) != (None, None):
+            raise ValueError("flow_control rtscts owns the RTS pin; remove rts (or set it to none) or use flow_control none")
+
+
+# Signal-line policy values (issue #63). Each line (dtr/rts) is a single select:
+# "none" (default) leaves the pin untouched; "on"/"off" fix the level; the
+# presence-* values follow the connected-client count (active level with one or
+# more clients, idle level with none).
+LINE_POLICY_VALUES = ("none", "on", "off", "presence-on", "presence-off")
+
+
+def resolve_line_policy(value: Optional[Union[bool, str]]) -> Tuple[Optional[bool], Optional[bool]]:
+    """Map a configured line policy to an (active_level, idle_level) pair.
+
+    Args:
+        value: The raw ``dtr`` / ``rts`` config value (None, a legacy boolean
+            shorthand for on/off, or a policy string).
+
+    Returns:
+        Tuple[Optional[bool], Optional[bool]]: (active, idle) levels. ``None``
+        means "do not touch the line" for that client-count state, so a fully
+        unmanaged line is (None, None).
+    """
+    if value is None or value == "none":
+        return (None, None)
+    if isinstance(value, bool):
+        return (value, value)
+    if value == "on":
+        return (True, True)
+    if value == "off":
+        return (False, False)
+    if value == "presence-on":
+        return (True, False)
+    if value == "presence-off":
+        return (False, True)
+    raise ValueError(f"Invalid line policy {value!r}; expected one of {list(LINE_POLICY_VALUES)} or a boolean")
 
 
 class SerialPortWrapper:
@@ -158,6 +210,12 @@ class SerialPortWrapper:
         # console can show why the port is offline; cleared on successful connect.
         self.status_message: str = ""
         self._status_changed: Optional[bool] = None
+        # Signal-line state (issue #63): the last level actually driven onto
+        # each line (None = never touched, or the line is unmanaged). Drives
+        # idempotency so on_client_count_changed never re-issues the same level.
+        self._dtr_driven: Optional[bool] = None
+        self._rts_driven: Optional[bool] = None
+        self._client_count: int = 0
 
     @property
     def read_write_groups(self) -> List[str]:
@@ -209,6 +267,73 @@ class SerialPortWrapper:
                     self.logger.debug("Meta notify failed on serial status change", exc_info=True)
         else:
             self.status_message = str(message or "")
+
+    def _line_policy(self, line: str) -> Tuple[Optional[bool], Optional[bool]]:
+        """Return the (active, idle) level pair for 'dtr' or 'rts' (issue #63)."""
+        return resolve_line_policy(getattr(self.config, line, None))
+
+    def _serial_driver(self) -> Optional[Any]:
+        """Return the underlying serial.Serial instance, or None when absent.
+
+        pyserial-asyncio exposes the raw instance as ``writer.transport.serial``.
+        """
+        try:
+            transport = getattr(self.writer, "transport", None)
+            serial_obj = getattr(transport, "serial", None) if transport is not None else None
+            return serial_obj if serial_obj is not None and hasattr(serial_obj, "dtr") else None
+        except Exception:
+            return None
+
+    def _apply_line(self, line: str, level: Optional[bool]) -> None:
+        """Drive one control line to `level` when connected (issue #63).
+
+        No-op when the line is unmanaged (level None), the driver is not
+        available, or the line already holds that level. A control-line set
+        failure must never corrupt the read loop, so exceptions are logged and
+        swallowed here.
+        """
+        if level is None:
+            return
+        driver = self._serial_driver()
+        if driver is None:
+            return
+        if getattr(self, f"_{line}_driven") == level:
+            return
+        try:
+            # Skip the ioctl when the driver already holds the target level
+            # (pyserial opens with DTR asserted, for example).
+            current = getattr(driver, line, None)
+            if isinstance(current, bool) and current == level:
+                setattr(self, f"_{line}_driven", level)
+                return
+            setattr(driver, line, level)
+            setattr(self, f"_{line}_driven", level)
+        except Exception:
+            # justification: a control-line ioctl failure is non-fatal; the
+            # data path must keep working and the error is already logged.
+            self.logger.error(f"Failed to drive {line.upper()} line on {self.config.name}", exc_info=True)
+
+    def _apply_line_levels_for_count(self, count: int) -> None:
+        """Drive both lines to the level implied by `count` connected clients."""
+        if not self.is_connected:
+            return
+        for line in ("dtr", "rts"):
+            active, idle = self._line_policy(line)
+            self._apply_line(line, active if count > 0 else idle)
+
+    def on_client_count_changed(self, count: int) -> None:
+        """Drive the control lines for the new connected-client count (issue #63).
+
+        Idempotent on equal counts: only presence-* policies change level between
+        the 0 and 1+ client states, so 2->1 (or any same-state transition) is a
+        no-op. While the port is not connected the lines are left alone.
+        """
+        if count == self._client_count:
+            return
+        old = self._client_count
+        self._client_count = count
+        self.logger.info(f"Client count changed for serial port {self.name}: {old} -> {count}")
+        self._apply_line_levels_for_count(count)
 
     async def start(self) -> bool:
         """Start (or schedule) serial port connection management.
@@ -387,6 +512,14 @@ class SerialPortWrapper:
             )
 
             self.is_connected = True
+            # Drive the configured signal lines (issue #63). With zero clients
+            # attached a presence-* line starts at its idle level; a fixed-level
+            # line takes its level immediately. Unmanaged lines stay untouched,
+            # which preserves the historical behavior for existing configs.
+            try:
+                self._apply_line_levels_for_count(self._client_count)
+            except Exception:
+                self.logger.error(f"Error applying initial signal lines to {self.config.name}", exc_info=True)
             self.logger.info(f"Successfully connected to {self.config.device}")
             # Reason for a previous failed cycle no longer applies now that we
             # are connected (issue #62); also clears the "Disconnected from ..."
@@ -431,6 +564,18 @@ class SerialPortWrapper:
         except Exception as e:
             self.logger.error(f"Error disconnecting from {self.config.device}: {e}", exc_info=True)
         finally:
+            # Reset managed lines to their active level so a stale idle signal
+            # (presence-* driving the line low) never lingers across a reconnect.
+            # Best-effort: this runs before the writer is dropped, so the
+            # transport is still available.
+            try:
+                for line in ("dtr", "rts"):
+                    active, _idle = self._line_policy(line)
+                    self._apply_line(line, active)
+            except Exception:
+                self.logger.error(f"Error resetting signal lines on {self.config.name}", exc_info=True)
+            self._dtr_driven = None
+            self._rts_driven = None
             self.is_connected = False
             self.reader = None
             self.writer = None
@@ -722,8 +867,8 @@ class SerialAdapter(BaseGenericAdapter):
                     stopbits=port_config.get("stopbits", 1),
                     timeout=port_config.get("timeout", 1.0),
                     flow_control=port_config.get("flow_control", "none"),
-                    dtr=port_config.get("dtr", True),
-                    rts=port_config.get("rts", True),
+                    dtr=port_config.get("dtr"),
+                    rts=port_config.get("rts"),
                     max_read_write_users=max_rw_users,
                     log_file=port_config.get("log_file"),
                     log_format=port_config.get("log_format"),
@@ -834,8 +979,8 @@ class SerialAdapter(BaseGenericAdapter):
                 stopbits=config.get("stopbits", 1),
                 timeout=config.get("timeout", 1.0),
                 flow_control=config.get("flow_control", "none"),
-                dtr=config.get("dtr", True),
-                rts=config.get("rts", True),
+                dtr=config.get("dtr"),
+                rts=config.get("rts"),
                 max_read_write_users=max_rw,
                 log_file=config.get("log_file"),
                 log_format=config.get("log_format"),
@@ -992,8 +1137,8 @@ class SerialAdapter(BaseGenericAdapter):
                 "stopbits": port_cfg.get("stopbits", 1),
                 "timeout": port_cfg.get("timeout", 1.0),
                 "flow_control": port_cfg.get("flow_control", "none"),
-                "dtr": port_cfg.get("dtr", True),
-                "rts": port_cfg.get("rts", True),
+                "dtr": port_cfg.get("dtr"),
+                "rts": port_cfg.get("rts"),
                 "max_read_write_users": mru,
                 "log_file": port_cfg.get("log_file"),
                 "log_format": port_cfg.get("log_format"),
