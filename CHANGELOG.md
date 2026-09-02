@@ -87,6 +87,11 @@ Changes since v1.0.2 (2026-08-27).
   - The new lists take effect from the next connection. A session already attached keeps the mode it was granted.
   - The Config Editor now tags these fields `soft`, not `full`.
   - No config change.
+- **Client listener changes now apply on Soft Reload.** The `client_listener` section is no longer Full-Reload-only.
+  - `max_connections` and `connection_timeout` update in place. A rebind is skipped.
+  - A change to `host`, `port`, or `enabled` rebinds the socket. Active TCP console sessions are disconnected; clients reconnect.
+  - A Full Reload still rebinds. The Config Editor tags the capacity and timeout fields `soft` and the rest `full`.
+  - No config change.
 
 ### Web console and observability
 

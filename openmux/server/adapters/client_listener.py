@@ -32,6 +32,14 @@ from .base_adapter import AdapterCapability, BaseGenericAdapter
 CTRL_MARKER = b"\x00OMXCTRL "
 
 
+def _to_int(value: Any, default: int) -> int:
+    """Coerce to int, falling back to ``default`` on bad input."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class TcpServerAdapter(BaseGenericAdapter):
     """Server-side adapter handling multiple OpenMux TCP clients.
 
@@ -282,6 +290,77 @@ class TcpServerAdapter(BaseGenericAdapter):
             self.server = None
 
         self.logger.info("TCP server stopped")
+
+    async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
+        """Reconcile the single client-listener endpoint on a soft reload.
+
+        Material fields (enabled, host, port) define the socket; any of them
+        changing triggers a rebind, which closes active client sessions (they
+        reconnect). Non-material fields (max_connections, connection_timeout)
+        are consulted on the next handshake, so they update in place without
+        dropping sessions.
+
+        Args:
+            new_config: Config dict. Accepts either the raw section
+                (``{"host": ..., "port": ...}``) or the full server config
+                (``{"client_listener": {...}}``), mirroring how the
+                constructor normalizes the input.
+
+        Returns:
+            Summary dict with a ``status`` of one of ``unchanged``, ``updated``,
+            ``restarted``, ``stopped``, or ``error``. ``changed`` and
+            ``unchanged`` list the field names that did or did not change.
+        """
+        if isinstance(new_config, dict):
+            nested = new_config.get("client_listener")
+            tcp_cfg: Dict[str, Any] = nested if isinstance(nested, dict) else dict(new_config)
+        else:
+            tcp_cfg = {}
+
+        material_old = (bool(self.enabled), str(self.host), int(self.port))
+        material_new = (
+            bool(tcp_cfg.get("enabled", True)),
+            str(tcp_cfg.get("host", self.host)),
+            _to_int(tcp_cfg.get("port", self.port), int(self.port)),
+        )
+        if not (1 <= material_new[2] <= 65535):
+            return {"status": "error", "error": f"invalid port {material_new[2]!r}", "changed": [], "unchanged": []}
+
+        summary: Dict[str, Any] = {"status": "unchanged", "changed": [], "unchanged": []}
+        if material_old != material_new:
+            # Bind-point or enablement changed: rebind, dropping active
+            # sessions (clients reconnect). `stop()` is a no-op on a stopped
+            # / never-started adapter, so this is safe on every path.
+            await self.stop()
+            self.enabled, self.host, self.port = material_new
+            summary["changed"] = ["enabled", "host", "port"]
+            if self.enabled and not await self.start():
+                summary["status"] = "error"
+                summary["error"] = f"rebind to {self.host}:{self.port} failed"
+            else:
+                summary["status"] = "restarted" if self.enabled else "stopped"
+            self.logger.info(
+                f"Client listener adapter {self.name} reconcile: {summary['status']} "
+                f"(host={self.host}, port={self.port}, enabled={self.enabled})"
+            )
+            return summary
+
+        for field in ("max_connections", "connection_timeout"):
+            if field not in tcp_cfg:
+                summary["unchanged"].append(field)
+                continue
+            if getattr(self, field) != tcp_cfg[field]:
+                setattr(self, field, tcp_cfg[field])
+                summary["changed"].append(field)
+            else:
+                summary["unchanged"].append(field)
+        if summary["changed"]:
+            summary["status"] = "updated"
+        self.logger.info(
+            f"Client listener adapter {self.name} reconcile: status={summary['status']} "
+            f"changed={summary['changed']} unchanged={summary['unchanged']}"
+        )
+        return summary
 
     async def handle_client_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Serve lifecycle of a newly accepted client connection.

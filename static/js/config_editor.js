@@ -775,6 +775,11 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         'logging.log_backup_count': 'restart',
         // action catalog is re-checked on every use; no reload needed
         'port_actions.actions_dir': 'live',
+        // Client listener: host/port/enable are material (rebind); the
+        // capacity and timeout bounds are checked on the next handshake and
+        // update in place, so they are soft.
+        'client_listener.max_connections': 'soft',
+        'client_listener.connection_timeout': 'soft',
         // Web console UI text is hot-applied on a soft reload (realm is read
         // per request, the MOTDs on each render); the rest of the web_console
         // section needs a full reload, so the SOFT marks override the section

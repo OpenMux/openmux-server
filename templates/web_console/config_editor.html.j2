@@ -188,7 +188,7 @@
 
   <div id="view-listeners" class="config-view" style="display:none">
   <div class="config-section" data-config-section="client_listener">
-    <div class="section-header"><span class="title">Client listener</span><span class="reload-hint reload-hint-full" title="The client listener is not restarted by a soft reload; use a Full Reload">FULL</span> <span class="desc">TCP console endpoint</span></div>
+    <div class="section-header"><span class="title">Client listener</span><span class="reload-hint reload-hint-full" title="Host, Port, and Enable need a Full Reload (they rebind the socket). Max connections and Timeout update in place on Soft Reload.">FULL</span> <span class="desc">TCP console endpoint</span></div>
     <div class="section">
       <div class="field"><label for="client_listener.enabled">Enable listener</label><input id="client_listener.enabled" type="checkbox" /></div>
       <div class="field"><label for="client_listener.host">Host</label><input id="client_listener.host" type="text" /></div>
@@ -231,8 +231,8 @@
     <div class="section-header"><span class="title">Guidance</span> <span class="desc">When to use what</span></div>
     <div class="section">
       <ul style="margin:0 0 0 18px; padding:0;">
-        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, web console MOTD and realm, edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports, and the console access default (the access_default key in security.yaml).</li>
-        <li>Use <b>Full Reload</b> for: Client listener changes, muxcon advanced settings (heartbeat, multipath, cache, core auth), web status and web console network/TLS settings, and web console plugins.</li>
+        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, web console MOTD and realm, edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports, the console access default (the access_default key in security.yaml), and client-listener Max connections / Timeout (applied in place; host, port, and enable need a Full Reload).</li>
+        <li>Use <b>Full Reload</b> for: client-listener host/port/enable, muxcon advanced settings (heartbeat, multipath, cache, core auth), web status and web console network/TLS settings, and web console plugins.</li>
         <li>Use <b>kill -HUP</b> for: the log level only (the Soft Reload button does not change the log level).</li>
         <li>Use a <b>process restart</b> for: the control socket path, PID file path, and the logging file/rotation settings.</li>
         <li>Reminder: Click <b>Save</b> first. Reload applies what’s in the active config file.</li>

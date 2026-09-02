@@ -875,7 +875,9 @@ class OpenMuxServer:
           logged_in_motd, realm)
         - Reconcile ports for adapters that support online updates (serial, loopback, command,
           tcp initiator, telnet listener)
-        - Do NOT restart connection endpoints (web console, client listener, muxcon)
+        - Reconcile the client listener: capacity/timeout bounds update in place; a
+          host/port/enable change rebinds the socket (active sessions reconnect)
+        - Do NOT restart the web console endpoint
 
         Returns a summary dict mirroring the web plugin for consistency.
         """
@@ -940,6 +942,7 @@ class OpenMuxServer:
         telnet_section = new_cfg.get("telnet_listener")
         ssh_section = new_cfg.get("ssh_listener")
         muxcon_section = new_cfg.get("muxcon")
+        client_listener_section = new_cfg.get("client_listener")
 
         adapters = list(getattr(self, "unified_adapters", []) or [])
 
@@ -954,6 +957,7 @@ class OpenMuxServer:
             ("telnet_listener", "telnet_listener", telnet_section),
             ("ssh_listener", "ssh_listener", ssh_section),
             ("muxcon", "muxcon", muxcon_section),
+            ("client_listener", "client_listener", client_listener_section),
         ]
         for _type_key, _sec_key, _sec_val in _bootstrap_map:
             if not _sec_val:
@@ -1067,6 +1071,21 @@ class OpenMuxServer:
                     except Exception as e:
                         self.logger.error(f"[reload-soft:{req_id}] MuxCon reconcile error: {e}", exc_info=True)
                         summary["adapters"]["muxcon"] = {"error": str(e)}
+                # Client listener (single-endpoint TCP console listener)
+                if key == "client_listener" and hasattr(a, "reconcile_ports"):
+                    # Absent section means "no listener" (same as a full
+                    # reload): converge by disabling.
+                    effective = (
+                        client_listener_section
+                        if client_listener_section is not None
+                        else {"enabled": False}
+                    )
+                    try:
+                        res = await a.reconcile_ports(effective)
+                        summary["adapters"].setdefault("client_listener", res)
+                    except Exception as e:
+                        self.logger.error(f"[reload-soft:{req_id}] Client listener reconcile error: {e}", exc_info=True)
+                        summary["adapters"]["client_listener"] = {"error": str(e)}
             except Exception:
                 continue
 

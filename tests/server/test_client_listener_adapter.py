@@ -590,3 +590,195 @@ class _TakeAdapter:
 
         cm.promote_client_to_read_write = _promote.__get__(cm, type(cm))
         self.adapter.set_console_manager(cm)
+
+
+# --- Reconcile (soft reload) -------------------------------------------------
+
+
+class _FakeListener:
+    """Stand-in for the result of `asyncio.start_server` the adapter expects."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.served = False
+        self.sockets = [object()]
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        await asyncio.sleep(0)
+
+    async def start_serving(self) -> None:
+        self.served = True
+
+
+def _make_adapter(port: int = 8023, host: str = "127.0.0.1", enabled: bool = True, **extra) -> TcpServerAdapter:
+    # Factory passes the flat section dict to the constructor (see factory.py
+    # _create_single_adapter: dict-shaped sections are passed through as-is).
+    cfg = {"host": host, "port": port, "enabled": enabled, **extra}
+    return TcpServerAdapter("cli", cfg)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_noop_when_unchanged():
+    """Material and optional fields identical: no rebind, no side effects."""
+    adapter = _make_adapter()
+    res = await adapter.reconcile_ports(
+        {"host": "127.0.0.1", "port": 8023, "max_connections": 100, "connection_timeout": 30}
+    )
+    assert res["status"] == "unchanged"
+    assert res["changed"] == []
+    assert res["unchanged"] == ["max_connections", "connection_timeout"]
+    assert adapter.server is None
+    assert adapter.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_updates_non_material_fields_in_place():
+    """Only max_connections / connection_timeout change: updated, no rebind."""
+    adapter = _make_adapter(max_connections=50, connection_timeout=10)
+    res = await adapter.reconcile_ports(
+        {"host": "127.0.0.1", "port": 8023, "max_connections": 200, "connection_timeout": 30}
+    )
+    assert res["status"] == "updated"
+    assert res["changed"] == ["max_connections", "connection_timeout"]
+    assert res["unchanged"] == []
+    assert adapter.max_connections == 200
+    assert adapter.connection_timeout == 30
+    # No rebind -> the (unbound) listener stays unbound
+    assert adapter.server is None
+    assert adapter.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_unchanged_when_optional_fields_absent():
+    """New config omits max_connections / connection_timeout: keep current values."""
+    adapter = _make_adapter(max_connections=77, connection_timeout=11)
+    res = await adapter.reconcile_ports({"host": "127.0.0.1", "port": 8023})
+    assert res["status"] == "unchanged"
+    assert res["unchanged"] == ["max_connections", "connection_timeout"]
+    assert adapter.max_connections == 77
+    assert adapter.connection_timeout == 11
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_rebinds_on_port_change(monkeypatch):
+    adapter = _make_adapter()
+    adapter.is_running = True
+    adapter.server = _FakeListener()
+
+    rebinds: List[str] = []
+
+    async def fake_start_server(cb, host, port):
+        rebinds.append(f"{host}:{port}")
+        return _FakeListener()
+
+    monkeypatch.setattr("openmux.server.adapters.client_listener.asyncio.start_server", fake_start_server)
+
+    res = await adapter.reconcile_ports({"host": "127.0.0.1", "port": 9999})
+    assert res["status"] == "restarted"
+    assert res["changed"] == ["enabled", "host", "port"]
+    assert rebinds == ["127.0.0.1:9999"]
+    assert adapter.port == 9999
+    assert adapter.is_running is True
+    assert adapter.server is not None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_rebinds_on_host_change(monkeypatch):
+    adapter = _make_adapter()
+    adapter.is_running = True
+    adapter.server = _FakeListener()
+    rebinds: List[str] = []
+
+    async def fake_start_server(cb, host, port):
+        rebinds.append(f"{host}:{port}")
+        return _FakeListener()
+
+    monkeypatch.setattr("openmux.server.adapters.client_listener.asyncio.start_server", fake_start_server)
+
+    res = await adapter.reconcile_ports({"host": "0.0.0.0", "port": 8023})
+    assert res["status"] == "restarted"
+    assert rebinds == ["0.0.0.0:8023"]
+    assert adapter.host == "0.0.0.0"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_disable_stops_server_without_rebinding(monkeypatch):
+    adapter = _make_adapter(enabled=True)
+    adapter.is_running = True
+    adapter.server = _FakeListener()
+
+    rebinding_happened: List[str] = []
+
+    async def fake_start_server(cb, host, port):
+        rebinding_happened.append(f"{host}:{port}")
+        return _FakeListener()
+
+    monkeypatch.setattr("openmux.server.adapters.client_listener.asyncio.start_server", fake_start_server)
+
+    res = await adapter.reconcile_ports({"host": "127.0.0.1", "port": 8023, "enabled": False})
+    assert res["status"] == "stopped"
+    assert rebinding_happened == []  # disable must not rebind
+    assert adapter.enabled is False
+    assert adapter.is_running is False
+    assert adapter.server is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_enable_binds_server(monkeypatch):
+    adapter = _make_adapter(enabled=False)
+    adapter.is_running = False
+    adapter.server = None
+    rebinds: List[str] = []
+
+    async def fake_start_server(cb, host, port):
+        rebinds.append(f"{host}:{port}")
+        return _FakeListener()
+
+    monkeypatch.setattr("openmux.server.adapters.client_listener.asyncio.start_server", fake_start_server)
+
+    res = await adapter.reconcile_ports({"host": "127.0.0.1", "port": 8023, "enabled": True})
+    assert res["status"] == "restarted"
+    assert rebinds == ["127.0.0.1:8023"]
+    assert adapter.is_running is True
+    assert adapter.server is not None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_accepts_full_server_config_shape(monkeypatch):
+    """Both the raw section and the full server config (nested under client_listener) work."""
+    adapter = _make_adapter()
+    res = await adapter.reconcile_ports(
+        {"server": {}, "client_listener": {"host": "127.0.0.1", "port": 8023}}
+    )
+    assert res["status"] in ("unchanged", "updated")
+
+    adapter.is_running = True
+    adapter.server = _FakeListener()
+    rebinds: List[str] = []
+
+    async def fake_start_server(cb, host, port):
+        rebinds.append(f"{host}:{port}")
+        return _FakeListener()
+
+    monkeypatch.setattr("openmux.server.adapters.client_listener.asyncio.start_server", fake_start_server)
+
+    res = await adapter.reconcile_ports(
+        {"client_listener": {"host": "0.0.0.0", "port": 8023}}
+    )
+    assert res["status"] == "restarted"
+    assert rebinds == ["0.0.0.0:8023"]
+    assert adapter.host == "0.0.0.0"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ports_accepts_list_input_as_no_config():
+    """A list config (not really valid for client_listener) is treated as no override."""
+    adapter = _make_adapter(max_connections=55)
+    res = await adapter.reconcile_ports([])
+    assert res["status"] == "unchanged"
+    assert adapter.max_connections == 55
+    assert adapter.host == "127.0.0.1"
+    assert adapter.port == 8023
