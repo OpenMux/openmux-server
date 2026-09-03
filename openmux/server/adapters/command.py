@@ -141,12 +141,12 @@ class CommandPort:
         self.is_running = False
         self.process_active = False
         # Contract attribute (docs/ADAPTER_PORT_CONTRACT.md): the "connected"
-        # flag the web UI / API shows for this port. Mirrors process
-        # liveness, but a resting port (on-demand and not yet spawned, or
-        # intentionally stopped) counts as connected. It is disconnected
-        # only while the process has exited or a spawn/respawn has failed --
-        # the same condition that sets status_message, so the UI banner and
-        # the info panel stay in sync.
+        # flag the web UI / API shows for this port. A resting port (on-demand
+        # and not yet spawned, intentionally stopped, or having exited cleanly
+        # with code 0) counts as connected. It is disconnected only while the
+        # process died abnormally (non-zero exit, signal) or a spawn/respawn
+        # failed -- the same condition that sets status_message, so the UI
+        # banner and the info panel stay in sync.
         self.is_connected = True
         self._connect_notified = True
         self.client_count = 0
@@ -545,6 +545,9 @@ class CommandPort:
             if self.client_count > 0:
                 self._schedule_lifecycle_notice("PROCESS_STARTED", "process started")
             self.process_active = True
+            # Process is up; mark connected. Covers the on-demand first
+            # spawn, the Enter-respawn path, and auto-restart respawns --
+            # all of them route through here.
             self._set_connected(True)
             if self.use_pty and self._output_batching_enabled:
                 if self._output_flush_task is None or self._output_flush_task.done():
@@ -756,6 +759,12 @@ class CommandPort:
                     break
                 exit_code = await self.process.wait()
                 self.process_active = False
+                # A clean exit (code 0) means the process ran to completion
+                # as expected. The port stays in a resting/online state so
+                # the status page and banner do not flag it offline.
+                # A non-zero exit (or signal kill, which produces a negative
+                # code) marks the port as degraded/offline until respawn.
+                clean_exit = not exit_code
                 # Wake the output batcher and drain whatever the process
                 # emitted last (e.g. its final line), so clients see the
                 # trailing output before any exit notice below.
@@ -766,19 +775,21 @@ class CommandPort:
                 await self._drain_output_buffer()
                 # Capture the exit reason (issue #62). Code 0 means a normal
                 # shutdown and gets no message; non-zero is reported.
-                if exit_code and exit_code != 0:
+                if not clean_exit:
                     self._set_status_message(f"Process exited with code {exit_code}")
-                # The process is dead until a respawn succeeds; surface it so
-                # the UI banner shows immediately (resting/respawn flips it
-                # back up; an intentional stop below also marks it resting).
-                self._set_connected(False)
+                    # The process is dead and did not exit cleanly; surface it
+                    # so the UI banner shows immediately. The auto_restart
+                    # path below will flip it back up on a successful respawn.
+                    self._set_connected(False)
                 if not self.is_running:
                     break
                 if not self.auto_restart:
                     self.logger.info(f"Process exited for {self.name}; not restarting")
-                    if not self.status_message:
+                    if not clean_exit and not self.status_message:
                         self._set_status_message(f"Process exited (code {exit_code}, auto_restart off)")
-                    # The port stays up; the client can press Enter to respawn.
+                    # The port stays up; the client can press Enter to
+                    # respawn. A clean exit is a resting state (CONFIGURED),
+                    # not a degraded one.
                     if self.client_count > 0:
                         self._schedule_lifecycle_notice(
                             "PROCESS_EXITED",
@@ -786,9 +797,13 @@ class CommandPort:
                         )
                     self._stopped_notice_sent = False
                     self.is_running = False
-                    self.state = PortState.DEGRADED
+                    self.state = PortState.CONFIGURED if clean_exit else PortState.DEGRADED
                     break
                 if self.max_restarts and self.restart_count >= self.max_restarts:
+                    # Exhausted the restart allowance; the port is offline
+                    # regardless of the immediate exit code. A clean code-0
+                    # exit after max_restarts failures is still a failure
+                    # condition (the process keeps dying).
                     self.logger.error(f"Max restarts reached for {self.name}; not restarting")
                     if not self.status_message:
                         self._set_status_message(f"Max restarts reached ({self.max_restarts})")
@@ -804,7 +819,10 @@ class CommandPort:
                 self.restart_count += 1
                 delay = self.restart_delay * (self.restart_backoff ** (self.restart_count - 1))
                 if self.client_count > 0:
-                    detail = f"code {exit_code}"
+                    if clean_exit:
+                        detail = f"finished (code 0)"
+                    else:
+                        detail = f"code {exit_code}"
                     if delay:
                         detail += f", restarting in {delay:.1f}s"
                     self._schedule_lifecycle_notice("PROCESS_EXITED", f"process exited ({detail})")

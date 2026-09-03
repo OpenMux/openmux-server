@@ -97,8 +97,13 @@ async def test_command_monitor_sets_message_on_nonzero_exit(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_command_monitor_sets_message_on_zero_exit_auto_restart_off(monkeypatch):
-    """Monitor loop: code 0 + auto_restart off -> generic 'auto_restart off' message."""
+async def test_command_monitor_zero_exit_auto_restart_off_resting_online(monkeypatch):
+    """Monitor loop: code 0 + auto_restart off -> resting state, port stays online.
+
+    A clean exit is a normal, expected termination (e.g. a login shell
+    closing). The port must not show an offline reason, must stay in a
+    connected/resting state, and must not be marked DEGRADED.
+    """
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
     port = CommandPort("cp-5", {"command": "echo", "auto_restart": False}, adapter)
@@ -107,7 +112,33 @@ async def test_command_monitor_sets_message_on_zero_exit_auto_restart_off(monkey
     port.process = _FakeProc(0)
     port._read_task = None
     await port._monitor_loop()
-    assert "auto_restart off" in port.status_message
+    assert port.status_message == ""
+    assert port.is_connected is True
+    assert port.state is PortState.CONFIGURED
+    assert port.process_active is False
+    assert port.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_command_monitor_nonzero_exit_auto_restart_off_marks_offline(monkeypatch):
+    """Monitor loop: non-zero exit + auto_restart off -> degraded + offline.
+
+    The contrast to the clean-exit case: an unexpected failure sets the
+    offline reason and flips the port to disconnected until a client
+    respawns it.
+    """
+    pm = CapturingPortManager()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    port = CommandPort("cp-5b", {"command": "echo", "auto_restart": False}, adapter)
+    port.use_pty = False
+    port.is_running = True
+    port.process = _FakeProc(2)
+    port._read_task = None
+    await port._monitor_loop()
+    assert "code 2" in port.status_message
+    assert port.is_connected is False
+    assert port.state is PortState.DEGRADED
+    assert port.is_running is False
 
 
 @pytest.mark.asyncio

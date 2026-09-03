@@ -81,7 +81,7 @@ Changes since v1.0.2 (2026-08-27).
     - `serial`: device not found, pyserial-asyncio missing, device open failure, connection closed (empty read), or read error.
   - And now `tcp_initiator` and `command` ports report the reason as well:
     - `tcp_initiator`: connection refused, timeout, protocol handshake failure, connection closed by remote, read error, or manual disconnect.
-    - `command`: process spawn failure (binary not found, generic error), non-zero exit code, max restarts reached, or process exited with auto_restart off.
+    - `command`: process spawn failure (binary not found, generic error), non-zero exit code, or max restarts reached.
   - The reason clears automatically when the port recovers (reconnect, new process spawn, intentional stop). An intentional `stop()` is a resting state and does not set a reason.
   - Federated peers now see the same reason text: the value travels inside the `PORTS:FEDERATED` catalog and is pushed live over a new lightweight `PORT_STATUS:` control channel (no full re-advertise needed). The value survives a peer restart via the existing federated cache.
   - A federated port also reports when the muxcon link to its origin is down, as a local reason of its own ("MuxCon link to <server_id> is down"). It is set when the last link path dies, shown as long as no path is live, and cleared when the link recovers. The link reason takes precedence over the origin's last reason, because the link outage is the freshest fact. It is local to the node that sees the outage and is never published over the wire.
@@ -96,6 +96,9 @@ Changes since v1.0.2 (2026-08-27).
 - **Command ports print a bracketed status line when the process lifecycle changes.** Attached clients now see `[OpenMux:PROCESS_STARTED …]` on spawn (e.g. on-demand start or auto-restart), `[OpenMux:PROCESS_EXITED …]` when the process dies — "restarting in Ns" under `auto_restart`, "press Enter to spawn/respawn" otherwise — and `[OpenMux:PROCESS_STOPPED …]` on an intentional stop (idle timeout, manual stop). With no client attached, nothing is printed — same convention as the existing `PROCESS_NOT_RUNNING` notice.
   - Related fix: a process's final output (e.g. its last line) is now always delivered to clients before the exit notice, even with output batching enabled. Previously the trailing chunk could sit un-flushed until the next input.
   - Related fix: the command port no longer leaks a PTY file descriptor per die→Enter respawn cycle.
+- **A clean command-port exit keeps the port online.** When a process finishes with exit code 0 (a normal termination, for example a closing login shell) and `auto_restart` is off, the port now rests in a configured, connected state instead of showing as offline. It resumes from the same Enter-to-respawn as before.
+  - A non-zero exit (or a signal) still marks the port offline with the exit reason, as before.
+  - No config change.
 - **Client listener changes now apply on Soft Reload.** The `client_listener` section is no longer Full-Reload-only.
   - `max_connections` and `connection_timeout` update in place. A rebind is skipped.
   - A change to `host`, `port`, or `enabled` rebinds the socket. Active TCP console sessions are disconnected; clients reconnect.
