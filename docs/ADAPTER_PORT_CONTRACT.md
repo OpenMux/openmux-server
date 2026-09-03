@@ -45,6 +45,13 @@ Every port instance **must** expose the following attributes:
 | `read_write_groups` | `List[str]` | Console groups granted read-write access. Empty on both this and `read_only_groups` means the port is open to all authenticated users (today's default behavior). |
 | `read_only_groups` | `List[str]` | Console groups granted read-only access. A user in this group is never promoted to read-write, even if `max_read_write_users` slots are free. |
 
+> **Per-port settings are flat attributes.** Every local adapter stores its per-port
+> settings as direct attributes on the port object (`LoopbackPort`, `CommandPort`,
+> `TcpInitiatorPort`, `SerialPortWrapper`). `port.config` is the raw per-port config
+> *dict* the port was built from, not a second copy of those attributes. In-place
+> soft-reload updates write the flat attributes, which is the same surface the access
+> ladder reads. There is one canonical place to read and write each value.
+
 > **Note:** Ports do **not** own or allocate a `data_queue`. The `UnifiedPortWrapper` created by PM owns the delivery queue. Any `data_queue` attribute on a port is a test-only staging buffer and is not part of this contract.
 
 ---

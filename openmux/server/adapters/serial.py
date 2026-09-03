@@ -12,7 +12,6 @@ import inspect
 import logging
 import os
 import stat
-from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from ..access_control import WRITE_MODES, InvalidWriteMode, parse_write_mode, wire_to_mode
@@ -20,87 +19,75 @@ from ..data_logger import DataLogger
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
 
-
-@dataclass
-class SerialPortConfig:
-    """Configuration parameters for a single serial port.
-
-    Args:
-        name: Logical unique port name.
-        description: Human-friendly description.
-        device: Path to serial device (e.g. /dev/ttyUSB0).
-        baudrate: Baud rate (positive integer).
-        bytesize: Number of data bits (5..8).
-        parity: Parity spec (N,E,O,M,S).
-        stopbits: Stop bits (1, 1.5, or 2).
-        timeout: Read timeout in seconds.
-        flow_control: Flow control mode string.
-        dtr: DTR line policy (issue #63). None/"none" leaves the line untouched;
-            "on"/"off" fix the level; "presence-on"/"presence-off" follow the
-            client count. Legacy booleans map to on/off.
-        rts: RTS line policy (same values as dtr).
-        max_read_write_users: Write-slot capacity mode, "none"/"one"/"multiple".
-    """
-
-    name: str
-    description: str
-    device: str
-    baudrate: int = 9600
-    bytesize: int = 8
-    parity: str = "N"
-    stopbits: int = 1
-    timeout: float = 1.0
-    flow_control: str = "none"
+# Per-port default values for SerialPortWrapper (issue #65). Kept in sync with
+# the defaults the adapter applies when building a port from config, so the
+# flat attributes and the reconcile comparison stay apples-to-apples.
+SERIAL_PORT_DEFAULTS: Dict[str, Any] = {
+    "description": "",
+    "device": "",
+    "baudrate": 9600,
+    "bytesize": 8,
+    "parity": "N",
+    "stopbits": 1,
+    "timeout": 1.0,
+    "flow_control": "none",
     # Signal-line policies (issue #63). None = "none" (untouched). A legacy
-    # boolean is kept verbatim on the dataclass as shorthand for on/off and is
-    # interpreted by resolve_line_policy(); the schema default is absent, not
-    # true. Note: pyyaml (YAML 1.1) parses unquoted on/off/On/... as booleans,
-    # so `dtr: on` and `dtr: "on"` both resolve to the same policy thanks to
-    # that bool==on/off shorthand. Only presence-on/presence-off/none survive
+    # boolean is kept verbatim as shorthand for on/off and is interpreted by
+    # resolve_line_policy(); the schema default is absent, not true. Note:
+    # pyyaml (YAML 1.1) parses unquoted on/off/On/... as booleans, so `dtr: on`
+    # and `dtr: "on"` both resolve to the same policy thanks to that
+    # bool==on/off shorthand. Only presence-on/presence-off/none survive
     # unquoting as strings.
-    dtr: Optional[Union[bool, str]] = None
-    rts: Optional[Union[bool, str]] = None
-    max_read_write_users: str = "one"  # Write-slot capacity mode: "none"/"one"/"multiple" (issue #59)
-    log_file: Optional[str] = None  # Optional per-port data log file path
-    log_format: Optional[str] = None  # 'line' or 'jsonl'
-    log_line_template: Optional[str] = None  # For 'line' format
-    log_direction: Optional[str] = None  # Direction filter for data logging: 'in' or 'out'
-    log_directions: Optional[List[str]] = None  # Direction filter for data logging: ['in', 'out']
-    scrollback_size: int = 0  # bytes to retain for client-requested scrollback replay; 0 = disabled
+    "dtr": None,
+    "rts": None,
+    "max_read_write_users": "one",  # Write-slot capacity mode: "none"/"one"/"multiple" (issue #59)
+    "log_file": None,  # Optional per-port data log file path
+    "log_format": None,  # 'line' or 'jsonl'
+    "log_line_template": None,  # For 'line' format
+    "log_direction": None,  # Direction filter for data logging: 'in' or 'out'
+    "log_directions": None,  # Direction filter for data logging: ['in', 'out']
+    "scrollback_size": 0,  # bytes to retain for client-requested scrollback replay; 0 = disabled
     # Console-group access control (issue #24): empty on both = open to all
     # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
-    read_write_groups: List[str] = field(default_factory=list)
-    read_only_groups: List[str] = field(default_factory=list)
+    "read_write_groups": [],
+    "read_only_groups": [],
+}
 
-    def __post_init__(self):
-        """Validate configuration values after initialization.
 
-        Raises:
-            ValueError: If any field contains an invalid value.
-        """
-        if not self.name:
-            raise ValueError("Serial port name cannot be empty")
-        if not self.device:
-            raise ValueError("Serial device path cannot be empty")
-        if self.baudrate <= 0:
-            raise ValueError("Baudrate must be positive")
-        if self.bytesize not in [5, 6, 7, 8]:
-            raise ValueError("Bytesize must be 5, 6, 7, or 8")
-        if self.parity not in ["N", "E", "O", "M", "S"]:
-            raise ValueError("Parity must be N, E, O, M, or S")
-        if self.stopbits not in [1, 1.5, 2]:
-            raise ValueError("Stopbits must be 1, 1.5, or 2")
-        if self.max_read_write_users not in WRITE_MODES:
-            raise ValueError(f"max_read_write_users must be one of {list(WRITE_MODES)}, got {self.max_read_write_users!r}")
-        for key in ("dtr", "rts"):
-            value = getattr(self, key)
-            if value is not None and not isinstance(value, bool) and value not in LINE_POLICY_VALUES:
-                raise ValueError(f"{key} must be none, on, off, presence-on, presence-off, or a boolean, got {value!r}")
-        # The rtscts/managed-rts conflict is rejected authoritatively by
-        # ConfigManager._validate_serial_ports_config; this keeps the dataclass
-        # self-contained when it is built directly (tests, adapters).
-        if str(self.flow_control).strip().lower() == "rtscts" and resolve_line_policy(self.rts) != (None, None):
-            raise ValueError("flow_control rtscts owns the RTS pin; remove rts (or set it to none) or use flow_control none")
+def _validate_serial_port(port: "SerialPortWrapper") -> None:
+    """Validate the flat per-port attributes on `port` (issue #65).
+
+    Called at the end of `SerialPortWrapper.__init__`. Keeps the same
+    validation rules (and error messages) the former dataclass
+    `__post_init__` applied, so an invalid port still fails at construction
+    time with the same message.
+
+    Raises:
+        ValueError: If any field contains an invalid value.
+    """
+    if not port.name:
+        raise ValueError("Serial port name cannot be empty")
+    if not port.device:
+        raise ValueError("Serial device path cannot be empty")
+    if port.baudrate <= 0:
+        raise ValueError("Baudrate must be positive")
+    if port.bytesize not in [5, 6, 7, 8]:
+        raise ValueError("Bytesize must be 5, 6, 7, or 8")
+    if port.parity not in ["N", "E", "O", "M", "S"]:
+        raise ValueError("Parity must be N, E, O, M, or S")
+    if port.stopbits not in [1, 1.5, 2]:
+        raise ValueError("Stopbits must be 1, 1.5, or 2")
+    if port.max_read_write_users not in WRITE_MODES:
+        raise ValueError(f"max_read_write_users must be one of {list(WRITE_MODES)}, got {port.max_read_write_users!r}")
+    for key in ("dtr", "rts"):
+        value = getattr(port, key)
+        if value is not None and not isinstance(value, bool) and value not in LINE_POLICY_VALUES:
+            raise ValueError(f"{key} must be none, on, off, presence-on, presence-off, or a boolean, got {value!r}")
+    # The rtscts/managed-rts conflict is rejected authoritatively by
+    # ConfigManager._validate_serial_ports_config; this keeps the port
+    # self-contained when it is built directly (tests, adapters).
+    if str(port.flow_control).strip().lower() == "rtscts" and resolve_line_policy(port.rts) != (None, None):
+        raise ValueError("flow_control rtscts owns the RTS pin; remove rts (or set it to none) or use flow_control none")
 
 
 # Signal-line policy values (issue #63). Each line (dtr/rts) is a single select:
@@ -145,11 +132,26 @@ class SerialPortWrapper:
     from the underlying serial stream is forwarded via data_callback, which
     is set by PortManager.register_unified_port().
 
+    Per-port settings are flat attributes on the port object (issue #65),
+    matching LoopbackPort, CommandPort, and TcpInitiatorPort. ``config`` is
+    the raw per-port dict; it is not a second copy of those attributes.
+
     Attributes:
-        config: Immutable ``SerialPortConfig`` describing the port.
-        name: Convenience alias of ``config.name``.
+        name: Logical unique port name.
+        device: Path to serial device (e.g. /dev/ttyUSB0).
         description: Human friendly description string.
+        baudrate: Baud rate (positive integer).
+        bytesize: Number of data bits (5..8).
+        parity: Parity spec (N,E,O,M,S).
+        stopbits: Stop bits (1, 1.5, or 2).
+        timeout: Read timeout in seconds.
+        flow_control: Flow control mode string.
+        dtr/rts: Signal-line policy (issue #63); None/"none" leaves the line
+            untouched, "on"/"off" fix the level, "presence-on"/
+            "presence-off" follow the client count.
         max_read_write_users: Write-slot capacity mode ("none"/"one"/"multiple").
+        read_write_groups / read_only_groups: Console-group access lists
+            (issue #24); flat attributes the access ladder reads directly.
         is_connected: True while active connection is established; always
             False while the port is offline.
         status_message: Non-empty while the port is offline with a reason:
@@ -160,25 +162,59 @@ class SerialPortWrapper:
 
     def __init__(
         self,
-        config: SerialPortConfig,
+        config: Dict[str, Any],
         logger: logging.Logger,
         meta_notify: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ):
+        """Build the port from a per-port config dict.
+
+        Args:
+            config: Per-port configuration mapping. Must contain ``name`` and
+                ``device``; unknown keys are preserved on ``self.config`` but
+                are not validated. Missing optional keys take the defaults
+                from ``SERIAL_PORT_DEFAULTS``.
+            logger: Parent adapter logger; a per-port child logger is derived.
+            meta_notify: Optional callback into PortManager listeners.
+
+        Raises:
+            ValueError: If any required field is missing or a field holds an
+                invalid value (see ``_validate_serial_port``).
+        """
+        if not isinstance(config, dict):
+            raise ValueError(f"Serial port config must be a dict, got {type(config).__name__}")
+
         self.config = config
-        self.name = config.name  # Add name attribute for port manager compatibility
-        self.description = config.description
-        self.max_read_write_users = config.max_read_write_users  # For port manager compatibility
-        # read_write_groups / read_only_groups are exposed as live properties
-        # (see below) that read straight from config, so soft-reload in-place
-        # updates to the config are visible to the access ladder without a copy.
-        self.logger = logger.getChild(f"serial.{config.name}")
+        self.name: str = config.get("name") or ""
+        # Flat per-port settings (issue #65): one canonical attribute each, in
+        # the same shape as the other local adapters. Soft reload updates these
+        # in place; the access ladder reads them directly.
+        self.description: str = config.get("description") or SERIAL_PORT_DEFAULTS["description"]
+        self.device: str = config.get("device") or SERIAL_PORT_DEFAULTS["device"]
+        self.baudrate: int = config.get("baudrate", SERIAL_PORT_DEFAULTS["baudrate"])
+        self.bytesize: int = config.get("bytesize", SERIAL_PORT_DEFAULTS["bytesize"])
+        self.parity: str = config.get("parity", SERIAL_PORT_DEFAULTS["parity"])
+        self.stopbits: int = config.get("stopbits", SERIAL_PORT_DEFAULTS["stopbits"])
+        self.timeout: float = config.get("timeout", SERIAL_PORT_DEFAULTS["timeout"])
+        self.flow_control: str = config.get("flow_control", SERIAL_PORT_DEFAULTS["flow_control"])
+        self.dtr: Optional[Union[bool, str]] = config.get("dtr")
+        self.rts: Optional[Union[bool, str]] = config.get("rts")
+        self.max_read_write_users: str = config.get("max_read_write_users", SERIAL_PORT_DEFAULTS["max_read_write_users"])
+        self.log_file: Optional[str] = config.get("log_file")
+        self.log_format: Optional[str] = config.get("log_format")
+        self.log_line_template: Optional[str] = config.get("log_line_template")
+        self.log_direction: Optional[str] = config.get("log_direction")
+        self.log_directions: Optional[List[str]] = config.get("log_directions")
+        self.scrollback_size: int = int(config.get("scrollback_size", SERIAL_PORT_DEFAULTS["scrollback_size"]))
+        self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
+        self.read_only_groups: List[str] = list(config.get("read_only_groups") or [])
+
+        self.logger = logger.getChild(f"serial.{self.name or 'unnamed'}")
         # Best-effort callback into PortManager listeners via adapter
         self._meta_notify = meta_notify
 
         # Lifecycle state (contract: PortState)
         self.state = PortState.CONFIGURED
         self.always_buffer: bool = False
-        self.scrollback_size: int = config.scrollback_size
 
         # Connection state
         self.reader: Optional[asyncio.StreamReader] = None
@@ -217,25 +253,9 @@ class SerialPortWrapper:
         self._rts_driven: Optional[bool] = None
         self._client_count: int = 0
 
-    @property
-    def read_write_groups(self) -> List[str]:
-        # Live view onto config.read_write_groups. A Soft Reload updates the
-        # dataclass in place; the access ladder (via the PM wrapper's
-        # live property) reads this on connect.
-        return self.config.read_write_groups
-
-    @read_write_groups.setter
-    def read_write_groups(self, value: List[str]) -> None:
-        self.config.read_write_groups = list(value or [])
-
-    @property
-    def read_only_groups(self) -> List[str]:
-        # Live view onto config.read_only_groups (mirrors read_write_groups).
-        return self.config.read_only_groups
-
-    @read_only_groups.setter
-    def read_only_groups(self, value: List[str]) -> None:
-        self.config.read_only_groups = list(value or [])
+        # Validate the flat attributes (same rules as the former dataclass
+        # __post_init__); raises ValueError before the port is usable.
+        _validate_serial_port(self)
 
     def _set_status_message(self, message: str, connected: bool = False) -> None:
         """Set or clear the offline reason and push a meta refresh on state change.
@@ -260,7 +280,7 @@ class SerialPortWrapper:
             if self._meta_notify:
                 try:
                     self._meta_notify(
-                        self.config.name,
+                        self.name,
                         {"event": "serial_status_changed", "status_message": self.status_message},
                     )
                 except Exception:
@@ -270,7 +290,7 @@ class SerialPortWrapper:
 
     def _line_policy(self, line: str) -> Tuple[Optional[bool], Optional[bool]]:
         """Return the (active, idle) level pair for 'dtr' or 'rts' (issue #63)."""
-        return resolve_line_policy(getattr(self.config, line, None))
+        return resolve_line_policy(getattr(self, line, None))
 
     def _serial_driver(self) -> Optional[Any]:
         """Return the underlying serial.Serial instance, or None when absent.
@@ -311,7 +331,7 @@ class SerialPortWrapper:
         except Exception:
             # justification: a control-line ioctl failure is non-fatal; the
             # data path must keep working and the error is already logged.
-            self.logger.error(f"Failed to drive {line.upper()} line on {self.config.name}", exc_info=True)
+            self.logger.error(f"Failed to drive {line.upper()} line on {self.name}", exc_info=True)
 
     def _apply_line_levels_for_count(self, count: int) -> None:
         """Drive both lines to the level implied by `count` connected clients."""
@@ -349,7 +369,7 @@ class SerialPortWrapper:
             self.state = PortState.DEGRADED
             return False
 
-        self.logger.info(f"Starting serial port {self.config.name} on {self.config.device}")
+        self.logger.info(f"Starting serial port {self.name} on {self.device}")
         self.state = PortState.CREATING
 
         # Start connection supervisor in background
@@ -368,7 +388,7 @@ class SerialPortWrapper:
             return
         if self.connection_task is not None and not self.connection_task.done():
             return
-        self.logger.info(f"Resuming serial port {self.config.name} on {self.config.device}")
+        self.logger.info(f"Resuming serial port {self.name} on {self.device}")
         self.state = PortState.CREATING
         self.connection_task = asyncio.create_task(self._connect_loop())
         self.state = PortState.ACTIVE
@@ -378,7 +398,7 @@ class SerialPortWrapper:
 
         Idempotent; safe to call multiple times.
         """
-        self.logger.info(f"Stopping serial port {self.config.name}")
+        self.logger.info(f"Stopping serial port {self.name}")
         self.state = PortState.DESTROYING
 
         # Stop auto-reconnection
@@ -441,7 +461,7 @@ class SerialPortWrapper:
                     self.max_reconnect_attempts == 0 or self.reconnect_attempts < self.max_reconnect_attempts
                 ):
                     self.reconnect_attempts += 1
-                    reconnect_msg = f"Attempting to reconnect to {self.config.device} (attempt {self.reconnect_attempts})"
+                    reconnect_msg = f"Attempting to reconnect to {self.device} (attempt {self.reconnect_attempts})"
                     self.logger.debug(reconnect_msg)
                     await asyncio.sleep(self.reconnect_delay)
                 else:
@@ -462,26 +482,26 @@ class SerialPortWrapper:
         """
         try:
             # Check if device exists
-            if not os.path.exists(self.config.device):
+            if not os.path.exists(self.device):
                 import time as _time
 
                 now = _time.monotonic()
                 if self._last_missing_warn_ts is None or (now - self._last_missing_warn_ts) >= 3600:
-                    self.logger.warning(f"Serial device {self.config.device} does not exist")
+                    self.logger.warning(f"Serial device {self.device} does not exist")
                     self._last_missing_warn_ts = now
                 else:
-                    self.logger.debug(f"Serial device {self.config.device} still not found")
-                self._set_status_message(f"Serial device {self.config.device} not found", connected=False)
+                    self.logger.debug(f"Serial device {self.device} still not found")
+                self._set_status_message(f"Serial device {self.device} not found", connected=False)
                 return False
 
             # Check device type on POSIX systems
             if os.name == "posix":
                 try:
-                    st = os.stat(self.config.device)
+                    st = os.stat(self.device)
                     if stat.S_ISCHR(st.st_mode):
-                        self.logger.debug(f"Device {self.config.device} is a character device")
+                        self.logger.debug(f"Device {self.device} is a character device")
                     else:
-                        self.logger.warning(f"Device {self.config.device} is not a character device")
+                        self.logger.warning(f"Device {self.device} is not a character device")
                 except Exception as e:
                     self.logger.warning(f"Could not check device type: {e}", exc_info=True)
 
@@ -497,18 +517,16 @@ class SerialPortWrapper:
 
             # Create serial connection
             self.logger.info(
-                f"Connecting to {self.config.device} "
-                f"({self.config.baudrate}bps, {self.config.bytesize}"
-                f"{self.config.parity}{self.config.stopbits})"
+                f"Connecting to {self.device} " f"({self.baudrate}bps, {self.bytesize}" f"{self.parity}{self.stopbits})"
             )
 
             self.reader, self.writer = await serial_asyncio.open_serial_connection(
-                url=self.config.device,
-                baudrate=self.config.baudrate,
-                bytesize=self.config.bytesize,
-                parity=self.config.parity,
-                stopbits=self.config.stopbits,
-                timeout=self.config.timeout,
+                url=self.device,
+                baudrate=self.baudrate,
+                bytesize=self.bytesize,
+                parity=self.parity,
+                stopbits=self.stopbits,
+                timeout=self.timeout,
             )
 
             self.is_connected = True
@@ -519,15 +537,15 @@ class SerialPortWrapper:
             try:
                 self._apply_line_levels_for_count(self._client_count)
             except Exception:
-                self.logger.error(f"Error applying initial signal lines to {self.config.name}", exc_info=True)
-            self.logger.info(f"Successfully connected to {self.config.device}")
+                self.logger.error(f"Error applying initial signal lines to {self.name}", exc_info=True)
+            self.logger.info(f"Successfully connected to {self.device}")
             # Reason for a previous failed cycle no longer applies now that we
             # are connected (issue #62); also clears the "Disconnected from ..."
             # reason on reconnect after a drop.
             self._set_status_message("", connected=True)
             try:
                 if self._meta_notify and self._last_notified_connected is not True:
-                    self._meta_notify(self.config.name, {"event": "serial_connected", "connected": True})
+                    self._meta_notify(self.name, {"event": "serial_connected", "connected": True})
                     self._last_notified_connected = True
             except Exception:
                 self.logger.debug("Meta notify failed on serial connect", exc_info=True)
@@ -537,8 +555,8 @@ class SerialPortWrapper:
             # No traceback: the error message already carries the errno detail
             # (e.g. termios EIO), and the connect loop retries with this same
             # failure every cycle, so a stack trace only adds noise.
-            self.logger.error(f"Failed to connect to {self.config.device}: {e}")
-            self._set_status_message(f"Failed to open {self.config.device}: {e}", connected=False)
+            self.logger.error(f"Failed to connect to {self.device}: {e}")
+            self._set_status_message(f"Failed to open {self.device}: {e}", connected=False)
             return False
 
     async def _disconnect(self) -> None:
@@ -559,10 +577,10 @@ class SerialPortWrapper:
                 if hasattr(self.writer, "wait_closed"):
                     await self.writer.wait_closed()
 
-            self.logger.info(f"Disconnected from {self.config.device}")
+            self.logger.info(f"Disconnected from {self.device}")
 
         except Exception as e:
-            self.logger.error(f"Error disconnecting from {self.config.device}: {e}", exc_info=True)
+            self.logger.error(f"Error disconnecting from {self.device}: {e}", exc_info=True)
         finally:
             # Reset managed lines to their active level so a stale idle signal
             # (presence-* driving the line low) never lingers across a reconnect.
@@ -573,7 +591,7 @@ class SerialPortWrapper:
                     active, _idle = self._line_policy(line)
                     self._apply_line(line, active)
             except Exception:
-                self.logger.error(f"Error resetting signal lines on {self.config.name}", exc_info=True)
+                self.logger.error(f"Error resetting signal lines on {self.name}", exc_info=True)
             self._dtr_driven = None
             self._rts_driven = None
             self.is_connected = False
@@ -581,7 +599,7 @@ class SerialPortWrapper:
             self.writer = None
             try:
                 if self._meta_notify and self._last_notified_connected is not False:
-                    self._meta_notify(self.config.name, {"event": "serial_disconnected", "connected": False})
+                    self._meta_notify(self.name, {"event": "serial_disconnected", "connected": False})
                     self._last_notified_connected = False
             except Exception:
                 self.logger.debug("Meta notify failed on serial disconnect", exc_info=True)
@@ -597,13 +615,13 @@ class SerialPortWrapper:
                     # Empty read typically means connection closed
                     self.logger.warning("Serial connection closed (empty read)")
                     # Reason for the drop (issue #62) so the banner can show it
-                    self._set_status_message(f"Disconnected from {self.config.device}")
+                    self._set_status_message(f"Disconnected from {self.device}")
                     # Proactively mark down and notify before breaking, to update UI immediately
                     try:
                         # Mark state false immediately to reduce race window
                         self.is_connected = False
                         if self._meta_notify and self._last_notified_connected is not False:
-                            self._meta_notify(self.config.name, {"event": "serial_disconnected", "connected": False})
+                            self._meta_notify(self.name, {"event": "serial_disconnected", "connected": False})
                             self._last_notified_connected = False
                     except Exception:
                         self.logger.debug("Meta notify failed on empty read disconnect", exc_info=True)
@@ -626,22 +644,20 @@ class SerialPortWrapper:
                         )
                         self._callback_missing_logged = True
                 # Per-chunk data logs are very chatty; keep at debug level
-                self.logger.debug(
-                    f"Read {len(data)} bytes from {self.config.device}: {data.decode('utf-8', errors='replace')}"
-                )
+                self.logger.debug(f"Read {len(data)} bytes from {self.device}: {data.decode('utf-8', errors='replace')}")
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Error reading from {self.config.device}: {e}", exc_info=True)
+                self.logger.error(f"Error reading from {self.device}: {e}", exc_info=True)
                 # Reason for the drop (issue #62) so the banner can show it
-                self._set_status_message(f"Read error on {self.config.device}: {e}")
+                self._set_status_message(f"Read error on {self.device}: {e}")
                 # Proactively notify disconnect on read error
                 try:
                     # Mark state false immediately to reduce race window
                     self.is_connected = False
                     if self._meta_notify and self._last_notified_connected is not False:
-                        self._meta_notify(self.config.name, {"event": "serial_disconnected", "connected": False})
+                        self._meta_notify(self.name, {"event": "serial_disconnected", "connected": False})
                         self._last_notified_connected = False
                 except Exception:
                     self.logger.debug("Meta notify failed on read error", exc_info=True)
@@ -660,30 +676,30 @@ class SerialPortWrapper:
             RuntimeError: If port not in ACTIVE state.
         """
         if self.state != PortState.ACTIVE or not self.is_connected or not self.writer:
-            raise RuntimeError(f"Serial port {self.config.name} not connected")
+            raise RuntimeError(f"Serial port {self.name} not connected")
 
         try:
             self.writer.write(data)
             await self.writer.drain()
-            self.logger.debug(f"Wrote {len(data)} bytes to {self.config.device}")
+            self.logger.debug(f"Wrote {len(data)} bytes to {self.device}")
             return len(data)
         except Exception as e:
-            self.logger.error(f"Error writing to {self.config.device}: {e}", exc_info=True)
+            self.logger.error(f"Error writing to {self.device}: {e}", exc_info=True)
             raise
 
     def get_status_snapshot(self) -> Dict[str, Any]:
         """Return config details and the offline reason for port listings."""
         snapshot: Dict[str, Any] = {
             "serial_config": {
-                "device": self.config.device,
-                "baudrate": self.config.baudrate,
-                "bytesize": self.config.bytesize,
-                "parity": self.config.parity,
-                "stopbits": self.config.stopbits,
-                "flow_control": self.config.flow_control,
-                "timeout": self.config.timeout,
-                "dtr": self.config.dtr,
-                "rts": self.config.rts,
+                "device": self.device,
+                "baudrate": self.baudrate,
+                "bytesize": self.bytesize,
+                "parity": self.parity,
+                "stopbits": self.stopbits,
+                "flow_control": self.flow_control,
+                "timeout": self.timeout,
+                "dtr": self.dtr,
+                "rts": self.rts,
             }
         }
         if self.status_message:
@@ -810,7 +826,7 @@ class SerialAdapter(BaseGenericAdapter):
         claimed: Dict[str, str] = {}
         flagged: Set[str] = set()
         for name, wrapper in self.serial_ports.items():
-            device = wrapper.config.device
+            device = wrapper.device
             holder = claimed.get(device)
             if holder is None:
                 claimed[device] = name
@@ -855,37 +871,12 @@ class SerialAdapter(BaseGenericAdapter):
                 continue
 
             try:
-                max_rw_users = self._resolve_max_rw_users(port_config, port_name=port_config.get("name"))
-                # Create SerialPortConfig with validation
-                serial_config = SerialPortConfig(
-                    name=port_config["name"],
-                    description=port_config.get("description", f"Serial port {port_config['name']}"),
-                    device=port_config["device"],
-                    baudrate=port_config.get("baudrate", 9600),
-                    bytesize=port_config.get("bytesize", 8),
-                    parity=port_config.get("parity", "N"),
-                    stopbits=port_config.get("stopbits", 1),
-                    timeout=port_config.get("timeout", 1.0),
-                    flow_control=port_config.get("flow_control", "none"),
-                    dtr=port_config.get("dtr"),
-                    rts=port_config.get("rts"),
-                    max_read_write_users=max_rw_users,
-                    log_file=port_config.get("log_file"),
-                    log_format=port_config.get("log_format"),
-                    log_line_template=port_config.get("log_line_template"),
-                    log_direction=port_config.get("log_direction"),
-                    log_directions=port_config.get("log_directions"),
-                    scrollback_size=int(port_config.get("scrollback_size", 0)),
-                    read_write_groups=port_config.get("read_write_groups") or [],
-                    read_only_groups=port_config.get("read_only_groups") or [],
-                )
+                # Build the flat per-port config + wrapper (validates; raises
+                # on a bad value, which the except below reports and re-raises).
+                port_wrapper = self._build_port(port_config)
+                self.serial_ports[port_wrapper.name] = port_wrapper
 
-                # Create wrapper
-                notifier = self._make_notifier()
-                port_wrapper = SerialPortWrapper(serial_config, self.logger, meta_notify=notifier)
-                self.serial_ports[serial_config.name] = port_wrapper
-
-                self.logger.info(f"Configured serial port {serial_config.name} -> {serial_config.device}")
+                self.logger.info(f"Configured serial port {port_wrapper.name} -> {port_wrapper.device}")
 
             except Exception as e:
                 port_name = port_config.get("name", "unknown") if isinstance(port_config, dict) else "unknown"
@@ -895,6 +886,33 @@ class SerialAdapter(BaseGenericAdapter):
         # One port per unix device (issue #57): flag ports that share a device
         # with an earlier port, before ``start()`` opens anything.
         self._recompute_duplicate_device_flags()
+
+    def _build_port_config_from_dict(self, port_config: Dict[str, Any], port_name: Optional[str] = None) -> Dict[str, Any]:
+        """Normalize a raw port dict into the per-port config a port stores.
+
+        Single canonical path from a raw port dict to the dict that
+        ``SerialPortWrapper`` consumes (initial construction, create_port,
+        and reconcile all build ports through it). ``SerialPortWrapper``
+        applies the remaining per-field defaults from
+        ``SERIAL_PORT_DEFAULTS``; this helper owns the one field whose
+        resolution needs adapter context (write-slot capacity, issue #59:
+        mode + legacy key + deprecation log).
+        """
+        cfg: Dict[str, Any] = dict(port_config)
+        cfg["max_read_write_users"] = self._resolve_max_rw_users(port_config, port_name=port_name)
+        return cfg
+
+    def _build_port(self, port_config: Dict[str, Any]) -> SerialPortWrapper:
+        """Construct a validated SerialPortWrapper from a raw port dict.
+
+        Shared by initial load (``_parse_port_configs``), soft-reload adds
+        (``create_port``), and tests.
+        """
+        cfg = self._build_port_config_from_dict(port_config, port_name=port_config.get("name"))
+        # Human-friendly label default (old load-path behavior).
+        if not cfg.get("description"):
+            cfg["description"] = f"Serial port {cfg.get('name') or 'unknown'}"
+        return SerialPortWrapper(cfg, self.logger, meta_notify=self._make_notifier())
 
     async def start(self) -> bool:
         """Start all configured serial ports.
@@ -968,32 +986,12 @@ class SerialAdapter(BaseGenericAdapter):
             SerialPortWrapper on success, None on failure.
         """
         try:
-            max_rw = self._resolve_max_rw_users(config, port_name=port_name)
-            serial_cfg = SerialPortConfig(
-                name=port_name,
-                description=config.get("description", f"Serial port {port_name}"),
-                device=config["device"],
-                baudrate=config.get("baudrate", 9600),
-                bytesize=config.get("bytesize", 8),
-                parity=config.get("parity", "N"),
-                stopbits=config.get("stopbits", 1),
-                timeout=config.get("timeout", 1.0),
-                flow_control=config.get("flow_control", "none"),
-                dtr=config.get("dtr"),
-                rts=config.get("rts"),
-                max_read_write_users=max_rw,
-                log_file=config.get("log_file"),
-                log_format=config.get("log_format"),
-                log_line_template=config.get("log_line_template"),
-                log_direction=config.get("log_direction"),
-                log_directions=config.get("log_directions"),
-                scrollback_size=int(config.get("scrollback_size", 0)),
-                read_write_groups=config.get("read_write_groups") or [],
-                read_only_groups=config.get("read_only_groups") or [],
-            )
-            notifier = self._make_notifier()
-            wrapper = SerialPortWrapper(serial_cfg, self.logger, meta_notify=notifier)
-            self.serial_ports[serial_cfg.name] = wrapper
+            # The port is created under `port_name` regardless of any `name`
+            # key inside the dict (matches the old create_port behavior).
+            cfg = dict(config)
+            cfg["name"] = port_name
+            wrapper = self._build_port(cfg)
+            self.serial_ports[wrapper.name] = wrapper
             # One port per unix device (issue #57): recompute after the new port
             # joins the set so a duplicate is flagged before ``start()`` below
             # would open the device. The flagged port stays registered and
@@ -1001,7 +999,7 @@ class SerialAdapter(BaseGenericAdapter):
             self._recompute_duplicate_device_flags()
             await wrapper.start()
             if self.main_port_manager:
-                await self.main_port_manager.register_unified_port(serial_cfg.name, wrapper, self)
+                await self.main_port_manager.register_unified_port(wrapper.name, wrapper, self)
             return wrapper
         except Exception as e:
             self.logger.error(f"Failed to create serial port {port_name}: {e}", exc_info=True)
@@ -1122,7 +1120,9 @@ class SerialAdapter(BaseGenericAdapter):
 
         # Determine which common ports have materially changed (require recreate)
         def _material_config(port_cfg: Dict[str, Any]) -> Dict[str, Any]:
-            # Apply the same defaults as SerialPortConfig so comparison is apples-to-apples
+            # Apply the same defaults the port constructor uses (the port
+            # fills absent keys from SERIAL_PORT_DEFAULTS) so the comparison
+            # is apples-to-apples when the port was built from a full dict.
             mru = port_cfg.get("max_read_write_users")
             if mru is None and "read_write_users" in port_cfg:
                 mru = port_cfg.get("read_write_users")
@@ -1148,6 +1148,28 @@ class SerialAdapter(BaseGenericAdapter):
                 "scrollback_size": port_cfg.get("scrollback_size", 0),
             }
 
+        # Keys on the port object that count as a material change (issue #65):
+        # the same fields the port builds from config. Reads go through the
+        # flat attributes the access ladder uses, so there is one place to look.
+        _material_keys = (
+            "device",
+            "baudrate",
+            "bytesize",
+            "parity",
+            "stopbits",
+            "timeout",
+            "flow_control",
+            "dtr",
+            "rts",
+            "max_read_write_users",
+            "log_file",
+            "log_format",
+            "log_line_template",
+            "log_direction",
+            "log_directions",
+            "scrollback_size",
+        )
+
         updated: list[str] = []
         unchanged: list[str] = []
         for name in common:
@@ -1155,27 +1177,11 @@ class SerialAdapter(BaseGenericAdapter):
             spw = None
             try:
                 spw = self.serial_ports[name]
-                # Extract material fields from existing dataclass
-                old_cfg = {
-                    "device": spw.config.device,
-                    "baudrate": spw.config.baudrate,
-                    "bytesize": spw.config.bytesize,
-                    "parity": spw.config.parity,
-                    "stopbits": spw.config.stopbits,
-                    "timeout": spw.config.timeout,
-                    "flow_control": spw.config.flow_control,
-                    "dtr": spw.config.dtr,
-                    "rts": spw.config.rts,
-                    # Silent normalization (wire_to_mode) so a raw legacy int
-                    # compares equal to its migrated mode string (issue #59).
-                    "max_read_write_users": wire_to_mode(spw.config.max_read_write_users),
-                    "log_file": getattr(spw.config, "log_file", None),
-                    "log_format": getattr(spw.config, "log_format", None),
-                    "log_line_template": getattr(spw.config, "log_line_template", None),
-                    "log_direction": getattr(spw.config, "log_direction", None),
-                    "log_directions": getattr(spw.config, "log_directions", None),
-                    "scrollback_size": getattr(spw.config, "scrollback_size", None),
-                }
+                # Extract material fields from the running port's flat attrs
+                old_cfg = {key: getattr(spw, key, None) for key in _material_keys}
+                # Silent normalization (wire_to_mode) so a raw legacy int on
+                # either side compares equal to its migrated mode string (#59).
+                old_cfg["max_read_write_users"] = wire_to_mode(old_cfg["max_read_write_users"])
             except Exception:
                 old_cfg = {}
             new_cfg = _material_config(new_by_name[name])
@@ -1201,10 +1207,10 @@ class SerialAdapter(BaseGenericAdapter):
                     try:
                         new_rw = list(new_by_name[name].get("read_write_groups") or [])
                         new_ro = list(new_by_name[name].get("read_only_groups") or [])
-                        if list(spw.config.read_write_groups or []) != new_rw:
-                            spw.config.read_write_groups = new_rw
-                        if list(spw.config.read_only_groups or []) != new_ro:
-                            spw.config.read_only_groups = new_ro
+                        if list(spw.read_write_groups or []) != new_rw:
+                            spw.read_write_groups = new_rw
+                        if list(spw.read_only_groups or []) != new_ro:
+                            spw.read_only_groups = new_ro
                     except Exception:
                         pass
                 unchanged.append(name)

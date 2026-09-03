@@ -2396,18 +2396,21 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     if hasattr(port_obj, "unified_port") and hasattr(getattr(port_obj, "unified_port", None), "is_connected"):
                         live_connected = bool(getattr(getattr(port_obj, "unified_port", None), "is_connected", None))
                         live_adapter = getattr(port_obj, "adapter_type", None)
-                        # Try serial config from unified_port if available
+                        # Try the live serial config if available (issue #65):
+                        # a serial port keeps its per-port settings as a plain
+                        # dict on `config`. Gate on `device` so other
+                        # adapters' per-port dicts (loopback, command, ...) do
+                        # not produce an all-null serial_config here.
                         try:
                             cfg = getattr(getattr(port_obj, "unified_port", None), "config", None)
-                            if cfg and hasattr(cfg, "__dict__"):
-                                cd = cfg.__dict__
+                            if isinstance(cfg, dict) and cfg.get("device") is not None:
                                 live_serial_cfg = {
-                                    "device": cd.get("device"),
-                                    "baudrate": cd.get("baudrate"),
-                                    "bytesize": cd.get("bytesize"),
-                                    "parity": cd.get("parity"),
-                                    "stopbits": cd.get("stopbits"),
-                                    "flow_control": cd.get("flow_control"),
+                                    "device": cfg.get("device"),
+                                    "baudrate": cfg.get("baudrate"),
+                                    "bytesize": cfg.get("bytesize"),
+                                    "parity": cfg.get("parity"),
+                                    "stopbits": cfg.get("stopbits"),
+                                    "flow_control": cfg.get("flow_control"),
                                 }
                         except Exception:
                             pass

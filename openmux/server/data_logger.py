@@ -59,7 +59,8 @@ class DataLogger:
             DataLogger.get().record_meta(port_name, event, client_id, meta)
 
     Filenames are resolved as:
-      1) port-specific config key: port.config.get("log_file") if present
+      1) port-specific config key: `log_file` on the port's per-port config
+         (a dict, or a per-port attribute) if present
       2) default pattern: {log_dir}/ports/{port_name}.log, where `log_dir` is the base
          directory set via `set_base_dir()` (config `logging.log_dir`), defaulting to `logs`
 

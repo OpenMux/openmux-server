@@ -439,13 +439,16 @@ class TestAdapterValidation:
         with pytest.raises(InvalidWriteMode):
             LoopbackPort("p1", {"name": "p1", "max_read_write_users": "two"}, adapter=None)
 
-    def test_serial_config_rejects_invalid_mode_in_post_init(self):
-        from openmux.server.adapters.serial import SerialPortConfig
+    def test_serial_port_rejects_invalid_mode_at_construction(self):
+        from openmux.server.adapters.serial import SerialPortWrapper
+
+        def _mk(cfg: dict):
+            return SerialPortWrapper(cfg, logging.getLogger("test.serial"))
 
         with pytest.raises(ValueError):
-            SerialPortConfig(name="p1", description="d", device="/dev/ttyX", max_read_write_users="two")
-        cfg = SerialPortConfig(name="p1", description="d", device="/dev/ttyX")
-        assert cfg.max_read_write_users == "one"
+            _mk({"name": "p1", "description": "d", "device": "/dev/ttyX", "max_read_write_users": "two"})
+        port = _mk({"name": "p1", "description": "d", "device": "/dev/ttyX"})
+        assert port.max_read_write_users == "one"
 
     def test_serial_validate_config_rejects_invalid_mode(self):
         from openmux.server.adapters.serial import SerialAdapter

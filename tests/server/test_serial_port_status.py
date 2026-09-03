@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from openmux.server.adapters.serial import SerialPortConfig, SerialPortWrapper
+from openmux.server.adapters.serial import SerialPortWrapper
 
 
 def _make_port(
@@ -32,11 +32,7 @@ def _make_port(
     def _capture(pname: str, payload: Dict[str, Any]) -> None:
         captured.append({"pname": pname, **payload})
 
-    cfg = SerialPortConfig(
-        name="testport",
-        description="test",
-        device=device,
-    )
+    cfg = {"name": "testport", "description": "test", "device": device}
     wrapper = SerialPortWrapper(cfg, logging.getLogger("test.serial"), meta_notify=_capture)
     # Suppress the rate-limited "device does not exist" warning timestamp so
     # multiple tests don't share state.
@@ -90,7 +86,7 @@ async def test_serial_missing_device_sets_status(monkeypatch):
     port = _make_port(captured=captured)
     ok = await port._connect()
     assert ok is False
-    assert port.status_message == f"Serial device {port.config.device} not found"
+    assert port.status_message == f"Serial device {port.device} not found"
     snap = port.get_status_snapshot()
     assert snap["status_message"] == port.status_message
     # The state flip from None -> offline must have fired a meta event
@@ -157,7 +153,7 @@ async def test_serial_read_empty_read_sets_drop_reason():
     port.is_connected = True
     await port._read_loop()
     assert port.is_connected is False
-    assert port.status_message == f"Disconnected from {port.config.device}"
+    assert port.status_message == f"Disconnected from {port.device}"
     assert "status_message" in port.get_status_snapshot()
 
 

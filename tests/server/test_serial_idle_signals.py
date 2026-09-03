@@ -15,10 +15,24 @@ import pytest
 
 from openmux.server.adapters.serial import (
     LINE_POLICY_VALUES,
-    SerialPortConfig,
     SerialPortWrapper,
     resolve_line_policy,
 )
+
+
+def _make_config(**overrides) -> dict:
+    """Build a serial per-port config dict (issue #65), overriding a few keys.
+
+    The port now takes a plain dict and fills missing keys from
+    ``SERIAL_PORT_DEFAULTS``.
+    """
+    cfg = {
+        "name": overrides.pop("name", "a"),
+        "description": overrides.pop("description", "a"),
+        "device": overrides.pop("device", "/dev/ttyX0"),
+    }
+    cfg.update(overrides)
+    return cfg
 
 
 class FakeSerial:
@@ -87,15 +101,11 @@ def _make_port(
         if captured is not None:
             captured.append(payload)
 
-    cfg = SerialPortConfig(
-        name="testport",
-        description="test",
-        device="/dev/ttyTEST0",
-        dtr=dtr,
-        rts=rts,
-        flow_control=flow_control,
+    wrapper = SerialPortWrapper(
+        _make_config(name="testport", description="test", device="/dev/ttyTEST0", dtr=dtr, rts=rts, flow_control=flow_control),
+        logging.getLogger("test.serial"),
+        meta_notify=_capture,
     )
-    wrapper = SerialPortWrapper(cfg, logging.getLogger("test.serial"), meta_notify=_capture)
     return wrapper
 
 
@@ -148,42 +158,38 @@ class TestResolveLinePolicy:
 
 class TestPolicyConfigValidation:
     def test_default_is_untouched(self):
-        cfg = SerialPortConfig(name="a", description="a", device="/dev/ttyX0")
-        assert cfg.dtr is None
-        assert cfg.rts is None
+        port = SerialPortWrapper(_make_config(), logging.getLogger("test.serial"))
+        assert port.dtr is None
+        assert port.rts is None
 
     def test_invalid_policy_rejected(self):
         for bad in ("bogus", "", "presence", 3):
             with pytest.raises(ValueError):
-                SerialPortConfig(name="a", description="a", device="/dev/ttyX0", dtr=bad)
+                SerialPortWrapper(_make_config(dtr=bad), logging.getLogger("test.serial"))
             with pytest.raises(ValueError):
-                SerialPortConfig(name="a", description="a", device="/dev/ttyX0", rts=bad)
+                SerialPortWrapper(_make_config(rts=bad), logging.getLogger("test.serial"))
 
     def test_rtscts_with_managed_rts_rejected(self):
         for bad in ("on", "off", "presence-on", "presence-off", True, False):
             with pytest.raises(ValueError, match="rtscts"):
-                SerialPortConfig(name="a", description="a", device="/dev/ttyX0", flow_control="rtscts", rts=bad)
+                SerialPortWrapper(_make_config(flow_control="rtscts", rts=bad), logging.getLogger("test.serial"))
 
     def test_rtscts_with_unmanaged_rts_ok(self):
         for ok in (None, "none"):
-            cfg = SerialPortConfig(name="a", description="a", device="/dev/ttyX0", flow_control="rtscts", rts=ok)
-            assert cfg.rts in (None, "none")
+            port = SerialPortWrapper(_make_config(flow_control="rtscts", rts=ok), logging.getLogger("test.serial"))
+            assert port.rts in (None, "none")
 
     def test_rtscts_with_any_dtr_ok(self):
-        dtr = SerialPortConfig(name="a", description="a", device="/dev/ttyX0", flow_control="rtscts", dtr="presence-on")
-        assert dtr.dtr == "presence-on"
+        port = SerialPortWrapper(_make_config(flow_control="rtscts", dtr="presence-on"), logging.getLogger("test.serial"))
+        assert port.dtr == "presence-on"
 
     def test_dsrdtr_and_xonxoff_with_any_lines_ok(self):
         for flow in ("dsrdtr", "xonxoff", "none"):
-            cfg = SerialPortConfig(
-                name="a",
-                description="a",
-                device="/dev/ttyX0",
-                flow_control=flow,
-                dtr="presence-on",
-                rts="presence-off",
+            port = SerialPortWrapper(
+                _make_config(flow_control=flow, dtr="presence-on", rts="presence-off"),
+                logging.getLogger("test.serial"),
             )
-            assert cfg.dtr == "presence-on"
+            assert port.dtr == "presence-on"
 
 
 # ---------------------------------------------------------------------------

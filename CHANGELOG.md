@@ -104,6 +104,7 @@ Changes since v1.0.2 (2026-08-27).
   - A change to `host`, `port`, or `enabled` rebinds the socket. Active TCP console sessions are disconnected; clients reconnect.
   - A Full Reload still rebinds. The Config Editor tags the capacity and timeout fields `soft` and the rest `full`.
   - No config change.
+- **Serial port configuration is unified internally (issue #65).** A serial port no longer nests its settings in a separate `SerialPortConfig` object next to the port. The port object keeps one flat set of settings, in the same shape as the loopback, command, and TCP-initiator ports. There is one place to read and write each value, so a soft-reload update and the access ladder can no longer see two copies of the same field. No config change. No user-visible behavior change.
 
 ### Web console and observability
 

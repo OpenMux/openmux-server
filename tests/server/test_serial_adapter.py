@@ -6,40 +6,41 @@ from types import SimpleNamespace
 import pytest
 
 from openmux.server.adapters.lifecycle import PortState
-from openmux.server.adapters.serial import SerialAdapter, SerialPortConfig, SerialPortWrapper
+from openmux.server.adapters.serial import SerialAdapter, SerialPortWrapper
 
 
 def _make_spw(**config_overrides) -> SimpleNamespace:
-    """Build a minimal SerialPortWrapper-like mock with a .config matching defaults.
+    """Build a minimal SerialPortWrapper-like mock.
 
-    The reconcile logic reads fields off ``spw.config`` to build old_cfg, so the
-    config namespace must carry all fields tracked by _material_config.
+    The reconcile logic reads the port's flat per-port attributes to build
+    old_cfg (issue #65), so the mock must carry those same material fields.
+    ``config`` is a plain dict, as on a real SerialPortWrapper.
     """
-    cfg = SimpleNamespace(
-        device="/dev/ttyUSB0",
-        baudrate=9600,
-        bytesize=8,
-        parity="N",
-        stopbits=1,
-        timeout=1.0,
-        flow_control="none",
-        dtr=None,  # issue #63: omitted = untouched (was the True default)
-        rts=None,
-        max_read_write_users=1,
-        log_file=None,
-        log_format=None,
-        log_line_template=None,
-        log_direction=None,
-        log_directions=None,
-        scrollback_size=0,
-    )
-    for k, v in config_overrides.items():
-        setattr(cfg, k, v)
+    flat = {
+        "device": "/dev/ttyUSB0",
+        "baudrate": 9600,
+        "bytesize": 8,
+        "parity": "N",
+        "stopbits": 1,
+        "timeout": 1.0,
+        "flow_control": "none",
+        "dtr": None,  # issue #63: omitted = untouched (was the True default)
+        "rts": None,
+        "max_read_write_users": "one",
+        "log_file": None,
+        "log_format": None,
+        "log_line_template": None,
+        "log_direction": None,
+        "log_directions": None,
+        "scrollback_size": 0,
+        "description": "",
+    }
+    flat.update(config_overrides)
 
     async def _stop():
         pass
 
-    port = SimpleNamespace(config=cfg, description="", stop=_stop, state=PortState.ACTIVE, status_message="")
+    port = SimpleNamespace(config=dict(flat), stop=_stop, state=PortState.ACTIVE, status_message="", **flat)
     return port
 
 
@@ -188,7 +189,7 @@ def _make_real_adapter_with_ports(ports: dict) -> SerialAdapter:
     """
     adapter = _make_adapter()
     for name, device in ports.items():
-        cfg = SerialPortConfig(name=name, description=name, device=device)
+        cfg = {"name": name, "description": name, "device": device}
         adapter.serial_ports[name] = SerialPortWrapper(cfg, logging.getLogger("test.serial"))
     return adapter
 
@@ -248,15 +249,14 @@ async def test_create_port_duplicate_device_offline(monkeypatch):
     adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0")
 
     async def real_create_port(self, port_name, cfg):
-        import logging
-
-        serial_cfg = SerialPortConfig(name=port_name, description=cfg.get("description", ""), device=cfg["device"])
-        wrapper = SerialPortWrapper(serial_cfg, logging.getLogger("test.serial"))
-        self.serial_ports[serial_cfg.name] = wrapper
+        wrapper = SerialPortWrapper(
+            {"name": port_name, "description": "", "device": cfg["device"]}, logging.getLogger("test.serial")
+        )
+        self.serial_ports[port_name] = wrapper
         self._recompute_duplicate_device_flags()
         await wrapper.start()
         if self.main_port_manager:
-            await self.main_port_manager.register_unified_port(serial_cfg.name, wrapper, self)
+            await self.main_port_manager.register_unified_port(wrapper.name, wrapper, self)
         return wrapper
 
     monkeypatch.setattr(SerialAdapter, "create_port", real_create_port)
@@ -282,66 +282,44 @@ async def test_create_port_duplicate_device_offline(monkeypatch):
 
 
 def _make_spw_with_groups(**config_overrides) -> SimpleNamespace:
-    """Like _make_spw, but the port also mirrors the group lists on itself.
+    """Like _make_spw, but the port also carries group lists.
 
-    A real SerialPortWrapper exposes ``read_write_groups`` / ``read_only_groups``
-    as properties over ``config``; this mock mirrors that so the reconcile
-    in-place update has the same read/write surface (spw.config.* and spw.*).
+    A real SerialPortWrapper stores ``read_write_groups`` / ``read_only_groups``
+    as plain attributes on the port (issue #65); the mock mirrors that flat
+    shape so the reconcile in-place update reads and writes the same surface.
     """
-    cfg = _make_spw(**config_overrides).config
-    cfg.read_write_groups = list(config_overrides.get("read_write_groups", []))
-    cfg.read_only_groups = list(config_overrides.get("read_only_groups", []))
-
-    class _Spw:
-        def __init__(self):
-            self.config = cfg
-            self.description = ""
-            self.state = PortState.ACTIVE
-            self.status_message = ""
-            self._stop = None
-
-        @property
-        def read_write_groups(self):
-            return self.config.read_write_groups
-
-        @read_write_groups.setter
-        def read_write_groups(self, value):
-            self.config.read_write_groups = list(value or [])
-
-        @property
-        def read_only_groups(self):
-            return self.config.read_only_groups
-
-        @read_only_groups.setter
-        def read_only_groups(self, value):
-            self.config.read_only_groups = list(value or [])
-
-        async def stop(self):
-            self._stop = True
-
-    return _Spw()
+    spw = _make_spw(**config_overrides)
+    spw.read_write_groups = list(config_overrides.get("read_write_groups", []))
+    spw.read_only_groups = list(config_overrides.get("read_only_groups", []))
+    return spw
 
 
-@pytest.mark.asyncio
-async def test_serial_wrapper_group_attrs_are_live_views_on_config():
-    """The wrapper's group attrs must track config in both directions.
+def test_serial_port_groups_are_flat_port_attributes():
+    """Issue #65: group lists are plain attributes on the port object.
 
-    This is what lets a Soft Reload's in-place config update become visible to
-    the access ladder through the PM wrapper, with no port re-creation.
+    The port no longer keeps a second copy on a config dataclass, so a Soft
+    Reload's in-place update writes the one attribute the access ladder reads
+    (through the PM wrapper's live property).
     """
-    spw = _make_spw_with_groups()
-    assert spw.read_write_groups == []
-    assert spw.read_only_groups == []
+    port = SerialPortWrapper(
+        {
+            "name": "a",
+            "description": "a",
+            "device": "/dev/ttyUSB0",
+            "read_write_groups": ["ops"],
+            "read_only_groups": ["viewers"],
+        },
+        logging.getLogger("test.serial"),
+    )
+    assert list(port.read_write_groups) == ["ops"]
+    assert list(port.read_only_groups) == ["viewers"]
 
-    # Property write lands in config.
-    spw.read_write_groups = ["ops"]
-    spw.read_only_groups = ["viewers"]
-    assert spw.config.read_write_groups == ["ops"]
-    assert spw.config.read_only_groups == ["viewers"]
-
-    # A direct config rebind (what reconcile does) is visible through the property.
-    spw.config.read_write_groups = ["oncall"]
-    assert spw.read_write_groups == ["oncall"]
+    # A direct attribute rebind (what reconcile does in place) is the update;
+    # there is no hidden second copy to drift from it.
+    port.read_write_groups = ["oncall"]
+    port.read_only_groups = []
+    assert list(port.read_write_groups) == ["oncall"]
+    assert list(port.read_only_groups) == []
 
 
 @pytest.mark.asyncio
@@ -393,3 +371,56 @@ async def test_reconcile_ports_updates_groups_in_place_without_restart(monkeypat
     spw = adapter.serial_ports["a"]
     assert list(spw.read_write_groups) == ["ops", "oncall"]
     assert list(spw.read_only_groups) == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_groups_in_place_visible_on_real_port(monkeypatch):
+    """A groups-only change on a real (non-mocked) serial port does not trigger
+    destroy/create and does flip the attribute visible through the same lookup
+    the access ladder uses.
+
+    Same shape of test as the loopback/command/tcp_initiator adapters (issue
+    #65 acceptance): a real SerialPortWrapper built through the adapter's own
+    construction path, and the new lists read off the port object the PM
+    wrapper's live property would read.
+    """
+    adapter = SerialAdapter("serial_ports", {"serial_ports": [{"name": "a", "device": "/dev/ttyUSB0"}]})
+    adapter.main_port_manager = None
+
+    original_port = adapter.serial_ports["a"]
+    assert original_port is not None
+    assert list(original_port.read_write_groups) == []
+
+    destroyed: list[str] = []
+
+    async def fake_destroy(self, port_name):
+        destroyed.append(port_name)
+
+    monkeypatch.setattr(SerialAdapter, "destroy_port", fake_destroy)
+
+    summary = await adapter.reconcile_ports(
+        {
+            "serial_ports": [
+                {
+                    "name": "a",
+                    "device": "/dev/ttyUSB0",
+                    "read_write_groups": ["oncall"],
+                    "read_only_groups": ["viewers"],
+                },
+            ]
+        }
+    )
+
+    assert summary["unchanged"] == ["a"], f"groups change must not recreate: {summary}"
+    assert summary["updated"] == []
+    assert summary["removed"] == []
+    assert summary["added"] == []
+    assert destroyed == []
+
+    # Same object, still in the registry (the port manager's registry holds
+    # this object; a recreate would replace it in adapter.serial_ports).
+    spw = adapter.serial_ports["a"]
+    assert spw is original_port
+    # The PM wrapper's live property reads these attributes off the port.
+    assert list(getattr(spw, "read_write_groups")) == ["oncall"]
+    assert list(getattr(spw, "read_only_groups")) == ["viewers"]

@@ -6,7 +6,7 @@ import pytest
 from openmux.server.adapters.command import CommandPort
 from openmux.server.adapters.lifecycle import PortState
 from openmux.server.adapters.loopback import LoopbackPort
-from openmux.server.adapters.serial import SerialPortConfig, SerialPortWrapper
+from openmux.server.adapters.serial import SerialPortWrapper
 from openmux.server.adapters.tcp_initiator import TcpInitiatorPort
 
 
@@ -91,8 +91,9 @@ async def test_loopback_write_data_round_trip():
 
 @pytest.mark.asyncio
 async def test_serial_write_data_requires_connection(monkeypatch):
-    cfg = SerialPortConfig(name="s1", description="d", device="/dev/null")
-    wrapper = SerialPortWrapper(cfg, logger=__import__("logging").getLogger("test.serial"))
+    wrapper = SerialPortWrapper(
+        {"name": "s1", "description": "d", "device": "/dev/null"}, logger=__import__("logging").getLogger("test.serial")
+    )
     # Not connected; expect RuntimeError
     with pytest.raises(RuntimeError):
         await wrapper.write_data(b"hi")
