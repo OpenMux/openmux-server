@@ -224,6 +224,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                                 "port_registered",
                                 "serial_connected",
                                 "tcp_connected",
+                                "command_connected",
                             )
                             or changes.get("connected") is True
                         )

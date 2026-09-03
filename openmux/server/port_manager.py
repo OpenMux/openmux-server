@@ -246,9 +246,15 @@ class PortManager:
                     "description": getattr(self.unified_port, "description", self.description),
                     "adapter": self.adapter_type,
                     "state": (self.unified_port.state.value if hasattr(self.unified_port, "state") else "active"),
-                    "is_running": self.is_running,
+                    # Read live so an on-demand command port registered before
+                    # its first spawn (or a port whose process later starts or
+                    # exits) reports its current state, not the value captured
+                    # at registration.
+                    "is_running": bool(getattr(self.unified_port, "is_running", self.is_running)),
                     # When unified port exposes connection state (e.g., Serial), surface it explicitly
-                    "connected": bool(getattr(self.unified_port, "is_connected", self.is_running)),
+                    "connected": bool(
+                        getattr(self.unified_port, "is_connected", getattr(self.unified_port, "is_running", self.is_running))
+                    ),
                     "connected_clients": len(self.connected_clients),
                     "max_read_write_users": self.max_read_write_users,
                     "read_write_groups": self.read_write_groups,

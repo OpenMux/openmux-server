@@ -428,3 +428,37 @@ async def test_add_client_to_port_dedupes_by_client_id():
     # A new read-only client is always admitted and recorded once.
     assert await pm.add_client_to_port("p1", "ro1", "u3", "read-only") is True
     assert sum(1 for c in port.connected_clients if c.get("client_id") == "ro1") == 1
+
+
+def test_wrapper_connected_reads_live_state():
+    # Regression: a unified port without an ``is_connected`` attribute (e.g.
+    # an on-demand command port registered before its first spawn) must
+    # report its CURRENT ``is_running`` value, not the one captured once at
+    # registration. The old frozen value kept the web console's info panel
+    # and the 'Port is disconnected on server' banner stuck for such ports.
+    pm = PortManager([])
+    fake = SimpleNamespace(name="live1", is_running=False, description="d")
+    adapter = SimpleNamespace()
+    adapter.get_adapter_type = lambda: "command"
+    adapter.ports = {"live1": fake}
+    pm.set_unified_adapters([adapter])
+    wrapper = pm.get_port("live1")
+    assert wrapper is not None
+    st = wrapper.get_status()
+    assert st["is_running"] is False
+    assert st["connected"] is False
+    # The underlying port starts; the wrapper must report the new state.
+    fake.is_running = True
+    st2 = wrapper.get_status()
+    assert st2["is_running"] is True
+    assert st2["connected"] is True
+    # Explicit is_connected (serial/loopback/tcp style) still wins.
+    fake2 = SimpleNamespace(name="live2", is_running=False, description="d", is_connected=True)
+    adapter2 = SimpleNamespace()
+    adapter2.get_adapter_type = lambda: "loopback"
+    adapter2.ports = {"live2": fake2}
+    pm2 = PortManager([])
+    pm2.set_unified_adapters([adapter2])
+    wrapper2 = pm2.get_port("live2")
+    assert wrapper2 is not None
+    assert wrapper2.get_status()["connected"] is True

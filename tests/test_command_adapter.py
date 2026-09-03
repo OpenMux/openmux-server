@@ -718,3 +718,97 @@ async def test_reconcile_updates_lifecycle_flags_in_place_without_recreate(monke
     assert destroyed == [] and created == []
     assert port.spawn_on_demand is True
     assert port.idle_timeout_sec == 30.0
+
+
+class RecordingPM(CapturingPortManager):
+    """CapturingPortManager that records meta events for connected-state tests."""
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.meta_events: list = []
+
+    def notify_meta_updated(self, port_name: str, changes=None) -> None:
+        self.meta_events.append((port_name, changes))
+
+    def connected_events(self) -> list:
+        return [(n, c) for (n, c) in self.meta_events if isinstance(c, dict) and "connected" in c]
+
+
+@pytest.mark.asyncio
+async def test_is_connected_tracks_process_lifecycle():
+    """Resting = connected; successful spawn leaves it connected; stop = resting.
+
+    A fresh on-demand port registered before any process exists must NOT show
+    as disconnected (the root of the 'Port is disconnected on server' banner
+    bug for newly created command ports).
+    """
+    pm = RecordingPM()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    port = CommandPort("conn1", {"command": "sleep 30", "shell": False, "clean_env": False}, adapter)
+    # Resting (on-demand, not yet spawned) counts as connected.
+    assert port.is_connected is True
+    assert await port.start() is True
+    try:
+        assert port.is_connected is True
+        assert port.process_active is True
+        # No connected-state flip happened (resting -> running is not a flip),
+        # so no connected event was pushed.
+        assert pm.connected_events() == []
+    finally:
+        await port.stop()
+    # An intentional stop is a resting state, not an offline one.
+    assert port.is_connected is True
+    assert port.is_running is False
+    assert pm.connected_events() == []
+
+
+@pytest.mark.asyncio
+async def test_spawn_failure_marks_disconnected_with_reason():
+    """A port whose process cannot be (re)started is offline, with the reason."""
+    pm = RecordingPM()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    port = CommandPort("conn2", {"command": "definitely_not_a_real_command_xyz"}, adapter)
+    assert port.is_connected is True
+    assert await port.start() is False
+    assert port.is_connected is False
+    assert port.status_message
+    events = pm.connected_events()
+    assert len(events) == 1
+    assert events[0][0] == "conn2"
+    assert events[0][1]["event"] == "command_disconnected"
+    assert events[0][1]["connected"] is False
+    # The reason travels in the same frame as the state flip.
+    assert events[0][1]["status_message"] == port.status_message
+
+
+@pytest.mark.asyncio
+async def test_exit_marks_disconnected_and_restart_recovers():
+    """Process exit (auto_restart off) flips to disconnected; respawn recovers."""
+    pm = RecordingPM()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    cfg = {"command": "exit 3", "shell": True, "clean_env": False, "auto_restart": False}
+    port = CommandPort("conn3", cfg, adapter)
+    assert await port.start() is True
+    # Wait for the monitor loop to observe the exit (it clears is_running in
+    # the not-restarting branch).
+    for _ in range(250):
+        if not port.is_running:
+            break
+        await asyncio.sleep(0.02)
+    assert port.is_running is False, "process did not exit in time"
+    assert port.process_active is False
+    assert port.is_connected is False
+    assert port.status_message
+    events = pm.connected_events()
+    assert len(events) == 1
+    assert events[0][1]["event"] == "command_disconnected"
+    assert events[0][1]["status_message"] == port.status_message
+    # Manual restart (Enter-respawn path) brings the port back to connected.
+    assert await port.restart() is True
+    assert port.is_connected is True
+    assert port.process_active is True
+    events = pm.connected_events()
+    assert events[-1][1]["event"] == "command_connected"
+    assert events[-1][1]["connected"] is True
+    await port.stop()
+    assert port.is_connected is True

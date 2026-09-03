@@ -140,6 +140,15 @@ class CommandPort:
         self._writer = None
         self.is_running = False
         self.process_active = False
+        # Contract attribute (docs/ADAPTER_PORT_CONTRACT.md): the "connected"
+        # flag the web UI / API shows for this port. Mirrors process
+        # liveness, but a resting port (on-demand and not yet spawned, or
+        # intentionally stopped) counts as connected. It is disconnected
+        # only while the process has exited or a spawn/respawn has failed --
+        # the same condition that sets status_message, so the UI banner and
+        # the info panel stay in sync.
+        self.is_connected = True
+        self._connect_notified = True
         self.client_count = 0
         # data_callback is set by PortManager.register_unified_port() or wired here
         # if the adapter already has a PM at construction time.
@@ -191,6 +200,35 @@ class CommandPort:
                 pass
         else:
             self.status_message = str(message or "")
+
+    def _set_connected(self, value: bool) -> None:
+        """Update ``is_connected`` and push a meta refresh on a real change.
+
+        Follows the serial/tcp_initiator convention: one event per state
+        flip carrying ``connected`` so consumers (web console banner, info
+        panel, client_listener notices, muxcon relay) can update live. The
+        current status_message is included so the reason travels in the
+        same frame.
+
+        Args:
+            value: New connected state (True = up or resting, False = down).
+        """
+        new_state = bool(value)
+        if self._connect_notified == new_state:
+            self.is_connected = new_state
+            return
+        self._connect_notified = new_state
+        self.is_connected = new_state
+        try:
+            mpm = getattr(getattr(self, "adapter", None), "main_port_manager", None)
+            if mpm and hasattr(mpm, "notify_meta_updated"):
+                event = "command_connected" if new_state else "command_disconnected"
+                mpm.notify_meta_updated(
+                    self.name,
+                    {"event": event, "connected": new_state, "status_message": self.status_message},
+                )
+        except Exception:
+            pass
 
     async def write_data(self, data: bytes) -> int:
         """Standardized write API: return number of bytes accepted.
@@ -507,6 +545,7 @@ class CommandPort:
             if self.client_count > 0:
                 self._schedule_lifecycle_notice("PROCESS_STARTED", "process started")
             self.process_active = True
+            self._set_connected(True)
             if self.use_pty and self._output_batching_enabled:
                 if self._output_flush_task is None or self._output_flush_task.done():
                     self._output_flush_task = asyncio.create_task(self._output_flush_buffer_loop())
@@ -516,10 +555,16 @@ class CommandPort:
         except FileNotFoundError as e:
             self.logger.error(f"Error spawning process for {self.name}: {e}", exc_info=True)
             self._set_status_message(f"Process not found: {e}")
+            # A port whose process cannot be (re)started is offline for the
+            # UI; the reason above explains why.
+            self._set_connected(False)
             return False
         except Exception as e:
             self.logger.error(f"Error spawning process for {self.name}: {e}", exc_info=True)
             self._set_status_message(f"Process spawn failed: {e}")
+            # A port whose process cannot be (re)started is offline for the
+            # UI; the reason above explains why.
+            self._set_connected(False)
             return False
 
     def get_status_snapshot(self) -> Dict[str, Any]:
@@ -723,6 +768,10 @@ class CommandPort:
                 # shutdown and gets no message; non-zero is reported.
                 if exit_code and exit_code != 0:
                     self._set_status_message(f"Process exited with code {exit_code}")
+                # The process is dead until a respawn succeeds; surface it so
+                # the UI banner shows immediately (resting/respawn flips it
+                # back up; an intentional stop below also marks it resting).
+                self._set_connected(False)
                 if not self.is_running:
                     break
                 if not self.auto_restart:
@@ -895,8 +944,10 @@ class CommandPort:
             if _clients > 0:
                 self._schedule_lifecycle_notice("PROCESS_STOPPED", "process was stopped")
             # An intentional stop is a resting state, not a failure; clear the
-            # offline reason so the port does not show a stale exit code.
+            # offline reason so the port does not show a stale exit code, and
+            # mark it connected again so the UI does not keep a stale banner.
             self._set_status_message("")
+            self._set_connected(True)
             self.is_running = False
             self.process_active = False
             self.state = PortState.CONFIGURED
