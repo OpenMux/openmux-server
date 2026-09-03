@@ -254,6 +254,17 @@ class CommandPort:
             return
         loop.create_task(_do_emit())
 
+    def _schedule_lifecycle_notice(self, kind: str, detail: str) -> None:
+        """Broadcast a bracketed process lifecycle notice to attached clients.
+
+        Same convention as the ``PROCESS_NOT_RUNNING`` notice: a
+        ``[OpenMux:…]`` line through the centralized data path, so attached
+        clients see it and no delivery happens when nobody is connected.
+        Callers check ``client_count`` before calling this.
+        """
+        message = f"\r\n[OpenMux:{kind} {self._stopped_prefix()}{detail}]\r\n".encode()
+        self._schedule_notice_emit(message)
+
     def on_client_count_changed(self, count: int):
         """Handle change in connected client count.
 
@@ -336,9 +347,7 @@ class CommandPort:
                 return False
             self.state = PortState.ACTIVE
             self.is_running = True
-            self.process_active = True
-            if self.auto_restart and not self._monitor_task:
-                self._monitor_task = asyncio.create_task(self._monitor_loop())
+            self._spawn_monitor_task()
             self.logger.info(f"Command port {self.name} started successfully")
             return True
         except Exception as e:
@@ -367,14 +376,18 @@ class CommandPort:
                 except Exception:  # justification: cancelling stale read task; failure is non-fatal and next spawn proceeds
                     pass
                 self._read_task = None
-            if self._pty_master_fd is not None and self._loop and self._pty_reader_added:
-                try:
-                    self._loop.remove_reader(self._pty_master_fd)
-                except Exception:  # justification: best-effort removal from loop; safe to proceed
-                    pass
+            if self._pty_master_fd is not None:
+                if self._loop and self._pty_reader_added:
+                    try:
+                        self._loop.remove_reader(self._pty_master_fd)
+                    except Exception:  # justification: reader may already be detached; safe to proceed
+                        pass
+                    self._pty_reader_added = False
+                # Close even when the reader already detached itself on EOF,
+                # so a die->Enter respawn cycle cannot leak the old master fd.
                 try:
                     os.close(self._pty_master_fd)
-                except Exception:  # justification: fd may already be closed; ignore
+                except OSError:  # justification: fd may already be closed; next spawn proceeds
                     pass
                 self._pty_master_fd = None
                 self._pty_reader_added = False
@@ -489,6 +502,10 @@ class CommandPort:
                 self._read_task = asyncio.create_task(self._stdout_reader_task())
 
             self._stopped_notice_sent = False
+            # Lifecycle notice (issue #63): tell attached clients the process
+            # is (re)starting, e.g. an on-demand spawn or an auto-restart.
+            if self.client_count > 0:
+                self._schedule_lifecycle_notice("PROCESS_STARTED", "process started")
             self.process_active = True
             if self.use_pty and self._output_batching_enabled:
                 if self._output_flush_task is None or self._output_flush_task.done():
@@ -694,6 +711,14 @@ class CommandPort:
                     break
                 exit_code = await self.process.wait()
                 self.process_active = False
+                # Wake the output batcher and drain whatever the process
+                # emitted last (e.g. its final line), so clients see the
+                # trailing output before any exit notice below.
+                try:
+                    self._output_flush_event.set()
+                except Exception:  # justification: batcher best-effort; no batcher is fine
+                    pass
+                await self._drain_output_buffer()
                 # Capture the exit reason (issue #62). Code 0 means a normal
                 # shutdown and gets no message; non-zero is reported.
                 if exit_code and exit_code != 0:
@@ -704,16 +729,37 @@ class CommandPort:
                     self.logger.info(f"Process exited for {self.name}; not restarting")
                     if not self.status_message:
                         self._set_status_message(f"Process exited (code {exit_code}, auto_restart off)")
+                    # The port stays up; the client can press Enter to respawn.
+                    if self.client_count > 0:
+                        self._schedule_lifecycle_notice(
+                            "PROCESS_EXITED",
+                            self._exit_notice_detail(exit_code),
+                        )
+                    self._stopped_notice_sent = False
+                    self.is_running = False
                     self.state = PortState.DEGRADED
                     break
                 if self.max_restarts and self.restart_count >= self.max_restarts:
                     self.logger.error(f"Max restarts reached for {self.name}; not restarting")
                     if not self.status_message:
                         self._set_status_message(f"Max restarts reached ({self.max_restarts})")
+                    if self.client_count > 0:
+                        self._schedule_lifecycle_notice(
+                            "PROCESS_EXITED",
+                            f"process exited (code {exit_code}, max restarts reached - press Enter to respawn)",
+                        )
+                    self._stopped_notice_sent = False
+                    self.is_running = False
                     self.state = PortState.DEGRADED
                     break
                 self.restart_count += 1
                 delay = self.restart_delay * (self.restart_backoff ** (self.restart_count - 1))
+                if self.client_count > 0:
+                    detail = f"code {exit_code}"
+                    if delay:
+                        detail += f", restarting in {delay:.1f}s"
+                    self._schedule_lifecycle_notice("PROCESS_EXITED", f"process exited ({detail})")
+                self._stopped_notice_sent = False
                 await asyncio.sleep(delay)
                 if not await self._spawn_process():
                     self.logger.error(f"Respawn failed for {self.name}; stopping monitor")
@@ -727,6 +773,48 @@ class CommandPort:
                 self.logger.error(f"Monitor loop error for {self.name}: {e}", exc_info=True)
                 break
         self.logger.info(f"Monitor loop exiting for command port {self.name}")
+
+    def _exit_notice_detail(self, exit_code: Optional[int]) -> str:
+        """Detail text for a terminal PROCESS_EXITED notice."""
+        hint = "press Enter to spawn" if getattr(self, "spawn_on_demand", False) else "press Enter to respawn"
+        return f"process exited (code {exit_code}) - {hint}"
+
+    async def _drain_output_buffer(self) -> None:
+        """Flush any residual batched output immediately (best-effort).
+
+        Awaited when the process exits: the batcher loop may already be
+        winding down, and clients must see the process's final output (e.g.
+        its last line) before any subsequent exit notice. The drain retries
+        briefly because the process's final bytes may still be in flight (the
+        PTY EOF read can land a beat after ``process.wait()`` returns).
+        """
+        try:
+            pending = None
+            for _attempt in range(10):  # worst-case ~0.2s for in-flight final bytes
+                async with self._output_buffer_lock:
+                    if self._output_buffer:
+                        pending = bytes(self._output_buffer)
+                        self._output_buffer.clear()
+                        self._first_data_time = None
+                        break
+                await asyncio.sleep(0.02)
+            if pending:
+                await self._emit_output_chunk(pending, require_clients=False)
+        except Exception:  # justification: residual flush is best-effort; the data path must not break
+            pass
+
+    def _spawn_monitor_task(self) -> None:
+        """Ensure the process monitor runs (exit notices + auto-restart).
+
+        The monitor is started for every spawn, not only under
+        ``auto_restart``: it also reports terminal exits to attached clients
+        and drains the output batcher at process end.
+        """
+        try:
+            if self._monitor_task is None or self._monitor_task.done():
+                self._monitor_task = asyncio.create_task(self._monitor_loop())
+        except Exception:
+            self.logger.error(f"Failed to start monitor task for {self.name}", exc_info=True)
 
     async def stop(self) -> None:
         """Terminate the running process and cancel I/O tasks.
@@ -751,17 +839,20 @@ class CommandPort:
             if self._monitor_task:
                 self._monitor_task.cancel()
                 self._monitor_task = None
-            if self._pty_master_fd is not None and self._loop and self._pty_reader_added:
-                try:
-                    self._loop.remove_reader(self._pty_master_fd)
-                except Exception:  # justification: best-effort removal from loop; safe to proceed
-                    pass
+            if self._pty_master_fd is not None:
+                if self._loop and self._pty_reader_added:
+                    try:
+                        self._loop.remove_reader(self._pty_master_fd)
+                    except Exception:  # justification: reader may already be detached; safe to proceed
+                        pass
+                    self._pty_reader_added = False
+                # Close even when the reader already detached itself on EOF,
+                # so a dead process cannot leak its master fd (issue #63).
                 try:
                     os.close(self._pty_master_fd)
-                except Exception:  # justification: fd may already be closed; ignore
+                except OSError:  # justification: fd may already be closed; ignore
                     pass
                 self._pty_master_fd = None
-                self._pty_reader_added = False
             # Wake/stop output flusher if active
             try:
                 if self._output_flush_event:
@@ -795,9 +886,14 @@ class CommandPort:
         except Exception as e:
             self.logger.error(f"Error stopping command port {self.name}: {e}", exc_info=True)
         finally:
+            # Lifecycle notice: warn clients still attached that the process
+            # was stopped (idle timeout, manual stop, adapter teardown).
+            _clients = self.client_count
             self._writer = None
             self.process = None
             self.client_count = 0
+            if _clients > 0:
+                self._schedule_lifecycle_notice("PROCESS_STOPPED", "process was stopped")
             # An intentional stop is a resting state, not a failure; clear the
             # offline reason so the port does not show a stale exit code.
             self._set_status_message("")
@@ -828,8 +924,7 @@ class CommandPort:
                     self.state = PortState.ACTIVE
                     self.is_running = True
                     self.process_active = True
-                    if self.auto_restart and not self._monitor_task:
-                        self._monitor_task = asyncio.create_task(self._monitor_loop())
+                    self._spawn_monitor_task()
                     return True
                 self.logger.error(f"Respawn failed for command port {self.name}")
                 return False

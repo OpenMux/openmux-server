@@ -93,6 +93,9 @@ Changes since v1.0.2 (2026-08-27).
   - No config change.
 - **Configured serial signal lines are now applied** (issue #63). A `dtr` / `rts` policy drives the pin on connect, and `presence-on` / `presence-off` track the connected-client count (high or low while one or more clients are attached, the opposite level while idle).
 - **Client attach/detach now notifies the adapter.** `on_client_count_changed` fires on the main client path for every port type. This makes command `idle_timeout_sec` and tcp_initiator `disconnect_when_idle` actually trigger, in addition to the serial signal lines above. Ports without the hook (loopback, federated) are unaffected.
+- **Command ports print a bracketed status line when the process lifecycle changes.** Attached clients now see `[OpenMux:PROCESS_STARTED …]` on spawn (e.g. on-demand start or auto-restart), `[OpenMux:PROCESS_EXITED …]` when the process dies — "restarting in Ns" under `auto_restart`, "press Enter to spawn/respawn" otherwise — and `[OpenMux:PROCESS_STOPPED …]` on an intentional stop (idle timeout, manual stop). With no client attached, nothing is printed — same convention as the existing `PROCESS_NOT_RUNNING` notice.
+  - Related fix: a process's final output (e.g. its last line) is now always delivered to clients before the exit notice, even with output batching enabled. Previously the trailing chunk could sit un-flushed until the next input.
+  - Related fix: the command port no longer leaks a PTY file descriptor per die→Enter respawn cycle.
 - **Client listener changes now apply on Soft Reload.** The `client_listener` section is no longer Full-Reload-only.
   - `max_connections` and `connection_timeout` update in place. A rebind is skipped.
   - A change to `host`, `port`, or `enabled` rebinds the socket. Active TCP console sessions are disconnected; clients reconnect.
