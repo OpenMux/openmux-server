@@ -64,7 +64,7 @@ Supported options per port:
 - `shell`: Run via shell (default: false)
 - `cwd`: Working directory
 - `env`: Environment variables map
-- `interactive`: Enable interactive mode; implies PTY by default (default: false)
+- `interactive`: Shortcut that presets `use_pty`, `always_buffer`, and `normalize_newlines` at once (default: false). It does not change the `command` string and never adds a shell. Set it for real terminals (shells, editors, TUIs). For scripted or byte-exact ports leave it off and set the individual flags you need.
 - `use_pty`: Allocate a PTY for the process (default: same as `interactive`)
 - `always_buffer`: Buffer output even with no clients (default: `interactive`)
 - `normalize_newlines`: Normalize incoming newlines (default: `interactive`)
@@ -77,10 +77,21 @@ Supported options per port:
 - `max_restarts`: Max restart attempts (0 = unlimited, default: 0)
 - `restart_backoff`: Exponential backoff factor (default: 1.0)
 - `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above)
-Lifecycle and on-demand options:
-- `spawn_on_demand`: When true, do not start the process at server startup; spawn only when the first client attaches. Default: false.
+Lifecycle: on-demand spawn and idle teardown:
+The process follows the connected-client count. This mirrors the serial adapter's presence-driven `dtr`/`rts` lines, which are driven by the same client-count event (issue #63):
+- `spawn_on_demand`: When true, do not start the process at server startup; spawn only when the first client attaches. The next client after a stop respawns a fresh process. Default: false.
 - `spawn_mode`: Alternative to `spawn_on_demand`. Supported values: `shared_eager` (default) or `shared_on_demand` (equivalent to `spawn_on_demand: true`).
-- `idle_timeout_sec`: When the last client disconnects, stop the process after this many seconds. `0` disables idle shutdown. Default: `0`.
+- `idle_timeout_sec`: When the last client disconnects, stop the process after this many seconds. A client that reconnects inside the window cancels the stop. The process is ready to respawn when the next client attaches. **`0` disables idle shutdown** — with `spawn_on_demand` and `idle_timeout_sec: 0` the process runs until server stop; set a positive value (for example `5`) to get teardown. Default: `0`.
+
+```yaml
+# Spawn on first client attach; stop 5s after the last client leaves.
+command_ports:
+  - name: shell_on_demand
+    command: bash
+    interactive: true
+    spawn_on_demand: true
+    idle_timeout_sec: 5
+```
 
 Note on shells and interactive flags:
 - The server does not modify your `command` based on the binary name. If you need an interactive shell, include the appropriate flags yourself (e.g., `bash -i`, `zsh -i`, `fish -i`). This avoids making assumptions about which shell you use and keeps behavior explicit and predictable.

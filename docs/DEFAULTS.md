@@ -100,6 +100,26 @@ command_ports (per-port) (schema defaults)
 - shell: false
 - max_read_write_users: one
 - cwd, env, interactive, always_buffer: no defaults
+- spawn_on_demand: false
+- spawn_mode: shared_eager
+- idle_timeout_sec: 0
+- auto_restart: false
+- restart_delay: 1.0
+- max_restarts: 0
+- restart_backoff: 1.0
+- local_echo: false
+- output_crlf: true
+- clean_env: true
+- intercept_term_queries: true
+- pty_force_raw: false
+- pty_enter_mode: none
+- enable_output_batching: true
+- output_batch_size: 1024
+- output_batch_timeout: 0.002
+- output_force_flush_timeout: 1.0
+- enable_batching: true
+- batch_size: 1024
+- batch_timeout: 0.002
 - read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
 
 tcp_initiator_ports (per-port) (schema defaults)

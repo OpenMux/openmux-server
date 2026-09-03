@@ -34,11 +34,15 @@ class CommandPort:
         shell (bool): Run under shell via ``create_subprocess_shell``.
         cwd (str): Working directory for the process.
         env (dict): Extra/override environment variables.
-        interactive (bool): Enable interactive/PTY behavior defaults.
+        interactive (bool): Preset for use_pty/always_buffer/normalize_newlines.
         always_buffer (bool): Keep buffering output even with zero clients.
         normalize_newlines (bool): Normalize newline sequences on input.
-        local_echo (bool): Echo writes back into the output buffer.
         use_pty (bool): Allocate PTY; enables richer terminal behavior.
+        spawn_on_demand (bool): Spawn the process on first client attach.
+        spawn_mode (str): "shared_eager" (default) or "shared_on_demand".
+        idle_timeout_sec (float): Stop the process this many seconds after
+            the last client leaves; 0 = never auto-stop on idle.
+        local_echo (bool): Echo writes back into the output buffer.
         output_crlf (bool): Convert outbound newlines to CRLF.
         clean_env (bool): Start from a minimal sanitized environment.
         intercept_term_queries (bool): Intercept XTGETTCAP queries.
@@ -1373,6 +1377,29 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                         setattr(port, "read_write_groups", new_rw)
                     if list(getattr(port, "read_only_groups", None) or []) != new_ro:
                         setattr(port, "read_only_groups", new_ro)
+                except Exception:
+                    pass
+                # In-place update of the process-lifecycle flags. These change
+                # a port that stays in service (e.g. a live client session), so
+                # updating the attributes in place avoids a destroy+recreate that
+                # would drop connected clients. The idle timer reads
+                # idle_timeout_sec lazily at fire time and spawn_on_demand is
+                # read on each 0->1 connect, so the new values take effect from
+                # the next client transition. Not in _material_cfg deliberately:
+                # they must not force a recreate.
+                try:
+                    if "spawn_on_demand" in new_by_name[n] or "spawn_mode" in new_by_name[n]:
+                        _spawn_mode = str(new_by_name[n].get("spawn_mode", "")).strip().lower()
+                        new_on_demand = bool(new_by_name[n].get("spawn_on_demand", False) or _spawn_mode == "shared_on_demand")
+                        if isinstance(getattr(port, "spawn_on_demand", None), bool) and port.spawn_on_demand != new_on_demand:
+                            port.spawn_on_demand = new_on_demand
+                    if "idle_timeout_sec" in new_by_name[n]:
+                        new_idle = float(new_by_name[n].get("idle_timeout_sec") or 0)
+                        if (
+                            isinstance(getattr(port, "idle_timeout_sec", None), (int, float))
+                            and port.idle_timeout_sec != new_idle
+                        ):
+                            port.idle_timeout_sec = new_idle
                 except Exception:
                     pass
                 unchanged.append(n)

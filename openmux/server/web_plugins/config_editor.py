@@ -730,6 +730,7 @@ def _read_defaults_doc() -> Dict[str, Any]:
             "serial_ports": ("serial_ports", True),
             "loopback_ports": ("loopback_ports", True),
             "command_ports": ("command_ports", True),
+            "tcp_initiator_ports": ("tcp_initiator_ports", True),
             "muxcon": ("muxcon", False),
         }
 

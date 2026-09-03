@@ -177,10 +177,35 @@ properties:
             - { type: string, enum: [none, one, multiple] }
             - { type: integer, minimum: 0 }
           default: one
+        # `interactive` is a shorthand preset for use_pty/always_buffer/
+        # normalize_newlines; it never modifies the command string.
         interactive: { type: boolean }
         always_buffer: { type: boolean }
         normalize_newlines: { type: boolean }
         use_pty: { type: boolean }
+        local_echo: { type: boolean, default: false }
+        output_crlf: { type: boolean, default: true }
+        clean_env: { type: boolean, default: true }
+        intercept_term_queries: { type: boolean, default: true }
+        pty_force_raw: { type: boolean, default: false }
+        pty_enter_mode: { type: string, enum: [none, cr, lf, crlf], default: none }
+        # Process lifecycle: on-demand spawn on first client attach, plus
+        # optional auto-stop after the last client leaves (0 = never stop).
+        spawn_on_demand: { type: boolean, default: false }
+        spawn_mode: { type: string, enum: [shared_eager, shared_on_demand], default: shared_eager }
+        idle_timeout_sec: { type: number, minimum: 0, default: 0 }
+        auto_restart: { type: boolean, default: false }
+        restart_delay: { type: number, minimum: 0, default: 1.0 }
+        max_restarts: { type: integer, minimum: 0, default: 0 }
+        restart_backoff: { type: number, minimum: 0, default: 1.0 }
+        # I/O batching (server -> client output, client -> process writes).
+        enable_output_batching: { type: boolean, default: true }
+        output_batch_size: { type: integer, minimum: 1, default: 1024 }
+        output_batch_timeout: { type: number, minimum: 0, default: 0.002 }
+        output_force_flush_timeout: { type: number, minimum: 0, default: 1.0 }
+        enable_batching: { type: boolean, default: true }
+        batch_size: { type: integer, minimum: 1, default: 1024 }
+        batch_timeout: { type: number, minimum: 0, default: 0.002 }
         scrollback_size: { type: integer, minimum: 0, default: 0 }
         read_write_groups:
           type: array

@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 
 from openmux.server.adapters.command import CommandAdapter, CommandPort, CommandWriter
+from openmux.server.port_manager import PortManager
 
 
 class StubConfigManager:
@@ -567,3 +568,153 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
     assert "b" in destroyed
     assert "b" in created  # destroyed then recreated
     assert "c" in created
+
+
+@pytest.mark.asyncio
+async def test_on_demand_lifecycle_through_real_client_paths(monkeypatch):
+    """spawn_on_demand + idle_timeout_sec drive the process via the canonical
+    PortManager add/remove client paths (the same hook the serial adapter
+    uses for presence signal lines, issue #63). Guards against a
+    dead-hook regression like the pre-#63 L7 finding, where only
+    direct on_client_count_changed() calls exercised the behavior."""
+    import os
+
+    from openmux.server import data_logger as dl_mod
+    from openmux.server.adapters.lifecycle import DynamicPortManager
+
+    class _FakeDL:
+        @staticmethod
+        def get():
+            return _FakeDL()
+
+        def record(self, *args, **kwargs):
+            return None
+
+        def record_meta(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(dl_mod.DataLogger, "get", _FakeDL.get, raising=False)
+
+    # Use a command whose process we can observe for its lifetime: a sleep,
+    # not a shell, so the observed process is the child itself.
+    port_cfg = {
+        "name": "ond",
+        "command": "sleep 30",
+        "shell": False,
+        "spawn_on_demand": True,
+        "idle_timeout_sec": 0.2,
+        "clean_env": False,
+        "max_read_write_users": "multiple",  # two concurrent writers to exercise the 2-client path
+    }
+    pm = PortManager([])
+    adapter = CommandAdapter("cmd", {"command_ports": [port_cfg]})
+    adapter.main_port_manager = pm
+    # Base load_configured_ports() requires the per-adapter dynamic manager.
+    DynamicPortManager(adapter)
+    pm.set_unified_adapters([adapter])
+    ok = await adapter.start()
+    assert ok is True
+    port = adapter.ports["ond"]
+    try:
+        # Not spawned at startup (on-demand).
+        assert port.is_running is False
+        assert port.process_active is False
+
+        # First client attach spawns the process via the real path.
+        assert await pm.add_client_to_port("ond", "c1", "u1", "read-write") is True
+        for _ in range(100):
+            if port.process_active and port.process is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert port.process_active is True, "process did not spawn on first attach"
+        pid1 = port.process.pid
+        assert os.kill(pid1, 0) is None  # process is alive
+
+        # A second client does not spawn a second process or tear down the first.
+        assert await pm.add_client_to_port("ond", "c2", "u2", "read-write") is True
+        await asyncio.sleep(0.05)
+        assert port.process is not None and port.process.pid == pid1
+
+        # Losing one client keeps the process running (the other client remains).
+        assert await pm.remove_client_from_port("ond", "c1") is True
+        await asyncio.sleep(0.05)
+        assert port.process_active is True
+
+        # Last client leaves: the idle timer stops the process shortly after.
+        assert await pm.remove_client_from_port("ond", "c2") is True
+        stopped_early = False
+        for _ in range(200):
+            if not port.is_running:
+                stopped_early = True
+                break
+            await asyncio.sleep(0.05)
+        assert stopped_early is True, "process was not stopped after last client + idle timeout"
+
+        # The next client connection respawns a fresh process.
+        assert await pm.add_client_to_port("ond", "c3", "u3", "read-write") is True
+        for _ in range(100):
+            if port.process_active and port.process is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert port.process_active is True, "process did not respawn on re-attach"
+        assert port.process.pid != pid1
+        assert os.kill(port.process.pid, 0) is None  # fresh process is alive
+
+        # Cleanup: detach and stop so no sleep lingers after the test.
+        await pm.remove_client_from_port("ond", "c3")
+    finally:
+        try:
+            await adapter.stop()
+        except Exception:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_reconcile_updates_lifecycle_flags_in_place_without_recreate(monkeypatch):
+    """A spawn_on_demand / idle_timeout_sec change on a live port is applied in
+    place, not by destroy+recreate (which would drop connected clients)."""
+    cfg = {"command_ports": [{"name": "a", "command": "cat -", "shell": True}]}
+    adapter = CommandAdapter("cmd", cfg)
+
+    class PortObj:
+        command = "cat -"
+        shell = True
+        cwd = None
+        env = None
+        auto_restart = False
+        max_read_write_users = "one"
+        interactive = False
+        always_buffer = False
+        scrollback_size = 0
+        read_write_groups: list = []
+        read_only_groups: list = []
+        spawn_on_demand = False
+        idle_timeout_sec = 0.0
+
+    port = PortObj()  # type: ignore[assignment]
+    adapter.ports["a"] = port
+
+    destroyed: list = []
+    created: list = []
+
+    async def fake_destroy(name: str) -> None:
+        destroyed.append(name)
+
+    async def fake_create(name: str, cfg: dict) -> None:
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    # Baseline reconcile: nothing changes.
+    s0 = await adapter.reconcile_ports([{"name": "a", "command": "cat -", "shell": True}])
+    assert s0["unchanged"] == ["a"] and destroyed == [] and created == []
+
+    # Changing only the lifecycle flags updates them in place, no recreate.
+    s1 = await adapter.reconcile_ports(
+        [{"name": "a", "command": "cat -", "shell": True, "spawn_on_demand": True, "idle_timeout_sec": 30}]
+    )
+    assert s1["unchanged"] == ["a"], f"lifecycle-only change must not recreate: {s1}"
+    assert destroyed == [] and created == []
+    assert port.spawn_on_demand is True
+    assert port.idle_timeout_sec == 30.0
