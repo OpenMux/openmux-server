@@ -110,8 +110,7 @@ Changes since v1.0.2 (2026-08-27).
   - A TCP-initiator on-demand rest (`connect_on_demand` + `disconnect_when_idle` + last client left) now shows `idle`, not `offline` (regression fix from #62). The intentional disconnect no longer sets `status_message = "Disconnected from host:port"`. A remote-closed or read-error disconnect still sets the reason and stays red.
   - A command port that has exhausted `max_restarts` still shows `offline` with the reason. A command port mid-`auto_restart` (the restart delay before a respawn) shows `offline` with `Restarting in Ns (exit code C)`.
   - A federated port shows the origin's derived readiness, forwarded over the existing #62 `PORT_STATUS:` channel and inside `PORTS:FEDERATED`. A down muxcon link still takes precedence and shows red, because the freshest fact is the link outage.
-  - Mixed-version peers and clients ignore the new field. No wire-protocol version bump, no config change.
-
+  - Mixed-version peers and clients ignore the new field. No wire-protocol version bump, no config change.- **Enter respawn works after a stopped command port.** A port stopped by `idle_timeout_sec` or a manual stop could not be respawned: the "press Enter to respawn" notice showed, but every keystroke was a no-op write (log: `WRITE FAILED`) until the server restarted. A lone Enter (CR) now restarts the process on that path too, and other input on a stopped port re-emits the one-shot `PROCESS_NOT_RUNNING` notice. No config change.
 ### Web console and observability
 
 - The About page shows the logged-in user: username, global permission, and console groups.

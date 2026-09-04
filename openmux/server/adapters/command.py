@@ -233,16 +233,58 @@ class CommandPort:
     async def write_data(self, data: bytes) -> int:
         """Standardized write API: return number of bytes accepted.
 
-        Uses internal writer if initialized; returns 0 if unavailable.
+        Uses the internal writer when present. When `stop()` has cleared
+        the writer, a lone newline still triggers the non-forced respawn
+        (`_try_newline_respawn`) the PROCESS_NOT_RUNNING notice promises,
+        and is delivered to the fresh writer. Other data returns 0; the
+        one-shot stopped notice is emitted by `_try_newline_respawn`.
         """
-        writer = getattr(self, "_writer", None)
-        if not writer or not data:
+        if not data:
             return 0
+        writer = getattr(self, "_writer", None)
+        if not writer:
+            if not await self._try_newline_respawn(data):
+                return 0
+            new_writer = self._writer
+            if new_writer is None:
+                return 0
+            # Write directly: a respawn created a fresh writer, and going
+            # through `CommandWriter.write` would re-check liveness flags.
+            await new_writer._write_direct(data)
+            return len(data)
         try:
             await writer.write(data)
             return len(data)
         except Exception:  # justification: transient write failure; upstream caller treats 0 as backpressure signal
             return 0
+
+    async def _try_newline_respawn(self, data: bytes) -> bool:
+        """Respawn the process on a lone newline (non-forced restart).
+
+        Enter (CR, LF, or CRLF) is the input the PROCESS_NOT_RUNNING notice
+        tells the user to press. Shared by `write_data` (after `stop()`
+        cleared the writer) and `CommandWriter.write` (natural death). The
+        caller delivers the newline itself: a successful respawn creates a
+        fresh writer, so delivery must use the current stream. Any other
+        input emits the one-shot PROCESS_NOT_RUNNING notice.
+
+        Returns:
+            bool: True when the process is now active (respawned or already
+            restarted); False otherwise.
+        """
+        try:
+            newline_only = data in (b"\r", b"\n", b"\r\n")
+        except Exception:  # justification: tolerate unexpected non-bytes input; treat as not a pure newline
+            newline_only = False
+        if not newline_only:
+            if not self._stopped_notice_sent:
+                self._stopped_notice_sent = True
+                hint = "spawn" if getattr(self, "spawn_on_demand", False) else "respawn"
+                notice = f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
+                self._schedule_notice_emit(notice)
+            return False
+        ok = await self.restart(force=False)
+        return bool(ok and self.process_active)
 
     async def _emit_output_chunk(
         self,
@@ -967,6 +1009,9 @@ class CommandPort:
             self._writer = None
             self.process = None
             self.client_count = 0
+            # Allow the PROCESS_NOT_RUNNING notice to fire again on the next
+            # attach; otherwise a stop() would eat the banner for good.
+            self._stopped_notice_sent = False
             if _clients > 0:
                 self._schedule_lifecycle_notice("PROCESS_STOPPED", "process was stopped")
             # An intentional stop is a resting state, not a failure; clear the
@@ -1150,36 +1195,16 @@ class CommandWriter:
         if not self.stdin_stream and not getattr(self.port, "use_pty", False):
             return
         if not self.port.process_active:
-            # Allow pressing Enter (CR / LF / CRLF) to respawn a dead process
-            newline_only = False
-            try:
-                if data in (b"\r", b"\n", b"\r\n"):
-                    newline_only = True
-            except Exception:  # justification: tolerate unexpected non-bytes input; treat as not a pure newline
-                pass
-            if newline_only:
-                # Attempt respawn (non-forced) – only if previously started
-                await self.port.restart(force=False)
-                if not self.port.process_active:
-                    # Respawn failed; fall through to stopped notice below
-                    pass
-                else:
-                    # Process is back; write the newline to deliver a prompt
-                    # Update stdin_stream reference if needed (new process)
-                    if not getattr(self.port, "use_pty", False):
-                        self.stdin_stream = self.port.process.stdin if self.port.process else None
-                    await self._write_direct(data)
-                    return
-            if not self.port._stopped_notice_sent:
-                self.port._stopped_notice_sent = True
-                hint = "spawn" if getattr(self.port, "spawn_on_demand", False) else "respawn"
-                notice = (
-                    f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self.port._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
-                )
-                try:
-                    await self.port._emit_output_chunk(notice, require_clients=False)
-                except Exception:
-                    self.logger.debug("Failed to emit stopped notice", exc_info=True)
+            # Allow pressing Enter (CR / LF / CRLF) to respawn a dead
+            # process. `_try_newline_respawn` shares this with the no-writer
+            # `write_data` path and emits the one-shot stopped notice for
+            # any other input.
+            if await self.port._try_newline_respawn(data):
+                # Process is back; write the newline to deliver a prompt.
+                # Update stdin_stream reference (a respawn spawns a new one)
+                if not getattr(self.port, "use_pty", False):
+                    self.stdin_stream = self.port.process.stdin if self.port.process else None
+                await self._write_direct(data)
             return
         if not self._batching_enabled:
             await self._write_direct(data)

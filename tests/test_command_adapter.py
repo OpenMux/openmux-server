@@ -812,3 +812,73 @@ async def test_exit_marks_disconnected_and_restart_recovers():
     assert events[-1][1]["connected"] is True
     await port.stop()
     assert port.is_connected is True
+
+
+@pytest.mark.asyncio
+async def test_write_data_respawns_after_stop_pipe():
+    """A lone newline via write_data respawns a stopped port (no-writer path).
+
+    stop() (idle timeout, manual stop) clears the writer; write_data must
+    still honor the PROCESS_NOT_RUNNING prompt's "press Enter" instead of
+    dropping the input as a write failure.
+    """
+    pm = CapturingPortManager()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    cfg = {"command": "sleep 5", "shell": True, "clean_env": False, "auto_restart": False}
+    port = CommandPort("wd1", cfg, adapter)
+    assert await port.start() is True
+    assert port.process_active is True
+    assert await port.stop() is None
+    assert port.process_active is False
+    assert port._writer is None
+    # stop() arms the notice flag for the next attach.
+    assert port._stopped_notice_sent is False
+    # The Enter-respawn: newline is accepted and the fresh writer is created.
+    assert await port.write_data(b"\r") == 1
+    assert port.process_active is True
+    assert port._writer is not None
+    # Subsequent input flows through the fresh writer.
+    assert await port.write_data(b"abc") == 3
+    assert port.process_active is True
+    await port.stop()
+
+
+@pytest.mark.asyncio
+async def test_write_data_respawns_after_stop_pty():
+    """Same Enter-respawn contract under PTY mode (the LOGIN port shape)."""
+    pm = CapturingPortManager()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    cfg = {"command": "sleep 5", "interactive": True, "clean_env": False, "auto_restart": False}
+    port = CommandPort("wd2", cfg, adapter)
+    assert await port.start() is True
+    assert port.use_pty is True
+    await port.stop()
+    assert port.process_active is False
+    assert port._writer is None
+    assert await port.write_data(b"\r") == 1
+    assert port.process_active is True
+    assert port._writer is not None
+    await port.stop()
+
+
+@pytest.mark.asyncio
+async def test_write_data_non_newline_stopped_emits_notice():
+    """Non-newline input on a stopped port does not spawn and notices once.
+
+    The PROCESS_NOT_RUNNING banner (previously only reachable while a writer
+    existed) must appear even after stop() cleared the writer.
+    """
+    pm = CapturingPortManager()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    cfg = {"command": "sleep 5", "shell": True, "clean_env": False, "auto_restart": False}
+    port = CommandPort("wd3", cfg, adapter)
+    assert await port.start() is True
+    await port.stop()
+    assert port._writer is None
+    assert await port.write_data(b"x") == 0
+    assert port.process_active is False
+    got = await asyncio.wait_for(pm.output_queue.get(), timeout=0.5)
+    assert b"PROCESS_NOT_RUNNING" in got
+    # Banner is one-shot until the next attach (flag set by the notice).
+    assert port._stopped_notice_sent is True
+    assert await port.write_data(b"y") == 0
