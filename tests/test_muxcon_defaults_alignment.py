@@ -48,7 +48,10 @@ def test_normalize_listener_defaults_are_safe():
     assert conf["use_tls"] is True
     assert conf["tls_autogen"] is True
     assert conf["require_client_cert"] is False
-    assert conf["tls_dir"] == "~/.openmux/muxcon"
+    # Absent tls_dir stays unset: the base resolves via locations
+    # (OPENMUX_STATE_DIR else ~/.openmux/muxcon) and an explicit value wins.
+    assert conf["tls_dir"] is None
+    assert conf["tls_known_peers_path"] is None
 
 
 def test_schema_muxcon_defaults_match_runtime():

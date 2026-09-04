@@ -41,6 +41,7 @@ from aiohttp import web
 from openmux.server.access_control import capacity_display_label, capacity_to_wire, holder_id_short
 from openmux.server.adapters.lifecycle import READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE
 from openmux.server.data_logger import DataLogger
+from openmux.server.locations import web_tls_dir
 from openmux.server.port_utils import natural_sort_key, safe_get_port
 from openmux.server.web_plugins import ADAPTER_APP_KEY
 
@@ -1426,8 +1427,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
             self.ssl_port = int(cfg.get("ssl_port", 8443))
         except Exception:
             self.ssl_port = 8443
-        # Default directory for web_console certs separate from muxcon
-        self.tls_dir = os.path.expanduser(cfg.get("tls_dir", "~/.openmux/web_console"))
+        # Default directory for web_console certs separate from muxcon; resolves
+        # via locations (OPENMUX_STATE_DIR, else ~/.openmux/web_console) unless
+        # the config sets an explicit tls_dir.
+        self.tls_dir = os.path.expanduser(cfg.get("tls_dir") or web_tls_dir())
         self.logger = logging.getLogger(f"openmux.adapter.web_console.{self.name}")
 
         # Will be set by server

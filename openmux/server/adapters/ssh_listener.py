@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives import serialization
 
 from openmux import __version__ as _OPENMUX_VERSION
 
+from ..locations import ssh_host_key_dir as _ssh_host_key_dir_default
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .listener_common import (
     CONTROL_MENU_HELP,
@@ -59,7 +60,9 @@ _AUTH_MAX_ATTEMPTS = 3
 
 # Host key is shared by all ssh_listener entries in this adapter instance and
 # auto-generated on first start, mirroring web_console's TLS cert autogen.
-_HOST_KEY_DIR = os.path.expanduser("~/.openmux/ssh_listener")
+# Resolved once at import: the unit sets OPENMUX_STATE_DIR before exec, and the
+# dev default is ~/.openmux/ssh_listener. Tests monkeypatch these module attrs.
+_HOST_KEY_DIR = _ssh_host_key_dir_default()
 _HOST_KEY_PATH = os.path.join(_HOST_KEY_DIR, "ssh_host_key")
 
 
