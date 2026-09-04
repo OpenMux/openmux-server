@@ -1,0 +1,207 @@
+"""
+Centralized filesystem location resolution for OpenMux.
+
+Every directory the server reads or writes resolves through one precedence
+chain so that packaged installs pin locations via environment variables while
+dev installs fall back to working-directory and per-user paths. Precedence:
+environment (set by the systemd unit or launcher) before the built-in dev
+default. Web read-only assets resolve from the installed package instead (see
+the ``webui`` helpers; the tree lands there in a follow-up change).
+
+This module is import-safe: each helper is a pure function of the current
+environment. It performs no I/O and needs no config object, so wiring it in
+does not change behavior on its own.
+"""
+
+import os
+from pathlib import Path
+from typing import Any, List, Optional
+
+# Environment variables (set by the systemd unit in packaged installs).
+ENV_LOG_DIR = "OPENMUX_LOG_DIR"
+ENV_RUN_DIR = "OPENMUX_RUN_DIR"
+ENV_STATE_DIR = "OPENMUX_STATE_DIR"
+ENV_CTL_SOCK = "OPENMUX_CTL_SOCK"
+
+# Built-in dev defaults (working-directory-relative when no env is set).
+_DEV_LOG_DIR = "logs"
+_DEV_PIDFILE = os.path.join(_DEV_LOG_DIR, "openmux.pid")
+_DEV_CTL_SOCK = os.path.join(_DEV_LOG_DIR, "openmux.sock")
+
+# Subdirectories under the state dir for per-protocol material.
+_STATE_MUXCON = "muxcon"
+_STATE_SSH = "ssh_listener"
+_STATE_WEB = "web_console"
+
+# Read-only assets ship with the package under ``webui`` (ticket T2).
+_WEBUI_PKG = "webui"
+
+
+def _env(name: str, default: str = "") -> str:
+    """Return ``os.environ[name]`` expanded and stripped, or ``default``.
+
+    An unset or empty value yields ``default``. ``~`` is expanded so users
+    may write home-relative paths.
+
+    Args:
+        name: Environment variable name.
+        default: Value returned when the variable is unset or empty.
+
+    Returns:
+        str: Expanded value, or ``default``.
+    """
+    value = os.environ.get(name, "")
+    if not value:
+        return default
+    return os.path.expanduser(value).strip()
+
+
+def log_dir() -> str:
+    """Base directory for all logs (aggregate log plus ``ports/``).
+
+    Resolution: ``OPENMUX_LOG_DIR`` when set, else the working-directory
+    relative ``logs``. Relative values are left as-is (CWD-relative on use).
+    """
+    return _env(ENV_LOG_DIR, _DEV_LOG_DIR)
+
+
+def run_dir() -> Optional[str]:
+    """Runtime directory for short-lived files (pid, control socket).
+
+    Resolution: ``OPENMUX_RUN_DIR`` when set, else ``None`` so callers fall
+    back to the working-directory runtime location.
+    """
+    value = _env(ENV_RUN_DIR)
+    return value or None
+
+
+def pidfile_path() -> str:
+    """PID file location.
+
+    Resolution: ``{run_dir}/openmux.pid`` when ``OPENMUX_RUN_DIR`` is set,
+    else the working-directory ``logs/openmux.pid``.
+    """
+    run = _env(ENV_RUN_DIR)
+    if run:
+        return os.path.join(run, "openmux.pid")
+    return _DEV_PIDFILE
+
+
+def control_socket_path() -> str:
+    """Control socket location.
+
+    Resolution: ``OPENMUX_CTL_SOCK`` when set, else ``{run_dir}/openmux.sock``
+    when ``OPENMUX_RUN_DIR`` is set, else the working-directory
+    ``logs/openmux.sock``. ``~`` is expanded on any env value.
+    """
+    override = _env(ENV_CTL_SOCK)
+    if override:
+        return override
+    run = _env(ENV_RUN_DIR)
+    if run:
+        return os.path.join(run, "openmux.sock")
+    return _DEV_CTL_SOCK
+
+
+def state_dir() -> str:
+    """Base directory for persistent, per-user material.
+
+    Resolution: ``OPENMUX_STATE_DIR`` when set, else the home-relative
+    ``~/.openmux``. This is where protocol material (muxcon TLS, SSH host
+    keys, web console TLS) lives in the absence of a packaged location.
+    """
+    return _env(ENV_STATE_DIR, os.path.expanduser("~/.openmux"))
+
+
+def muxcon_tls_dir() -> str:
+    """MuxCon TLS directory (certs, keys, known peers, federated cache)."""
+    return os.path.join(state_dir(), _STATE_MUXCON)
+
+
+def muxcon_known_peers_path() -> str:
+    """MuxCon known-peers file location."""
+    return os.path.join(muxcon_tls_dir(), "known_peers.yaml")
+
+
+def muxcon_federated_cache_path() -> str:
+    """MuxCon federated cache location."""
+    return os.path.join(muxcon_tls_dir(), "federated_cache.json")
+
+
+def ssh_host_key_dir() -> str:
+    """SSH listener host-key directory."""
+    return os.path.join(state_dir(), _STATE_SSH)
+
+
+def web_tls_dir() -> str:
+    """Web console auto-generated TLS directory."""
+    return os.path.join(state_dir(), _STATE_WEB)
+
+
+def _module_dir() -> Path:
+    """Directory of this file (the ``openmux/server`` package dir)."""
+    return Path(__file__).resolve().parent
+
+
+def templates_dir() -> Path:
+    """Jinja2 template dir shipped with the package.
+
+    Points at ``openmux/server/webui/templates/web_console``. The tree is
+    moved there in a follow-up change; this helper is the single source of
+    truth once it lands (the CWD and ``parents[3]`` fallbacks are removed).
+    """
+    return _module_dir() / _WEBUI_PKG / "templates" / "web_console"
+
+
+def static_dir() -> Path:
+    """Web static assets dir shipped with the package.
+
+    Points at ``openmux/server/webui/static`` (see ``templates_dir``).
+    """
+    return _module_dir() / _WEBUI_PKG / "static"
+
+
+# Location keys removed from the schema in favor of env-based resolution.
+# They are still accepted and ignored (with a warning) for one release so
+# stale conffiles upgrade smoothly instead of failing validation.
+_REMOVED_TOP_LEVEL = (
+    ("server", "control_socket"),
+    ("server", "pidfile"),
+    ("logging", "log_dir"),
+    ("muxcon", "federated_cache_path"),
+    ("web_console", "static_dir"),
+    ("web_console", "template_dir"),
+)
+_REMOVED_LISTENER_KEYS = ("tls_dir", "tls_known_peers_path")
+
+
+def removed_location_keys(config: Any) -> List[str]:
+    """Dotted paths of removed location keys still present in ``config``.
+
+    Callers log one warning per returned path so an upgrade from an old
+    conffile degrades to a warning instead of a hard validation error.
+
+    Args:
+        config: Parsed config mapping (the full server.yaml dict).
+
+    Returns:
+        List[str]: Dotted keys, e.g. ``["logging.log_dir"]``. Empty when the
+        config is clean or not a mapping.
+    """
+    found: List[str] = []
+    if not isinstance(config, dict):
+        return found
+    for section, key in _REMOVED_TOP_LEVEL:
+        sec = config.get(section)
+        if isinstance(sec, dict) and key in sec:
+            found.append(f"{section}.{key}")
+    mux = config.get("muxcon")
+    if isinstance(mux, dict):
+        listeners = mux.get("listeners")
+        if isinstance(listeners, list):
+            for index, listener in enumerate(listeners):
+                if isinstance(listener, dict):
+                    for key in _REMOVED_LISTENER_KEYS:
+                        if key in listener:
+                            found.append(f"muxcon.listeners[{index}].{key}")
+    return found
