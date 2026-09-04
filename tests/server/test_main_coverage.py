@@ -184,6 +184,13 @@ def test_resolve_logging_paths_combinations(tmp_path):
     assert base == tmp_path / "logs" and main == tmp_path / "elsewhere" / "x.log"
 
 
+def test_resolve_logging_paths_env_default(tmp_path, monkeypatch):
+    # Both unset + OPENMUX_LOG_DIR set: base from the env var.
+    monkeypatch.setenv("OPENMUX_LOG_DIR", str(tmp_path / "envlogs"))
+    base, main = _resolve_logging_paths(None, None)
+    assert base == tmp_path / "envlogs" and main == tmp_path / "envlogs" / "openmux.log"
+
+
 def test_setup_basic_logging_honors_log_dir_and_file(tmp_path):
     log_dir = str(tmp_path / "srvlogs")
     _setup_basic_logging("INFO", log_dir=log_dir)

@@ -138,6 +138,23 @@ def test_logging_manager_get_logger(tmp_path):
                 lg2.removeHandler(h)
 
 
+def test_logging_manager_env_log_dir(tmp_path, monkeypatch):
+    """With no `logging.log_dir` set, the OPENMUX_LOG_DIR env var is the base."""
+    base = tmp_path / "envlogs"
+    monkeypatch.setenv("OPENMUX_LOG_DIR", str(base))
+    orig_handlers = snapshot_root_handlers()
+    try:
+        lm = LoggingManager({"log_level": "INFO"})
+        assert (base / "openmux.log").exists()
+        assert (base / "openmux_server.log").exists()
+    finally:
+        restore_root_handlers(orig_handlers)
+        for comp in ["server", "client", "serial", "auth", "config", "console"]:
+            lg2 = logging.getLogger(f"openmux.{comp}")
+            for h in list(lg2.handlers):
+                lg2.removeHandler(h)
+
+
 def test_logging_manager_console_only_when_dir_uncreatable(tmp_path, caplog):
     """issue #42: an uncreatable log dir keeps the console handler and adds no file
     handler (and does not raise)."""

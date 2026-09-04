@@ -174,7 +174,7 @@ class LoggingManager:
         root_logger.addHandler(console_handler)
 
         # Create log directory if it doesn't exist
-        log_dir = self.config.get("log_dir", "logs")
+        log_dir = self._resolve_log_dir()
         # issue #42: an uncreatable dir warns once and keeps console-only output.
         if not ensure_directory(log_dir):
             return
@@ -191,9 +191,24 @@ class LoggingManager:
         file_handler.setFormatter(file_formatter)
         root_logger.addHandler(file_handler)
 
+    def _resolve_log_dir(self) -> str:
+        """Resolve the base log directory.
+
+        Order: `logging.log_dir` from config, then the `OPENMUX_LOG_DIR`
+        environment variable, then the dev default `logs` (via
+        `locations.log_dir`). A leading `~` is expanded to the home dir,
+        matching the other resolvable paths.
+        """
+        from . import locations
+
+        cfg_dir = self.config.get("log_dir")
+        if isinstance(cfg_dir, str) and cfg_dir.strip():
+            return os.path.expanduser(cfg_dir.strip())
+        return locations.log_dir()
+
     def _setup_component_loggers(self):
         """Set up loggers for each component"""
-        log_dir = self.config.get("log_dir", "logs")
+        log_dir = self._resolve_log_dir()
         # issue #42: skip per-component file logs when the dir is not writable.
         if not ensure_directory(log_dir):
             return

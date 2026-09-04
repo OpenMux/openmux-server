@@ -19,6 +19,7 @@ import yaml
 from ..common.fsutil import ensure_directory
 from .auth_manager import AuthManager
 from .config_manager import ConfigManager
+from .locations import log_dir as _locations_log_dir
 from .console_manager import ConsoleManager
 from .data_logger import DataLogger
 from .port_manager import PortManager
@@ -1725,21 +1726,20 @@ def _resolve_logging_paths(log_dir: Optional[str], log_file: Optional[str]) -> "
 
     `log_dir` is the base directory for all server logs. `file` is the full
     path of the main aggregate log; when `log_dir` is unset, the main file's
-    own directory becomes the base. Both unset keeps the historical `logs/`
-    + `logs/openmux.log` dev behavior.
+    own directory becomes the base. When neither is set, the base comes from
+    the `OPENMUX_LOG_DIR` environment variable, else the historical `logs/`
+    dev default. A leading `~` in a config value is expanded.
     """
-    from pathlib import Path
-
-    base = (log_dir or "").strip()
+    base_cfg = (log_dir or "").strip()
     main_file = (log_file or "").strip()
-    if base:
-        base_path = Path(base)
-        file_path = Path(main_file) if main_file else base_path / "openmux.log"
-        return base_path, file_path
-    if main_file:
-        file_path = Path(main_file)
-        return file_path.parent, file_path
-    return Path("logs"), Path("logs") / "openmux.log"
+    if base_cfg:
+        base_path = Path(os.path.expanduser(base_cfg))
+    elif main_file:
+        base_path = Path(os.path.expanduser(main_file)).parent
+    else:
+        base_path = Path(_locations_log_dir())  # OPENMUX_LOG_DIR else logs/
+    file_path = Path(os.path.expanduser(main_file)) if main_file else base_path / "openmux.log"
+    return base_path, file_path
 
 
 def _remove_stale_file_handlers() -> None:
