@@ -13,7 +13,12 @@ Usage examples:
 Socket resolution precedence:
   1) --socket path
   2) env OPENMUX_CTL_SOCK
-  3) logs/openmux.sock (default)
+  3) env OPENMUX_RUN_DIR (openmux.sock inside it)
+  4) logs/openmux.sock (default)
+
+Steps 2-3 fall back to /etc/defaults/openmux (KEY=VALUE, packaged installs)
+when the variable is not set in the shell, so openmuxctl finds the packaged
+server's control socket without exported variables.
 """
 from __future__ import annotations
 
@@ -22,7 +27,9 @@ import asyncio
 import json
 import os
 import sys
-from typing import Any, List, Optional
+from typing import List, Optional
+
+from ..server.locations import control_socket_path as _locations_control_socket
 
 
 async def send_command(sock_path: str, payload: dict) -> int:
@@ -63,7 +70,8 @@ def resolve_socket_path(cli_sock: Optional[str]) -> str:
     env = os.environ.get("OPENMUX_CTL_SOCK")
     if env:
         return env
-    return os.path.join("logs", "openmux.sock")
+    # Shared resolution with the server: OPENMUX_RUN_DIR, else the dev default logs/.
+    return _locations_control_socket()
 
 
 def main(argv: Optional[List[str]] = None) -> int:

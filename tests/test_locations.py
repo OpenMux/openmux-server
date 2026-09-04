@@ -14,9 +14,59 @@ _ENV_VARS = (
 
 @pytest.fixture
 def clean_env(monkeypatch):
-    for var in _ENV_VARS:
+    for var in _ENV_VARS + ("OPENMUX_ENV_FILE",):
         monkeypatch.delenv(var, raising=False)
+    locations._ENV_FILE_CACHE = None
     return monkeypatch
+
+
+def test_env_file_provides_unset_value(clean_env, tmp_path, monkeypatch):
+    env_file = tmp_path / "defaults"
+    env_file.write_text("OPENMUX_RUN_DIR=/run/openmux\nOPENMUX_LOG_DIR=/var/log/openmux\n")
+    monkeypatch.setenv("OPENMUX_ENV_FILE", str(env_file))
+    locations._ENV_FILE_CACHE = None
+    assert locations.run_dir() == "/run/openmux"
+    assert locations.log_dir() == "/var/log/openmux"
+
+
+def test_process_env_beats_env_file(clean_env, tmp_path, monkeypatch):
+    env_file = tmp_path / "defaults"
+    env_file.write_text("OPENMUX_RUN_DIR=/from/file\n")
+    monkeypatch.setenv("OPENMUX_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OPENMUX_RUN_DIR", "/from/env")
+    locations._ENV_FILE_CACHE = None
+    assert locations.run_dir() == "/from/env"
+
+
+def test_env_file_format_and_quotes(clean_env, tmp_path, monkeypatch):
+    env_file = tmp_path / "defaults"
+    env_file.write_text(
+        "# a comment\n"
+        "  \n"
+        "OPENMUX_LOG_DIR='single'\n"
+        'OPENMUX_STATE_DIR="with space"\n'
+        "OPENMUX_CTL_SOCK=/run/openmux/custom.sock\n"
+        "not a line without equals\n"
+    )
+    monkeypatch.setenv("OPENMUX_ENV_FILE", str(env_file))
+    locations._ENV_FILE_CACHE = None
+    parsed = locations._env_file_values()
+    assert parsed == {
+        "OPENMUX_LOG_DIR": "single",
+        "OPENMUX_STATE_DIR": "with space",
+        "OPENMUX_CTL_SOCK": "/run/openmux/custom.sock",
+    }
+    # Resolution uses the parsed value for every location variable.
+    assert locations.control_socket_path() == "/run/openmux/custom.sock"
+    assert locations.state_dir() == "with space"
+
+
+def test_env_file_missing_is_noop(clean_env, monkeypatch):
+    # Missing file: resolution falls back to defaults, no error.
+    monkeypatch.setenv("OPENMUX_ENV_FILE", "/nonexistent/openmux/defaults")
+    locations._ENV_FILE_CACHE = None
+    assert locations.run_dir() is None
+    assert locations.log_dir() == "logs"
 
 
 def test_log_dir_default(clean_env):

@@ -277,6 +277,94 @@ def test_server_repoints_data_logger_base_dir(tmp_path):
     assert (log_dir / "openmux_server.log").exists()
 
 
+def _write_pid_sock_config(tmp_path, server_cfg):
+    """Write a minimal server.yaml + authentication.yaml under tmp_path."""
+    cfg_path = tmp_path / "server.yaml"
+    cfg = {"server": server_cfg or {}, "logging": {"level": "INFO", "log_dir": str(tmp_path / "logs")}}
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    (tmp_path / "authentication.yaml").write_text(
+        yaml.safe_dump({"users": [{"username": "u", "password_hash": "x", "permissions": "admin"}]})
+    )
+    return cfg_path
+
+
+def test_resolve_pidfile_precedence(tmp_path, monkeypatch):
+    for var in ("OPENMUX_PIDFILE", "OPENMUX_RUN_DIR", "OPENMUX_CTL_SOCK"):
+        monkeypatch.delenv(var, raising=False)
+    # No config key, no env: dev default
+    server = OpenMuxServer(str(_write_pid_sock_config(tmp_path, {})), log_level="INFO")
+    assert server._resolve_pidfile() == os.path.join("logs", "openmux.pid")
+    # OPENMUX_RUN_DIR places the pidfile in the runtime directory
+    monkeypatch.setenv("OPENMUX_RUN_DIR", str(tmp_path / "run"))
+    assert server._resolve_pidfile() == str(tmp_path / "run" / "openmux.pid")
+    # Deprecated OPENMUX_PIDFILE still wins as an operational override (kept for one release)
+    monkeypatch.setenv("OPENMUX_PIDFILE", str(tmp_path / "legacy.pid"))
+    assert server._resolve_pidfile() == str(tmp_path / "legacy.pid")
+    # config server.pidfile beats OPENMUX_RUN_DIR (env override must be unset first)
+    monkeypatch.delenv("OPENMUX_PIDFILE")
+    server2 = OpenMuxServer(str(_write_pid_sock_config(tmp_path, {"pidfile": str(tmp_path / "cfg.pid")})), log_level="INFO")
+    assert server2._resolve_pidfile() == str(tmp_path / "cfg.pid")
+
+
+def test_resolve_pidfile_deprecation_warnings(tmp_path, monkeypatch, caplog):
+    for var in ("OPENMUX_PIDFILE", "OPENMUX_RUN_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("OPENMUX_PIDFILE", str(tmp_path / "legacy.pid"))
+    server = OpenMuxServer(str(_write_pid_sock_config(tmp_path, {})), log_level="INFO")
+    with caplog.at_level(logging.WARNING, logger="openmux.server"):
+        path = server._resolve_pidfile()
+    assert path == str(tmp_path / "legacy.pid")
+    assert any("OPENMUX_PIDFILE is deprecated" in r.getMessage() for r in caplog.records)
+    # Legacy runtime.pidfile fallback still resolves, with its own warning
+    monkeypatch.delenv("OPENMUX_PIDFILE")
+    server2 = OpenMuxServer(str(_write_pid_sock_config(tmp_path, {})), log_level="INFO")
+    server2.config_manager.config["runtime"] = {"pidfile": str(tmp_path / "rt.pid")}
+    with caplog.at_level(logging.WARNING, logger="openmux.server"):
+        assert server2._resolve_pidfile() == str(tmp_path / "rt.pid")
+    assert any("deprecated runtime.pidfile" in r.getMessage() for r in caplog.records)
+
+
+def test_resolve_control_socket_path(tmp_path, monkeypatch):
+    for var in ("OPENMUX_CTL_SOCK", "OPENMUX_RUN_DIR", "OPENMUX_PIDFILE"):
+        monkeypatch.delenv(var, raising=False)
+    server = OpenMuxServer(str(_write_pid_sock_config(tmp_path, {})), log_level="INFO")
+    # No config key, no env: dev default (makedirs of logs/ is a no-op in-repo)
+    assert server._resolve_control_socket_path() == os.path.join("logs", "openmux.sock")
+    # OPENMUX_RUN_DIR
+    monkeypatch.setenv("OPENMUX_RUN_DIR", str(tmp_path / "run"))
+    assert server._resolve_control_socket_path() == str(tmp_path / "run" / "openmux.sock")
+    # OPENMUX_CTL_SOCK overrides everything
+    monkeypatch.setenv("OPENMUX_CTL_SOCK", str(tmp_path / "ctl" / "custom.sock"))
+    assert server._resolve_control_socket_path() == str(tmp_path / "ctl" / "custom.sock")
+    # config server.control_socket beats OPENMUX_RUN_DIR
+    monkeypatch.delenv("OPENMUX_CTL_SOCK")
+    server2 = OpenMuxServer(
+        str(_write_pid_sock_config(tmp_path, {"control_socket": str(tmp_path / "cfg.sock")})), log_level="INFO"
+    )
+    assert server2._resolve_control_socket_path() == str(tmp_path / "cfg.sock")
+    # Legacy runtime.control_socket fallback still resolves
+    server3 = OpenMuxServer(str(_write_pid_sock_config(tmp_path, {})), log_level="INFO")
+    server3.config_manager.config["runtime"] = {"control_socket": str(tmp_path / "rt.sock")}
+    assert server3._resolve_control_socket_path() == str(tmp_path / "rt.sock")
+
+
+def test_openmuxctl_resolve_socket_path(tmp_path, monkeypatch):
+    from openmux.cli.openmuxctl import resolve_socket_path
+
+    for var in ("OPENMUX_CTL_SOCK", "OPENMUX_RUN_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    # --socket flag wins
+    assert resolve_socket_path(str(tmp_path / "flag.sock")) == str(tmp_path / "flag.sock")
+    # No env: dev default
+    assert resolve_socket_path(None) == os.path.join("logs", "openmux.sock")
+    # OPENMUX_RUN_DIR shared with the server
+    monkeypatch.setenv("OPENMUX_RUN_DIR", str(tmp_path / "rundir"))
+    assert resolve_socket_path(None) == str(tmp_path / "rundir" / "openmux.sock")
+    # OPENMUX_CTL_SOCK beats OPENMUX_RUN_DIR
+    monkeypatch.setenv("OPENMUX_CTL_SOCK", str(tmp_path / "ctl.sock"))
+    assert resolve_socket_path(None) == str(tmp_path / "ctl.sock")
+
+
 def test_setup_basic_logging_warns_once_for_uncreatable_dir(tmp_path, caplog, monkeypatch):
     """issue #42: a log dir that cannot be created warns once, not per setup call."""
     import logging

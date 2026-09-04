@@ -19,7 +19,11 @@ import yaml
 from ..common.fsutil import ensure_directory
 from .auth_manager import AuthManager
 from .config_manager import ConfigManager
-from .locations import log_dir as _locations_log_dir
+from .locations import (
+    control_socket_path as _locations_control_socket,
+    log_dir as _locations_log_dir,
+    pidfile_path as _locations_pidfile,
+)
 from .console_manager import ConsoleManager
 from .data_logger import DataLogger
 from .port_manager import PortManager
@@ -355,37 +359,76 @@ class OpenMuxServer:
         Precedence:
           1) env OPENMUX_CTL_SOCK
           2) config.server.control_socket
-          3) config.runtime.control_socket (deprecated; fallback)
-          4) logs/openmux.sock (default)
+          3) config.runtime.control_socket (deprecated; fallback, warns)
+          4) locations.control_socket_path(): OPENMUX_RUN_DIR, else logs/
         """
-        try:
-            path = os.environ.get("OPENMUX_CTL_SOCK")
-            if not path:
+        path = os.environ.get("OPENMUX_CTL_SOCK")
+        if not path:
+            path, deprecated = self._config_string_path(("server", "control_socket"), ("runtime", "control_socket"))
+            if deprecated:
                 try:
-                    cfg = getattr(self.config_manager, "config", {}) or {}
-                    # Preferred location: server.control_socket
-                    srv = cfg.get("server", {}) or {}
-                    path = srv.get("control_socket")
-                    if not path:
-                        # Back-compat (deprecated): runtime.control_socket
-                        rt = cfg.get("runtime", {}) or {}
-                        path = rt.get("control_socket")
-                        if path:
-                            try:
-                                self.logger.warning(
-                                    "Using deprecated runtime.control_socket; please move to server.control_socket"
-                                )
-                            except Exception:
-                                pass
+                    self.logger.warning("Using deprecated runtime.control_socket; please move to server.control_socket")
                 except Exception:
-                    path = None
-            if not path:
-                path = os.path.join("logs", "openmux.sock")
+                    pass
+        if not path:
+            path = _locations_control_socket()
+        if not path:
+            return None
+        try:
             # Ensure parent exists
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             return path
         except Exception:
             return None
+
+    def _config_string_path(
+        self, preferred: Tuple[str, str], deprecated: Optional[Tuple[str, str]] = None
+    ) -> Tuple[Optional[str], bool]:
+        """Read a string value from config by (section, key).
+
+        Returns (value, deprecated) where deprecated is True when the value
+        came from the legacy ``runtime`` section. Returns (None, False) when
+        neither key is set or the config is unavailable.
+        """
+        try:
+            cfg = getattr(self.config_manager, "config", {}) or {}
+            value = (cfg.get(preferred[0], {}) or {}).get(preferred[1])
+            if value:
+                return value, False
+            if deprecated:
+                value = (cfg.get(deprecated[0], {}) or {}).get(deprecated[1])
+                if value:
+                    return value, True
+        except Exception:
+            pass
+        return None, False
+
+    def _resolve_pidfile(self) -> str:
+        """Resolve the PID file path.
+
+        Precedence:
+          1) env OPENMUX_PIDFILE (deprecated; OPENMUX_RUN_DIR replaces it)
+          2) config.server.pidfile
+          3) config.runtime.pidfile (deprecated; fallback, warns)
+          4) locations.pidfile_path(): OPENMUX_RUN_DIR, else logs/openmux.pid
+        """
+        pidfile = os.environ.get("OPENMUX_PIDFILE")
+        if pidfile:
+            try:
+                self.logger.warning(
+                    "OPENMUX_PIDFILE is deprecated; use OPENMUX_RUN_DIR instead. Honoring it for one release."
+                )
+            except Exception:  # justification: logger best-effort; keep the value
+                pass
+            return os.path.expanduser(pidfile)
+        config_pid, deprecated = self._config_string_path(("server", "pidfile"), ("runtime", "pidfile"))
+        if config_pid:
+            if deprecated:
+                self.logger.warning("Using deprecated runtime.pidfile; please move to server.pidfile")
+            return os.path.expanduser(config_pid)
+        return os.path.expanduser(_locations_pidfile())
 
     async def _start_control_socket(self, path: str) -> None:
         """Start a Unix domain control socket for local CLI control."""
@@ -1959,33 +2002,14 @@ def main():
         # Set up shutdown handlers
         _setup_shutdown_handlers(loop, server)
 
-        # Write PID file for CLI/signal control (default logs/openmux.pid; override with OPENMUX_PIDFILE)
+        # Write PID file for CLI/signal control
+        # (OPENMUX_PIDFILE (deprecated) > server.pidfile > runtime.pidfile > OPENMUX_RUN_DIR > logs/)
         try:
-            pidfile = os.environ.get("OPENMUX_PIDFILE")
-            if not pidfile:
-                # Try config runtime.pidfile, else fall back to logs/openmux.pid
-                try:
-                    cm2 = ConfigManager(
-                        config_path,
-                        auth_config_path=auth_config,
-                        security_config_path=security_config,
-                    )
-                    cfg2 = cm2.load_config() or {}
-                    # Preferred location: server.pidfile
-                    server_cfg = (cfg2 or {}).get("server", {}) or {}
-                    pidfile = server_cfg.get("pidfile")
-                    if not pidfile:
-                        # Back-compat (deprecated): runtime.pidfile
-                        runtime_cfg = (cfg2 or {}).get("runtime", {}) or {}
-                        pidfile = runtime_cfg.get("pidfile")
-                        if pidfile:
-                            logging.warning("Using deprecated runtime.pidfile; please move to server.pidfile")
-                except Exception:
-                    pidfile = None
-            if not pidfile:
-                pidfile = os.path.join("logs", "openmux.pid")
+            pidfile = server._resolve_pidfile()
             # Ensure directory exists
-            os.makedirs(os.path.dirname(pidfile), exist_ok=True)
+            parent = os.path.dirname(pidfile)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             with open(pidfile, "w", encoding="utf-8") as f:
                 f.write(str(os.getpid()))
             logging.info(f"PID file written: {pidfile}")
@@ -2008,28 +2032,12 @@ def main():
         logging.info("Server shutdown complete")
         logging.shutdown()
 
-        # Remove PID file (best-effort)
+        # Remove PID file (best-effort; mirror the write-time resolution)
         try:
-            # Try env first
-            pidfile = os.environ.get("OPENMUX_PIDFILE")
-            if not pidfile:
-                # Try to mirror the same resolution as during write, but best-effort only
-                try:
-                    parsed_args = _parse_arguments()
-                    cm3 = ConfigManager(
-                        _find_config_file(parsed_args.config),
-                        auth_config_path=parsed_args.auth_config,
-                        security_config_path=parsed_args.security_config,
-                    )
-                    cfg3 = cm3.load_config() or {}
-                    pidfile = (cfg3.get("server", {}) or {}).get("pidfile") or (cfg3.get("runtime", {}) or {}).get("pidfile")
-                except Exception:
-                    pidfile = None
-            if not pidfile:
-                pidfile = os.path.join("logs", "openmux.pid")
+            pidfile = server._resolve_pidfile()
             if os.path.exists(pidfile):
                 os.remove(pidfile)
-        except Exception:
+        except Exception:  # justification: best-effort cleanup during exit
             pass
 
 

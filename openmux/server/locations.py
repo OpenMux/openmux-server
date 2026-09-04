@@ -3,19 +3,33 @@ Centralized filesystem location resolution for OpenMux.
 
 Every directory the server reads or writes resolves through one precedence
 chain so that packaged installs pin locations via environment variables while
-dev installs fall back to working-directory and per-user paths. Precedence:
-environment (set by the systemd unit or launcher) before the built-in dev
-default. Web read-only assets resolve from the installed package instead (see
-the ``webui`` helpers; the tree lands there in a follow-up change).
+dev installs fall back to working-directory and per-user paths. Precedence
+for each variable:
+
+    process environment > /etc/defaults/openmux > built-in default
+
+``/etc/defaults/openmux`` is plain ``KEY=VALUE`` lines (systemd
+``EnvironmentFile`` compatible, so the unit and this code read the same file).
+It exists only in packaged installs; a missing file is the normal case.
+Keep it readable (0644): it holds locations, never secrets.
+
+Web read-only assets resolve from the installed package instead (see the
+``webui`` helpers; the tree lands there in a follow-up change).
 
 This module is import-safe: each helper is a pure function of the current
-environment. It performs no I/O and needs no config object, so wiring it in
-does not change behavior on its own.
+environment and the defaults file. It performs no I/O beyond reading that
+file once (cached) and needs no config object, so wiring it in does not
+change behavior on a system without the file.
 """
 
 import os
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
+
+# Defaults file for packaged installs. Format: systemd-compatible KEY=VALUE
+# lines. Override with OPENMUX_ENV_FILE (tests, Docker, manual starts).
+ENV_FILE_PATH = "/etc/defaults/openmux"
+_ENV_FILE_CACHE: Optional[Dict[str, str]] = None
 
 # Environment variables (set by the systemd unit in packaged installs).
 ENV_LOG_DIR = "OPENMUX_LOG_DIR"
@@ -37,20 +51,57 @@ _STATE_WEB = "web_console"
 _WEBUI_PKG = "webui"
 
 
-def _env(name: str, default: str = "") -> str:
-    """Return ``os.environ[name]`` expanded and stripped, or ``default``.
+def _env_file_values() -> Dict[str, str]:
+    """Read the defaults file once and cache the parsed values.
 
-    An unset or empty value yields ``default``. ``~`` is expanded so users
-    may write home-relative paths.
+    The file is ``OPENMUX_ENV_FILE`` (tests/override) else
+    ``/etc/defaults/openmux`` (packaged installs). A missing, unreadable, or
+    malformed file yields an empty mapping: a packaged location override must
+    never break startup.
+    """
+    global _ENV_FILE_CACHE
+    if _ENV_FILE_CACHE is None:
+        values: Dict[str, str] = {}
+        path = os.environ.get("OPENMUX_ENV_FILE") or ENV_FILE_PATH
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for raw in handle:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    if key:
+                        values[key] = _strip_quotes(value.strip())
+        except OSError:  # justification: absent/corrupt defaults file means no override
+            values = {}
+        _ENV_FILE_CACHE = values
+    return _ENV_FILE_CACHE
+
+
+def _strip_quotes(value: str) -> str:
+    """Remove one pair of matching single or double quotes from a value."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def _env(name: str, default: str = "") -> str:
+    """Resolve ``name`` from the environment, the defaults file, or ``default``.
+
+    An unset or empty value at each level falls through to the next. ``~`` is
+    expanded so users may write home-relative paths.
 
     Args:
         name: Environment variable name.
-        default: Value returned when the variable is unset or empty.
+        default: Value returned when neither source provides one.
 
     Returns:
         str: Expanded value, or ``default``.
     """
     value = os.environ.get(name, "")
+    if not value.strip():
+        value = _env_file_values().get(name, "")
     if not value:
         return default
     return os.path.expanduser(value).strip()
