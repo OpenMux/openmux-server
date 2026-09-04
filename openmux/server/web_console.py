@@ -1940,26 +1940,33 @@ class WebConsoleAdapter(BaseGenericAdapter):
     def _prepare_templates(self) -> None:
         """Initialize the Jinja2 template environment and ensure default directories.
 
-        Jinja2 and a valid template_dir are required. If either is unavailable,
-        ``self._jinja_env`` is set to None and an error is logged at startup.
+        Templates and static assets ship inside the package
+        (``openmux/server/webui/``) and are the default for both, so a
+        packaged install serves the UI without any config. An explicit
+        ``template_dir`` / ``static_dir`` still wins and is used as-is,
+        but a missing override is logged as a warning.
+
+        Jinja2 and a usable template directory are required. If either is
+        unavailable, ``self._jinja_env`` is set to None and an error is
+        logged at startup.
         """
-        # Default directories if not provided
-        try:
-            if not self.static_dir:
-                # Prefer WorkingDirectory (systemd sets it) -> ./static
-                self.static_dir = str((Path.cwd() / "static").resolve())
-            if not self.template_dir:
-                # Default templates for web_console live under ./templates/web_console
-                self.template_dir = str((Path.cwd() / "templates" / "web_console").resolve())
-        except Exception:
-            # Fallback to module-relative dirs if cwd fails
-            base = (
-                Path(__file__).resolve().parents[3]
-                if len(Path(__file__).resolve().parents) >= 3
-                else Path(__file__).resolve().parent
-            )
-            self.static_dir = self.static_dir or str((base / "static").resolve())
-            self.template_dir = self.template_dir or str((base / "templates" / "web_console").resolve())
+        from .locations import static_dir as _locations_static_dir
+        from .locations import templates_dir as _locations_templates_dir
+
+        if not self.template_dir:
+            self.template_dir = str(_locations_templates_dir())
+        if not self.static_dir:
+            self.static_dir = str(_locations_static_dir())
+        if not Path(self.template_dir).is_dir():
+            try:
+                self.logger.error("template_dir does not exist: %s", self.template_dir)
+            except Exception:  # justification: logging best-effort; startup proceeds
+                pass
+        if not Path(self.static_dir).is_dir():
+            try:
+                self.logger.warning("static_dir does not exist: %s", self.static_dir)
+            except Exception:  # justification: logging best-effort; startup proceeds
+                pass
 
         # Attempt to set up Jinja2 if available and directory exists
         try:

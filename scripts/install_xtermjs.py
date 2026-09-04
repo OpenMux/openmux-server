@@ -139,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download xterm.js assets for the OpenMux Web Console")
     parser.add_argument(
         "--static-dir",
-        help="Target static assets directory (default: <repo_root>/static)",
+        help="Target static assets directory (default: <repo_root>/openmux/server/webui/static)",
         default=None,
     )
     parser.add_argument(
@@ -168,7 +168,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
-    static_dir = Path(args.static_dir) if args.static_dir else repo_root / "static"
+    static_dir = Path(args.static_dir) if args.static_dir else repo_root / "openmux" / "server" / "webui" / "static"
     license_dir = Path(args.license_dir) if args.license_dir else repo_root / "third_party_licenses"
     assets = build_assets(args.xterm_version, args.xterm_addon_fit_version)
     license_files = build_license_files(args.xterm_version, args.xterm_addon_fit_version)

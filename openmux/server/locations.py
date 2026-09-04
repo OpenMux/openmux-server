@@ -197,9 +197,9 @@ def _module_dir() -> Path:
 def templates_dir() -> Path:
     """Jinja2 template dir shipped with the package.
 
-    Points at ``openmux/server/webui/templates/web_console``. The tree is
-    moved there in a follow-up change; this helper is the single source of
-    truth once it lands (the CWD and ``parents[3]`` fallbacks are removed).
+    Points at ``openmux/server/webui/templates/web_console``, the location
+    the tree has been moved to (T2). The web console uses this as its
+    default; an explicit ``template_dir`` config value still wins.
     """
     return _module_dir() / _WEBUI_PKG / "templates" / "web_console"
 

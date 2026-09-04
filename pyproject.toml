@@ -67,6 +67,11 @@ write_to = "openmux/_version.py"
 # This tells setuptools to automatically find all packages
 include = ["openmux*"]
 
+[tool.setuptools.package-data]
+# Read-only web UI assets ship inside the package (moved from repo-root
+# templates/web_console and static in T2). Included in wheel and sdist.
+"openmux.server.webui" = ["templates/web_console/*.j2", "static/**"]
+
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "-ra -q"

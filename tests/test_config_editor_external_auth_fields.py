@@ -10,8 +10,8 @@ the editor, so the check is performed on the shipped assets.
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE_PATH = REPO_ROOT / "templates" / "web_console" / "config_editor.html.j2"
-JS_PATH = REPO_ROOT / "static" / "js" / "config_editor.js"
+TEMPLATE_PATH = REPO_ROOT / "openmux" / "server" / "webui" / "templates" / "web_console" / "config_editor.html.j2"
+JS_PATH = REPO_ROOT / "openmux" / "server" / "webui" / "static" / "js" / "config_editor.js"
 
 EXPECTED_TEMPLATE_IDS = [
     "auth.extauth.enabled",

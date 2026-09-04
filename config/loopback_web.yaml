@@ -29,8 +29,6 @@ web_console:
   port: 8082
   probes_include_details: true
   realm: OpenMux
-  static_dir: static
-  template_dir: templates/web_console/
   tls_autogen: false
   use_tls: false
 web_status:

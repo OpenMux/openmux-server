@@ -80,8 +80,15 @@ def test_login_page_shows_server_version(monkeypatch):
     import openmux.server.web_console as wc
 
     adapter = _make_adapter(0)
-    # tests/ -> repo root, so templates live at <repo>/templates/web_console
-    tdir = Path(__file__).resolve().parents[1] / "templates" / "web_console"
+    # Templates ship inside the package (openmux/server/webui).
+    tdir = (
+        Path(__file__).resolve().parents[1]
+        / "openmux"
+        / "server"
+        / "webui"
+        / "templates"
+        / "web_console"
+    )
     adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
 
     monkeypatch.setattr(wc, "_get_dist_version", lambda: "9.8.7.post3+gabc1234.d20260101")
@@ -97,7 +104,14 @@ def test_login_page_shows_server_version(monkeypatch):
 def test_login_page_shows_motd():
     from jinja2 import Environment, FileSystemLoader
 
-    tdir = Path(__file__).resolve().parents[1] / "templates" / "web_console"
+    tdir = (
+        Path(__file__).resolve().parents[1]
+        / "openmux"
+        / "server"
+        / "webui"
+        / "templates"
+        / "web_console"
+    )
     motd = "Planned maintenance\nSaturday 22:00-02:00"
 
     adapter = _make_adapter(0, motd=motd)
@@ -125,7 +139,14 @@ def test_login_page_never_shows_logged_in_motd():
     """The logged-in MOTD may hold sensitive text; it must not leak pre-auth."""
     from jinja2 import Environment, FileSystemLoader
 
-    tdir = Path(__file__).resolve().parents[1] / "templates" / "web_console"
+    tdir = (
+        Path(__file__).resolve().parents[1]
+        / "openmux"
+        / "server"
+        / "webui"
+        / "templates"
+        / "web_console"
+    )
     li_motd = "Internal detail: rack B42, PSU 2 failing"
 
     adapter = _make_adapter(0, logged_in_motd=li_motd)
@@ -218,7 +239,14 @@ def test_render_about_shows_logged_in_user():
     """The About page shows the caller's username, permission, and groups."""
     from jinja2 import Environment, FileSystemLoader
 
-    tdir = Path(__file__).resolve().parents[1] / "templates" / "web_console"
+    tdir = (
+        Path(__file__).resolve().parents[1]
+        / "openmux"
+        / "server"
+        / "webui"
+        / "templates"
+        / "web_console"
+    )
     adapter = _make_adapter(0)
     adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
 
