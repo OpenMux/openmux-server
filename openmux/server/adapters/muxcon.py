@@ -116,7 +116,7 @@ from ...common.federation_types import (
 )
 from ..muxcon_protocol import MuxConProtocolHandler
 from .base_adapter import AdapterCapability, BaseGenericAdapter
-from .lifecycle import PortLifecycleEvent, PortState
+from .lifecycle import PortLifecycleEvent, PortState, derive_port_readiness
 
 
 @dataclass
@@ -644,6 +644,17 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         Echo loop avoided: each peer only relays status changes for ports it
         owns locally, and the receiver only relays further UPSTREAM.
         """
+        # Readiness (issue #68): read from the local wrapper snapshot so the
+        # frame carries the origin-derived value. Best-effort; empty when the
+        # port has no snapshot (older peers ignore the field either way).
+        readiness = ""
+        try:
+            local_port = self.main_port_manager.ports.get(port_name) if self.main_port_manager else None
+            local_status = local_port.get_status() if local_port and hasattr(local_port, "get_status") else None
+            if isinstance(local_status, dict):
+                readiness = local_status.get("readiness") or ""
+        except Exception:
+            readiness = ""
         for cid, conn in list(self.connections.items()):
             if not self._is_conn_authenticated(cid):
                 continue
@@ -654,7 +665,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             peer_server_id = conn.get("server_id")
             if peer_server_id and peer_server_id == self.server_id:
                 continue
-            body = f"PORT_STATUS:{port_name}\n{json.dumps({'status_message': status_message or ''}, separators=(',', ':'))}"
+            # Body is one JSON line; the readiness key is additive — older
+            # peers ignore it (same tolerance convention as status_message).
+            body = f"PORT_STATUS:{port_name}\n{json.dumps({'status_message': status_message or '', 'readiness': readiness}, separators=(',', ':'))}"
             try:
                 seq = self._next_frame_seq(cid)
                 frame = self.proto.create_control_frame(0, seq, body)
@@ -663,10 +676,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 self.logger.debug(f"[{cid}] Failed to send PORT_STATUS frame for {port_name}", exc_info=True)
 
     @staticmethod
-    def _parse_port_status_frame(payload: str) -> Optional[Tuple[str, str]]:
+    def _parse_port_status_frame(payload: str) -> Optional[Tuple[str, str, str]]:
         """Parse an inbound ``PORT_STATUS:<port>`` control frame body.
 
-        Returns (port_name, status_message) or None on malformed input.
+        Returns (port_name, status_message, readiness) or None on malformed
+        input. readiness is empty when the sender predates the field.
         """
         lines = payload.split("\n")
         if not lines or not lines[0].startswith("PORT_STATUS:"):
@@ -675,10 +689,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         if len(lines) < 2 or not lines[1].strip():
             return None
         try:
-            msg = json.loads(lines[1]).get("status_message") or ""
+            body = json.loads(lines[1])
+            msg = body.get("status_message") or ""
+            readiness = body.get("readiness") or ""
         except Exception:
             return None
-        return port_name, str(msg)
+        return port_name, str(msg), str(readiness)
 
     async def _handle_port_status_frame(self, conn_id: str, payload: str) -> None:
         """Handle an inbound ``PORT_STATUS:`` control frame from a peer.
@@ -694,7 +710,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         if parsed is None:
             self.logger.debug(f"[{conn_id}] Malformed PORT_STATUS frame")
             return
-        port_name, status_message = parsed
+        port_name, status_message, readiness = parsed
         peer_key = self._derive_peer_key_from_conn_id(conn_id)
         proxy = (self._peer_proxies.get(peer_key) or {}).get(port_name)
         if proxy is None:
@@ -705,6 +721,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             if meta is not None:
                 try:
                     meta.status_message = status_message or None
+                except Exception:
+                    pass
+                try:
+                    meta.readiness = readiness or None
                 except Exception:
                     pass
         except Exception:
@@ -3622,6 +3642,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 # Offline reason (issue #62): cached so a peer that is
                                 # down stays annotated after a full-reload cold start.
                                 status_msg = getattr(meta, "status_message", None)
+                                readiness_cached = getattr(meta, "readiness", None)
                             except Exception:
                                 pass
                         ent[pname] = {
@@ -3635,6 +3656,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             "read_write_groups": rw_groups,
                             "read_only_groups": ro_groups,
                             "status_message": status_msg,
+                            "readiness": readiness_cached,
                         }
                     except Exception:
                         continue
@@ -3700,6 +3722,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             read_only_groups=rec.get("read_only_groups") or None,
                             # Offline reason (issue #62): restored from cache.
                             status_message=rec.get("status_message") or None,
+                            # Readiness (issue #68): restored from cache.
+                            readiness=rec.get("readiness") or None,
                         )
                         proxy = self.RemotePortProxy(self, peer_key, pname, metadata)
                         proxy.is_connected = bool(rec.get("connected", False))
@@ -3856,6 +3880,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 # remote status page / info panel can surface the same text the
                 # origin shows (empty string stays None and is omitted from the wire).
                 status_message = p.get("status_message") or None
+                # Readiness (issue #68): derived by the wrapper snapshot; absent
+                # on pre-fix local states, so it is simply omitted from the wire.
+                readiness = p.get("readiness") or None
                 # Optional serial details for local serial or loopback ports
                 serial_cfg = None
                 line_status = None
@@ -3910,6 +3937,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         read_write_groups=rw_groups,
                         read_only_groups=ro_groups,
                         status_message=status_message,
+                        readiness=readiness,
                     )
                 )
 
@@ -5848,6 +5876,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # Offline reason (issue #62): forwarded from the origin over the wire;
         # missing on older peers (treated as None).
         status_msg = pd.get("status_message") or None
+        # Readiness (issue #68): forwarded from the origin; missing on older peers.
+        readiness_msg = pd.get("readiness") or None
 
         metadata = PortMetadata(
             name=name,
@@ -5864,6 +5894,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             read_write_groups=rw_groups,
             read_only_groups=ro_groups,
             status_message=status_msg,
+            readiness=readiness_msg,
         )
 
         # Reuse existing proxy if present to preserve clients and sessions
@@ -6377,18 +6408,26 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 # Offline reason (issue #62): surfaced from the (live) port metadata
                 # so federated peers show the same reason text the origin advertises.
                 status_message = ""
-                try:
-                    meta = getattr(self, "metadata", None)
-                    if meta is not None:
-                        status_message = getattr(meta, "status_message", "") or ""
-                except Exception:
-                    status_message = ""
+                meta = getattr(self, "metadata", None)
+                if meta is not None:
+                    status_message = getattr(meta, "status_message", "") or ""
                 # A down muxcon link takes precedence over the origin's last
                 # advertised reason: the most useful fact right now is that the
                 # link is down, not the device state from before the outage.
                 link_reason = getattr(self, "link_reason", "") or ""
                 if link_reason:
                     status_message = link_reason
+                # Readiness (issue #68): prefer the value forwarded from the
+                # origin (via the #62 PORT_STATUS channel or PORTS:FEDERATED
+                # metadata). A down link overrides a stale origin value (same
+                # precedence as the reason above). Fall back to deriving
+                # locally from the link state and merged reason when absent
+                # (older peers send no readiness).
+                ready = ""
+                if not link_reason:
+                    ready = getattr(meta, "readiness", None) or "" if meta is not None else ""
+                if not ready:
+                    ready = derive_port_readiness(self.is_connected, status_message)
                 return {
                     "name": self.name,
                     "description": self.description,
@@ -6398,6 +6437,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     "adapter_type": "remote_muxcon",
                     "remote_connection_id": self.connection_id,
                     "remote_port_name": self.remote_port_name,
+                    "readiness": ready,
                     **({"status_message": status_message} if status_message else {}),
                 }
             except Exception:  # justification: status synthesis best-effort for UI; return minimal info

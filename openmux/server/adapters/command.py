@@ -818,6 +818,14 @@ class CommandPort:
                     break
                 self.restart_count += 1
                 delay = self.restart_delay * (self.restart_backoff ** (self.restart_count - 1))
+                # Restart gap (issue #68): auto-restart in progress is "stays
+                # red", not a healthy idle rest. Surface the reason the process
+                # is down (with the retry delay) until the respawn succeeds;
+                # _spawn_process clears the message on success. A zero-delay
+                # config still flashes it briefly for state consistency.
+                self._set_status_message(
+                    f"Restarting in {delay:.1f}s (exit code {exit_code})" if delay else f"Restarting (exit code {exit_code})"
+                )
                 if self.client_count > 0:
                     if clean_exit:
                         detail = f"finished (code 0)"

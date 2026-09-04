@@ -36,12 +36,23 @@
             {% if adapter %}<span class="tag tiny">{{ adapter }}</span>{% else %}<span class="muted">—</span>{% endif %}
           </td>
         </tr>
-        {% if p.status_message %}
+        {# Readiness (issue #68): derived; prefer the snapshot value, else derive.
+           Offline = status_message set; idle = no reason and not running; else active. #}
+        {% set rdy = p.readiness if p.readiness is defined else ('offline' if p.status_message else ('idle' if not conn else 'active')) %}
+        {% if rdy == 'offline' %}
           <tr>
             <th>Status</th>
             <td>
               <span class="tag tiny bad">offline</span>
               <span class="muted">{{ p.status_message }}</span>
+            </td>
+          </tr>
+        {% elif rdy == 'idle' %}
+          <tr>
+            <th>Status</th>
+            <td>
+              <span class="tag tiny warn">idle</span>
+              <span class="muted">resumes on next client or Enter</span>
             </td>
           </tr>
         {% endif %}
@@ -169,7 +180,9 @@
         </td>
         <td>
           {% set conn = (p.connected if ('connected' in p) else (p.is_running or false)) %}
-          <span class="tag {% if conn %}ok{% else %}bad{% endif %}">{{ conn and 'connected' or 'down' }}</span>
+          {# Readiness (issue #68): green running, yellow healthy-idle, red failure. #}
+          {% set rdy = p.readiness if p.readiness is defined else ('offline' if p.status_message else ('idle' if not conn else 'active')) %}
+          <span class="tag {% if rdy == 'active' %}ok{% elif rdy == 'idle' %}warn{% else %}bad{% endif %}">{{ rdy == 'active' and 'connected' or (rdy == 'idle' and 'idle' or 'down') }}</span>
           {% if p.status_message %}
             <span class="tag bad" title="{{ p.status_message }}">offline</span>
           {% endif %}
@@ -310,7 +323,8 @@
                     </td>
                   <td class="muted">{{ (local.description if local else rp.description) or '' }}</td>
                   <td>
-                    <span class="tag {% if rp.connected %}ok{% else %}bad{% endif %}">{{ rp.connected and 'connected' or 'down' }}</span>
+                    {% set rdy = rp.readiness if rp.readiness is defined else ('offline' if rp.status_message else ('idle' if not rp.connected else 'active')) %}
+                    <span class="tag {% if rdy == 'active' %}ok{% elif rdy == 'idle' %}warn{% else %}bad{% endif %}">{{ rdy == 'active' and 'connected' or (rdy == 'idle' and 'idle' or 'down') }}</span>
                   </td>
                   <td>{{ rp.federation_type or '' }}</td>
                   <td>{{ rp.max_rw_users or '' }}</td>

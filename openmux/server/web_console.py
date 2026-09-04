@@ -39,6 +39,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from aiohttp import web
 
 from openmux.server.access_control import capacity_display_label, capacity_to_wire, holder_id_short
+from openmux.server.adapters.lifecycle import READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE
 from openmux.server.data_logger import DataLogger
 from openmux.server.port_utils import natural_sort_key, safe_get_port
 from openmux.server.web_plugins import ADAPTER_APP_KEY
@@ -2456,6 +2457,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
             # next frame (e.g. when a port recovers). Older peers simply
             # ignore the extra empty field on the wire.
             meta["status_message"] = info.get("status_message") or ""
+            # Readiness (issue #68): the derived active/idle/offline value so
+            # the console can recolor the banner/info panel live without a
+            # full re-render. Older clients ignore the extra key.
+            readiness = info.get("readiness")
+            if readiness in (READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE):
+                meta["readiness"] = readiness
             payload = "OMXCTRL " + json.dumps(meta, separators=(",", ":"))
             for cid in list(subs):
                 try:
@@ -2576,6 +2583,20 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                     "serial_config": serial_cfg,
                                     "line_status": line_status,
                                 }
+                                # Status text (issue #62) + derived readiness (issue #68) so
+                                # the federated catalog row can color idle vs down. The proxy
+                                # snapshot already merges link_reason over the origin reason
+                                # and derives a link-aware readiness.
+                                try:
+                                    psnap = proxy.get_status() if hasattr(proxy, "get_status") else {}
+                                    if isinstance(psnap, dict):
+                                        if psnap.get("status_message"):
+                                            prepped["status_message"] = psnap.get("status_message")
+                                        if psnap.get("readiness"):
+                                            prepped["readiness"] = psnap.get("readiness")
+                                except Exception:
+                                    pass
+                                ports_registered.append(prepped)
                                 ports_registered.append(prepped)
                                 # Track per-name metadata for later enrichment of ports_summary
                                 meta_by_port[pname] = {
@@ -3364,6 +3385,26 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                         lr = getattr(port, "link_reason", None)
                                         if lr:
                                             info["status_message"] = lr
+                                    except Exception:
+                                        pass
+                                    # Readiness (issue #68): RemotePortProxy.get_status()
+                                    # already derives a link-aware value, so only fill
+                                    # in when it is absent (older code paths / older
+                                    # peers that send no readiness and a minimal
+                                    # snapshot).
+                                    try:
+                                        existing_readiness = info.get("readiness")
+                                        if existing_readiness not in (
+                                            READINESS_ACTIVE,
+                                            READINESS_IDLE,
+                                            READINESS_OFFLINE,
+                                        ):
+                                            _alive = bool(info.get("connected", getattr(port, "is_connected", False)))
+                                            info["readiness"] = (
+                                                READINESS_OFFLINE
+                                                if info.get("status_message")
+                                                else (READINESS_IDLE if not _alive else READINESS_ACTIVE)
+                                            )
                                     except Exception:
                                         pass
                                 except Exception:

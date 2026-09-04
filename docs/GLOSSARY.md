@@ -32,6 +32,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Active | The port is ready and accepts data. | connected, online |
 | Degraded | The port exists but works with reduced function (for example, a disconnected device that retries). | — |
 | Offline | The UI tag shown for a port that is not connected and carries a reason (a failed start, a dropped connection, or a blocked start such as a duplicate serial device). The reason text is always shown next to it. | unstartable (use offline for every port type) |
+| Idle | The UI tag shown for a port that is healthy but intentionally not running. The port resumes on the next client or Enter. The tag is yellow. It is derived from the port's liveliness and the absence of an offline reason, and it is distinct from `PortState`. | resting (use idle), inactive (use idle) |
 | Destroying | `stop()` is running; cleanup is not done yet. | — |
 | Destroyed | The port is stopped. Do not reuse the instance. | removed, dead |
 

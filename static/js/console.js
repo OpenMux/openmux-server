@@ -375,6 +375,10 @@ function renderInfo(p) {
   rows.push(`<tr><th>Description</th><td>${valueOrDash(p.description)}</td></tr>`);
   if (p.status_message) {
     rows.push(`<tr><th>Status</th><td><span class=\"tag bad\">offline</span> <span class=\"muted\">${escapeHtml(String(p.status_message))}</span></td></tr>`);
+  } else if (p.readiness === 'idle') {
+    // Readiness (issue #68): healthy but intentionally not running (resumes on
+    // next client or Enter). No reason text — the idle state itself is the info.
+    rows.push(`<tr><th>Status</th><td><span class=\"tag warn\">idle</span> <span class=\"muted\">resumes on next client or Enter</span></td></tr>`);
   }
   rows.push(`<tr><th>Connected</th><td>${connected ? '<span class=\"tag ok\">yes</span>' : '<span class=\"tag bad\">no</span>'} &nbsp; <span class=\"tag\">${clientMode}</span></td></tr>`);
   // Serial configuration rows
@@ -1504,6 +1508,7 @@ function connectSelected() {
           applyIf('line_status');
           applyIf('server_chain');
           applyIf('last_seen');
+          applyIf('readiness');
           // status_message (issue #57): the server omits the key when the port
           // is healthy, so drop it explicitly when a snapshot clears it.
           if (Object.prototype.hasOwnProperty.call(msg, 'status_message')) {
@@ -1529,9 +1534,15 @@ function connectSelected() {
                     // Issue #62: show the live reason (e.g. "Connection refused by
                     // host:port") as a second muted line when we have one, so the
                     // banner explains *why* the port is down.
+                    // Issue #68: a healthy-but-not-running (idle) port is not a
+                    // failure — use distinct wording and no reason line.
                     const p = ports.find(x => x.name === currentPort()) || null;
-                    const reason = (p && p.status_message ? p.status_message : null);
-                    showBanner('Port is disconnected on server. Data will resume when it becomes available.', 'warn', reason);
+                    if (p && p.readiness === 'idle') {
+                      showBanner('Port is healthy but not running. Data will resume when it starts.', 'warn');
+                    } else {
+                      const reason = (p && p.status_message ? p.status_message : null);
+                      showBanner('Port is disconnected on server. Data will resume when it becomes available.', 'warn', reason);
+                    }
                   }
                   portDownTimer = null;
                 }, 1000);

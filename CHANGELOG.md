@@ -105,6 +105,12 @@ Changes since v1.0.2 (2026-08-27).
   - A Full Reload still rebinds. The Config Editor tags the capacity and timeout fields `soft` and the rest `full`.
   - No config change.
 - **Serial port configuration is unified internally (issue #65).** A serial port no longer nests its settings in a separate `SerialPortConfig` object next to the port. The port object keeps one flat set of settings, in the same shape as the loopback, command, and TCP-initiator ports. There is one place to read and write each value, so a soft-reload update and the access ladder can no longer see two copies of the same field. No config change. No user-visible behavior change.
+- **Ports show a derived readiness (issue #68).** The status page and web console now show three readiness values: green `connected` (running), yellow `idle` (healthy, intentionally not running), and red `offline` (a reason is set). `idle` is derived at the snapshot point from the port's liveliness and the absence of an offline reason; it is not a `PortState` value and is not stored.
+  - A command port after a clean code-0 exit with `auto_restart` off shows `idle`, not `offline` and not green. It resumes from the same Enter-to-respawn. A fresh `spawn_on_demand` port before its first spawn also shows `idle`.
+  - A TCP-initiator on-demand rest (`connect_on_demand` + `disconnect_when_idle` + last client left) now shows `idle`, not `offline` (regression fix from #62). The intentional disconnect no longer sets `status_message = "Disconnected from host:port"`. A remote-closed or read-error disconnect still sets the reason and stays red.
+  - A command port that has exhausted `max_restarts` still shows `offline` with the reason. A command port mid-`auto_restart` (the restart delay before a respawn) shows `offline` with `Restarting in Ns (exit code C)`.
+  - A federated port shows the origin's derived readiness, forwarded over the existing #62 `PORT_STATUS:` channel and inside `PORTS:FEDERATED`. A down muxcon link still takes precedence and shows red, because the freshest fact is the link outage.
+  - Mixed-version peers and clients ignore the new field. No wire-protocol version bump, no config change.
 
 ### Web console and observability
 

@@ -41,6 +41,69 @@ class PortState(Enum):
     DESTROYED = "destroyed"  # Port removed and cleaned up
 
 
+#: The three readiness values, in display order (issue #68). Readiness is a
+#: derived *view* of a port's liveliness plus its offline reason; it is not a
+#: stored state and is intentionally distinct from :class:`PortState` (the
+#: create/destroy/active lifecycle axis).
+READINESS_ACTIVE = "active"  # running and serving (green "connected")
+READINESS_IDLE = "idle"  # healthy, intentionally not running (yellow "idle")
+READINESS_OFFLINE = "offline"  # failed; needs attention (red "offline")
+
+
+def port_is_alive(port: Any, /) -> bool:
+    """Return whether a port's underlying resource is currently up (issue #68).
+
+    This is the "alive" input to :func:`derive_port_readiness`. It reads the
+    first available liveness signal on ``port`` in a deliberate order so it
+    works for every local adapter without an adapter-type branch:
+
+    - ``process_active`` (command): a healthy-but-resting command port keeps
+      ``is_connected = True`` while ``process_active`` is ``False``, so the
+      process flag must win or a resting shell would read "active".
+    - ``is_connected`` (serial, tcp_initiator, loopback, federated proxy).
+    - ``is_running`` (fallback for ports that expose only that).
+
+    Args:
+        port: A port object exposing one or more of the attributes above.
+
+    Returns:
+        bool: ``True`` when the underlying resource is up/running.
+    """
+    for attr in ("process_active", "is_connected", "is_running"):
+        value = getattr(port, attr, None)
+        if isinstance(value, bool):
+            return value
+    return False
+
+
+def derive_port_readiness(alive: bool, status_message: Optional[str]) -> str:
+    """Derive a port's readiness from liveliness and its offline reason.
+
+    Single source of truth for the three readiness values (issue #68). The
+    values are derived at the status-snapshot point and are never stored:
+
+    - ``offline`` when ``status_message`` is set (the reason is shown);
+    - ``idle`` when there is no reason and the port is not currently running;
+    - ``active`` otherwise.
+
+    A non-empty ``status_message`` always wins: it is the discriminator that
+    keeps a genuinely-failing port red. "No reason + not running" is exactly
+    the healthy-but-idle case.
+
+    Args:
+        alive: Whether the underlying process/connection is up now.
+        status_message: The port's offline reason, or empty/None when healthy.
+
+    Returns:
+        str: One of READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE.
+    """
+    if status_message:
+        return READINESS_OFFLINE
+    if not alive:
+        return READINESS_IDLE
+    return READINESS_ACTIVE
+
+
 class DynamicPortManager:
     """Manage dynamic port lifecycle for a single adapter.
 

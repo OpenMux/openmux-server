@@ -97,6 +97,39 @@ CONFIGURED → CREATING → ACTIVE → DESTROYING → DESTROYED
 | `DESTROYING` | `stop()` is executing; cleanup in progress. |
 | `DESTROYED` | Port is fully stopped; instance must not be reused. |
 
+Readiness is a separate axis (see below).
+
+## Readiness (derived, not stored)
+
+Readiness is the UI-facing readiness value of a port. The web console and
+status page show one of three values:
+
+| Readiness | Meaning | Derived when |
+|---|---|---|
+| `active` | Running and serving (green "connected"). | The resource is up and no offline reason is set. |
+| `idle` | Healthy, intentionally not running (yellow "idle"). It resumes on the next client or Enter. | No offline reason is set and the resource is not up now. |
+| `offline` | Failed; needs attention (red "offline" + reason). | An offline reason (`status_message`) is set. |
+
+The value is derived from `(alive, status_message)` at the status-snapshot
+point by `derive_port_readiness()` in
+`openmux.server.adapters.lifecycle`. It is not stored and is not a `PortState`
+value. `PortState` is the lifecycle axis; readiness is the readiness axis.
+
+- `alive` comes from `port_is_alive(port)`. It reads `process_active`, then
+  `is_connected`, then `is_running`, and returns the first boolean found.
+  Command ports must keep `process_active` authoritative: a resting shell keeps
+  `is_connected = True` while `process_active` is `False`.
+- `status_message` is the #62 offline reason.
+- A non-empty `status_message` always wins. A genuinely failing port stays red.
+- An intentional idle rest sets no reason. For example: a command port after a
+  clean code-0 exit with `auto_restart` off, or a TCP-initiator port after an
+  intentional `disconnect_when_idle`. Its readiness is `idle`.
+- Federated peers see the origin's derived readiness via the `PORT_STATUS:`
+  control channel (see the #62 relay). A down muxcon link overrides the
+  origin's last value, because the freshest fact is the link outage.
+- The per-port status snapshot (`get_status()` on the `UnifiedPortWrapper`,
+  and `RemotePortProxy.get_status()`) includes a derived `readiness` key.
+
 ---
 
 ## Data Routing — PortManager-Only Invariant

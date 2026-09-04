@@ -287,7 +287,13 @@ class TcpInitiatorPort:
             self.logger.debug("Meta notify failed for %s", self.name, exc_info=True)
 
     async def _disconnect(self) -> None:
-        """Close the active TCP connection and reset stream state."""
+        """Close the active TCP connection and reset stream state.
+
+        Used only for intentional rest (server stop, idle disconnect); it
+        clears the status message so the port derives "idle" (yellow) rather
+        than "offline" (issue #68). Unintended closes set their own reason in
+        _read_loop and stay red.
+        """
         if not self.is_connected:
             return
         try:
@@ -302,7 +308,7 @@ class TcpInitiatorPort:
             self.is_connected = False
             self.reader = None
             self.writer = None
-            self._set_status_message(f"Disconnected from {self.host}:{self.port}")
+            self._set_status_message("")
 
     async def _read_loop(self) -> None:
         """Continuously read inbound data until connection closes or cancelled."""

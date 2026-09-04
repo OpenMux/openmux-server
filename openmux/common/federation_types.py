@@ -197,6 +197,10 @@ class PortMetadata:
             refuses, or a command whose process exited). Empty/None omits the
             field so federated peers only see it when the origin is reporting
             a real reason (issue #62).
+        readiness: Optional readiness derived by the origin ("active" / "idle"
+            / "offline", issue #68). Carried over federation so a federated peer
+            distinguishes a healthy-but-not-running origin port (idle) from a
+            failed one. Absent on older peers; receivers derive a fallback.
     """
 
     name: str
@@ -237,6 +241,11 @@ class PortMetadata:
     # muxcon federation so a federated peer can display the same status text
     # as the origin. Mixed-version peers: older peers simply ignore the field.
     status_message: Optional[str] = None
+
+    # Origin-derived readiness (issue #68): one of "active" / "idle" /
+    # "offline". Set by the origin and re-published by mid-chain nodes so the
+    # peer sees the origin's view of the port; missing on older peers.
+    readiness: Optional[str] = None
 
     def get_display_name(self) -> str:
         """Return the user‑facing port name.
@@ -290,6 +299,7 @@ class PortMetadata:
             **({"read_write_groups": self.read_write_groups} if self.read_write_groups else {}),
             **({"read_only_groups": self.read_only_groups} if self.read_only_groups else {}),
             **({"status_message": self.status_message} if self.status_message else {}),
+            **({"readiness": self.readiness} if self.readiness else {}),
         }
 
     def to_federation_dict(self) -> Dict[str, Any]:
@@ -318,4 +328,5 @@ class PortMetadata:
             **({"read_write_groups": self.read_write_groups} if self.read_write_groups else {}),
             **({"read_only_groups": self.read_only_groups} if self.read_only_groups else {}),
             **({"status_message": self.status_message} if self.status_message else {}),
+            **({"readiness": self.readiness} if self.readiness else {}),
         }

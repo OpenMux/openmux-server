@@ -20,6 +20,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from openmux.server.access_control import write_capacity
+from openmux.server.adapters.lifecycle import derive_port_readiness, port_is_alive
 from openmux.server.data_logger import DataLogger
 from openmux.server.port_utils import natural_sort_key
 
@@ -277,6 +278,16 @@ class PortManager:
                     extra = getattr(self.unified_port, "status_snapshot")
                     if isinstance(extra, dict):
                         status.update(extra)
+                # Readiness (issue #68): derived at snapshot time — "offline" when
+                # the adapter set a status_message (reason shown), "idle" when no
+                # reason and the port is not currently running, else "active".
+                try:
+                    status["readiness"] = derive_port_readiness(
+                        port_is_alive(self.unified_port),
+                        status.get("status_message"),
+                    )
+                except Exception:
+                    pass
                 return status
 
             def add_client(self, client: Any) -> None:
