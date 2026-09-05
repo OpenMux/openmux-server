@@ -52,7 +52,8 @@ version, runtime details, and the hardware identity from
 ## 3. Local control with `openmuxctl`
 
 `openmuxctl` talks to the running server through a Unix domain socket
-(`server.control_socket` in your config, for example `logs/openmux.sock`).
+(`logs/openmux.sock` for a dev run; `openmux.sock` inside the run dir,
+packaged `/run/openmux` - see [LOCATIONS.md](LOCATIONS.md)).
 
 ```sh
 python -m openmux.cli.openmuxctl status
@@ -169,8 +170,8 @@ muxcon:
 ```
 
 `tls_tofu: true` is Trust-On-First-Use: the initiator stores the peer's
-certificate fingerprint on first connect (under `muxcon.tls_dir`,
-`known_peers.yaml`) and rejects a different certificate later. For
+certificate fingerprint on first connect (in `<state dir>/muxcon/known_peers.yaml`)
+and rejects a different certificate later. For
 production, prefer real certificates and `ssl_verify: true`, or pin an exact
 fingerprint with `tls_pin_fingerprint: "sha256:<hex>"`.
 

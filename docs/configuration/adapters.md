@@ -388,8 +388,8 @@ Identity note:
 - `ssl_ca_cert`: CA for client cert verification (optional)
 - `require_client_cert`: Require client certificate (default: false)
 - `tls_autogen`: Autogenerate self-signed cert if missing (default: true)
-- `tls_dir`: Directory for generated certs and TOFU file (default: `~/.openmux/muxcon`)
-- `tls_known_peers_path`: Override path to known_peers file
+- Generated certs and the TOFU peers file store in `<state dir>/muxcon/`
+  (see [../LOCATIONS.md](../LOCATIONS.md))
  - `interface` (alias: `bind_interface`): Bind the listening socket to a specific network interface. macOS uses interface index (IPv4/IPv6); Linux uses `SO_BINDTODEVICE` (requires privileges). If not supported, ignored with a warning.
  - `fwmark` (aliases: `so_mark`, `routing_mark`): Linux-only socket mark applied to the listener. Useful with policy routing; requires CAP_NET_ADMIN/root.
 
@@ -430,7 +430,7 @@ Each initiator resolves one verification mode per peer. The first match wins:
 In the "pin", "tofou", and "off" modes the TLS-level check is relaxed (`CERT_NONE`). The post-handshake fingerprint gate protects the link. This is what lets a default initiator reach a default listener, whose autogen cert is self-signed.
 
 Behavior:
-- ToFU stores `host:port` to `sha256:<hex>` in the known peers file (default `<tls_dir>/known_peers.yaml`; override with `tls_known_peers_path`). The first connect is unverified and is logged at WARNING. After the first connect, a different certificate is rejected.
+- ToFU stores `host:port` to `sha256:<hex>` in `<state dir>/muxcon/known_peers.yaml`. The first connect is unverified and is logged at WARNING. After the first connect, a different certificate is rejected.
 - A pin requires an exact fingerprint match (case-insensitive).
 - A peer that presents no certificate is rejected while a pin or ToFU is active.
 - `ssl_verify: false` disables only the TLS-level check. A configured pin or ToFU gate still protects the link.
@@ -506,8 +506,8 @@ Supported keys:
 - `logged_in_motd`: Message of the day for authenticated users. Shown at the top of the status page. May hold sensitive text; never shown before login. Multiline; hidden when blank (default: not set). Pick up changes with a soft reload.
 - `base_path`: URL prefix for all routes (default: `/`)
 - `respect_forwarded_prefix`: Honor `X-Forwarded-Prefix` headers from reverse proxies
-- `static_dir`: Directory for static assets (xterm, css, js)
-- `template_dir`: Directory for Jinja2 templates (optional)
+- Static assets (xterm, css, js) and templates are inside the python
+  package (`openmux/server/webui/`); there are no directory keys
 - `session_ttl_seconds`: Browser session lifetime in seconds (default: 28800)
 - `enable_probes`: Register health endpoints `/healthz`, `/livez`, `/readyz` (default: true)
 - `probes_include_details`: Include extended JSON in probe responses (default: false)
@@ -523,15 +523,13 @@ TLS/HTTPS keys:
 - `ssl_cert`: Path to PEM-encoded server certificate (required if `use_tls` and `tls_autogen: false`)
 - `ssl_key`: Path to PEM-encoded server private key (required if `use_tls` and `tls_autogen: false`)
 - `tls_autogen`: Autogenerate a self-signed EC (P-256) cert + key on first run if missing (default: true)
-- `tls_dir`: Directory for generated cert/key (default: `~/.openmux/web_console`)
+- Generated cert/key store in `<state dir>/web_console/` (see [../LOCATIONS.md](../LOCATIONS.md); there is no `tls_dir` key)
 
 Example (self-signed, autogen):
 ```yaml
 web_console:
   use_tls: true
   tls_autogen: true
-  # Optional custom location for generated files
-  tls_dir: ~/.openmux/web_console
 ```
 
 Example (bring-your-own cert/key):

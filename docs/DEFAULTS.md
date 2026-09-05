@@ -12,8 +12,7 @@ Top-level sections
 server
 - server.id: no default (runtime may fall back to hostname in muxcon)
 - server.description: no default
-- server.control_socket: logs/openmux.sock (env override: OPENMUX_CTL_SOCK)
-- server.pidfile: logs/openmux.pid (env override: OPENMUX_PIDFILE)
+- control socket and pidfile: `openmux.sock` / `openmux.pid` inside the run dir — no config keys; see [LOCATIONS.md](LOCATIONS.md)
 
 authentication
 - At least one of users, api_keys, public_keys, or external_auth must be provided.
@@ -37,8 +36,8 @@ security.yaml (runtime defaults from openmux/server/security_policy.py; the file
 logging (runtime defaults in _setup_basic_logging in openmux/server/main.py)
 - logging.level: WARNING at process start; overridden by -v/-vv on the CLI or by the config value, whichever comes last
 - logging.console: true (stdout handler can be turned off with false)
-- logging.log_dir: logs (cwd-relative; the base directory for all server logs, including the ports/ subdirectory)
-- logging.file: none (the main aggregate log goes to {log_dir}/openmux.log)
+- log dir: no config key. `OPENMUX_LOG_DIR` (env, then the defaults file, then the systemd `$LOGS_DIRECTORY` variable), else `logs/` cwd-relative (the base directory for all server logs, including the `ports/` subdirectory)
+- logging.file: none (the main aggregate log goes to `{log_dir}/openmux.log`)
 - logging.max_log_size: 10485760 (10 MB, rotation threshold per log file)
 - logging.log_backup_count: 5
 - logging paths apply on SIGHUP/soft reload or full reload; level applies the same way
@@ -148,9 +147,12 @@ muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapte
   - use_tls: true
   - require_client_cert: false
   - tls_autogen: true
-  - tls_dir: ~/.openmux/muxcon
-  - tls_known_peers_path: <tls_dir>/known_peers.yaml
   - interface, fwmark: unset by default
+
+  TLS material (generated certs, known peers, federated cache) stores in
+  `<OPENMUX_STATE_DIR>/muxcon/` (packaged default `/var/lib/openmux/muxcon`,
+  dev `~/.openmux/muxcon`). The `tls_dir` and `tls_known_peers_path` keys
+  are deprecated and ignored.
   - path_pref, path_group: unset by default
 - initiators[*]:
   - host: localhost (if unspecified)
@@ -180,7 +182,7 @@ muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapte
 - federated_cache:
   - federated_cache_enabled: true
   - federated_cache_ttl_sec: 0.0 (disabled by time)
-  - federated_cache_path: <tls_dir>/federated_cache.json
+  - federated cache file: <state dir>/muxcon/federated_cache.json
 
 web_status (runtime defaults from openmux/server/adapters/web_status.py)
 - host: 0.0.0.0
@@ -203,10 +205,11 @@ web_console (runtime defaults from openmux/server/web_console.py)
 - probes_include_details: false (schema default)
 - use_tls: false (schema default)
 - tls_autogen: true (schema default)
-- tls_dir: ~/.openmux/web_console
+- web TLS material stores in `<OPENMUX_STATE_DIR>/web_console/` (the `tls_dir`
+  key is deprecated and ignored)
 - session_ttl_seconds: 28800 (8 hours)
-- static_dir: in-package assets (openmux/server/webui/static) if not set
-- template_dir: in-package templates (openmux/server/webui/templates/web_console) if not set
+- static and template assets are in-package (`openmux/server/webui/`); there
+  are no `static_dir`/`template_dir` keys
 - hardware_info_file: /etc/openmux-hardware (OpenMux hardware identity file; shown on the /about page)
 - ssl_cert, ssl_key: required if use_tls true and tls_autogen false (runtime enforcement)
 - plugins: array of module strings (no default; example includes openmux.server.web_plugins.config_editor)

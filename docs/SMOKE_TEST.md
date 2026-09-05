@@ -45,7 +45,7 @@ Notes
 
 Reload verification (signals)
 
-You can trigger reloads from the CLI without using the UI. The server writes a PID file on startup (default `logs/openmux.pid`, override with `OPENMUX_PIDFILE` env or `server.pidfile` in config).
+You can trigger reloads from the CLI without using the UI. The server writes a PID file on startup at `openmux.pid` inside the run dir (dev run: `logs/openmux.pid`; packaged: `/run/openmux/openmux.pid`; override with the `OPENMUX_RUN_DIR` env or the defaults file - see [LOCATIONS.md](LOCATIONS.md)).
 
 - Soft reload (SIGHUP):
 
@@ -77,7 +77,7 @@ Local control socket and openmuxctl
 
 Phase 2 adds a Unix domain control socket for local commands (status, soft/full reload) and a tiny CLI helper.
 
-- Default socket path: `logs/openmux.sock` (override with env `OPENMUX_CTL_SOCK` or `server.control_socket` in config)
+- Default socket path: `logs/openmux.sock` (dev run) or `/run/openmux/openmux.sock` (packaged); override with `OPENMUX_RUN_DIR` or `OPENMUX_CTL_SOCK`, in the shell or via the defaults file - see [LOCATIONS.md](LOCATIONS.md)
 - Permissions: the server restricts the socket file to `0600` on startup
 
 Quick usage with the helper script:

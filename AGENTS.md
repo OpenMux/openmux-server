@@ -2,7 +2,7 @@
 
 OpenMux is a serial/console "terminal server": a Python asyncio server (`openmux/server/`) that
 exposes serial, loopback, command, and TCP-initiator ports through pluggable adapters, plus a
-CLI/WebSocket client (`openmux/client/`) and an HTML5 web console (`templates/web_console/`).
+CLI/WebSocket client (`openmux/client/`) and an HTML5 web console (web UI assets in `openmux/server/webui/`).
 
 ## Architecture
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full runtime flow, adapter/plugin
@@ -75,7 +75,7 @@ features. Update it as part of the same change:
 - Exception handling & logging policy is strict — read
   [CONTRIBUTING.md](CONTRIBUTING.md) before touching `except Exception` blocks. Silent
   swallows require an inline `# justification: ...` comment.
-- The Config Editor web console (`templates/web_console/config_editor.html.j2`) embeds a large
+- The Config Editor web console (`openmux/server/webui/templates/web_console/config_editor.html.j2`) embeds a large
   inline `<script>` as a single Jinja2 template. There is no JS linter/build step for it, so a
   syntax error (e.g. a stray trailing comma) silently breaks the *entire* script with no visible
   error other than sub-views failing to switch. After editing this file, sanity-check the JS by

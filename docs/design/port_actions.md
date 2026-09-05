@@ -49,8 +49,8 @@ Implementation: `openmux/server/actions/` (`session.py`, `registry.py`,
 `slow_noop.py`, `confirm_probe.py`, `select_probe.py`, `setup_wizard.py`), CLI entry
 point in `scripts/run_action.py`, web plugin in
 `openmux/server/web_plugins/port_actions.py`, console-page UI in
-`templates/web_console/console.html.j2` (Actions button/overlay) and
-`static/js/console.js` (catalog fetch, run form, live WS event log, run
+`openmux/server/webui/templates/web_console/console.html.j2` (Actions button/overlay) and
+`openmux/server/webui/static/js/console.js` (catalog fetch, run form, live WS event log, run
 history), tests in `tests/test_action_*.py` and `tests/test_port_actions_plugin.py`.
 
 The web plugin exposes, per port, `GET .../actions` (catalog filtered by config),
@@ -207,8 +207,8 @@ What's worth adding is a second, additional view for *structured* progress infor
 than a byte stream and doesn't belong inside a terminal's character grid.
 
 **Implemented UI** (see
-[console.html.j2](../../templates/web_console/console.html.j2) and
-[static/js/console.js](../../static/js/console.js)): `#term-container` holds
+[console.html.j2](../../openmux/server/webui/templates/web_console/console.html.j2) and
+[static/js/console.js](../../openmux/server/webui/static/js/console.js)): `#term-container` holds
 two panes side by side, split vertically (left/right, not top/bottom):
 - The existing `#term` xterm pane, unchanged — still shows raw port I/O live via the
   normal broadcast.
@@ -288,7 +288,7 @@ A script should be able to pause and wait on a human, not just on device output 
 label". This is a second, separate channel from the device I/O already covered above.
 
 **Implemented** (`session.py`, `runner.py`, `web_plugins/port_actions.py`,
-`console.html.j2`, `static/js/console.js`):
+`webui/templates/web_console/console.html.j2`, `webui/static/js/console.js`):
 - **Device channel** (already covered): script ⇄ port, via the action's own read-write
   client attachment (`write_to_port` / the action's `client_queues[client_id]`).
 - **Operator channel**: browser ⇄ script, carried over the *same*
@@ -375,8 +375,9 @@ sends this frame after a confirmation prompt.
 
 ## Persisted log
 `DataLogger` resolves a port's log file from either a `port_obj.config["log_file"]`
-override or the default `{log_dir}/ports/{port_name}.log` (config `logging.log_dir`,
-default `logs/`), keyed by whatever `port_name` string is passed to `record()`. No
+override or the default `{log_dir}/ports/{port_name}.log` (the log dir from the
+`OPENMUX_LOG_DIR` env/file/systemd chain, dev default `logs/`), keyed by whatever `port_name`
+string is passed to `record()`. No
 DataLogger change is needed: route action traffic through
 `DataLogger.get().record(port_name=run.log_port_name, ...)` to get a fully separate,
 self-contained transcript file per run
@@ -564,10 +565,11 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
 - **Config Editor web-UI support**: **implemented** — `port_actions` is a recognized
   `config_editor.allowed` section name in `config/security.yaml`, and there is a
   dedicated "Actions" sub-view (mirroring the existing `ports`/`listeners`/`muxcon`/
-  `auth` sub-pages in `templates/web_console/config_editor.html.j2`, `?view=actions`)
+  `auth` sub-pages in `openmux/server/webui/templates/web_console/config_editor.html.j2`,
+  `?view=actions`)
   for editing `actions_dir` and the `action_ports` allow-list table without hand-editing
   YAML. Each `action_ports` entry is edited as one row (action id + comma-separated
-  port list, `*` for all ports) in `static/js/config_editor.js`.
+  port list, `*` for all ports) in `openmux/server/webui/static/js/config_editor.js`.
 
 ## Rollout phases
 1. Script format + `session` expect wrapper + subprocess runner, no UI (CLI-triggerable
@@ -579,7 +581,7 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
    replay; per-run persisted log + run history/audit list. **Implemented**: `active_run`
    in the actions catalog response + structured-event history replay on `/ws/actions/<id>`;
    the persisted per-run log (`{log_dir}/ports/{port}_action_{action_id}_{started}_{run_id}.log`,
-   where `{log_dir}` is the config `logging.log_dir` value, default `logs`),
+where `{log_dir}` is the resolved log dir, dev default `logs`),
    phase 1) and run history list (`GET .../runs`, phase 2) already existed from earlier phases.
 5. Operator-input channel (`session.wait_for_input()`/`confirm()`), force-take parity
    with existing console controls. **Implemented**: `waiting_for_operator` event +

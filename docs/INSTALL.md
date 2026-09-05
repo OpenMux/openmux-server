@@ -271,26 +271,17 @@ openmuxctl reload --soft
 
 ---
 
-## Install xterm.js Assets
+## Web UI Assets
 
-The Web Console depends on locally bundled xterm.js files. Run the helper script before enabling `web_console`:
+The Web Console serves xterm.js and its CSS and JS assets from inside the
+python package (`openmux/server/webui/static/`). The files are pinned,
+committed in the source tree, and shipped in the packages, so there is no
+download at install time and no runtime CDN dependency.
 
-```sh
-scripts/install_xtermjs.py                 # installs into ./static by default
-scripts/install_xtermjs.py --force         # re-download even if files exist
-scripts/install_xtermjs.py --static-dir /var/lib/openmux/static
-```
-
-The script exits with an error if any of `xterm.js`, `xterm.css`, or the fit addon fail to download, so failures are caught during installation—not at runtime.
-
-Recommended approach:
-
-- Use xterm.js as vendored static assets under `static/`.
-- Do not require Node.js or `npm` on deployment targets just to run OpenMux.
-- Do not fetch xterm.js during Debian package builds or at service startup.
-- Pin the xterm.js and `xterm-addon-fit` versions during development or release preparation, then ship those files in the source tree and packages.
-
-This is the lowest-friction option for OpenMux because it keeps packaging simple, avoids network access during installation, and ensures the Web Console works without any runtime CDN dependency.
+`scripts/install_xtermjs.py` exists only to refresh those vendored files when
+you deliberately bump the xterm.js or `xterm-addon-fit` version.
+It exits with an error if any file fails to download, so a bad version bump is
+caught during refresh—not at runtime.
 
 ---
 
@@ -298,9 +289,12 @@ This is the lowest-friction option for OpenMux because it keeps packaging simple
 
 - Use `--config-dir /path/to/config` to load `server.yaml`, `authentication.yaml`, and `security.yaml` from the same directory, or point directly at a server YAML via `-c/--config`.
 - Override sidecar locations explicitly with `-a/--auth-config` and `-s/--security-config`.
-- Control socket and pidfile defaults (can be overridden in config or env):
-  - `server.control_socket`: `logs/openmux.sock` (override with `OPENMUX_CTL_SOCK`)
-  - `server.pidfile`: `logs/openmux.pid` (override with `OPENMUX_PIDFILE`)
+- The control socket and pidfile are `openmux.sock` and `openmux.pid`
+  inside the run dir. The run dir resolves through one chain
+  (`OPENMUX_RUN_DIR` env, then `/etc/defaults/openmux`, then the systemd
+  `$RUNTIME_DIRECTORY` variable, then the dev default `logs/`):
+  packaged `/run/openmux`, dev `logs/`. `OPENMUX_CTL_SOCK` overrides the
+  socket path directly. Full rules: [LOCATIONS.md](LOCATIONS.md).
 
 Example minimal config is provided at `config/loopback_test.yaml`.
 
@@ -331,13 +325,29 @@ Wants=network-online.target
 Type=simple
 User=openmux
 Group=openmux
+EnvironmentFile=-/etc/defaults/openmux
 ExecStart=/usr/bin/openmux-server -c /etc/openmux/server.yaml
-WorkingDirectory=/var/lib/openmux
+RuntimeDirectory=openmux
+StateDirectory=openmux
+LogsDirectory=openmux
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+The `*Directory=` lines are the packaged directory defaults (see
+[LOCATIONS.md](LOCATIONS.md)): systemd creates `/run/openmux`,
+`/var/lib/openmux`, and `/var/log/openmux` owned by the service user
+before it starts, and exports `RUNTIME_DIRECTORY`, `STATE_DIRECTORY`, and
+`LOGS_DIRECTORY`. The server reads the variables at a lower tier than the
+`OPENMUX_*` env and the defaults file, so a value uncommented in
+`/etc/defaults/openmux` relocates the directory. Relocate there, not in the
+unit: a unit-only change moves the server but not `openmuxctl`.
+
+For a non-systemd install the `*Directory=` lines and `EnvironmentFile=` are
+optional: without them the server falls back to the dev defaults
+(`logs/`, `~/.openmux`) or to the `OPENMUX_*` variables you export.
 
 Then:
 

@@ -76,13 +76,13 @@ same-host loopback testing; not recommended over an untrusted network).
 
 TLS is independent of this handshake: `use_tls: true` (the default for
 listeners) wraps the TCP connection before HELLO. `tls_autogen: true`
-generates a self-signed cert/key under `tls_dir` on first start; the cert
+generates a self-signed cert/key under `<state dir>/muxcon/` on first start; the cert
 CN is the node's `server.id` and it has no SAN. TLS failure is fail-closed
 on both sides: a listener that cannot build its TLS context refuses to
 start a plaintext listener, and an initiator that cannot build its TLS
 context retries after backoff instead of dialing in plaintext.
 `tls_tofu: true` on an initiator (Trust-On-First-Use) pins the listener's
-certificate fingerprint into `<tls_dir>/known_peers.yaml` on first connect
+certificate fingerprint into `<state dir>/muxcon/known_peers.yaml` on first connect
 and rejects a different certificate later; `tls_pin_fingerprint` pins an
 exact `sha256:<hex>` up front instead.
 
@@ -179,8 +179,8 @@ syntax (the original design draft's `node_pattern: {regex: ...}` /
 ### 4.2 Federated cache (offline ports survive a restart)
 
 If `federated_cache_enabled: true` (default), a JSON snapshot of every
-remote proxy's minimal metadata is written to `federated_cache_path`
-(default `<tls_dir>/federated_cache.json`) on every change, and reloaded on
+remote proxy's minimal metadata is written to the federated cache file
+(`<state dir>/muxcon/federated_cache.json`) on every change, and reloaded on
 `start()` — so a federated port a peer previously advertised still shows up
 (marked disconnected) after this node restarts, even before the peer
 reconnects. The snapshot also carries each proxy's `status_message`
