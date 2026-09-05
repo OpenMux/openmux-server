@@ -44,8 +44,8 @@ Changes since v1.0.2 (2026-08-27).
   A running server serves the console from the installed package; no
   `template_dir`/`static_dir` config and no repository-root `templates/` or
   `static/` directories are needed anymore. The `Dockerfile` no longer
-  copies those trees, and the Debian package keeps copying them to
-  `/usr/share/openmux` (the server does not read that copy).
+  copies those trees, and the Debian package no longer copies them to
+  `/usr/share/openmux`.
 
 - **`security.yaml` gains `access_default`** (issue #58). Value: `allow` (default) or `deny`. It sets the default posture for console ports that declare no group lists.
   - `deny`: a no-list port admits only admin. A mis-created port is locked, not open.
