@@ -1,9 +1,13 @@
 # OpenMux Server Configuration (Debian package defaults)
+#
+# This file holds server policy only. Filesystem locations are owned by the
+# systemd unit + /etc/defaults/openmux (see openmux-server.service):
+# OPENMUX_LOG_DIR, OPENMUX_RUN_DIR, OPENMUX_STATE_DIR. Web UI assets come
+# from the installed python package; TLS state from OPENMUX_STATE_DIR.
 
 server:
   id: "primary-server"
   description: "Primary OpenMux Server"
-  pidfile: "/run/openmux/openmux.pid"
 
 loopback_ports:
   - name: "loopback"
@@ -44,7 +48,10 @@ web_console:
   realm: OpenMux
   respect_forwarded_prefix: false
   ssl_port: 443
-  static_dir: /usr/share/openmux/static
-  template_dir: /usr/share/openmux/templates/web_console
   tls_autogen: true
   use_tls: true
+
+port_actions:
+  # Writable, user-managed home for port-action scripts (created by the
+  # package; the Config Editor creates action directories here).
+  actions_dir: /etc/openmux/actions

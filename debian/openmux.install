@@ -2,12 +2,12 @@ debian/package-config/authentication.yaml usr/share/openmux/default-config/
 debian/package-config/client.yaml usr/share/openmux/default-config/
 debian/package-config/security.yaml usr/share/openmux/default-config/
 debian/package-config/server.yaml usr/share/openmux/default-config/
+debian/package-config/openmux.defaults /etc/defaults/
 debian/openmux-server.service lib/systemd/system/
-openmux/server/webui/static/logo.svg usr/share/openmux/static/
-openmux/server/webui/static/web_console.css usr/share/openmux/static/
-openmux/server/webui/static/js usr/share/openmux/static/
-openmux/server/webui/static/xterm usr/share/openmux/static/
-openmux/server/webui/static/xterm-addon-fit usr/share/openmux/static/
-openmux/server/webui/templates/web_console/* usr/share/openmux/templates/web_console/
+# The web UI templates and static assets ship with the python package
+# (openmux/server/webui, installed to dist-packages via pyproject
+# package-data); the server resolves them from there. The former
+# /usr/share/openmux webui copies are dropped (T7). The xterm
+# third-party licenses stay in the package docs.
 third_party_licenses/xterm/* usr/share/doc/openmux/third-party-licenses/xterm/
 third_party_licenses/xterm-addon-fit/* usr/share/doc/openmux/third-party-licenses/xterm-addon-fit/

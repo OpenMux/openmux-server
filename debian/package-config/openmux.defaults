@@ -1,0 +1,22 @@
+# OpenMux server filesystem locations.
+#
+# Relocating the OpenMux directories is done here. Uncomment a line and
+# edit the path to override the packaged default; the systemd unit
+# (EnvironmentFile=) and the server itself read this file, one KEY=VALUE
+# per line. A shell environment variable with the same name always beats
+# a value here. openmuxctl reads this file too, so the control socket
+# stays reachable after a move. If the file is removed the service still
+# starts (the unit line starts with '-').
+#
+# Locations only - never put secrets in this file (it must stay 0644
+# readable).
+#
+# Packaged defaults (set by the systemd unit):
+# Logs (aggregate + ports/):            /var/log/openmux
+# Runtime (pidfile, control socket):     /run/openmux
+# State (muxcon/ssh/web TLS material):   /var/lib/openmux
+#
+# Override examples:
+#OPENMUX_LOG_DIR=/var/log/openmux
+#OPENMUX_RUN_DIR=/run/openmux
+#OPENMUX_STATE_DIR=/var/lib/openmux

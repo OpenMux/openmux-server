@@ -9,12 +9,31 @@ User=openmux
 Group=openmux
 WorkingDirectory=/var/lib/openmux
 Environment=PYTHONUNBUFFERED=1
-Environment=OPENMUX_PIDFILE=/run/openmux/openmux.pid
+# Filesystem locations come from /etc/defaults/openmux (shipped by the
+# package; one KEY=VALUE per line, systemd EnvironmentFile format):
+# OPENMUX_LOG_DIR, OPENMUX_RUN_DIR, OPENMUX_STATE_DIR. An admin edits that
+# file to override the distro defaults (the leading "-" keeps the service
+# startable if the file is removed). The process environment always
+# beats the file.
+EnvironmentFile=-/etc/defaults/openmux
+# Lets non-systemd launches (manual starts, tests, openmuxctl) find the
+# same file; the server also defaults to this path on its own.
+Environment=OPENMUX_ENV_FILE=/etc/defaults/openmux
 ExecStart=/usr/bin/openmux-server --config-dir /etc/openmux
 ExecReload=/bin/kill -HUP $MAINPID
+# Create the FHS dirs, owned by the service user, before it starts (the
+# unprivileged server cannot create /run/openmux itself, and /run is tmpfs
+# so it must be made each boot). The lines below are also the SERVER
+# DEFAULTS: the unit exports $RUNTIME_DIRECTORY/$STATE_DIRECTORY/
+# $LOGS_DIRECTORY and the server uses them when nothing else is set. A
+# value in /etc/defaults/openmux (OPENMUX_LOG_DIR/_RUN_DIR/_STATE_DIR) is
+# the admin override and beats these lines - so relocating files means
+# editing that file, not this unit.
 RuntimeDirectory=openmux
 StateDirectory=openmux
 LogsDirectory=openmux
+# /etc/openmux/actions (port-action scripts) is created by postinst; the
+# package owns that dir, not systemd.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true

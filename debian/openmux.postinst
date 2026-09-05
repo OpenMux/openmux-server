@@ -21,6 +21,12 @@ fi
 
 install -d -o openmux -g openmux /var/lib/openmux /var/log/openmux
 
+# Writable home for user port-action scripts. The default conffile points
+# port_actions.actions_dir at it; the Config Editor creates action
+# directories in the same place. 0750: owner (openmux) manages the files,
+# group (openmux) can list, others cannot traverse.
+install -d -m 0750 -o openmux -g openmux /etc/openmux/actions
+
 install -d -m 0750 -o root -g openmux /etc/openmux
 
 for cfg in authentication.yaml client.yaml security.yaml server.yaml; do
