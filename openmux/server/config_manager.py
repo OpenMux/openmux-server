@@ -103,6 +103,14 @@ class ConfigManager:
 
                 self.config = yaml.safe_load(content)
 
+            # Deprecation shim: strip location keys that moved to env-based
+            # resolution (OPENMUX_LOG_DIR/RUN_DIR/STATE_DIR) before validation
+            # runs (the schema rejects unknown keys). Every SIGHUP/Config
+            # Editor reload re-runs load_config, so this fires there too.
+            from .locations import absorb_removed_location_keys
+
+            absorb_removed_location_keys(self.config, logger=self.logger)
+
             # Validate configuration
             self._validate_config()
 

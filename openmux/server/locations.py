@@ -213,8 +213,9 @@ def static_dir() -> Path:
 
 
 # Location keys removed from the schema in favor of env-based resolution.
-# They are still accepted and ignored (with a warning) for one release so
-# stale conffiles upgrade smoothly instead of failing validation.
+# They are accepted and stripped (with a warning) until the next minor
+# release; a stale conffile upgrades smoothly instead of failing validation.
+# _REMOVED_TOP_LEVEL is the single source of truth for both helpers below.
 _REMOVED_TOP_LEVEL = (
     ("server", "control_socket"),
     ("server", "pidfile"),
@@ -229,8 +230,8 @@ _REMOVED_LISTENER_KEYS = ("tls_dir", "tls_known_peers_path")
 def removed_location_keys(config: Any) -> List[str]:
     """Dotted paths of removed location keys still present in ``config``.
 
-    Callers log one warning per returned path so an upgrade from an old
-    conffile degrades to a warning instead of a hard validation error.
+    Pure detection, used by the deprecation shim (``absorb_removed_location_keys``)
+    and by tests:
 
     Args:
         config: Parsed config mapping (the full server.yaml dict).
@@ -239,6 +240,12 @@ def removed_location_keys(config: Any) -> List[str]:
         List[str]: Dotted keys, e.g. ``["logging.log_dir"]``. Empty when the
         config is clean or not a mapping.
     """
+    found: List[str] = []
+    return _detect_removed_location_keys(config)
+
+
+def _detect_removed_location_keys(config: Any) -> List[str]:
+    """Detection core shared by :func:`removed_location_keys` and the shim."""
     found: List[str] = []
     if not isinstance(config, dict):
         return found
@@ -256,3 +263,47 @@ def removed_location_keys(config: Any) -> List[str]:
                         if key in listener:
                             found.append(f"muxcon.listeners[{index}].{key}")
     return found
+
+
+def absorb_removed_location_keys(config: Any, logger: Optional[Any] = None) -> List[str]:
+    """Strip removed location keys from ``config`` (in place) and warn about them.
+
+    One warning per removed key. This is the one-release deprecation shim:
+    a stale conffile is loaded, warned, and ignored instead of failing the
+    schema check. ConfigManager calls it right after the YAML parse and
+    before validation, on every load — covering boot, SIGHUP soft reload,
+    and the Config Editor reload actions (all of them re-run load_config).
+
+    Args:
+        config: Parsed config mapping (mutated in place).
+        logger: Optional logger for the warnings; when omitted the keys are
+            still detected and stripped silently.
+
+    Returns:
+        List[str]: The dotted key paths that were present and removed.
+    """
+    keys = removed_location_keys(config)
+    if not isinstance(config, dict):
+        return keys
+    for key in _REMOVED_LISTENER_KEYS:
+        mux = config.get("muxcon")
+        if isinstance(mux, dict) and isinstance(mux.get("listeners"), list):
+            for listener in mux["listeners"]:
+                if isinstance(listener, dict) and key in listener:
+                    del listener[key]
+    for section, key in _REMOVED_TOP_LEVEL:
+        sec = config.get(section)
+        if isinstance(sec, dict) and key in sec:
+            del sec[key]
+    if logger is not None:
+        for path in keys:
+            try:
+                logger.warning(
+                    "Config key %s is no longer supported and is ignored; remove it from your "
+                    "configuration (it is resolved via the environment in packaged installs)"
+                    " until the next minor release.",
+                    path,
+                )
+            except Exception:  # justification: warning is best-effort; the key is stripped either way
+                pass
+    return keys

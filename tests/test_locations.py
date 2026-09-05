@@ -197,3 +197,65 @@ def test_removed_keys_no_listeners(clean_env):
 
 def test_removed_keys_non_dict(clean_env):
     assert locations.removed_location_keys("not-a-dict") == []
+
+
+class _WarnLog:
+    def __init__(self) -> None:
+        self.messages: list = []
+
+    def warning(self, fmt, *args) -> None:
+        self.messages.append(fmt % args if args else fmt)
+
+
+def test_absorb_strips_and_warns_once_per_key(clean_env):
+    log = _WarnLog()
+    cfg = {
+        "server": {"control_socket": "x.sock", "pidfile": "x.pid", "id": "s1"},
+        "logging": {"log_dir": "logs", "file": "/tmp/a.log"},
+        "muxcon": {
+            "federated_cache_path": "/tmp/cache.json",
+            "listeners": [{"port": 7822, "tls_dir": "~/.openmux/muxcon"}],
+        },
+        "web_console": {"static_dir": "/a", "template_dir": "/b", "port": 8080},
+    }
+    found = locations.absorb_removed_location_keys(cfg, logger=log)
+    assert sorted(found) == sorted(
+        [
+            "server.control_socket",
+            "server.pidfile",
+            "logging.log_dir",
+            "muxcon.federated_cache_path",
+            "muxcon.listeners[0].tls_dir",
+            "web_console.static_dir",
+            "web_console.template_dir",
+        ]
+    )
+    # Values stripped in place, kept keys untouched.
+    assert cfg["server"] == {"id": "s1"}
+    assert cfg["logging"] == {"file": "/tmp/a.log"}
+    assert cfg["muxcon"]["listeners"] == [{"port": 7822}]
+    assert cfg["web_console"] == {"port": 8080}
+    # Second pass finds nothing (idempotent) and warns nothing new.
+    before = len(log.messages)
+    assert locations.absorb_removed_location_keys(cfg, logger=log) == []
+    assert len(log.messages) == before
+
+
+def test_absorb_warns_one_line_per_key(clean_env):
+    log = _WarnLog()
+    cfg = {
+        "server": {"pidfile": "x.pid", "control_socket": "x.sock"},
+        "muxcon": {"listeners": [{"port": 7822, "tls_dir": "a"}, {"port": 7823, "tls_dir": "b"}]},
+    }
+    locations.absorb_removed_location_keys(cfg, logger=log)
+    assert len(log.messages) == 4
+    assert any("server.pidfile" in m for m in log.messages)
+    assert any("server.control_socket" in m for m in log.messages)
+    assert any("muxcon.listeners[1].tls_dir" in m for m in log.messages)
+
+
+def test_absorb_noop_on_clean_config(clean_env):
+    log = _WarnLog()
+    cfg = {"server": {"id": "s1"}, "logging": {"file": "/tmp/a.log"}}
+    assert locations.absorb_removed_location_keys(cfg, logger=log) == []
+    assert log.messages == []

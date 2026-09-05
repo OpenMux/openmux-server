@@ -8,6 +8,7 @@ import importlib
 import os
 
 import pytest
+import yaml
 
 from openmux.server import locations
 from openmux.server.adapters import ssh_listener as ssh_listener_module
@@ -48,23 +49,40 @@ def test_muxcon_tls_dir_dev_default(clean_state_env):
     assert a._known_peers_path == locations.muxcon_known_peers_path()
 
 
-def test_muxcon_explicit_listener_tls_dir_still_wins(clean_state_env, monkeypatch, tmp_path):
-    monkeypatch.setenv("OPENMUX_STATE_DIR", "/state")
-    explicit = str(tmp_path / "tls")
-    a = UnifiedMuxConAdapter("mx", {"listeners": [{"host": "127.0.0.1", "port": 1, "tls_dir": explicit}]})
-    assert a._tls_dir == explicit
-    assert a._known_peers_path == os.path.join(explicit, "known_peers.yaml")
+def test_muxcon_listener_config_no_longer_places_state(clean_state_env, monkeypatch, tmp_path):
+    """The per-listener tls_dir/tls_known_peers_path keys were removed.
 
-
-def test_muxcon_explicit_known_peers_path_still_wins(clean_state_env, monkeypatch, tmp_path):
+    The state base tracks OPENMUX_STATE_DIR even when a listener entry
+    carries the stale keys; the ConfigManager deprecation shim strips them
+    before an adapter ever sees a real config.
+    """
     monkeypatch.setenv("OPENMUX_STATE_DIR", "/state")
-    explicit = str(tmp_path / "peers.yaml")
     a = UnifiedMuxConAdapter(
-        "mx", {"listeners": [{"host": "127.0.0.1", "port": 1, "tls_known_peers_path": explicit}]}
+        "mx",
+        {"listeners": [{"host": "127.0.0.1", "port": 1, "tls_dir": str(tmp_path / "tls")}]},
     )
-    assert a._known_peers_path == explicit
-    # With a known_peers override but no tls_dir, the base stays the state dir.
     assert a._tls_dir == "/state/muxcon"
+    assert a._known_peers_path == "/state/muxcon/known_peers.yaml"
+
+
+def test_muxcon_config_manager_shim_strips_listener_tls_keys(clean_state_env, tmp_path):
+    from openmux.server.config_manager import ConfigManager
+
+    cfg_path = tmp_path / "server.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "server": {"id": "t"},
+                "muxcon": {"listeners": [{"host": "127.0.0.1", "port": 7822, "tls_dir": "~/.openmux/muxcon"}]},
+            },
+            sort_keys=False,
+        )
+    )
+    (tmp_path / "authentication.yaml").write_text(
+        yaml.safe_dump({"users": [{"username": "u", "password_hash": "x", "permissions": "admin"}]})
+    )
+    cfg = ConfigManager(str(cfg_path)).load_config()
+    assert "tls_dir" not in cfg["muxcon"]["listeners"][0]
 
 
 def test_ssh_listener_host_key_dir_follows_env(clean_state_env, monkeypatch):
@@ -102,6 +120,11 @@ def test_web_console_tls_dir_dev_default(clean_state_env):
     assert _web_console({}).tls_dir == locations.web_tls_dir()
 
 
-def test_web_console_explicit_tls_dir_still_wins(clean_state_env, monkeypatch, tmp_path):
+def test_web_console_tls_dir_is_env_driven(clean_state_env, monkeypatch, tmp_path):
+    """The web console has no tls_dir config key.
+
+    State stays OPENMUX_STATE_DIR-driven even when a stale ``tls_dir``
+    value is present in the config dict.
+    """
     monkeypatch.setenv("OPENMUX_STATE_DIR", "/state")
-    assert _web_console({"tls_dir": str(tmp_path / "wc")}).tls_dir == str(tmp_path / "wc")
+    assert _web_console({"tls_dir": str(tmp_path / "wc")}).tls_dir == "/state/web_console"

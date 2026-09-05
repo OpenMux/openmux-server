@@ -11,7 +11,7 @@ def test_validate_config_and_status_basics(tmp_path):
     cfg = {
         "muxcon": {
             "listeners": [
-                {"host": "127.0.0.1", "port": 8022, "use_tls": True, "tls_autogen": True, "tls_dir": str(tmp_path)},
+                {"host": "127.0.0.1", "port": 8022, "use_tls": True, "tls_autogen": True},
             ],
             "initiators": [{"host": "localhost", "port": 8022}],
         }

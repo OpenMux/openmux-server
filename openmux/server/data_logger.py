@@ -62,7 +62,8 @@ class DataLogger:
       1) port-specific config key: `log_file` on the port's per-port config
          (a dict, or a per-port attribute) if present
       2) default pattern: {log_dir}/ports/{port_name}.log, where `log_dir` is the base
-         directory set via `set_base_dir()` (config `logging.log_dir`), defaulting to `logs`
+         directory set via `set_base_dir()` (OPENMUX_LOG_DIR via locations), defaulting
+         to `logs`
 
     Writes are buffered through an asyncio.Queue and a single background task.
     """
@@ -103,7 +104,7 @@ class DataLogger:
         self.enabled = True  # can be toggled later via config
         # Base directory for the default `{base}/ports/{port_name}.log` pattern. Null
         # means the historical cwd-relative `logs/ports` (issue #47: the server sets this
-        # from config `logging.log_dir` at startup and on each reload).
+        # from the env log dir (OPENMUX_LOG_DIR via locations) at startup and on reload).
         self.base_dir: Optional[str] = None
         self.logger = logging.getLogger("openmux.server.data_logger")
         # Format configuration
@@ -334,8 +335,9 @@ class DataLogger:
         """Set the base directory for default per-port log files (issue #47).
 
         Args:
-            base: Directory that holds the `ports/` subdirectory, e.g. the resolved
-                config `logging.log_dir`; `None` falls back to `logs/ports`.
+            base: Directory that holds the `ports/` subdirectory, e.g. the
+                resolved env log dir (OPENMUX_LOG_DIR via locations); `None`
+                falls back to `logs/ports`.
 
         When the base directory changes, the open file handles and line buffers
         belonging to the previous base are closed and dropped, so the next write

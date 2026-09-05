@@ -107,9 +107,10 @@ def test_apply_per_connection_filters():
 
 
 @pytest.mark.asyncio
-async def test_tls_autogen_and_server_context(tmp_path):
+async def test_tls_autogen_and_server_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENMUX_STATE_DIR", str(tmp_path))
     ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
-    lconf = {"use_tls": True, "tls_dir": str(tmp_path)}
+    lconf = {"use_tls": True}
     cert_path, key_path = await ad._ensure_autogen_cert(lconf)
     assert os.path.exists(cert_path) and os.path.exists(key_path)
     # Create server SSL context and require client cert

@@ -43,12 +43,10 @@ muxcon:
     interface: en0
     port: 7822
     tls_autogen: true
-    tls_dir: ~/.openmux/muxcon/loopback
   - enabled: true
     interface: lo
     port: 7823
     tls_autogen: true
-    tls_dir: ~/.openmux/muxcon/loopback
   mpath_neighbor_idle_drop_sec: 60
   mpath_preemptive_promote: false
   public_keys:
@@ -57,9 +55,6 @@ muxcon:
 server:
   description: Loopback Test Server
   id: loopback-test-server
-  # Local control interfaces
-  control_socket: logs/openmux.sock
-  pidfile: logs/openmux.pid
 port_actions:
   actions_dir: openmux/server/actions/examples
   action_ports:

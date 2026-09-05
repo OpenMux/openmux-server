@@ -58,15 +58,16 @@ async def test_ttl_cleanup_purges_offline_ports(monkeypatch):
     assert ("rx1", "federated_port_unregistered_ttl") in events
 
 
-def test_persist_and_load_cache(tmp_path):
-    cache_file = tmp_path / "federated_cache.json"
-    # Writer adapter persists cache
+def test_persist_and_load_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENMUX_STATE_DIR", str(tmp_path / "state"))
+    cache_file = tmp_path / "state" / "muxcon" / "federated_cache.json"
+    # Writer adapter persists cache; the path is fixed next to the TOFU
+    # state (the old federated_cache_path config key was removed).
     ad1 = UnifiedMuxConAdapter(
         "mx1",
         {
             "muxcon": {
                 "federated_cache_enabled": True,
-                "federated_cache_path": str(cache_file),
             }
         },
     )
@@ -104,7 +105,6 @@ def test_persist_and_load_cache(tmp_path):
         {
             "muxcon": {
                 "federated_cache_enabled": True,
-                "federated_cache_path": str(cache_file),
             }
         },
     )

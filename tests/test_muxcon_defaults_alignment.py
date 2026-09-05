@@ -48,10 +48,11 @@ def test_normalize_listener_defaults_are_safe():
     assert conf["use_tls"] is True
     assert conf["tls_autogen"] is True
     assert conf["require_client_cert"] is False
-    # Absent tls_dir stays unset: the base resolves via locations
-    # (OPENMUX_STATE_DIR else ~/.openmux/muxcon) and an explicit value wins.
-    assert conf["tls_dir"] is None
-    assert conf["tls_known_peers_path"] is None
+    # The per-listener tls_dir/tls_known_peers_path keys were removed (T6):
+    # the state base resolves via locations (OPENMUX_STATE_DIR else
+    # ~/.openmux/muxcon).
+    assert "tls_dir" not in conf
+    assert "tls_known_peers_path" not in conf
 
 
 def test_schema_muxcon_defaults_match_runtime():
@@ -66,7 +67,12 @@ def test_schema_muxcon_defaults_match_runtime():
     assert li["use_tls"]["default"] is True
     assert li["tls_autogen"]["default"] is True
     assert li["require_client_cert"]["default"] is False
-    assert li["tls_dir"]["default"] == "~/.openmux/muxcon"
+    # tls_dir/tls_known_peers_path/federated_cache_path are no longer schema
+    # keys: the state base resolves via locations (OPENMUX_STATE_DIR, else
+    # ~/.openmux/muxcon).
+    assert "tls_dir" not in li
+    assert "tls_known_peers_path" not in li
+    assert "federated_cache_path" not in props
     assert ini["port"]["default"] == 7822
     assert ini["use_tls"]["default"] is True
     assert ini["ssl_verify"]["default"] is True

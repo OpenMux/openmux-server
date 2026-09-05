@@ -366,13 +366,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.federated_cache_ttl_sec = float(effective_config.get("federated_cache_ttl_sec", 0.0))
         except Exception:
             self.federated_cache_ttl_sec = 0.0
-        try:
-            cache_path = effective_config.get("federated_cache_path")
-            if not cache_path:
-                cache_path = os.path.join(self._tls_dir, "federated_cache.json")
-            self.federated_cache_path = os.path.expanduser(str(cache_path))
-        except Exception:
-            self.federated_cache_path = os.path.expanduser(os.path.join(self._tls_dir, "federated_cache.json"))
+        # Cache file is fixed next to the TOFU state; the old
+        # `federated_cache_path` config key was removed.
+        self.federated_cache_path = os.path.join(self._tls_dir, "federated_cache.json")
         # Internal: periodic task for TTL cleanup
         self._cache_cleanup_task: Optional[asyncio.Task] = None
 
@@ -398,11 +394,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             "ssl_ca_cert": lst.get("ssl_ca_cert"),
             "require_client_cert": bool(lst.get("require_client_cert", False)),
             "tls_autogen": bool(lst.get("tls_autogen", True)),
-            # Keep an absent tls_dir as None: the base comes from locations
-            # (OPENMUX_STATE_DIR or ~/.openmux/muxcon) and only an explicit
-            # config value overrides it.
-            "tls_dir": lst.get("tls_dir"),
-            "tls_known_peers_path": lst.get("tls_known_peers_path"),
+            # The per-listener tls_dir/tls_known_peers_path keys were removed
+            # from the schema; the state base resolves via locations.
             "path_pref": lst.get("path_pref"),
             "path_group": lst.get("path_group"),
             "tags": lst.get("tags", {}),
@@ -412,21 +405,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         }
 
     def _refresh_tls_dir_from_listeners(self) -> None:
-        """Recompute tls_dir/known_peers_path from the first configured listener.
+        """Recompute tls_dir/known_peers_path from locations.
 
-        Defaults resolve via locations (OPENMUX_STATE_DIR, else ~/.openmux/muxcon);
-        an explicit first-listener `tls_dir` / `tls_known_peers_path` still wins.
+        The state base resolves via locations (OPENMUX_STATE_DIR, else
+        ~/.openmux/muxcon). The per-listener `tls_dir` /
+        `tls_known_peers_path` keys were removed from the schema; the
+        listener list is the identity for start/stop/reconcile, not for
+        state placement.
         """
-        tls_dir = muxcon_tls_dir()
-        known_peers = muxcon_known_peers_path()
-        if self.listeners_conf:
-            primary = self.listeners_conf[0]
-            if primary.get("tls_dir"):
-                tls_dir = os.path.expanduser(primary["tls_dir"])
-            kp = primary.get("tls_known_peers_path") or os.path.join(tls_dir, "known_peers.yaml")
-            known_peers = os.path.expanduser(kp)
-        self._tls_dir = tls_dir
-        self._known_peers_path = known_peers
+        self._tls_dir = muxcon_tls_dir()
+        self._known_peers_path = muxcon_known_peers_path()
 
     def _normalize_peer(self, p: Dict[str, Any]) -> Optional["FederationPeer"]:
         """Build a `FederationPeer` from one raw `muxcon.initiators[]` entry."""

@@ -76,11 +76,11 @@ def test_safe_formatter_sanitizes_and_handles_unicode():
     assert "日本語" in out
 
 
-def test_logging_manager_initializes_root_and_components(tmp_path):
+def test_logging_manager_initializes_root_and_components(tmp_path, monkeypatch):
     log_dir = tmp_path / "logs"
+    monkeypatch.setenv("OPENMUX_LOG_DIR", str(log_dir))
     cfg = {
         "log_level": "DEBUG",
-        "log_dir": str(log_dir),
         "max_log_size": 1024,
         "log_backup_count": 2,
     }
@@ -122,8 +122,9 @@ def test_logging_manager_initializes_root_and_components(tmp_path):
                 lg.removeHandler(h)
 
 
-def test_logging_manager_get_logger(tmp_path):
-    cfg = {"log_dir": str(tmp_path / "logs")}
+def test_logging_manager_get_logger(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENMUX_LOG_DIR", str(tmp_path / "logs"))
+    cfg = {}
     orig_handlers = snapshot_root_handlers()
     try:
         lm = LoggingManager(cfg)
@@ -155,7 +156,7 @@ def test_logging_manager_env_log_dir(tmp_path, monkeypatch):
                 lg2.removeHandler(h)
 
 
-def test_logging_manager_console_only_when_dir_uncreatable(tmp_path, caplog):
+def test_logging_manager_console_only_when_dir_uncreatable(tmp_path, caplog, monkeypatch):
     """issue #42: an uncreatable log dir keeps the console handler and adds no file
     handler (and does not raise)."""
     from openmux.common import fsutil
@@ -163,7 +164,8 @@ def test_logging_manager_console_only_when_dir_uncreatable(tmp_path, caplog):
     fsutil._warned.clear()
     blocker = tmp_path / "logs"
     blocker.write_text("a regular file, not a directory")
-    cfg = {"log_level": "INFO", "log_dir": str(tmp_path / "logs")}
+    monkeypatch.setenv("OPENMUX_LOG_DIR", str(tmp_path / "logs"))
+    cfg = {"log_level": "INFO"}
     orig_handlers = snapshot_root_handlers()
     try:
         with caplog.at_level(logging.WARNING, logger=""):

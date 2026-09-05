@@ -67,12 +67,13 @@ class OpenMuxServer:
         """
         # Set up basic logging early; default overridden after config load.
         # Pre-read the `logging:` block so the first file handlers already land
-        # where `logging.log_dir`/`logging.file` point (issue #47).
+        # where `logging.file` points (issue #47). The base log directory is
+        # env-driven (OPENMUX_LOG_DIR); the old `logging.log_dir` key is
+        # removed and stripped by the ConfigManager deprecation shim.
         pre_log_cfg = _read_logging_block(config_path)
         pre_rot = _resolve_log_rotation(pre_log_cfg)
         _setup_basic_logging(
             level_name=log_level,
-            log_dir=pre_log_cfg.get("log_dir"),
             log_file=pre_log_cfg.get("file"),
             max_log_size=pre_rot["max_bytes"],
             log_backup_count=pre_rot["backup_count"],
@@ -108,7 +109,6 @@ class OpenMuxServer:
         try:
             _setup_basic_logging(
                 level_name=effective_level,
-                log_dir=logging_cfg.get("log_dir"),
                 log_file=logging_cfg.get("file"),
                 max_log_size=rot["max_bytes"],
                 log_backup_count=rot["backup_count"],
@@ -121,7 +121,7 @@ class OpenMuxServer:
         # Point the DataLogger default ports/ directory at the resolved log base
         # (issue #47); per-port `log_file` overrides are unaffected
         try:
-            base, _main_file = _resolve_logging_paths(logging_cfg.get("log_dir"), logging_cfg.get("file"))
+            base, _main_file = _resolve_logging_paths(None, logging_cfg.get("file"))
             DataLogger.get().set_base_dir(str(base))
         except Exception:
             # Best-effort repoint; keep the default location on failure
@@ -228,11 +228,12 @@ class OpenMuxServer:
         """Re-apply the `logging:` block after a config reload (issue #47).
 
         Applies the level always (as before) and re-points the file handlers
-        when `logging.file`/`logging.log_dir` changed. Changing paths requires
-        a reload (SIGHUP soft reload, SIGUSR1 full reload, or the Config
-        Editor reload actions) and takes effect from the next log record. The
-        DataLogger ports/ base dir is re-pointed as well, closing stale
-        per-port file handles under the old directory.
+        when `logging.file` changed. Changing the path requires a reload
+        (SIGHUP soft reload, SIGUSR1 full reload, or the Config Editor reload
+        actions) and takes effect from the next log record. The DataLogger
+        ports/ base dir is re-pointed as well, closing stale per-port file
+        handles under the old directory. The base log directory is env-driven
+        (OPENMUX_LOG_DIR) and does not change on reload.
         """
         cfg = getattr(self.config_manager, "config", {}) or {}
         logging_cfg = cfg.get("logging", {}) if isinstance(cfg, dict) else {}
@@ -242,7 +243,6 @@ class OpenMuxServer:
         try:
             _setup_basic_logging(
                 level_name=level,
-                log_dir=logging_cfg.get("log_dir"),
                 log_file=logging_cfg.get("file"),
                 max_log_size=rot["max_bytes"],
                 log_backup_count=rot["backup_count"],
@@ -253,7 +253,7 @@ class OpenMuxServer:
             return
         # Repoint per-port logs when the base dir moved
         try:
-            base, _main_file = _resolve_logging_paths(logging_cfg.get("log_dir"), logging_cfg.get("file"))
+            base, _main_file = _resolve_logging_paths(None, logging_cfg.get("file"))
             DataLogger.get().set_base_dir(str(base))
         except Exception:
             self.logger.error("Failed to re-point DataLogger base dir", exc_info=True)
@@ -354,20 +354,25 @@ class OpenMuxServer:
     # ================= Control Socket (Unix domain) =================
 
     def _resolve_control_socket_path(self) -> Optional[str]:
-        """Resolve the control socket path from env/config or default.
+        """Resolve the control socket path from env or default.
 
         Precedence:
           1) env OPENMUX_CTL_SOCK
-          2) config.server.control_socket
-          3) config.runtime.control_socket (deprecated; fallback, warns)
-          4) locations.control_socket_path(): OPENMUX_RUN_DIR, else logs/
+          2) config.runtime.control_socket (legacy section; warns)
+          3) locations.control_socket_path(): OPENMUX_RUN_DIR, else logs/
+
+        The old ``server.control_socket`` key was removed from the schema; the
+        deprecation shim in ConfigManager drops it at load time.
         """
         path = os.environ.get("OPENMUX_CTL_SOCK")
         if not path:
             path, deprecated = self._config_string_path(("server", "control_socket"), ("runtime", "control_socket"))
             if deprecated:
                 try:
-                    self.logger.warning("Using deprecated runtime.control_socket; please move to server.control_socket")
+                    self.logger.warning(
+                        "Using deprecated runtime.control_socket; remove it, the control socket resolves "
+                        "via OPENMUX_RUN_DIR (or OPENMUX_CTL_SOCK as an override)"
+                    )
                 except Exception:
                     pass
         if not path:
@@ -410,9 +415,11 @@ class OpenMuxServer:
 
         Precedence:
           1) env OPENMUX_PIDFILE (deprecated; OPENMUX_RUN_DIR replaces it)
-          2) config.server.pidfile
-          3) config.runtime.pidfile (deprecated; fallback, warns)
-          4) locations.pidfile_path(): OPENMUX_RUN_DIR, else logs/openmux.pid
+          2) config.runtime.pidfile (legacy section; warns)
+          3) locations.pidfile_path(): OPENMUX_RUN_DIR, else logs/openmux.pid
+
+        The old ``server.pidfile`` key was removed from the schema; the
+        deprecation shim in ConfigManager drops it at load time.
         """
         pidfile = os.environ.get("OPENMUX_PIDFILE")
         if pidfile:
@@ -426,7 +433,10 @@ class OpenMuxServer:
         config_pid, deprecated = self._config_string_path(("server", "pidfile"), ("runtime", "pidfile"))
         if config_pid:
             if deprecated:
-                self.logger.warning("Using deprecated runtime.pidfile; please move to server.pidfile")
+                self.logger.warning(
+                    "Using deprecated runtime.pidfile; remove it, the pidfile resolves "
+                    "via OPENMUX_RUN_DIR (or OPENMUX_PIDFILE as a deprecated override)"
+                )
             return os.path.expanduser(config_pid)
         return os.path.expanduser(_locations_pidfile())
 
@@ -2003,7 +2013,7 @@ def main():
         _setup_shutdown_handlers(loop, server)
 
         # Write PID file for CLI/signal control
-        # (OPENMUX_PIDFILE (deprecated) > server.pidfile > runtime.pidfile > OPENMUX_RUN_DIR > logs/)
+        # pidfile (OPENMUX_PIDFILE (deprecated) > runtime.pidfile > OPENMUX_RUN_DIR > logs/)
         try:
             pidfile = server._resolve_pidfile()
             # Ensure directory exists

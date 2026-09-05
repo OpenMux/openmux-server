@@ -194,16 +194,13 @@ class LoggingManager:
     def _resolve_log_dir(self) -> str:
         """Resolve the base log directory.
 
-        Order: `logging.log_dir` from config, then the `OPENMUX_LOG_DIR`
-        environment variable, then the dev default `logs` (via
-        `locations.log_dir`). A leading `~` is expanded to the home dir,
-        matching the other resolvable paths.
+        The `OPENMUX_LOG_DIR` environment variable, else the dev default
+        `logs` (via `locations.log_dir`). The old `logging.log_dir` config
+        key was removed in favor of the environment; the deprecation shim
+        in ConfigManager strips it at load time.
         """
         from . import locations
 
-        cfg_dir = self.config.get("log_dir")
-        if isinstance(cfg_dir, str) and cfg_dir.strip():
-            return os.path.expanduser(cfg_dir.strip())
         return locations.log_dir()
 
     def _setup_component_loggers(self):

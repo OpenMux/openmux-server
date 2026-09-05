@@ -31,10 +31,8 @@ async def test_control_socket_status_and_reloads(tmp_path):
               id: test
             logging:
               level: WARNING
-            runtime:
-              pidfile: "{pid}"
             """
-        ).format(pid=str(tmp_path / "openmux.pid"))
+        )
     )
 
     # Instantiate server (won't start adapters in this test)

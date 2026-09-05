@@ -255,12 +255,13 @@ def test_read_logging_block(tmp_path):
     assert _read_logging_block(str(empty_path)) == {}
 
 
-def test_server_repoints_data_logger_base_dir(tmp_path):
-    """OpenMuxServer applies logging.log_dir to the DataLogger default path."""
+def test_server_repoints_data_logger_base_dir(tmp_path, monkeypatch):
+    """OpenMuxServer points the DataLogger at the env-based log dir."""
     log_dir = tmp_path / "srvlogs"
+    monkeypatch.setenv("OPENMUX_LOG_DIR", str(log_dir))
     server_cfg = {
         "server": {"host": "127.0.0.1", "port": 0},
-        "logging": {"level": "INFO", "log_dir": str(log_dir)},
+        "logging": {"level": "INFO"},
     }
     server_path = tmp_path / "server.yaml"
     server_path.write_text(yaml.safe_dump(server_cfg, sort_keys=False))
@@ -300,10 +301,11 @@ def test_resolve_pidfile_precedence(tmp_path, monkeypatch):
     # Deprecated OPENMUX_PIDFILE still wins as an operational override (kept for one release)
     monkeypatch.setenv("OPENMUX_PIDFILE", str(tmp_path / "legacy.pid"))
     assert server._resolve_pidfile() == str(tmp_path / "legacy.pid")
-    # config server.pidfile beats OPENMUX_RUN_DIR (env override must be unset first)
+    # The old server.pidfile key was removed: a stale value is stripped at
+    # load time and the env/default resolution still wins.
     monkeypatch.delenv("OPENMUX_PIDFILE")
     server2 = OpenMuxServer(str(_write_pid_sock_config(tmp_path, {"pidfile": str(tmp_path / "cfg.pid")})), log_level="INFO")
-    assert server2._resolve_pidfile() == str(tmp_path / "cfg.pid")
+    assert server2._resolve_pidfile() == str(tmp_path / "run" / "openmux.pid")
 
 
 def test_resolve_pidfile_deprecation_warnings(tmp_path, monkeypatch, caplog):
@@ -316,7 +318,8 @@ def test_resolve_pidfile_deprecation_warnings(tmp_path, monkeypatch, caplog):
     assert path == str(tmp_path / "legacy.pid")
     assert any("OPENMUX_PIDFILE is deprecated" in r.getMessage() for r in caplog.records)
     # Legacy runtime.pidfile fallback still resolves, with its own warning
-    monkeypatch.delenv("OPENMUX_PIDFILE")
+    monkeypatch.delenv("OPENMUX_PIDFILE", raising=False)
+    monkeypatch.delenv("OPENMUX_RUN_DIR", raising=False)
     server2 = OpenMuxServer(str(_write_pid_sock_config(tmp_path, {})), log_level="INFO")
     server2.config_manager.config["runtime"] = {"pidfile": str(tmp_path / "rt.pid")}
     with caplog.at_level(logging.WARNING, logger="openmux.server"):
@@ -336,13 +339,15 @@ def test_resolve_control_socket_path(tmp_path, monkeypatch):
     # OPENMUX_CTL_SOCK overrides everything
     monkeypatch.setenv("OPENMUX_CTL_SOCK", str(tmp_path / "ctl" / "custom.sock"))
     assert server._resolve_control_socket_path() == str(tmp_path / "ctl" / "custom.sock")
-    # config server.control_socket beats OPENMUX_RUN_DIR
-    monkeypatch.delenv("OPENMUX_CTL_SOCK")
+    # The old server.control_socket key was removed: a stale value is
+    # stripped at load time and the env/default resolution still wins.
+    monkeypatch.delenv("OPENMUX_CTL_SOCK", raising=False)
     server2 = OpenMuxServer(
         str(_write_pid_sock_config(tmp_path, {"control_socket": str(tmp_path / "cfg.sock")})), log_level="INFO"
     )
-    assert server2._resolve_control_socket_path() == str(tmp_path / "cfg.sock")
+    assert server2._resolve_control_socket_path() == str(tmp_path / "run" / "openmux.sock")
     # Legacy runtime.control_socket fallback still resolves
+    monkeypatch.delenv("OPENMUX_RUN_DIR", raising=False)
     server3 = OpenMuxServer(str(_write_pid_sock_config(tmp_path, {})), log_level="INFO")
     server3.config_manager.config["runtime"] = {"control_socket": str(tmp_path / "rt.sock")}
     assert server3._resolve_control_socket_path() == str(tmp_path / "rt.sock")

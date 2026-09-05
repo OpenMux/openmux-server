@@ -15,8 +15,6 @@ properties:
     properties:
       id: { type: string }
       description: { type: string }
-      control_socket: { type: string, default: logs/openmux.sock }
-      pidfile: { type: string, default: logs/openmux.pid }
       fail_fast_adapters: { type: boolean, default: true }
   logging:
     type: object
@@ -31,9 +29,6 @@ properties:
       file:
         type: string
         description: "Full path of the main aggregate server log. Default {log_dir}/openmux.log. Takes effect on SIGHUP/soft or full reload."
-      log_dir:
-        type: string
-        description: "Base directory for all server logs, including the ports/ subdirectory for per-port and action-run logs. Default logs (cwd-relative). Takes effect on SIGHUP/soft or full reload."
       max_log_size:
         type: integer
         minimum: 0
@@ -295,7 +290,6 @@ properties:
       auth_required: { type: boolean, default: true }
       federated_cache_enabled: { type: boolean }
       federated_cache_ttl_sec: { type: number, minimum: 0 }
-      federated_cache_path: { type: string }
       heartbeat_interval: { type: number, minimum: 0 }
       shutdown_grace_timeout_sec: { type: number, minimum: 0 }
       context_idle_timeout_sec: { type: number, minimum: 0 }
@@ -331,12 +325,10 @@ properties:
             port: { type: integer, minimum: 1, maximum: 65535, default: 7822 }
             use_tls: { type: boolean, default: true }
             tls_autogen: { type: boolean, default: true }
-            tls_dir: { type: string, default: "~/.openmux/muxcon" }
             ssl_cert: { type: string }
             ssl_key: { type: string }
             ssl_ca_cert: { type: string }
             require_client_cert: { type: boolean, default: false }
-            tls_known_peers_path: { type: string }
             path_pref: { type: integer }
             path_group: { type: string }
             tags: { type: object, additionalProperties: true }
@@ -418,8 +410,6 @@ properties:
       use_tls: { type: boolean, default: false }
       tls_autogen: { type: boolean, default: true }
       respect_forwarded_prefix: { type: boolean }
-      static_dir: { type: string }
-      template_dir: { type: string }
       hardware_info_file: { type: string, default: /etc/openmux-hardware }
       plugins:
         type: array

@@ -1373,8 +1373,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
         logged_in_motd: <multiline text> (str, optional)  # message of the day for
                 # logged-in users; shown at the top of the status page;
                 # hidden when blank (soft-reloadable)
-        static_dir: <path> (str, optional)  # where /static/ is served from; created if missing
-        template_dir: <path> (str, optional) # jinja2 templates directory (index.html.j2, console.html.j2, status.html.j2)
         enable_probes: true (bool)  # register /healthz, /livez, /readyz endpoints
         probes_include_details: false (bool)  # when true, probes return JSON with version/uptime/clients
     """
@@ -1427,10 +1425,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
             self.ssl_port = int(cfg.get("ssl_port", 8443))
         except Exception:
             self.ssl_port = 8443
-        # Default directory for web_console certs separate from muxcon; resolves
-        # via locations (OPENMUX_STATE_DIR, else ~/.openmux/web_console) unless
-        # the config sets an explicit tls_dir.
-        self.tls_dir = os.path.expanduser(cfg.get("tls_dir") or web_tls_dir())
+        # State directory for web_console certs, separate from muxcon;
+        # resolves via locations (OPENMUX_STATE_DIR, else
+        # ~/.openmux/web_console).
+        self.tls_dir = web_tls_dir()
         self.logger = logging.getLogger(f"openmux.adapter.web_console.{self.name}")
 
         # Will be set by server

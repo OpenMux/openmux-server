@@ -172,9 +172,8 @@ async def test_tls_context_builders_and_autogen(tmp_path):
     peer = FederationPeer("h", 1, options={"use_tls": True, "ssl_verify": False})
     cctx = await a._create_client_ssl_context(peer)
     assert isinstance(cctx, ssl.SSLContext) and cctx.verify_mode == ssl.CERT_NONE
-    # Autogen cert/key
-    p = tmp_path / "tls"
-    c, k = await a._ensure_autogen_cert({"tls_dir": str(p)})
+    # Autogen cert/key into the adapter's own state dir
+    c, k = await a._ensure_autogen_cert(None)
     assert os.path.exists(c) and os.path.exists(k)
 
 
@@ -188,7 +187,7 @@ async def test_listener_tls_setup_failure_is_fail_closed(tmp_path, monkeypatch):
         raise RuntimeError("autogen failed on purpose")
 
     monkeypatch.setattr(a, "_ensure_autogen_cert", boom)
-    lconf = {"use_tls": True, "tls_autogen": True, "tls_dir": str(tmp_path)}
+    lconf = {"use_tls": True, "tls_autogen": True}
     key = ("127.0.0.1", 0)
     assert await a._start_single_listener(key, lconf) is False
     assert key not in a._servers
@@ -209,7 +208,7 @@ async def test_listener_tls_without_cert_or_autogen_is_fail_closed(tmp_path):
 async def test_listener_tls_autogen_still_starts(tmp_path):
     # Positive control: with autogen working, TLS listener still binds.
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
-    lconf = {"use_tls": True, "tls_autogen": True, "tls_dir": str(tmp_path)}
+    lconf = {"use_tls": True, "tls_autogen": True}
     key = ("127.0.0.1", 0)
     try:
         assert await a._start_single_listener(key, lconf) is True
@@ -290,7 +289,7 @@ async def test_client_ssl_context_by_mode(tmp_path):
     ctx = await a._create_client_ssl_context(FederationPeer("h", 1, options={"use_tls": True, "tls_tofu": False}))
     assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
     # CA mode with a loadable CA file: strict against that CA
-    ca, _ = await a._ensure_autogen_cert({"tls_dir": str(tmp_path)})
+    ca, _ = await a._ensure_autogen_cert(None)
     ctx = await a._create_client_ssl_context(FederationPeer("h", 1, options={"use_tls": True, "ssl_ca_cert": ca}))
     assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
 
@@ -369,7 +368,7 @@ async def test_verify_mode_announce_warns_once_when_unverified(tmp_path, caplog)
 @pytest.mark.asyncio
 async def test_listener_warns_when_auth_not_required(tmp_path, caplog):
     a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": False})
-    lconf = a._normalize_listener_conf({"host": "127.0.0.1", "port": 0, "use_tls": False, "tls_dir": str(tmp_path)})
+    lconf = a._normalize_listener_conf({"host": "127.0.0.1", "port": 0, "use_tls": False})
     key = (lconf["host"], lconf["port"])
     try:
         with caplog.at_level(logging.WARNING, logger="openmux.adapter.muxcon.mx"):
@@ -2800,15 +2799,16 @@ async def test_end_to_end_local_force_take_notifies_federated_peers_own_client()
 
 
 @pytest.mark.asyncio
-async def test_end_to_end_default_initiator_reaches_default_listener_over_tls(tmp_path):
+async def test_end_to_end_default_initiator_reaches_default_listener_over_tls(tmp_path, monkeypatch):
     """Interop regression for the safe-defaults gap: an initiator with all
     safe defaults (use_tls, ssl_verify, ToFU) must complete TLS against a
     default listener's self-signed autogen cert - which strict system CA
     verification could never do. Auth is disabled on both sides so this test
     isolates the TLS behavior (Ed25519 identity has its own tests)."""
-    listener_cfg = UnifiedMuxConAdapter._normalize_listener_conf(
-        {"host": "127.0.0.1", "port": 0, "tls_dir": str(tmp_path / "a")}
-    )
+    # Both nodes share a test-local state dir so certs/ToFU never touch the
+    # real home dir (the state base resolves via locations, env-driven).
+    monkeypatch.setenv("OPENMUX_STATE_DIR", str(tmp_path / "state"))
+    listener_cfg = UnifiedMuxConAdapter._normalize_listener_conf({"host": "127.0.0.1", "port": 0})
     ad_a = UnifiedMuxConAdapter("a", {"listeners": [listener_cfg], "auth_required": False})
     ad_a.server_id = "node-a"
 
@@ -2817,12 +2817,12 @@ async def test_end_to_end_default_initiator_reaches_default_listener_over_tls(tm
     try:
         real_port = ad_a._servers[("127.0.0.1", 0)].sockets[0].getsockname()[1]
 
-        # Node B: all safe defaults; the disabled listener entry only gives it
-        # a test-local tls_dir so the ToFU store never touches the real home dir.
+        # Node B: all safe defaults; its disabled (port 0) listener entry only
+        # exists so that `start()` has an endpoint to satisfy.
         ad_b = UnifiedMuxConAdapter(
             "b",
             {
-                "listeners": [{"host": "127.0.0.1", "port": 0, "enabled": False, "tls_dir": str(tmp_path / "b")}],
+                "listeners": [{"host": "127.0.0.1", "port": 0, "enabled": False}],
                 "initiators": [{"host": "127.0.0.1", "port": real_port}],
                 "auth_required": False,
             },

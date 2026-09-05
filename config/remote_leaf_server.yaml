@@ -49,9 +49,6 @@ muxcon:
       host: "127.0.0.1"
       port: 7822
       use_tls: true
-      # Predefine TLS storage if enabling later
-      tls_dir: "~/.openmux/muxcon/remote_leaf"
-      tls_known_peers_path: "~/.openmux/muxcon/remote_leaf/known_peers.yaml"
   initiators:
     #- # identity is server.id; node_name deprecated
     #  host: 10.20.0.181
@@ -70,7 +67,6 @@ muxcon:
       use_tls: true
       ssl_verify: false
       tls_tofu: true
-      tls_known_peers_path: "~/.openmux/muxcon/remote_leaf/known_peers.yaml"
       # Capability fields per spec (placeholders for future implementation)
       share_ports: ["remote_*"]
       accept_ports: []

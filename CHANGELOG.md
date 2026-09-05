@@ -10,6 +10,36 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Config changes to check before upgrading
 
+- **Location keys are removed from `server.yaml`** (dirs move to packaging).
+  These keys no longer exist and their values are ignored, with one
+  deprecation warning per key. Remove them from your config:
+  - `server.control_socket` and `server.pidfile`. Runtime files come from
+    `OPENMUX_RUN_DIR` (packaged: `/run/openmux`).
+  - `logging.log_dir`. Logs come from `OPENMUX_LOG_DIR` (packaged:
+    `/var/log/openmux`). `logging.file` stays.
+  - `muxcon.federated_cache_path`, `muxcon.listeners[].tls_dir`, and
+    `muxcon.listeners[].tls_known_peers_path`. State comes from
+    `OPENMUX_STATE_DIR` (packaged: `/var/lib/openmux/muxcon`).
+  - `web_console.static_dir` and `web_console.template_dir`. UI assets ship
+    inside the package; the server finds them on its own.
+- **`OPENMUX_PIDFILE` is deprecated.** `OPENMUX_RUN_DIR` replaces it; the old
+  variable still works while a warning is issued. The new variables for
+  packaged installs are `OPENMUX_LOG_DIR`, `OPENMUX_RUN_DIR`, and
+  `OPENMUX_STATE_DIR`. `OPENMUX_CTL_SOCK` stays as an override. A packaged
+  install can set them in `/etc/defaults/openmux` (one `KEY=VALUE` per
+  line, no secrets in the file).
+  - On the Debian package the systemd unit sets these variables, so all
+    server-run files move to `/run/openmux`, `/var/log/openmux`, and
+    `/var/lib/openmux` without touching the conffile.
+  - Dev defaults (no env) are unchanged: `logs/` next to the start dir and
+    `~/.openmux` for per-user state.
+- **Web UI templates and static assets now ship with the Python package.**
+  A running server serves the console from the installed package; no
+  `template_dir`/`static_dir` config and no repository-root `templates/` or
+  `static/` directories are needed anymore. The `Dockerfile` no longer
+  copies those trees, and the Debian package keeps copying them to
+  `/usr/share/openmux` (the server does not read that copy).
+
 - **`security.yaml` gains `access_default`** (issue #58). Value: `allow` (default) or `deny`. It sets the default posture for console ports that declare no group lists.
   - `deny`: a no-list port admits only admin. A mis-created port is locked, not open.
   - `allow`: every authenticated user connects. Mode comes from the user `permissions` value and the write slots.
