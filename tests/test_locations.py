@@ -10,11 +10,12 @@ _ENV_VARS = (
     "OPENMUX_STATE_DIR",
     "OPENMUX_CTL_SOCK",
 )
+_SYSTEMD_VARS = ("RUNTIME_DIRECTORY", "STATE_DIRECTORY", "LOGS_DIRECTORY")
 
 
 @pytest.fixture
 def clean_env(monkeypatch):
-    for var in _ENV_VARS + ("OPENMUX_ENV_FILE",):
+    for var in _ENV_VARS + ("OPENMUX_ENV_FILE",) + _SYSTEMD_VARS:
         monkeypatch.delenv(var, raising=False)
     locations._ENV_FILE_CACHE = None
     return monkeypatch
@@ -132,6 +133,51 @@ def test_state_subdirs_follow_state_dir(clean_env):
     assert locations.muxcon_federated_cache_path() == "/var/lib/openmux/muxcon/federated_cache.json"
     assert locations.ssh_host_key_dir() == "/var/lib/openmux/ssh_listener"
     assert locations.web_tls_dir() == "/var/lib/openmux/web_console"
+
+
+def test_systemd_dir_vars_used_when_nothing_else_set(clean_env, monkeypatch):
+    # No shell env, no defaults file: systemd's exported dir vars apply.
+    monkeypatch.setenv("OPENMUX_ENV_FILE", "/nonexistent/openmux/defaults")
+    monkeypatch.setenv("RUNTIME_DIRECTORY", "/run/openmux")
+    monkeypatch.setenv("STATE_DIRECTORY", "/var/lib/openmux")
+    monkeypatch.setenv("LOGS_DIRECTORY", "/var/log/openmux")
+    assert locations.run_dir() == "/run/openmux"
+    assert locations.pidfile_path() == "/run/openmux/openmux.pid"
+    assert locations.control_socket_path() == "/run/openmux/openmux.sock"
+    assert locations.state_dir() == "/var/lib/openmux"
+    assert locations.log_dir() == "/var/log/openmux"
+
+
+def test_env_file_beats_systemd_dir_vars(clean_env, tmp_path, monkeypatch):
+    env_file = tmp_path / "defaults"
+    env_file.write_text("OPENMUX_RUN_DIR=/from/file\n")
+    monkeypatch.setenv("OPENMUX_ENV_FILE", str(env_file))
+    monkeypatch.setenv("RUNTIME_DIRECTORY", "/run/openmux")
+    assert locations.run_dir() == "/from/file"
+    assert locations.control_socket_path() == "/from/file/openmux.sock"
+
+
+def test_process_env_beats_systemd_dir_vars(clean_env, monkeypatch):
+    monkeypatch.setenv("OPENMUX_RUN_DIR", "/from/env")
+    monkeypatch.setenv("RUNTIME_DIRECTORY", "/run/openmux")
+    assert locations.run_dir() == "/from/env"
+    monkeypatch.setenv("OPENMUX_LOG_DIR", "/var/log/other")
+    monkeypatch.setenv("LOGS_DIRECTORY", "/var/log/openmux")
+    assert locations.log_dir() == "/var/log/other"
+
+
+def test_systemd_var_partial_set_falls_through_per_location(clean_env, monkeypatch):
+    # Only RUNTIME_DIRECTORY set (e.g. older without LogsDirectory): state
+    # and logs keep their built-in defaults, run dir uses the var.
+    monkeypatch.setenv("OPENMUX_ENV_FILE", "/nonexistent/openmux/defaults")
+    monkeypatch.setenv("RUNTIME_DIRECTORY", "/run/openmux")
+    assert locations.run_dir() == "/run/openmux"
+    assert locations.state_dir() == os.path.expanduser("~/.openmux")
+    assert locations.log_dir() == "logs"
+
+
+def test_pkg_run_dir_constant(clean_env):
+    assert locations.PACKAGED_RUN_DIR == "/run/openmux"
 
 
 def test_state_subdirs_dev_default(clean_env):

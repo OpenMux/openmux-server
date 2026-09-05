@@ -6,7 +6,8 @@ chain so that packaged installs pin locations via environment variables while
 dev installs fall back to working-directory and per-user paths. Precedence
 for each variable:
 
-    process environment > /etc/defaults/openmux > built-in default
+    process environment > /etc/defaults/openmux > systemd directory
+    variable > built-in default
 
 ``/etc/defaults/openmux`` is plain ``KEY=VALUE`` lines (systemd
 ``EnvironmentFile`` compatible, so the unit and this code read the same file).
@@ -31,11 +32,23 @@ from typing import Any, Dict, List, Optional
 ENV_FILE_PATH = "/etc/defaults/openmux"
 _ENV_FILE_CACHE: Optional[Dict[str, str]] = None
 
-# Environment variables (set by the systemd unit in packaged installs).
+# Environment variables (set via /etc/defaults/openmux in packaged installs).
 ENV_LOG_DIR = "OPENMUX_LOG_DIR"
 ENV_RUN_DIR = "OPENMUX_RUN_DIR"
 ENV_STATE_DIR = "OPENMUX_STATE_DIR"
 ENV_CTL_SOCK = "OPENMUX_CTL_SOCK"
+
+# systemd directory variables: present in the service process only when the
+# unit declares the matching RuntimeDirectory=/StateDirectory=/
+# LogsDirectory=. An unset value never breaks resolution; it just falls
+# through to the built-in default.
+_SYSTEMD_RUN_DIR = "RUNTIME_DIRECTORY"
+_SYSTEMD_STATE_DIR = "STATE_DIRECTORY"
+_SYSTEMD_LOG_DIR = "LOGS_DIRECTORY"
+
+# Packaged run dir by default: the unit's RuntimeDirectory= value and the
+# last-resort probe for one-shot clients (openmuxctl).
+PACKAGED_RUN_DIR = "/run/openmux"
 
 # Built-in dev defaults (working-directory-relative when no env is set).
 _DEV_LOG_DIR = "logs"
@@ -86,15 +99,20 @@ def _strip_quotes(value: str) -> str:
     return value
 
 
-def _env(name: str, default: str = "") -> str:
-    """Resolve ``name`` from the environment, the defaults file, or ``default``.
+def _env(name: str, default: str = "", systemd_var: str = "") -> str:
+    """Resolve ``name``: process env, defaults file, systemd var, or ``default``.
 
-    An unset or empty value at each level falls through to the next. ``~`` is
-    expanded so users may write home-relative paths.
+    An unset or empty value at each level falls through to the next.
+    ``systemd_var`` names the systemd directory variable for this location
+    (``RUNTIME_DIRECTORY``/``STATE_DIRECTORY``/``LOGS_DIRECTORY``); it is set
+    only by a unit that declares the matching ``*Directory=``, and an absent
+    value there simply falls through to the next level. ``~`` is expanded so
+    users may write home-relative paths.
 
     Args:
         name: Environment variable name.
-        default: Value returned when neither source provides one.
+        default: Value returned when no level provides one.
+        systemd_var: Optional systemd directory variable to consult.
 
     Returns:
         str: Expanded value, or ``default``.
@@ -102,37 +120,51 @@ def _env(name: str, default: str = "") -> str:
     value = os.environ.get(name, "")
     if not value.strip():
         value = _env_file_values().get(name, "")
+    if not value and systemd_var:
+        value = os.environ.get(systemd_var, "")
     if not value:
         return default
     return os.path.expanduser(value).strip()
 
 
+def env_value(name: str, default: str = "") -> str:
+    """Read a location variable with process-env then defaults-file resolution.
+
+    Public for standalone tools (openmuxctl) that must follow the same
+    resolution as the server helpers without the systemd directory variable
+    (those are set only inside the unit's own processes).
+    """
+    return _env(name, default)
+
+
 def log_dir() -> str:
     """Base directory for all logs (aggregate log plus ``ports/``).
 
-    Resolution: ``OPENMUX_LOG_DIR`` when set, else the working-directory
-    relative ``logs``. Relative values are left as-is (CWD-relative on use).
+    Resolution: ``OPENMUX_LOG_DIR`` (env, then /etc/defaults/openmux), else
+    systemd's ``$LOGS_DIRECTORY``, else the working-directory relative
+    ``logs``. Relative values are left as-is (CWD-relative on use).
     """
-    return _env(ENV_LOG_DIR, _DEV_LOG_DIR)
+    return _env(ENV_LOG_DIR, _DEV_LOG_DIR, _SYSTEMD_LOG_DIR)
 
 
 def run_dir() -> Optional[str]:
     """Runtime directory for short-lived files (pid, control socket).
 
-    Resolution: ``OPENMUX_RUN_DIR`` when set, else ``None`` so callers fall
-    back to the working-directory runtime location.
+    Resolution: ``OPENMUX_RUN_DIR`` (env, then /etc/defaults/openmux), else
+    systemd's ``$RUNTIME_DIRECTORY``, else ``None`` so callers fall back to
+    the working-directory runtime location.
     """
-    value = _env(ENV_RUN_DIR)
+    value = _env(ENV_RUN_DIR, "", _SYSTEMD_RUN_DIR)
     return value or None
 
 
 def pidfile_path() -> str:
     """PID file location.
 
-    Resolution: ``{run_dir}/openmux.pid`` when ``OPENMUX_RUN_DIR`` is set,
-    else the working-directory ``logs/openmux.pid``.
+    Resolution: ``{run_dir}/openmux.pid`` when a run dir resolves (env,
+    defaults file, or systemd's), else the working-directory ``logs``.
     """
-    run = _env(ENV_RUN_DIR)
+    run = _env(ENV_RUN_DIR, "", _SYSTEMD_RUN_DIR)
     if run:
         return os.path.join(run, "openmux.pid")
     return _DEV_PIDFILE
@@ -141,14 +173,14 @@ def pidfile_path() -> str:
 def control_socket_path() -> str:
     """Control socket location.
 
-    Resolution: ``OPENMUX_CTL_SOCK`` when set, else ``{run_dir}/openmux.sock``
-    when ``OPENMUX_RUN_DIR`` is set, else the working-directory
-    ``logs/openmux.sock``. ``~`` is expanded on any env value.
+    Resolution: ``OPENMUX_CTL_SOCK`` (env, then defaults file) when set,
+    else ``{run_dir}/openmux.sock`` for the resolved run dir, else the
+    working-directory ``logs/openmux.sock``. ``~`` is expanded on any value.
     """
     override = _env(ENV_CTL_SOCK)
     if override:
         return override
-    run = _env(ENV_RUN_DIR)
+    run = _env(ENV_RUN_DIR, "", _SYSTEMD_RUN_DIR)
     if run:
         return os.path.join(run, "openmux.sock")
     return _DEV_CTL_SOCK
@@ -157,11 +189,12 @@ def control_socket_path() -> str:
 def state_dir() -> str:
     """Base directory for persistent, per-user material.
 
-    Resolution: ``OPENMUX_STATE_DIR`` when set, else the home-relative
-    ``~/.openmux``. This is where protocol material (muxcon TLS, SSH host
-    keys, web console TLS) lives in the absence of a packaged location.
+    Resolution: ``OPENMUX_STATE_DIR`` (env, then /etc/defaults/openmux), else
+    systemd's ``$STATE_DIRECTORY``, else the home-relative ``~/.openmux``.
+    This is where protocol material (muxcon TLS, SSH host keys, web console
+    TLS) lives in the absence of a packaged location.
     """
-    return _env(ENV_STATE_DIR, os.path.expanduser("~/.openmux"))
+    return _env(ENV_STATE_DIR, os.path.expanduser("~/.openmux"), _SYSTEMD_STATE_DIR)
 
 
 def muxcon_tls_dir() -> str:

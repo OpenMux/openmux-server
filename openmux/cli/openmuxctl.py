@@ -12,13 +12,18 @@ Usage examples:
 
 Socket resolution precedence:
   1) --socket path
-  2) env OPENMUX_CTL_SOCK
-  3) env OPENMUX_RUN_DIR (openmux.sock inside it)
-  4) logs/openmux.sock (default)
+  2) OPENMUX_CTL_SOCK (shell env, else /etc/defaults/openmux)
+  3) OPENMUX_RUN_DIR (shell env, else /etc/defaults/openmux); the socket
+     lives inside that dir
+  4) /run/openmux/openmux.sock, probed for existence (packaged install,
+     no override set)
+  5) logs/openmux.sock (dev default)
 
-Steps 2-3 fall back to /etc/defaults/openmux (KEY=VALUE, packaged installs)
-when the variable is not set in the shell, so openmuxctl finds the packaged
-server's control socket without exported variables.
+openmuxctl runs in a user shell, outside the server's environment: it sees
+neither the server's exported variables nor systemd's directory variables.
+Relocating the directories is done in /etc/defaults/openmux (the server
+applies the same file), which is why steps 2-3 read it; a shell env
+assignment overrides the file for this tool only.
 """
 from __future__ import annotations
 
@@ -29,7 +34,7 @@ import os
 import sys
 from typing import List, Optional
 
-from ..server.locations import control_socket_path as _locations_control_socket
+from ..server import locations
 
 
 async def send_command(sock_path: str, payload: dict) -> int:
@@ -65,13 +70,23 @@ async def send_command(sock_path: str, payload: dict) -> int:
 
 
 def resolve_socket_path(cli_sock: Optional[str]) -> str:
+    """Resolve the control socket path (see module docstring for the chain)."""
     if cli_sock:
         return cli_sock
-    env = os.environ.get("OPENMUX_CTL_SOCK")
-    if env:
-        return env
-    # Shared resolution with the server: OPENMUX_RUN_DIR, else the dev default logs/.
-    return _locations_control_socket()
+    # 2) OPENMUX_CTL_SOCK: shell env, else /etc/defaults/openmux.
+    override = locations.env_value("OPENMUX_CTL_SOCK")
+    if override:
+        return override
+    # 3) OPENMUX_RUN_DIR: same resolution; the socket lives inside it.
+    run_dir = locations.env_value("OPENMUX_RUN_DIR")
+    if run_dir:
+        return os.path.join(run_dir, "openmux.sock")
+    # 4) Packaged install, no override: probe the default systemd run dir.
+    packaged_dir = locations.PACKAGED_RUN_DIR
+    if os.path.isdir(packaged_dir):
+        return os.path.join(packaged_dir, "openmux.sock")
+    # 5) Dev default next to the start dir (logs/openmux.sock).
+    return locations.control_socket_path()
 
 
 def main(argv: Optional[List[str]] = None) -> int:

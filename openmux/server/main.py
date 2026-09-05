@@ -359,7 +359,9 @@ class OpenMuxServer:
         Precedence:
           1) env OPENMUX_CTL_SOCK
           2) config.runtime.control_socket (legacy section; warns)
-          3) locations.control_socket_path(): OPENMUX_RUN_DIR, else logs/
+          3) locations.control_socket_path(): OPENMUX_RUN_DIR (env, then
+             /etc/defaults/openmux, then systemd's $RUNTIME_DIRECTORY),
+             else logs/
 
         The old ``server.control_socket`` key was removed from the schema; the
         deprecation shim in ConfigManager drops it at load time.
@@ -416,7 +418,9 @@ class OpenMuxServer:
         Precedence:
           1) env OPENMUX_PIDFILE (deprecated; OPENMUX_RUN_DIR replaces it)
           2) config.runtime.pidfile (legacy section; warns)
-          3) locations.pidfile_path(): OPENMUX_RUN_DIR, else logs/openmux.pid
+          3) locations.pidfile_path(): OPENMUX_RUN_DIR (env, then
+             /etc/defaults/openmux, then systemd's $RUNTIME_DIRECTORY),
+             else logs/openmux.pid
 
         The old ``server.pidfile`` key was removed from the schema; the
         deprecation shim in ConfigManager drops it at load time.

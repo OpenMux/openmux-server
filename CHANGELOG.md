@@ -28,11 +28,18 @@ Changes since v1.0.2 (2026-08-27).
   `OPENMUX_STATE_DIR`. `OPENMUX_CTL_SOCK` stays as an override. A packaged
   install can set them in `/etc/defaults/openmux` (one `KEY=VALUE` per
   line, no secrets in the file).
-  - On the Debian package the systemd unit sets these variables, so all
-    server-run files move to `/run/openmux`, `/var/log/openmux`, and
-    `/var/lib/openmux` without touching the conffile.
-  - Dev defaults (no env) are unchanged: `logs/` next to the start dir and
-    `~/.openmux` for per-user state.
+  - On the Debian package the unit's `RuntimeDirectory=`/`StateDirectory=`/
+    `LogsDirectory=` both create the dirs and act as the server defaults
+    (`$RUNTIME_DIRECTORY`/`$STATE_DIRECTORY`/`$LOGS_DIRECTORY`); files land
+    in `/run/openmux`, `/var/log/openmux`, and `/var/lib/openmux` without
+    touching the conffile.
+  - Resolution is `OPENMUX_*` env > `/etc/defaults/openmux` > the systemd
+    dir variables > the dev defaults. `/etc/defaults/openmux` ships with
+    its three values commented out: it is the override point. Relocate
+    files there, not in the unit. `openmuxctl` resolves `OPENMUX_RUN_DIR`
+    from the same file and probes `/run/openmux` when no override is set.
+  - Dev defaults (no env, no file, no unit) are unchanged: `logs/` next to
+    the start dir and `~/.openmux` for per-user state.
 - **Web UI templates and static assets now ship with the Python package.**
   A running server serves the console from the installed package; no
   `template_dir`/`static_dir` config and no repository-root `templates/` or
