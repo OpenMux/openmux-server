@@ -540,15 +540,22 @@ def _validate_payload(payload: Dict[str, Any], cm: ConfigManager) -> Tuple[bool,
     Does not persist any changes. Returns (ok, error_message).
     """
     try:
+        # Authoritative JSON Schema pass first: rejects the edit with every
+        # violation in the 400 body (the UI shows the message verbatim).
+        from openmux.server.config_validation import payload_violations
+
+        schema_errors = payload_violations(payload)
+        if schema_errors:
+            return False, "Schema validation failed:\n" + "\n".join(schema_errors), None
         # Create a throwaway manager pointing at the same path to reuse behavior
         temp_cm = ConfigManager(
             cm.config_path,
             auth_config_path=getattr(cm, "auth_config_path", None),
             security_config_path=getattr(cm, "security_config_path", None),
         )
-        # Directly assign and validate
+        # Directly assign and validate. The inline-authentication variant is
+        # allowed here, matching the schema's authentication allowance.
         temp_cm.config = payload
-        # Use internal validation routine; it raises on error
         temp_cm._validate_config(allow_inline_authentication=True)  # type: ignore[attr-defined]
         return True, None, None
     except Exception as e:
@@ -597,55 +604,38 @@ async def _handle_validate(request: web.Request) -> web.StreamResponse:
 async def _handle_schema(request: web.Request) -> web.StreamResponse:
     """Return a JSON Schema describing the config shape for UI form building.
 
-    Attempts to load the authoritative YAML-formatted JSON Schema from the
-    repository (config_schema/openmux_config_schema.yaml). If unavailable or
-    invalid, falls back to a permissive minimal schema. Server-side validation
-    via ConfigManager remains the source of truth.
+    Loads the authoritative YAML-formatted JSON Schema that ships inside the
+    package (openmux/config_schema). If it is missing or invalid, falls back
+    to a permissive minimal schema and logs ERROR. Server-side validation
+    (schema + ConfigManager) remains the source of truth.
     """
     # Admin-only visibility for the schema endpoint
     adapter = request.app[ADAPTER_APP_KEY]
     adapter._require_permission(request, ("admin",))
-    # Try to load YAML schema from well-known locations
+    # The authoritative schema ships inside the package (see
+    # openmux/config_schema), so it resolves from the install location, not
+    # the current working directory. OPENMUX_CONFIG_SCHEMA still wins when
+    # set (locations.server_schema_file).
     schema: Dict[str, Any] = {}
     loaded = False
     try:
-        import os
-        from pathlib import Path
-
         import yaml  # type: ignore
 
-        # Optional override via environment variable
-        env_path = os.environ.get("OPENMUX_CONFIG_SCHEMA")
-        candidates = []
-        if env_path:
-            candidates.append(Path(env_path))
-        # Repo root relative to this file: openmux/server/web_plugins/ -> repo_root/config_schema/...
-        try:
-            repo_root = Path(__file__).resolve().parents[3]
-            candidates.append(repo_root / "config_schema" / "openmux_config_schema.yaml")
-        except Exception:
-            pass
-        # Also check current working directory mirror path (when running from repo root)
-        try:
-            candidates.append(Path.cwd() / "config_schema" / "openmux_config_schema.yaml")
-        except Exception:
-            pass
+        from openmux.server.locations import server_schema_file
 
-        for p in candidates:
-            try:
-                if not p:
-                    continue
-                if p.is_file():
-                    with p.open("r", encoding="utf-8") as f:
-                        data = yaml.safe_load(f) or {}
-                    if isinstance(data, dict) and data:
-                        schema = data  # type: ignore[assignment]
-                        loaded = True
-                        break
-            except Exception:
-                continue
+        path = server_schema_file()
+        if path.is_file():
+            with path.open("r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            if isinstance(data, dict) and data:
+                schema = data  # type: ignore[assignment]
+                loaded = True
     except Exception:
         loaded = False
+        try:
+            adapter.logger.error("Config schema endpoint fell back to the permissive schema", exc_info=True)
+        except Exception:
+            pass
 
     if not loaded:
         # Permissive fallback schema

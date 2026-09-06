@@ -14,8 +14,10 @@ for each variable:
 It exists only in packaged installs; a missing file is the normal case.
 Keep it readable (0644): it holds locations, never secrets.
 
-Web read-only assets resolve from the installed package instead (see the
-``webui`` helpers; the tree lands there in a follow-up change).
+Web read-only assets and the config JSON Schemas resolve from the installed
+package instead (see the ``webui`` and ``schema_*`` helpers): a dev checkout,
+an editable install, a wheel, and a Docker image all find the same copies
+with no WorkingDirectory tricks.
 
 This module is import-safe: each helper is a pure function of the current
 environment and the defaults file. It performs no I/O beyond reading that
@@ -37,6 +39,8 @@ ENV_LOG_DIR = "OPENMUX_LOG_DIR"
 ENV_RUN_DIR = "OPENMUX_RUN_DIR"
 ENV_STATE_DIR = "OPENMUX_STATE_DIR"
 ENV_CTL_SOCK = "OPENMUX_CTL_SOCK"
+# Override for the server config schema file (full path to a YAML schema).
+ENV_CONFIG_SCHEMA = "OPENMUX_CONFIG_SCHEMA"
 
 # systemd directory variables: present in the service process only when the
 # unit declares the matching RuntimeDirectory=/StateDirectory=/
@@ -243,6 +247,52 @@ def static_dir() -> Path:
     Points at ``openmux/server/webui/static`` (see ``templates_dir``).
     """
     return _module_dir() / _WEBUI_PKG / "static"
+
+
+# Read-only config schemas ship with the package (openmux/config_schema).
+_SCHEMA_PKG = "config_schema"
+
+
+def schema_dir() -> Path:
+    """Read-only config JSON Schemas dir shipped with the package.
+
+    Points at ``openmux/config_schema`` (the tree moved there from the
+    repo root, same treatment as the webui assets). Works identically for a
+    dev checkout, an editable install, a wheel, and a Docker image.
+    """
+    return _module_dir().parent / _SCHEMA_PKG
+
+
+def schema_file(name: str) -> Path:
+    """Path of one in-package schema file (e.g. ``openmux_config_schema.yaml``).
+
+    Args:
+        name: Schema file name under ``openmux/config_schema``.
+    """
+    return schema_dir() / name
+
+
+def server_schema_file() -> Path:
+    """Resolve the ``server.yaml`` JSON schema to validate against.
+
+    Resolution: ``OPENMUX_CONFIG_SCHEMA`` (process env, then
+    /etc/defaults/openmux) when it points to an existing file, else the
+    in-package ``openmux/config_schema/openmux_config_schema.yaml``. A
+    missing override never breaks boot; callers that care can compare
+    against :func:`server_schema_override` to warn.
+    """
+    override = server_schema_override()
+    if override:
+        path = Path(os.path.expanduser(override))
+        if path.is_file():
+            return path
+    return schema_file("openmux_config_schema.yaml")
+
+
+def server_schema_override() -> Optional[str]:
+    """Raw ``OPENMUX_CONFIG_SCHEMA`` value (env, then defaults file), or None."""
+    value = _env(ENV_CONFIG_SCHEMA)
+    return value or None
 
 
 # Location keys removed from the schema in favor of env-based resolution.

@@ -85,6 +85,36 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Behavior changes (no config change required)
 
+- **Config files are validated against the JSON schemas at startup.** The
+  authoritative schemas now ship inside the Python package
+  (`openmux/config_schema/`). On every config load (startup and reload),
+  `server.yaml`, `authentication.yaml`, and `security.yaml` are checked
+  against their schemas. Each violation is logged as ERROR; the server
+  still starts (a working deployment never breaks on a newly caught typo).
+  Validate offline with
+  `openmux-server --check-config -c <dir>/server.yaml` (exit 0 valid, 1
+  schema violations, 2 missing or unparseable file). The Config Editor now
+  rejects edits that violate the schema. The runtime imports `jsonschema`;
+  the Debian package declares the new `python3-jsonschema` dependency.
+- **Schema tightenings (code still accepts these; removal tracked in
+  tickets #71 and #72).**
+  - `serial_ports` is an array of port mappings only. The unified adapter
+    dict form (`{adapter_type: serial, ports: [...]}`) no longer passes
+    schema validation. The code still loads it until it is removed
+    (ticket #71).
+  - The deprecated `openmux_client_ports` section no longer passes schema
+    validation. The code still loads it until it is removed (ticket #72).
+  - Per-key MuxCon federation filters use the flat
+    `public_keys[].advertise_filters` / `public_keys[].accept_filters`
+    keys only. The nested `public_keys[].muxcon` wrapper no longer passes
+    schema validation. The code still reads the nested form as a fallback
+    until it is removed (ticket #73).
+  - Write-slot capacity uses `max_read_write_users` only (all port
+    types). The legacy `read_write_users` alias no longer passes schema
+    validation. The serial code still reads it as a fallback until it is
+    removed (ticket #75). Configs that used the alias keep loading but now
+    log a schema ERROR at load.
+
 - **Console access resolves with one predictable ladder** (issue #58, part 1). Order: admin bypass, then group lists (a closed boundary), then the user `permissions` value on no-list ports.
   - Review your configs if you relied on the old shortcuts.
   - A user with global `read-write` no longer gets read-write on a list-bearing port where the user is not listed.

@@ -48,6 +48,14 @@ The primary config (`server.yaml`) may reference two sidecar files: `authenticat
 - Config Editor and hot-reload operations MUST honor the resolved `config_editor` writable-section set (`allowed - disabled`). An empty resolved set means the UI is fully read-only.
 - The Config Editor MUST NOT send stored secrets (user `password_hash`, `api_keys[].key`, and initiator `password`/`api_key` fields) to the browser. It returns a mask sentinel instead and restores the stored value on save unless the admin submits a new value.
 
+## 8. Schema Authority
+Each config section has exactly one canonical format. The schemas in `openmux/config_schema/` define it; there is no legacy or compatibility form in the schema.
+
+- The packaged schemas are the single source of truth for shape. The code may be more permissive during a deprecation window, but MUST NOT accept a format the schema rejects without a tracking issue.
+- On every load, the server checks each config file against its schema and logs each violation as ERROR. Validation MUST stay log-only at startup; refusing to start is what `--check-config` is for.
+- The Config Editor MUST reject a payload that violates the schemas (HTTP 400 with the rendered violations).
+- When a format is dropped from a schema, the removal of the old code path MUST be tracked in an issue and named in the CHANGELOG.
+
 Any future sidecar files (e.g., secrets) require expanding this section with invariants before implementation.
 
 ## 8. Backward Compatibility Window

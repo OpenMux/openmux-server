@@ -24,6 +24,9 @@ python -m openmux.server -c config/server.yaml
 python -m openmux.client server.example.com
 ```
 
+For a longer walkthrough, including how to configure MuxCon federation
+between two servers, see [docs/QUICKSTART.md](docs/QUICKSTART.md).
+
 ### Configuration Files
 
 OpenMux now keeps credentials and security policy in dedicated sidecar files so they can be managed independently of the main server config:
@@ -48,6 +51,20 @@ Optionally you can also specify the directory with these config files instead us
 ```
 python -m openmux.server --config-dir ./config/
 ```
+
+### Validating The Configuration
+
+The server checks the three config files against the JSON schemas on every
+load (a violation is logged as ERROR and does not stop the server). To check
+them offline, without starting the server:
+
+```
+python -m openmux.server --check-config -c config/server.yaml
+```
+
+Exit codes: 0 valid, 1 schema violations found, 2 a file is missing or
+unparseable. Sidecar paths come from `-a`/`-s` when given, otherwise from the
+same directory as `server.yaml`.
 
 ### Password Hashes For Users
 
@@ -82,26 +99,16 @@ Important details:
 
 ### Web Console Assets
 
-The Web Console serves bundled xterm.js files from `static/`. Download the latest xterm.js assets before enabling the adapter:
-
-```bash
-scripts/install_xtermjs.py
-
-# optional flags
-scripts/install_xtermjs.py --force            # re-download even if files exist
-scripts/install_xtermjs.py --static-dir /var/lib/openmux/static
-```
-
-The script fetches the latest `xterm.js`, `xterm.css`, and fit addon builds and verifies they exist locally before exiting, so browsers never rely on CDN fetches at runtime.
+The Web Console serves bundled xterm.js files from inside the python package (`openmux/server/webui/static/`). The files are pinned, committed in the source tree, and shipped in the packages, so browsers never rely on CDN fetches at runtime.
 
 Recommended dependency model:
 
 - Treat xterm.js as vendored static web assets, not as a runtime Node.js dependency.
-- Keep the required browser files in `static/` and ship them with OpenMux packages.
+- Keep the required browser files in `openmux/server/webui/static/` and ship them with OpenMux packages.
 - Pin the xterm.js and `xterm-addon-fit` versions during release preparation instead of downloading them on target systems.
 - Avoid CDN fetches in production so installs and Debian builds stay deterministic.
 
-In practice this means the repository and release artifacts should contain the required xterm.js files ahead of time, and packaging should install them as ordinary static assets.
+`scripts/install_xtermjs.py` only refreshes those vendored files when you deliberately bump the xterm.js or `xterm-addon-fit` version.
 
 ## Features
 
@@ -162,13 +169,10 @@ Two ways to trigger a live reload without full restart:
 
 Control socket details:
 
-- Default path: `logs/openmux.sock` (created with permissions 0600)
-- Config keys (under `server:`):
-  - `server.control_socket`: override control socket path
-  - `server.pidfile`: override pid file path (default `logs/openmux.pid`)
-- Environment overrides:
-  - `OPENMUX_CTL_SOCK` for the control socket path
-  - `OPENMUX_PIDFILE` for the pid file path
+- Default path: `logs/openmux.sock` (dev run) or `/run/openmux/openmux.sock` (packaged), created with permissions 0600
+- The socket and the pid file both live in the run dir. The run dir resolves through: `OPENMUX_RUN_DIR` env → `/etc/defaults/openmux` → the systemd `$RUNTIME_DIRECTORY` variable → dev default `logs/`
+- `OPENMUX_CTL_SOCK` overrides the control socket path directly
+- See `docs/LOCATIONS.md` for the full resolution order
 
 ## Installation
 
@@ -194,8 +198,9 @@ pip install -e .
 # For web interface support
 pip install -e ".[web]"
 
-# External authentication uses the openmux-pam-helper or an other external authentication script/binary;
-# no Python dependency is required (see docs/INSTALL.md).
+# External authentication uses the openmux-pam-helper or another external
+# authentication script/binary; no Python dependency is required
+# (see docs/INSTALL.md).
 ```
 
 ## Configuration

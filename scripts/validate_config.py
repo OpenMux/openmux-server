@@ -3,7 +3,7 @@
 
 Usage:
   python scripts/validate_config.py --config config/serial_unified.yaml \
-      --schema config_schema/openmux_config_schema.yaml
+      --schema openmux/config_schema/openmux_config_schema.yaml
 
 Exit codes:
   0 = valid

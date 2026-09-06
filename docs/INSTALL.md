@@ -306,8 +306,12 @@ Example minimal config is provided at `config/loopback_test.yaml`.
   - Install `python3-cryptography`
 - Control socket permission denied:
   - The socket is created with 0600; run `openmuxctl` as the same user that started the server, or change the path to a root-owned directory only if you also run the server as root.
+- `--check-config` reports schema violations:
+  - Each line names the file, the path in the file, and the problem. Fix the config and re-run. Exit codes: 0 valid, 1 schema violations, 2 a file is missing or unparseable.
+- Startup log shows `Config validation ... schema violation(s)`:
+  - The server loads config files against the JSON schemas on every load. A violation is logged as ERROR but does not stop the server. Fix the highlighted key.
 - Schema/UI in the web console not loading:
-  - The server falls back to a permissive schema if the YAML schema isn’t found. Ensure `config_schema/openmux_config_schema.yaml` exists when running from the repo.
+  - The server serves the schema from the installed package. It falls back to a permissive schema and logs an ERROR if the packaged schema is missing or unreadable. The `OPENMUX_CONFIG_SCHEMA` environment variable points to a local override.
 
 ---
 

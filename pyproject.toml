@@ -32,6 +32,7 @@ dependencies = [
     "cryptography>=38.0.0",
     "aiohttp>=3.9.0",
     "Jinja2>=3.1.0",
+    "jsonschema>=4.18.0",
 ]
 
 [project.optional-dependencies]
@@ -71,6 +72,10 @@ include = ["openmux*"]
 # Read-only web UI assets ship inside the package (moved from repo-root
 # templates/web_console and static in T2). Included in wheel and sdist.
 "openmux.server.webui" = ["templates/web_console/*.j2", "static/**"]
+# Read-only config JSON Schemas ship inside the package (moved from repo-root
+# config_schema/). Included in wheel and sdist so schema validation works
+# from an installed deployment.
+"openmux.config_schema" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"

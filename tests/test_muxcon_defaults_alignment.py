@@ -18,7 +18,7 @@ import yaml
 from openmux.server.adapters.muxcon import UnifiedMuxConAdapter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_PATH = REPO_ROOT / "config_schema" / "openmux_config_schema.yaml"
+SCHEMA_PATH = REPO_ROOT / "openmux" / "config_schema" / "openmux_config_schema.yaml"
 
 
 def _muxcon_schema(path: Path) -> dict:

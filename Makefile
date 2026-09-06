@@ -366,7 +366,7 @@ clean:
 
 # Default config and schema paths (override with `make validate-config CONFIG=...`)
 CONFIG ?= config/server.yaml
-SCHEMA ?= config_schema/openmux_config_schema.yaml
+SCHEMA ?= openmux/config_schema/openmux_config_schema.yaml
 
 validate-config: venv-dev
 	$(call print_status,"Validating configuration $(CONFIG) against $(SCHEMA)...")

@@ -2,8 +2,8 @@
 """Validate every OpenMux config file under ./config against its schema.
 
 The schema for each file is detected from its top-level keys: every schema in
-config_schema/ declares the top-level keys it accepts, and a file must be
-covered by exactly one schema. There is no filename mapping and no default
+openmux/config_schema/ declares the top-level keys it accepts, and a file must
+be covered by exactly one schema. There is no filename mapping and no default
 schema; a file covered by zero schemas (or by several) is a hard error.
 
 Exits 0 when everything validates, 1 otherwise.
@@ -16,12 +16,12 @@ import yaml
 from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_DIR = ROOT / "config_schema"
+SCHEMA_DIR = ROOT / "openmux" / "config_schema"
 SCHEMA_FILES = sorted(SCHEMA_DIR.glob("openmux_*.yaml"))
 
 
 def _schema_key_sets() -> Dict[str, Set[str]]:
-    """Top-level keys accepted by each schema in config_schema/."""
+    """Top-level keys accepted by each schema in openmux/config_schema/."""
     return {path.name: set(yaml.safe_load(path.read_text())["properties"].keys()) for path in SCHEMA_FILES}
 
 

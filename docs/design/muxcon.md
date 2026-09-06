@@ -159,8 +159,8 @@ unregistered (`_handle_ports_federated`'s stale-proxy diff).
 ### 4.1 Advertise/accept filters
 
 `advertise_filters`/`accept_filters` (adapter-level, under `muxcon:`) and
-optional per-key overrides (nested under a `muxcon.public_keys[].muxcon`
-entry, applied once a connection authenticates with that key) each take:
+optional per-key overrides (flat keys on a `muxcon.public_keys[]` entry,
+applied once a connection authenticates with that key) each take:
 
 ```yaml
 include: []            # glob patterns on port name; empty = allow all

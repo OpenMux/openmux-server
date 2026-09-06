@@ -428,9 +428,7 @@ class OpenMuxServer:
         pidfile = os.environ.get("OPENMUX_PIDFILE")
         if pidfile:
             try:
-                self.logger.warning(
-                    "OPENMUX_PIDFILE is deprecated; use OPENMUX_RUN_DIR instead. Honoring it for one release."
-                )
+                self.logger.warning("OPENMUX_PIDFILE is deprecated; use OPENMUX_RUN_DIR instead. Honoring it for one release.")
             except Exception:  # justification: logger best-effort; keep the value
                 pass
             return os.path.expanduser(pidfile)
@@ -1133,11 +1131,7 @@ class OpenMuxServer:
                 if key == "client_listener" and hasattr(a, "reconcile_ports"):
                     # Absent section means "no listener" (same as a full
                     # reload): converge by disabling.
-                    effective = (
-                        client_listener_section
-                        if client_listener_section is not None
-                        else {"enabled": False}
-                    )
+                    effective = client_listener_section if client_listener_section is not None else {"enabled": False}
                     try:
                         res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("client_listener", res)
@@ -1576,6 +1570,13 @@ def _parse_arguments():
         help="Path to security configuration file (security.yaml)",
     )
     parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Validate the configuration files against the JSON Schema and exit without starting "
+        "the server. Exit code 0 = valid, 1 = schema violations, 2 = a file is missing or "
+        "unparseable.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -1985,6 +1986,25 @@ def main():
     config_path = _find_config_file(args.config)
     auth_config = args.auth_config
     security_config = args.security_config
+
+    # --check-config: strict schema pass over all three files and exit.
+    # Derive sidecar paths exactly like ConfigManager so the check covers
+    # the same files the server would load.
+    if args.check_config:
+        from .config_validation import check_config_files
+
+        base_dir = os.path.dirname(os.path.abspath(config_path))
+        auth_path = auth_config or os.path.join(base_dir, "authentication.yaml")
+        security_path = security_config or os.path.join(base_dir, "security.yaml")
+        violations, problems = check_config_files(config_path, auth_path, security_path)
+        for line in violations + problems:
+            print(line)
+        if problems:
+            sys.exit(2)
+        if violations:
+            sys.exit(1)
+        print(f"Config validation OK: {config_path}, {auth_path}, {security_path}")
+        sys.exit(0)
 
     # Determine initial log level from CLI or config.logging.level
     cli_level = None

@@ -19,10 +19,13 @@ This document gives a precise, implementation‑oriented map of how the OpenMux 
 
 ---
 ## 2. Configuration Model (Strict Schema)
-The authoritative schemas live in `config_schema/`, one per config file. Minimal required top‑level keys:
+The authoritative schemas live in `openmux/config_schema/` (shipped with the
+package), one per config file. Minimal required top‑level keys:
 - `server.yaml` (schema `openmux_config_schema.yaml`): `server` (identifiers and metadata). At least one runtime provider section present: one or more of (`client_listener`, `serial_ports`, `loopback_ports`, `command_ports`, `muxcon`, `web_status`).
 - `authentication.yaml` (schema `openmux_authentication_schema.yaml`): at least one of `users`, `api_keys`, `public_keys`, or `external_auth`.
 - `security.yaml` (schema `openmux_security_schema.yaml`): optional allow‑lists, rate limits, and the server-wide `access_default` console posture (`allow`/`deny`).
+
+The server resolves the schemas from the package (`openmux.server.locations.server_schema_file()`; override with `OPENMUX_CONFIG_SCHEMA`). On every config load — startup, SIGHUP, and Config Editor reload — `ConfigManager` checks the parsed config against the server schema, the auth sidecar against the auth schema, and `security.yaml` against the security schema. Each violation is logged as ERROR; loading continues. `openmux-server --check-config` runs the same checks strictly and exits 0/1/2 without starting the server. The Config Editor rejects a save when the payload violates the schema.
 
 Only per‑section configuration is supported. Each top‑level section maps directly to a specific adapter plugin (e.g., `loopback_ports`, `serial_ports`, `client_listener`, `muxcon`). The factory instantiates adapters from the sections present in the config.
 
@@ -194,7 +197,7 @@ class MyAdapter(BaseGenericAdapter):
 ## 13. Fast Onboarding Tasks
 1. Read `openmux/server/adapters/base_adapter.py` and `lifecycle.py`.
 2. Inspect an existing simple adapter (e.g., `loopback.py`).
-3. Run `make validate-config` on a sample config; study `config_schema/openmux_config_schema.yaml`.
+3. Run `make validate-config` on a sample config; study `openmux/config_schema/openmux_config_schema.yaml`.
 4. Add a trivial adapter (copy skeleton) and register it; confirm it appears in server startup logs under "Available Plugin Types".
 
 ---

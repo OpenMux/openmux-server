@@ -44,6 +44,7 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from .config_validation import AUTH_SCHEMA, SECURITY_SCHEMA, SERVER_SCHEMA, check_mapping
 from .security_policy import SecurityPolicy
 
 
@@ -110,6 +111,12 @@ class ConfigManager:
             from .locations import absorb_removed_location_keys
 
             absorb_removed_location_keys(self.config, logger=self.logger)
+
+            # Full JSON Schema pass (log-only): each violation is logged as
+            # ERROR and load continues, so a currently-working deployment
+            # never breaks on a newly caught typo.
+            if isinstance(self.config, dict):
+                check_mapping(self.logger, self.config, SERVER_SCHEMA, self.config_path)
 
             # Validate configuration
             self._validate_config()
@@ -475,6 +482,8 @@ class ConfigManager:
             data = yaml.safe_load(handle) or {}
         if not isinstance(data, dict):
             raise ValueError("Authentication configuration must be a mapping")
+        # Log-only schema pass (see the server-config pass in load_config).
+        check_mapping(self.logger, data, AUTH_SCHEMA, path)
         self._authentication_config = data
         return data
 
@@ -492,5 +501,9 @@ class ConfigManager:
                     policy_data = {}
             else:
                 self.logger.warning("Security policy file not found at %s; using defaults", path)
+            # Log-only schema pass; SecurityPolicy.from_mapping below remains
+            # the hard structural gate (it refuses to start on a bad file).
+            if isinstance(policy_data, dict):
+                check_mapping(self.logger, policy_data, SECURITY_SCHEMA, path)
             self._security_policy = SecurityPolicy.from_mapping(policy_data)
         return self._security_policy
