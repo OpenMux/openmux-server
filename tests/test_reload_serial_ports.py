@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import json
+import os
+import pty
 
 import pytest
 from aiohttp import ClientSession, TCPConnector
@@ -122,10 +124,21 @@ async def test_duplicate_serial_device_flagged_in_api_ports(tmp_path):
     pm = PortManager([])
     cm = ConsoleManager(pm, auth)
 
+    # Both ports name ONE real tty (a pty slave, not /dev/null) so the holder
+    # can actually open its device and come up clean. /dev/null is a character
+    # device that cannot be termios-configured, so the holder would fail to open
+    # it and surface that real reason as its own status_message (issue #62
+    # exposes offline reasons) - which this test is not about. Two ports naming
+    # the same device exercises the issue #57 dedup flag; only the first
+    # (consoleA) opens it. A pty slave is a real tty on both macOS and Linux.
+    # The large per-port read timeout keeps an idle read from returning empty
+    # (the read loop treats an empty read as a drop) during the test window.
+    master, slave_fd = pty.openpty()
+    dev = os.ttyname(slave_fd)
     ser_cfg = {
         "serial_ports": [
-            {"name": "consoleA", "description": "A", "device": "/dev/null", "baudrate": 9600},
-            {"name": "consoleB", "description": "B", "device": "/dev/null", "baudrate": 9600},
+            {"name": "consoleA", "description": "A", "device": dev, "baudrate": 9600, "timeout": 30.0},
+            {"name": "consoleB", "description": "B", "device": dev, "baudrate": 9600, "timeout": 30.0},
         ]
     }
     serial = SerialAdapter("serial_ports", ser_cfg)
@@ -163,3 +176,5 @@ async def test_duplicate_serial_device_flagged_in_api_ports(tmp_path):
     await serial.stop()
     # Both connection supervisors (only consoleA has one) are stopped
     assert serial.serial_ports == {}
+    os.close(master)
+    os.close(slave_fd)
