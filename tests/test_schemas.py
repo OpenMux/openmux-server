@@ -45,6 +45,48 @@ def test_all_schema_files_exist_and_are_valid():
         Draft202012Validator.check_schema(yaml.safe_load(path.read_text()))
 
 
+def test_client_schema_accepts_valid_config_and_rejects_drift():
+    """The client schema must match the keys the client code actually reads.
+
+    Regression: the schema had no `logging` property while the client reads it,
+    so any client config with `logging:` would fail validation as soon as the
+    client runs schema checks.
+    """
+    schema = yaml.safe_load((SCHEMA_DIR / "openmux_client_schema.yaml").read_text())
+    errors = list(Draft202012Validator(schema).iter_errors(_valid_client_config()))
+    assert errors == [], yaml.safe_dump([e.message for e in errors])
+
+    # A logging typo (unknown key) is still rejected.
+    bad = _valid_client_config()
+    bad["logging"]["log_levl"] = b"INFO"
+    errors = list(Draft202012Validator(schema).iter_errors(bad))
+    assert len(errors) == 1 and "log_levl" in errors[0].message
+
+    # The shipped example config validates.
+    example = yaml.safe_load((REPO_ROOT / "docs" / "examples" / "client.yaml").read_text())
+    errors = list(Draft202012Validator(schema).iter_errors(example))
+    assert errors == [], yaml.safe_dump([e.message for e in errors])
+
+
+def _valid_client_config():
+    return {
+        "servers": [
+            {"name": "lab-hub", "host": "127.0.0.1", "port": 8023, "username": "admin", "api_key": "k"},
+        ],
+        "default_server": "lab-hub",
+        "use_tls": False,
+        "logging": {
+            "log_level": "INFO",
+            "file_only": False,
+            "file_logging_enabled": True,
+            "log_dir": "logs",
+            "log_file": "openmux_client.log",
+            "log_max_size_mb": 10,
+            "log_backups": 5,
+        },
+    }
+
+
 def test_config_editor_serves_the_authoritative_schema():
     """The /schema endpoint must serve the packaged schema, not a CWD guess."""
     src = inspect.getsource(config_editor)

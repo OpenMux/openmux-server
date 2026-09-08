@@ -29,3 +29,38 @@ properties:
         pubkey_path: { type: string }
         pubkey_id: { type: string }
   use_tls: { type: boolean, default: false }
+  logging:
+    type: object
+    additionalProperties: false
+    description: >
+      Optional client logging configuration, consumed by ClientLoggingManager.
+      All keys are optional; defaults apply when omitted.
+    properties:
+      log_level:
+        description: "Log level for the root logger. One of DEBUG, INFO, WARNING, ERROR, CRITICAL. Default WARNING."
+      file_only:
+        type: boolean
+        default: false
+        description: "Log to file only; suppress the console handler."
+      file_logging_enabled:
+        type: boolean
+        default: false
+        description: "Write log records to a file in addition to the console."
+      log_dir:
+        type: string
+        default: logs
+        description: "Directory for the client log file. Default logs."
+      log_file:
+        type: string
+        default: openmux_client.log
+        description: "Basename of the client log file. Default openmux_client.log."
+      log_max_size_mb:
+        type: integer
+        minimum: 0
+        default: 10
+        description: "Rotation threshold in MB for the client log. 0 disables rotation. Default 10."
+      log_backups:
+        type: integer
+        minimum: 0
+        default: 5
+        description: "Number of rotated client log backups to keep. 0 disables rotation. Default 5."

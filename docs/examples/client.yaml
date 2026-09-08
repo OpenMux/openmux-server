@@ -1,0 +1,32 @@
+# Example OpenMux client configuration
+# Place this file in one of these locations (first found is used):
+# - $OPENMUX_CLIENT_CONFIG
+# - ./client.(yaml|yml|json) or ./openmux_client.*
+# - $XDG_CONFIG_HOME/openmux/client.* or ~/.config/openmux/client.*
+# - ~/Library/Application Support/OpenMux/client.* (macOS)
+# - ~/.openmux_client.* or ~/.openmux/client.*
+# - /etc/openmux/client.* or /usr/local/etc/openmux/client.*
+
+# Known servers for discovery, listing and default connections
+servers:
+  - name: lab-hub
+    host: 127.0.0.1
+    port: 8023
+  - name: remote1
+    host: remote1.example.com
+    port: 8023
+
+# Default server used when -s/--server is omitted
+default_server: lab-hub
+
+# Global TLS preference (overridden by --encrypt/--no-encrypt)
+use_tls: false
+
+# Optional client logging configuration
+logging:
+  log_level: INFO          # INFO | DEBUG | WARNING
+  file_logging_enabled: true
+  log_dir: logs
+  log_file: openmux_client.log
+  log_max_size_mb: 10
+  log_backups: 5
