@@ -34,6 +34,15 @@ def _make_adapter(port, **cfg):
     return adapter
 
 
+def _bound_port(adapter) -> int:
+    """Read back the port a started single-site web console actually bound.
+
+    Lets tests start on an ephemeral port (``"port": 0``) instead of a hard-
+    coded one, so full-suite runs never collide on a fixed port (issue #69).
+    """
+    return int(adapter._http_site._server.sockets[0].getsockname()[1])
+
+
 def test_format_uptime_values():
     assert _format_uptime(None) == ""
     assert _format_uptime(5) == "5s"
@@ -81,14 +90,7 @@ def test_login_page_shows_server_version(monkeypatch):
 
     adapter = _make_adapter(0)
     # Templates ship inside the package (openmux/server/webui).
-    tdir = (
-        Path(__file__).resolve().parents[1]
-        / "openmux"
-        / "server"
-        / "webui"
-        / "templates"
-        / "web_console"
-    )
+    tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
     adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
 
     monkeypatch.setattr(wc, "_get_dist_version", lambda: "9.8.7.post3+gabc1234.d20260101")
@@ -104,14 +106,7 @@ def test_login_page_shows_server_version(monkeypatch):
 def test_login_page_shows_motd():
     from jinja2 import Environment, FileSystemLoader
 
-    tdir = (
-        Path(__file__).resolve().parents[1]
-        / "openmux"
-        / "server"
-        / "webui"
-        / "templates"
-        / "web_console"
-    )
+    tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
     motd = "Planned maintenance\nSaturday 22:00-02:00"
 
     adapter = _make_adapter(0, motd=motd)
@@ -139,14 +134,7 @@ def test_login_page_never_shows_logged_in_motd():
     """The logged-in MOTD may hold sensitive text; it must not leak pre-auth."""
     from jinja2 import Environment, FileSystemLoader
 
-    tdir = (
-        Path(__file__).resolve().parents[1]
-        / "openmux"
-        / "server"
-        / "webui"
-        / "templates"
-        / "web_console"
-    )
+    tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
     li_motd = "Internal detail: rack B42, PSU 2 failing"
 
     adapter = _make_adapter(0, logged_in_motd=li_motd)
@@ -199,17 +187,18 @@ def test_logged_in_motd_blank_and_unset():
 
 @pytest.mark.asyncio
 async def test_about_page_shows_server_version():
-    adapter = _make_adapter(8911)
+    adapter = _make_adapter(0)
     assert await adapter.start()
+    port = _bound_port(adapter)
     try:
         async with ClientSession(connector=TCPConnector(ssl=False)) as session:
-            async with session.get("http://127.0.0.1:8911/about", headers=_AUTH) as resp:
+            async with session.get(f"http://127.0.0.1:{port}/about", headers=_AUTH) as resp:
                 assert resp.status == 200
                 html = await resp.text()
                 assert "OpenMux About" in html
                 assert f"v{__version__}" in html
             # Unauthenticated requests are redirected to login.
-            async with session.get("http://127.0.0.1:8911/about", allow_redirects=False) as resp:
+            async with session.get(f"http://127.0.0.1:{port}/about", allow_redirects=False) as resp:
                 assert resp.status in (301, 302, 307, 308)
                 assert "/login" in resp.headers.get("Location", "")
     finally:
@@ -220,11 +209,12 @@ async def test_about_page_shows_server_version():
 async def test_about_page_shows_hardware_info(tmp_path):
     hw = tmp_path / "hw"
     hw.write_text('OPENMUX_MANUFACTURER="FTDI Ltd."\n' 'OPENMUX_PRODUCT="Basic RS232-HS"\n' 'OPENMUX_SERIAL="OMH123"\n')
-    adapter = _make_adapter(8912, hardware_info_file=str(hw))
+    adapter = _make_adapter(0, hardware_info_file=str(hw))
     assert await adapter.start()
+    port = _bound_port(adapter)
     try:
         async with ClientSession(connector=TCPConnector(ssl=False)) as session:
-            async with session.get("http://127.0.0.1:8912/about", headers=_AUTH) as resp:
+            async with session.get(f"http://127.0.0.1:{port}/about", headers=_AUTH) as resp:
                 assert resp.status == 200
                 html = await resp.text()
                 assert "Hardware" in html
@@ -239,14 +229,7 @@ def test_render_about_shows_logged_in_user():
     """The About page shows the caller's username, permission, and groups."""
     from jinja2 import Environment, FileSystemLoader
 
-    tdir = (
-        Path(__file__).resolve().parents[1]
-        / "openmux"
-        / "server"
-        / "webui"
-        / "templates"
-        / "web_console"
-    )
+    tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
     adapter = _make_adapter(0)
     adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
 
@@ -282,11 +265,12 @@ def test_get_user_groups_includes_explicit_groups():
 
 @pytest.mark.asyncio
 async def test_about_page_shows_logged_in_user_route():
-    adapter = _make_adapter(8913)
+    adapter = _make_adapter(0)
     assert await adapter.start()
+    port = _bound_port(adapter)
     try:
         async with ClientSession(connector=TCPConnector(ssl=False)) as session:
-            async with session.get("http://127.0.0.1:8913/about", headers=_AUTH) as resp:
+            async with session.get(f"http://127.0.0.1:{port}/about", headers=_AUTH) as resp:
                 assert resp.status == 200
                 html = await resp.text()
                 # the authenticated caller's identity is rendered

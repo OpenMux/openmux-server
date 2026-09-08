@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import tempfile
 import textwrap
 
 import pytest
@@ -38,9 +39,11 @@ async def test_control_socket_status_and_reloads(tmp_path):
     # Instantiate server (won't start adapters in this test)
     server = OpenMuxServer(str(cfg_path))
 
-    # Create a temp unix socket path
-    # Use short path under /tmp due to AF_UNIX path length limits
-    sock_path = os.path.join("/tmp", f"omuxctl_{os.getpid()}_{abs(hash(str(tmp_path)))}.sock")
+    # Create a temp unix socket path in the writable system temp dir
+    # (tempfile.gettempdir() -> $TMPDIR on macOS). A raw /tmp bind fails under
+    # sandboxes that block /tmp (issue #69), and a tmp_path-based path would be
+    # too long for an AF_UNIX path on macOS (>105 chars).
+    sock_path = os.path.join(tempfile.gettempdir(), f"omuxctl_{os.getpid()}.sock")
 
     # Start control socket
     await server._start_control_socket(str(sock_path))

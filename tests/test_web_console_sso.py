@@ -61,14 +61,15 @@ async def _readyz(adapter: WebConsoleAdapter, port: int, headers: dict) -> int:
 @pytest.mark.asyncio
 async def test_exploit_unsigned_v1e_rejected_no_muxcon():
     """SEC-01 exploit: unsigned v1e claim with node 'None' + /proxy/ prefix must not authenticate."""
-    adapter = _make_adapter(8931)
+    adapter = _make_adapter(0)
     assert await adapter.start()
+    port = int(adapter._http_site._server.sockets[0].getsockname()[1])
     try:
         now = int(time.time())
         claims = {"ver": 1, "user": "admin", "perm": "admin", "node": "None", "iat": now, "exp": now + 60}
         payload_b64 = _b64url(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
         header = f"v1e;evil;{payload_b64};AAAA"
-        status = await _readyz(adapter, 8931, {"X-OMX-SSO": header, "X-Forwarded-Prefix": "/proxy/x"})
+        status = await _readyz(adapter, port, {"X-OMX-SSO": header, "X-Forwarded-Prefix": "/proxy/x"})
         assert status == 401
         assert adapter._verify_sso_header(header) is None
     finally:
@@ -78,8 +79,9 @@ async def test_exploit_unsigned_v1e_rejected_no_muxcon():
 @pytest.mark.asyncio
 async def test_exploit_unsigned_v1e_rejected_with_local_server_id(monkeypatch):
     """SEC-01 exploit variant: node matches the local server_id but the kid is unregistered."""
-    adapter = _make_adapter(8932)
+    adapter = _make_adapter(0)
     assert await adapter.start()
+    port = int(adapter._http_site._server.sockets[0].getsockname()[1])
     try:
         stub = SimpleNamespace(_auth_pubkeys={}, server_id="mbp")
         monkeypatch.setattr(adapter, "_find_muxcon_adapter", lambda: stub)
@@ -88,7 +90,7 @@ async def test_exploit_unsigned_v1e_rejected_with_local_server_id(monkeypatch):
         payload_b64 = _b64url(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
         header = f"v1e;malicious-kid;{payload_b64};AAAA"
         assert adapter._verify_sso_header(header) is None
-        status = await _readyz(adapter, 8932, {"X-OMX-SSO": header, "X-Forwarded-Prefix": "/proxy/x"})
+        status = await _readyz(adapter, port, {"X-OMX-SSO": header, "X-Forwarded-Prefix": "/proxy/x"})
         assert status == 401
     finally:
         await adapter.stop()
@@ -97,8 +99,9 @@ async def test_exploit_unsigned_v1e_rejected_with_local_server_id(monkeypatch):
 @pytest.mark.asyncio
 async def test_signed_v1e_accepted(monkeypatch):
     """A v1e claim signed with a registered MuxCon key must authenticate."""
-    adapter = _make_adapter(8933)
+    adapter = _make_adapter(0)
     assert await adapter.start()
+    port = int(adapter._http_site._server.sockets[0].getsockname()[1])
     try:
         priv = Ed25519PrivateKey.generate()
         kid = "k1"
@@ -112,7 +115,7 @@ async def test_signed_v1e_accepted(monkeypatch):
         header = f"v1e;{kid};{payload_b64};{_b64url(sig)}"
         returned = adapter._verify_sso_header(header)
         assert returned is not None and returned["user"] == "ops" and returned["perm"] == "read-write"
-        status = await _readyz(adapter, 8933, {"X-OMX-SSO": header})
+        status = await _readyz(adapter, port, {"X-OMX-SSO": header})
         assert status == 200
     finally:
         await adapter.stop()
@@ -120,8 +123,9 @@ async def test_signed_v1e_accepted(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_signed_v1e_bad_signature_rejected(monkeypatch):
-    adapter = _make_adapter(8934)
+    adapter = _make_adapter(0)
     assert await adapter.start()
+    port = int(adapter._http_site._server.sockets[0].getsockname()[1])
     try:
         priv = Ed25519PrivateKey.generate()
         kid = "k1"
@@ -133,7 +137,7 @@ async def test_signed_v1e_bad_signature_rejected(monkeypatch):
         forged_sig = priv.sign(payload + b"tampered")
         header = f"v1e;{kid};{_b64url(payload)};{_b64url(forged_sig)}"
         assert adapter._verify_sso_header(header) is None
-        status = await _readyz(adapter, 8934, {"X-OMX-SSO": header})
+        status = await _readyz(adapter, port, {"X-OMX-SSO": header})
         assert status == 401
     finally:
         await adapter.stop()
@@ -141,8 +145,9 @@ async def test_signed_v1e_bad_signature_rejected(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_expired_v1e_rejected(monkeypatch):
-    adapter = _make_adapter(8935)
+    adapter = _make_adapter(0)
     assert await adapter.start()
+    port = int(adapter._http_site._server.sockets[0].getsockname()[1])
     try:
         priv = Ed25519PrivateKey.generate()
         kid = "k1"
@@ -160,8 +165,9 @@ async def test_expired_v1e_rejected(monkeypatch):
 @pytest.mark.asyncio
 async def test_hmac_v1_still_accepted():
     """Legacy v1 HMAC SSO (sso_secret configured) must keep working."""
-    adapter = _make_adapter(8936, sso_secret="topsecret")
+    adapter = _make_adapter(0, sso_secret="topsecret")
     assert await adapter.start()
+    port = int(adapter._http_site._server.sockets[0].getsockname()[1])
     try:
         now = int(time.time())
         claims = {"ver": 1, "user": "ops", "perm": "read-write", "node": "mbp", "iat": now, "exp": now + 60}
@@ -171,7 +177,7 @@ async def test_hmac_v1_still_accepted():
         bad = f"v1;{payload_b64};{'0' * len(mac)}"
         assert adapter._verify_sso_header(good) is not None
         assert adapter._verify_sso_header(bad) is None
-        assert await _readyz(adapter, 8936, {"X-OMX-SSO": good}) == 200
-        assert await _readyz(adapter, 8936, {"X-OMX-SSO": bad}) == 401
+        assert await _readyz(adapter, port, {"X-OMX-SSO": good}) == 200
+        assert await _readyz(adapter, port, {"X-OMX-SSO": bad}) == 401
     finally:
         await adapter.stop()

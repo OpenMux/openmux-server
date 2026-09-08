@@ -13,13 +13,22 @@ from openmux.server.port_manager import PortManager
 from openmux.server.web_console import WebConsoleAdapter
 
 
+def _bound_port(adapter) -> int:
+    """Read back the port a started single-site web console actually bound.
+
+    Lets tests start on an ephemeral port (``"port": 0``) instead of a hard-
+    coded one, so full-suite runs never collide on a fixed port (issue #69).
+    """
+    return int(adapter._http_site._server.sockets[0].getsockname()[1])
+
+
 @pytest.mark.asyncio
 async def test_probes_plain_text(tmp_path):
     # Minimal config
     config = {
         "web_console": {
             "host": "127.0.0.1",
-            "port": 8901,
+            "port": 0,
             "enable_ui": False,
             "enable_probes": True,
             "probes_include_details": False,
@@ -34,17 +43,18 @@ async def test_probes_plain_text(tmp_path):
     adapter.set_console_manager(cm)
     started = await adapter.start()
     assert started
+    port = _bound_port(adapter)
 
     async with ClientSession(connector=TCPConnector(ssl=False)) as session:
-        async with session.get("http://127.0.0.1:8901/healthz") as resp:
+        async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
             assert resp.status == 200
             text = await resp.text()
             assert text.strip() == "ok"
-        async with session.get("http://127.0.0.1:8901/livez") as resp:
+        async with session.get(f"http://127.0.0.1:{port}/livez") as resp:
             assert resp.status == 200
             assert (await resp.text()).strip() == "live"
         # readyz requires auth
-        async with session.get("http://127.0.0.1:8901/readyz") as resp:
+        async with session.get(f"http://127.0.0.1:{port}/readyz") as resp:
             assert resp.status in (401, 403)
 
     await adapter.stop()
@@ -55,7 +65,7 @@ async def test_probes_detailed_json(tmp_path):
     config = {
         "web_console": {
             "host": "127.0.0.1",
-            "port": 8902,
+            "port": 0,
             "enable_ui": False,
             "enable_probes": True,
             "probes_include_details": True,
@@ -70,21 +80,22 @@ async def test_probes_detailed_json(tmp_path):
     adapter.set_auth_manager(auth)
     adapter.set_console_manager(cm)
     assert await adapter.start()
+    port = _bound_port(adapter)
 
     async with ClientSession(connector=TCPConnector(ssl=False)) as session:
-        async with session.get("http://127.0.0.1:8902/healthz") as resp:
+        async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
             assert resp.status == 200
             data = json.loads(await resp.text())
             assert data["component"] == "web_console"
             assert "uptime_seconds" in data
-        async with session.get("http://127.0.0.1:8902/livez") as resp:
+        async with session.get(f"http://127.0.0.1:{port}/livez") as resp:
             assert resp.status == 200
             ldata = json.loads(await resp.text())
             assert ldata["status"] == "ok"
         # readyz with auth header
         token = base64.b64encode(b"u:password").decode()
         headers = {"Authorization": f"Basic {token}"}
-        async with session.get("http://127.0.0.1:8902/readyz", headers=headers) as resp:
+        async with session.get(f"http://127.0.0.1:{port}/readyz", headers=headers) as resp:
             body = await resp.text()
             if resp.status == 200:
                 rdata = json.loads(body)
@@ -101,7 +112,7 @@ async def test_probes_disabled(tmp_path):
     config = {
         "web_console": {
             "host": "127.0.0.1",
-            "port": 8903,
+            "port": 0,
             "enable_ui": False,
             "enable_probes": False,
         }
@@ -113,14 +124,15 @@ async def test_probes_disabled(tmp_path):
     adapter.set_auth_manager(auth)
     adapter.set_console_manager(cm)
     assert await adapter.start()
+    port = _bound_port(adapter)
 
     async with ClientSession(connector=TCPConnector(ssl=False)) as session:
         for path in ("healthz", "livez"):
-            async with session.get(f"http://127.0.0.1:8903/{path}") as resp:
+            async with session.get(f"http://127.0.0.1:{port}/{path}") as resp:
                 # Should be 404 because probes disabled (no route registered, middleware bypasses only if probes enabled)
                 assert resp.status == 404
         # readyz path still requires auth (middleware not bypassed) so expect 401 when probes disabled
-        async with session.get("http://127.0.0.1:8903/readyz") as resp:
+        async with session.get(f"http://127.0.0.1:{port}/readyz") as resp:
             assert resp.status in (401, 404)
 
     await adapter.stop()
@@ -155,7 +167,7 @@ async def test_websocket_connect_and_send(tmp_path):
     config = {
         "web_console": {
             "host": "127.0.0.1",
-            "port": 8904,
+            "port": 0,
             "enable_ui": False,
             "enable_probes": True,
             "probes_include_details": True,
@@ -169,18 +181,19 @@ async def test_websocket_connect_and_send(tmp_path):
     adapter.set_auth_manager(auth)
     adapter.set_console_manager(cm)
     assert await adapter.start()
+    port = _bound_port(adapter)
 
     token = base64.b64encode(b"u:password").decode()
     headers = {"Authorization": f"Basic {token}"}
 
     async with ClientSession(connector=TCPConnector(ssl=False)) as session:
         # Ready should reflect console_manager / port_manager presence
-        async with session.get("http://127.0.0.1:8904/readyz", headers=headers) as resp:
+        async with session.get(f"http://127.0.0.1:{port}/readyz", headers=headers) as resp:
             assert resp.status == 200
             data = json.loads(await resp.text())
             assert data.get("port_manager") is True
         # Connect WS
-        async with session.ws_connect("http://127.0.0.1:8904/ws/loopback_ws1", headers=headers) as ws:
+        async with session.ws_connect(f"http://127.0.0.1:{port}/ws/loopback_ws1", headers=headers) as ws:
             await ws.send_str("hello")
             # Allow server to process write
             await asyncio.sleep(0.05)

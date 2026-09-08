@@ -20,7 +20,7 @@ async def test_reload_serial_ports_incremental(tmp_path):
     wc_cfg = {
         "web_console": {
             "host": "127.0.0.1",
-            "port": 8910,
+            "port": 0,
             "enable_ui": False,
             "enable_probes": True,
             "probes_include_details": True,
@@ -58,6 +58,7 @@ async def test_reload_serial_ports_incremental(tmp_path):
     wc.set_auth_manager(auth)
     wc.set_console_manager(cm)
     assert await wc.start()
+    bound_port = int(wc._http_site._server.sockets[0].getsockname()[1])  # bound (ephemeral) port
 
     # Prepare auth header
     token = base64.b64encode(b"admin:password").decode()
@@ -65,7 +66,7 @@ async def test_reload_serial_ports_incremental(tmp_path):
 
     async with ClientSession(connector=TCPConnector(ssl=False)) as session:
         # List ports before reload
-        async with session.get("http://127.0.0.1:8910/api/ports", headers=headers) as resp:
+        async with session.get(f"http://127.0.0.1:{bound_port}/api/ports", headers=headers) as resp:
             assert resp.status == 200
             data = json.loads(await resp.text())
             names = {p.get("name") for p in data.get("ports", [])}
@@ -84,7 +85,7 @@ async def test_reload_serial_ports_incremental(tmp_path):
         assert "consoleA" in (summary.get("updated") or [])
 
         # Verify /api/ports reflects new set
-        async with session.get("http://127.0.0.1:8910/api/ports", headers=headers) as resp:
+        async with session.get(f"http://127.0.0.1:{bound_port}/api/ports", headers=headers) as resp:
             assert resp.status == 200
             data2 = json.loads(await resp.text())
             names2 = {p.get("name") for p in data2.get("ports", [])}
@@ -105,7 +106,7 @@ async def test_duplicate_serial_device_flagged_in_api_ports(tmp_path):
     wc_cfg = {
         "web_console": {
             "host": "127.0.0.1",
-            "port": 8911,
+            "port": 0,
             "enable_ui": False,
         }
     }
@@ -156,12 +157,13 @@ async def test_duplicate_serial_device_flagged_in_api_ports(tmp_path):
     wc.set_auth_manager(auth)
     wc.set_console_manager(cm)
     assert await wc.start()
+    bound_port = int(wc._http_site._server.sockets[0].getsockname()[1])  # bound (ephemeral) port
 
     token = base64.b64encode(b"admin:password").decode()
     headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
     async with ClientSession(connector=TCPConnector(ssl=False)) as session:
-        async with session.get("http://127.0.0.1:8911/api/ports", headers=headers) as resp:
+        async with session.get(f"http://127.0.0.1:{bound_port}/api/ports", headers=headers) as resp:
             assert resp.status == 200
             data = json.loads(await resp.text())
             by_name = {p.get("name"): p for p in data.get("ports", [])}

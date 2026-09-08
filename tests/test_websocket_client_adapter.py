@@ -48,17 +48,18 @@ async def start_web_console(port: int, users):
     adapter.set_auth_manager(auth)
     adapter.set_console_manager(cm)
     assert await adapter.start()
-    return adapter, auth, pm, cm, dummy
+    bound_port = int(adapter._http_site._server.sockets[0].getsockname()[1])
+    return adapter, auth, pm, cm, dummy, bound_port
 
 
 @pytest.mark.asyncio
 async def test_discovery_list_ports_success(tmp_path):
-    adapter, auth, pm, cm, dummy = await start_web_console(
-        8921, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
+    adapter, auth, pm, cm, dummy, port = await start_web_console(
+        0, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
     )
     client = WebSocketClientAdapter(
         "127.0.0.1",
-        8921,
+        port,
         {
             "basic_user": "u",
             "basic_password": "password",
@@ -75,12 +76,12 @@ async def test_discovery_list_ports_success(tmp_path):
 
 @pytest.mark.asyncio
 async def test_discovery_list_ports_unauthorized(tmp_path):
-    adapter, auth, pm, cm, dummy = await start_web_console(
-        8922, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
+    adapter, auth, pm, cm, dummy, port = await start_web_console(
+        0, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
     )
     client = WebSocketClientAdapter(
         "127.0.0.1",
-        8922,
+        port,
         {
             # missing creds -> 401 listing -> empty
             "list_ports_via_http": True,
@@ -95,13 +96,13 @@ async def test_discovery_list_ports_unauthorized(tmp_path):
 
 @pytest.mark.asyncio
 async def test_connect_and_send_receive(tmp_path):
-    adapter, auth, pm, cm, dummy = await start_web_console(
-        8923, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
+    adapter, auth, pm, cm, dummy, port = await start_web_console(
+        0, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
     )
     # Create client with direct port_name to open real ws
     client = WebSocketClientAdapter(
         "127.0.0.1",
-        8923,
+        port,
         {
             "basic_user": "u",
             "basic_password": "password",
@@ -120,12 +121,12 @@ async def test_connect_and_send_receive(tmp_path):
 
 @pytest.mark.asyncio
 async def test_invalid_port_name_closes_cleanly(tmp_path):
-    adapter, auth, pm, cm, dummy = await start_web_console(
-        8924, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
+    adapter, auth, pm, cm, dummy, port = await start_web_console(
+        0, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
     )
     client = WebSocketClientAdapter(
         "127.0.0.1",
-        8924,
+        port,
         {
             "basic_user": "u",
             "basic_password": "password",
@@ -141,12 +142,12 @@ async def test_invalid_port_name_closes_cleanly(tmp_path):
 
 @pytest.mark.asyncio
 async def test_timeout_and_control_frames(tmp_path):
-    adapter, auth, pm, cm, dummy = await start_web_console(
-        8925, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
+    adapter, auth, pm, cm, dummy, port = await start_web_console(
+        0, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
     )
     client = WebSocketClientAdapter(
         "127.0.0.1",
-        8925,
+        port,
         {
             "basic_user": "u",
             "basic_password": "password",
@@ -163,12 +164,12 @@ async def test_timeout_and_control_frames(tmp_path):
 
 @pytest.mark.asyncio
 async def test_manual_close_before_loop_end(tmp_path):
-    adapter, auth, pm, cm, dummy = await start_web_console(
-        8926, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
+    adapter, auth, pm, cm, dummy, port = await start_web_console(
+        0, [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
     )
     client = WebSocketClientAdapter(
         "127.0.0.1",
-        8926,
+        port,
         {
             "basic_user": "u",
             "basic_password": "password",
