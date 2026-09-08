@@ -1,5 +1,20 @@
 # Unified MuxCon Adapter Specification
 
+> **Status: pre-implementation draft, not current.** This document describes
+> the original design proposal for a unified MuxCon adapter. The adapter that
+> shipped (`openmux/server/adapters/muxcon.py`) implements the same overall
+> goal (one adapter, listeners + initiators, single TCP connection per peer)
+> but diverged from this draft in its config schema and wire protocol — for
+> example, there is no `federation_policies`/`node_pattern` matching engine,
+> no per-initiator `share_ports`/`accept_ports`/`request_ports`, and
+> `server.node_name` was replaced by `server.id`. It also does not document
+> several major features that did ship (TLS + Trust-On-First-Use, Ed25519
+> peer authentication, heartbeats, multipath failover, retransmission,
+> fault injection, viewer-presence relay). For the current, accurate
+> description of the shipped adapter, see
+> [docs/design/muxcon.md](../docs/design/muxcon.md). Keep this file only as
+> historical context for why the adapter was unified in the first place.
+
 ## Overview
 
 This specification defines the design for a unified MuxCon adapter that consolidates the current separate client and server adapters into a single, flexible component. The unified adapter eliminates code duplication while supporting bidirectional federation over single TCP connections with flexible capability-based configuration.
