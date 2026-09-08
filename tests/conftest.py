@@ -131,6 +131,37 @@ def _isolate_openmux_logging():
             pass
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_openmux_state_dir(tmp_path_factory):
+    """Point the OpenMux state base at a private temp dir for the whole session.
+
+    Locations such as `muxcon_tls_dir()` and `ssh_host_key_dir()` fall back to the
+    user's home (`~/.openmux`) when `OPENMUX_STATE_DIR` is unset, and several
+    adapters write material there (auto-generated TLS certs/keys, the SSH host
+    key, the MuxCon federated cache, known-peers ToFU pins). The suite must never
+    read or write the real home dir: on a machine without `~/.openmux` (or a
+    file-attributed/sandboxed home) `os.path.exists()` returns False for the
+    existing cert (EPERM collapses into False), adapters try to regenerate it
+    into `~`, the write EPERMs, and the affected tests flake. Pinning the state
+    base here makes every test hermetic; individual tests that assert on
+    `~/.openmux` as the *default* resolution explicitly unset the variable.
+    """
+    mp = pytest.MonkeyPatch()
+    mp.setenv("OPENMUX_STATE_DIR", str(tmp_path_factory.mktemp("openmux-state")))
+    # locations caches /etc/defaults/openmux once; refresh before any adapter
+    # resolves a path under the new state dir.
+    try:
+        from openmux.server import locations
+
+        locations._ENV_FILE_CACHE = None
+    except Exception:  # justification: import guard mirrors conftest boot
+        pass
+    try:
+        yield
+    finally:
+        mp.undo()
+
+
 @pytest.fixture
 def event_loop():
     """Create an instance of the default event loop for each test"""

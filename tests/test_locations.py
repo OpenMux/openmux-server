@@ -168,9 +168,13 @@ def test_process_env_beats_systemd_dir_vars(clean_env, monkeypatch):
 
 def test_systemd_var_partial_set_falls_through_per_location(clean_env, monkeypatch):
     # Only RUNTIME_DIRECTORY set (e.g. older without LogsDirectory): state
-    # and logs keep their built-in defaults, run dir uses the var.
+    # and logs keep their built-in defaults, run dir uses the var. The suite-
+    # level state isolation (conftest) pins OPENMUX_STATE_DIR, so unset it (and
+    # STATE_DIRECTORY) here to observe the true dev default.
     monkeypatch.setenv("OPENMUX_ENV_FILE", "/nonexistent/openmux/defaults")
     monkeypatch.setenv("RUNTIME_DIRECTORY", "/run/openmux")
+    monkeypatch.delenv("OPENMUX_STATE_DIR", raising=False)
+    monkeypatch.delenv("STATE_DIRECTORY", raising=False)
     assert locations.run_dir() == "/run/openmux"
     assert locations.state_dir() == os.path.expanduser("~/.openmux")
     assert locations.log_dir() == "logs"
@@ -180,7 +184,11 @@ def test_pkg_run_dir_constant(clean_env):
     assert locations.PACKAGED_RUN_DIR == "/run/openmux"
 
 
-def test_state_subdirs_dev_default(clean_env):
+def test_state_subdirs_dev_default(clean_env, monkeypatch):
+    # The suite-level state isolation (conftest) pins OPENMUX_STATE_DIR; unset
+    # it (and STATE_DIRECTORY) to observe the true dev default of ~/.openmux.
+    monkeypatch.delenv("OPENMUX_STATE_DIR", raising=False)
+    monkeypatch.delenv("STATE_DIRECTORY", raising=False)
     home_state = os.path.expanduser("~/.openmux")
     assert locations.muxcon_tls_dir() == os.path.join(home_state, "muxcon")
     assert locations.ssh_host_key_dir() == os.path.join(home_state, "ssh_listener")

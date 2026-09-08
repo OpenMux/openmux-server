@@ -160,7 +160,9 @@ def test_is_conn_authenticated_variants():
 
 
 @pytest.mark.asyncio
-async def test_tls_context_builders_and_autogen(tmp_path):
+async def test_tls_context_builders_and_autogen(tmp_path, monkeypatch):
+    # The autogen cert/key must not land in the real home state dir.
+    monkeypatch.setenv("OPENMUX_STATE_DIR", str(tmp_path / "state"))
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     # Server context without TLS disabled -> None
     ctx = await a._create_server_ssl_context({"use_tls": False})
@@ -205,8 +207,10 @@ async def test_listener_tls_without_cert_or_autogen_is_fail_closed(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_listener_tls_autogen_still_starts(tmp_path):
-    # Positive control: with autogen working, TLS listener still binds.
+async def test_listener_tls_autogen_still_starts(tmp_path, monkeypatch):
+    # Positive control: with autogen working, TLS listener still binds. The
+    # autogen cert must not land in the real home state dir.
+    monkeypatch.setenv("OPENMUX_STATE_DIR", str(tmp_path / "state"))
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     lconf = {"use_tls": True, "tls_autogen": True}
     key = ("127.0.0.1", 0)
@@ -275,7 +279,10 @@ def test_verify_mode_resolution_matrix():
 
 
 @pytest.mark.asyncio
-async def test_client_ssl_context_by_mode(tmp_path):
+async def test_client_ssl_context_by_mode(tmp_path, monkeypatch):
+    # The CA mode branch reuses the autogen cert; keep it out of the real home
+    # state dir.
+    monkeypatch.setenv("OPENMUX_STATE_DIR", str(tmp_path / "state"))
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     # Default peer: relaxed TLS-level check (ToFU gates the link)
     ctx = await a._create_client_ssl_context(FederationPeer("h", 1, options={"use_tls": True}))
@@ -1856,7 +1863,10 @@ def test_mpath_select_promotes_on_stale():
 
 
 @pytest.mark.asyncio
-async def test_federated_proxy_reuse_reconnect_notification_and_stream_reopen(monkeypatch):
+async def test_federated_proxy_reuse_reconnect_notification_and_stream_reopen(tmp_path, monkeypatch):
+    # The reuse path persists the federated cache; keep that file out of the
+    # real home state dir.
+    monkeypatch.setenv("OPENMUX_STATE_DIR", str(tmp_path / "state"))
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     pm = FakePM()
     a.main_port_manager = pm
@@ -3168,9 +3178,11 @@ async def test_link_state_flips_clear_link_reason_on_recover():
     # in the all-stale branch.
     proxy.is_connected = True
     a._mpath_groups["node:p1"] = {
-        "conns": OrderedDict({
-            "c1": {"opened_at": _time.time() - 9999, "last_rx_seen": _time.time() - 9999},
-        }),
+        "conns": OrderedDict(
+            {
+                "c1": {"opened_at": _time.time() - 9999, "last_rx_seen": _time.time() - 9999},
+            }
+        ),
         "primary": "c1",
         "rr_index": 0,
     }
@@ -3204,26 +3216,30 @@ async def test_load_federated_cache_offline_proxy_gets_link_reason(tmp_path):
     a.federated_cache_enabled = True
 
     # Pre-populate cache with an offline remote port record.
-    cache_path.write_text(_json.dumps({
-        "peers": {
-            "node:peer1": {
-                "rport": {
-                    "connected": False,
-                    "last_seen": 0,
-                    "origin_server_id": "peer1",
-                    "description": "remote",
-                    "max_rw_users": 1,
-                    "serial_config": None,
-                    "line_status": None,
-                    "read_write_groups": [],
-                    "read_only_groups": [],
-                    # Origin's reason at cache-save time: preserved on metadata
-                    # but should be preempted by the fresh "link is down" reason.
-                    "status_message": "Connection refused by p1:1234",
+    cache_path.write_text(
+        _json.dumps(
+            {
+                "peers": {
+                    "node:peer1": {
+                        "rport": {
+                            "connected": False,
+                            "last_seen": 0,
+                            "origin_server_id": "peer1",
+                            "description": "remote",
+                            "max_rw_users": 1,
+                            "serial_config": None,
+                            "line_status": None,
+                            "read_write_groups": [],
+                            "read_only_groups": [],
+                            # Origin's reason at cache-save time: preserved on metadata
+                            # but should be preempted by the fresh "link is down" reason.
+                            "status_message": "Connection refused by p1:1234",
+                        },
+                    },
                 },
-            },
-        },
-    }))
+            }
+        )
+    )
 
     await a._load_federated_cache()
     p = a._peer_proxies["node:peer1"]["rport"]
