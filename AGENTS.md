@@ -21,11 +21,25 @@ Use the existing `.venv` (`.venv/bin/python`, `.venv/bin/pytest`) rather than sy
 - Lint: `make lint` (flake8, syntax-error-only checks are hard failures, style is not)
 - Format: `make format` (black + isort, line-length 127)
 - Start server for manual/browser testing: use the "Run OpenMux Server" task, or
-  `.venv/bin/python -m openmux.server.main -c config/server.yaml`
+  `.venv/bin/python -m openmux.server.main --config-dir config-local` (dev config). Never
+  edit `config/` to make a local change - it holds pristine defaults that also ship in the
+  Debian package. Seed the working copy with `make init-config` (or just `make run-server`,
+  which does it). See "Config layout" below.
 - After any code change, run the relevant tests (`pytest -q tests/test_<name>.py` for the
   affected area, or `make test` for the full suite) and confirm they pass before considering
   the change done. Treat a newly failing or newly skipped test as a regression to fix, not
   to ignore.
+
+## Config layout
+- `config/` = pristine defaults (server.yaml, authentication.yaml, security.yaml + example
+  adapter configs). Tracked in git and shipped as the Debian default config. Do not edit it
+  for local setup; the single source of truth stays here.
+- `config-local/` = your working copy (gitignored). `make init-config` copies a file from
+  `config/` to `config-local/` only if the target is missing, so edits there survive.
+  `make run-server` runs `--config-dir config-local`.
+- Packaged installs: defaults live in `/etc/openmux/` (seeded from the package on first
+  install). The server has no silent fallback config: a missing config file is a hard error
+  with a hint pointing at the three ways to provide one.
 
 ## Python Coding Style
 - Formatting is enforced by `make format` (black + isort, line-length 127) — match this rather

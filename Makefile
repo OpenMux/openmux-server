@@ -43,6 +43,12 @@ reload-full:
 
 # Project configuration
 PROJECT_NAME = openmux
+# Dev config layout: config/ holds the pristine defaults (tracked in git);
+# config-local/ holds YOUR working copy (gitignored). make init-config copies
+# a config/ file into config-local/ only when it is missing, so edits to
+# config-local/ survive re-runs and a fresh checkout always starts clean.
+CONFIG_DIR   ?= config
+CONFIG_LOCAL ?= config-local
 # Version from git, same rule as the setuptools-scm config in pyproject.toml
 # (scripts/git_version.py needs only stdlib + git). Plain python3 as a last
 # resort keeps the Makefile usable on a machine without the venv. 0.0.0 is
@@ -127,7 +133,8 @@ help:
 	@echo ""
 	@echo "$(COLOR_GREEN)Utilities:$(COLOR_RESET)"
 	@echo "  clean          Clean up temporary files"
-	@echo "  run-server     Run OpenMux server"
+	@echo "  init-config    Seed config-local/ from the pristine config/ defaults"
+	@echo "  run-server     Run OpenMux server (dev config from config-local/)"
 	@echo "  run-client     Run OpenMux client"
 	@echo "  run-management Run OpenMux management server"
 	@echo "  vulture        Run dead code analysis (vulture)"
@@ -326,6 +333,9 @@ deb: clean xterm-assets
 		echo "dpkg-buildpackage not found. Install dpkg-dev: sudo apt-get install dpkg-dev devscripts"; \
 		exit 1; \
 	fi
+	@# The packaged default configs are generated from config/ inside the
+	@# build tree by debian/rules (override_dh_auto_install); nothing to
+	@# pre-generate in the source tree here.
 	@# Sync debian/changelog version from pyproject.toml
 	DEB_REVISION=$(DEB_REVISION) DEB_DIST=$(DEB_DIST) DEB_SNAPSHOT=$(DEB_SNAPSHOT) \
 		$(PYTHON) scripts/update_deb_changelog.py --package $(PROJECT_NAME) --message "Automated build"
@@ -381,10 +391,31 @@ validate-all-configs: venv-dev
 # Runtime Targets
 # ============================================================================
 
-# Run the OpenMux server
-run-server: venv
-	$(call print_status,"Starting OpenMux server...")
-	$(PYTHON_VENV) -m openmux.server.main
+# Seed the local working config from the pristine defaults. Copies each file
+# server.yaml / authentication.yaml / security.yaml from $(CONFIG_DIR)/ to
+# $(CONFIG_LOCAL)/ only when the target file is missing - it never overwrites
+# your edits. Run once on a fresh checkout; make run-* run it for you.
+init-config:
+	@mkdir -p $(CONFIG_LOCAL)
+	@copied=0; \
+	for f in server.yaml authentication.yaml security.yaml; do \
+		if [ -f "$(CONFIG_LOCAL)/$$f" ]; then \
+			continue; \
+		fi; \
+		if [ -f "$(CONFIG_DIR)/$$f" ]; then \
+			cp "$(CONFIG_DIR)/$$f" "$(CONFIG_LOCAL)/$$f"; echo "  seeded $(CONFIG_LOCAL)/$$f from $(CONFIG_DIR)/$$f"; copied=1; \
+		else \
+			echo "  missing default: $(CONFIG_DIR)/$$f" >&2; exit 1; \
+		fi; \
+	done; \
+	if [ $$copied -eq 0 ]; then \
+		echo "config-local/ is already complete (nothing to seed). Edits there are preserved."; \
+	fi
+
+# Run the OpenMux server (dev config from config-local/, see init-config)
+run-server: init-config
+	$(call print_status,"Starting OpenMux server with config dir $(CONFIG_LOCAL)...")
+	$(PYTHON_VENV) -m openmux.server.main --config-dir $(CONFIG_LOCAL)
 
 # Run the OpenMux client
 run-client: venv

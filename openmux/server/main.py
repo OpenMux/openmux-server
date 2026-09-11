@@ -1585,6 +1585,13 @@ def _parse_arguments():
     )
     args = parser.parse_args()
 
+    # Dev default: no explicit config given and a local working config exists
+    # (seeded by `make init-config` into config-local/), use it. This covers
+    # the common "openmux-server" run from a repository checkout.
+    dev_config_dir = "config-local"
+    if not args.config_dir and not args.config and os.path.isfile(os.path.join(dev_config_dir, "server.yaml")):
+        args.config_dir = dev_config_dir
+
     # When --config-dir is provided, derive any unspecified config paths from it
     if args.config_dir:
         base_dir = os.path.abspath(args.config_dir)
@@ -1603,27 +1610,33 @@ def _parse_arguments():
 
 
 def _find_config_file(config_path: str) -> str:
-    """Find and validate the configuration file path.
+    """Locate and validate the configuration file path.
 
     Args:
-        config_path: Preferred configuration path supplied by the user.
+        config_path: Server configuration path supplied on the command line,
+            already resolved against --config-dir, the config-local dev
+            default, or /etc/openmux.
 
     Returns:
         str: Resolved configuration path.
 
     Notes:
-        Exits the process with status 1 if no suitable config file is found.
+        Exits the process with status 1 if the file does not exist. There is
+        deliberately no silent fallback to a bundled config: point
+        -c/--config or --config-dir at your config, run `make init-config` in
+        a repo checkout, or install the package defaults to /etc/openmux.
     """
     if os.path.exists(config_path):
         return config_path
 
-    # Check if the config file exists in the current directory
-    local_config = os.path.join(os.path.dirname(__file__), "..", "..", "config", "server.yaml")
-    if os.path.exists(local_config):
-        return local_config
-    else:
-        logging.error(f"Config file not found: {config_path}")
-        sys.exit(1)
+    logging.error(f"Config file not found: {config_path}")
+    if not os.path.exists("/etc/openmux/server.yaml") and not os.path.exists(os.path.join("config-local", "server.yaml")):
+        logging.error(
+            "No config found. In a repo checkout run `make init-config` (seeds config-local/, "
+            "which `make run-server` picks up), or pass -c/--config / --config-dir. "
+            "Packaged installs use /etc/openmux."
+        )
+    sys.exit(1)
 
 
 def _setup_shutdown_handlers(loop, server):

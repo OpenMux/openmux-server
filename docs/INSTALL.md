@@ -289,6 +289,8 @@ caught during refresh—not at runtime.
 
 - Use `--config-dir /path/to/config` to load `server.yaml`, `authentication.yaml`, and `security.yaml` from the same directory, or point directly at a server YAML via `-c/--config`.
 - Override sidecar locations explicitly with `-a/--auth-config` and `-s/--security-config`.
+- In a repo checkout, your working config is `config-local/` (gitignored), seeded from the **pristine** defaults in `config/` by `make init-config`. `make run-server` adds `--config-dir config-local`. Do not edit `config/` for local changes.
+- The server has no silent fallback config: a missing config file is a hard error. Provide one via `make init-config` (dev), `--config-dir`/`-c` (explicit), or the packaged defaults in `/etc/openmux`.
 - The control socket and pidfile are `openmux.sock` and `openmux.pid`
   inside the run dir. The run dir resolves through one chain
   (`OPENMUX_RUN_DIR` env, then `/etc/defaults/openmux`, then the systemd

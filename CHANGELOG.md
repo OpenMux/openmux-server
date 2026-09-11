@@ -10,6 +10,8 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Config changes to check before upgrading
 
+- **Default configs are generated for the Debian package; `config/` is the single source.** The packaged `server.yaml` is generated at build time from `config/server.yaml` with only the FHS overrides (`logging.file` → `/var/log/openmux/...`, `port_actions.actions_dir` → `/etc/openmux/actions`), and the packaged `security.yaml` now ships verbatim from `config/`. The hand-maintained copies in `debian/package-config/` for those two files are gone, so the packaged defaults can no longer drift from the repo defaults (the old packaged `security.yaml` was missing the `access_default` key). The packaged `authentication.yaml` still differs intentionally (no local automation API keys) and keeps living in `debian/package-config/`. No change to a running install: `/etc/openmux` is seeded only on first install and is never overwritten.
+
 - **Location keys are removed from `server.yaml`** (dirs move to packaging).
   These keys no longer exist and their values are ignored, with one
   deprecation warning per key. Remove them from your config:
@@ -85,6 +87,7 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Behavior changes (no config change required)
 
+- **The server no longer silently falls back to a bundled config.** When `-c`/`--config-dir` name a missing file, the server exits with a hint instead of loading `config/server.yaml` from the source tree. Dev workflow: `make init-config` seeds the gitignored `config-local/` from the pristine `config/` defaults; `make run-server` runs `--config-dir config-local`. The bare `openmux-server` also uses `config-local/` when it exists. Packaged installs are unchanged (`/etc/openmux`, `--config-dir`).
 - **Config files are validated against the JSON schemas at startup.** The
   authoritative schemas now ship inside the Python package
   (`openmux/config_schema/`). On every config load (startup and reload),

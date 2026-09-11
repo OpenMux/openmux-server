@@ -145,12 +145,18 @@ def test_parse_arguments_defaults(monkeypatch):
     assert args.verbose == 0
 
 
-def test_find_config_file_fallback_uses_repo_config():
-    # Provide a definitely missing path
-    choose = _find_config_file("/no/such/config/file.yaml")
-    assert os.path.exists(choose)
-    # Should point to repository config/server.yaml
-    assert choose.endswith(os.path.join("config", "server.yaml"))
+def test_find_config_file_missing_path_exits():
+    # There is no silent fallback to a bundled config: a missing path is a
+    # hard error (exit 1), telling the user to pass -c/--config or
+    # --config-dir, run make init-config, or install to /etc/openmux.
+    with pytest.raises(SystemExit):
+        _find_config_file("/no/such/config/file.yaml")
+
+
+def test_find_config_file_existing_path_returns_unchanged(tmp_path):
+    cfg = tmp_path / "server.yaml"
+    cfg.write_text("server:\n  id: x\n")
+    assert _find_config_file(str(cfg)) == str(cfg)
 
 
 def test_setup_basic_logging_idempotent(tmp_path, caplog):

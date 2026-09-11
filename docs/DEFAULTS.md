@@ -2,6 +2,16 @@ OpenMux Configuration Defaults
 
 This document consolidates default values used across the server configuration. It combines defaults declared in the JSON Schema and implicit defaults enforced at runtime by adapters and managers. Where there is a discrepancy, the runtime behavior is authoritative, and the schema/docs should be aligned in subsequent revisions.
 
+Config file layout
+- `config/` holds the **pristine** defaults (server.yaml, authentication.yaml,
+  security.yaml plus example adapter configs). It is the single source of truth
+  and is shipped as the Debian default config. Do not edit it for local setups.
+- `config-local/` (gitignored) is the local working copy. `make init-config`
+  copies each of the three editable files from `config/` only when missing, so
+  edits survive. `make run-server` runs `--config-dir config-local`.
+- Packaged installs use `/etc/openmux/` (seeded from the package on first
+  install). The server has no silent fallback: a missing config is a hard error.
+
 Notes
 - “Schema default” applies when validating/merging config via the schema.
 - “Runtime default” applies when code reads config and fills missing values.

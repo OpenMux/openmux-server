@@ -24,6 +24,15 @@ real serial device or network gear.
 python -m openmux.server.main -c config/loopback_test.yaml
 ```
 
+For day-to-day local config (server/auth/security) use the gitignored working
+copy instead of editing `config/` (the pristine defaults):
+
+```sh
+make init-config                 # seeds config-local/ from config/ (once)
+# edit config-local/server.yaml, authentication.yaml, security.yaml
+make run-server                  # runs --config-dir config-local
+```
+
 The server logs each adapter it starts, for example the `client_listener` on
 port 8023 and the web console on port 80 (or 443 for HTTPS).
 
@@ -36,9 +45,10 @@ python -m openmux.client --list --server localhost --port 8023
 python -m openmux.client --server localhost --port 8023
 ```
 
-Default credentials for `config/loopback_test.yaml` and `config/server.yaml`
-come from `config/authentication.yaml`. Check that file for the current
-username and password, or add your own user (see
+Default credentials for `config/loopback_test.yaml` come from
+`config/authentication.yaml`. For `config-local/authentication.yaml` (seeded by
+`make init-config`), check that file for the current username and password, or
+add your own user (see
 [Generate a user password hash](INSTALL.md#generate-a-user-password-hash)).
 
 You can also open the web console in a browser at `http://localhost` (or the

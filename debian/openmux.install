@@ -1,7 +1,13 @@
+# server.yaml is GENERATED at build time from config/server.yaml (see
+# scripts/make_deb_server_config.py); security.yaml ships verbatim from
+# config/ (single source of truth). authentication.yaml and client.yaml are
+# packaging-specific and intentionally differ from config/. The generated
+# dir is gitignored, so dh auto-install ignores it and these explicit lines
+# control exactly what ships.
+debian/deb-package-config/generated/server.yaml usr/share/openmux/default-config/
+config/security.yaml usr/share/openmux/default-config/
 debian/package-config/authentication.yaml usr/share/openmux/default-config/
 debian/package-config/client.yaml usr/share/openmux/default-config/
-debian/package-config/security.yaml usr/share/openmux/default-config/
-debian/package-config/server.yaml usr/share/openmux/default-config/
 debian/package-config/openmux.defaults /etc/defaults/
 debian/openmux-server.service lib/systemd/system/
 # The web UI templates and static assets ship with the python package

@@ -6,8 +6,33 @@
 
 # Skip running tests during package build by default (can be enabled later)
 override_dh_auto_test:
-	@echo "Skipping tests during build (override_dh_auto_test)"
+	@echo "Skipping tests during package build"
+
+# The packaged default configs are GENERATED, not hand-copied: the
+# generated dir is gitignored (dh auto-install ignores gitignored trees),
+# so the explicit lines in openmux.install control what ships. This keeps
+# config/ the single source of truth: server.yaml comes from
+# config/server.yaml with only the FHS overrides (logging.file,
+# port_actions.actions_dir), and security.yaml ships verbatim from config/
+# (the old hand-copied copy had drifted: it was missing the access_default
+# block). The build fails if the required sources are missing.
+override_dh_auto_install:
+	@echo "Generating deb default configs from config/ ..."
+	install -d -m 0755 debian/deb-package-config/generated
+	python3 scripts/make_deb_server_config.py config/server.yaml debian/deb-package-config/generated/server.yaml
+	for f in server.yaml security.yaml; do \
+		if [ ! -f config/$$f ]; then \
+			echo "ERROR: config/$$f is required for the package build" >&2; \
+			exit 1; \
+		fi; \
+	done
+	dh_auto_install
 
 override_dh_fixperms:
 	dh_fixperms
-	chmod 0644 debian/openmux/usr/share/openmux/default-config/*.yaml
+	if [ -f debian/openmux/usr/share/openmux/default-config/server.yaml ]; then \
+		chmod 0644 debian/openmux/usr/share/openmux/default-config/*.yaml; \
+	else \
+		echo "ERROR: default configs were not installed into debian/openmux" >&2; \
+		exit 1; \
+	fi

@@ -127,3 +127,4 @@ id_ed25519*
 *.iso
 *.img
 action_scripts/
+config-local/

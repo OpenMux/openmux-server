@@ -221,8 +221,8 @@ This chapter expands the earlier summaries (Sections 1, 5, 11) into a definitive
 2. Python loads `openmux/server/main.py` and executes `main()`.
 
 ### 15.2 Argument Parsing & Config Path Resolution
-3. `_parse_arguments()` reads `--config` (`-c`), `--config-dir`, `--auth-config` (`-a`), `--security-config` (`-s`), and `--verbose`, deriving defaults (e.g., `/etc/openmux/server.yaml`) when not provided.
-4. `_find_config_file()` validates / locates the server YAML (tries provided path, then project `config/server.yaml`). Failure → `sys.exit(1)`.
+3. `_parse_arguments()` reads `--config` (`-c`), `--config-dir`, `--auth-config` (`-a`), `--security-config` (`-s`), and `--verbose`. When nothing is given, a `config-local/` working copy (dev, seeded by `make init-config`) is used if present; otherwise `/etc/openmux/server.yaml` is the default.
+4. `_find_config_file()` checks the resolved path exists. There is no silent fallback to a bundled config - a missing file exits with status 1 and a hint (`make init-config` / `--config-dir` / packaged `/etc/openmux`).
 
 ### 15.3 Core Object Construction
 5. `OpenMuxServer(config_path)` is instantiated.
