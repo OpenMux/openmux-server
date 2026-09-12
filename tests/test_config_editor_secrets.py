@@ -22,9 +22,6 @@ def _sample_config():
                 "protocol": {"type": "openmux", "password": "hunter2", "api_key": "leafkey"},
             }
         ],
-        "openmux_client_ports": [
-            {"name": "legacy1", "password": "hunter3", "api_key": "legacykey"},
-        ],
     }
 
 
@@ -37,8 +34,6 @@ def test_mask_config_secrets_hides_password_hash_and_keys():
     assert masked["authentication"]["api_keys"][0]["key"] == _SECRET_MASK
     assert masked["tcp_initiator_ports"][0]["protocol"]["password"] == _SECRET_MASK
     assert masked["tcp_initiator_ports"][0]["protocol"]["api_key"] == _SECRET_MASK
-    assert masked["openmux_client_ports"][0]["password"] == _SECRET_MASK
-    assert masked["openmux_client_ports"][0]["api_key"] == _SECRET_MASK
 
 
 def test_mask_config_secrets_does_not_mutate_original():
@@ -59,8 +54,6 @@ def test_restore_masked_secrets_keeps_stored_value_when_unchanged():
     assert payload["authentication"]["api_keys"][0]["key"] == "topsecretkey"
     assert payload["tcp_initiator_ports"][0]["protocol"]["password"] == "hunter2"
     assert payload["tcp_initiator_ports"][0]["protocol"]["api_key"] == "leafkey"
-    assert payload["openmux_client_ports"][0]["password"] == "hunter3"
-    assert payload["openmux_client_ports"][0]["api_key"] == "legacykey"
 
 
 def test_restore_masked_secrets_preserves_explicit_edits():

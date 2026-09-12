@@ -69,7 +69,6 @@ _KNOWN_CONFIG_SECTIONS: FrozenSet[str] = frozenset(
         "serial_ports",
         "command_ports",
         "tcp_initiator_ports",
-        "openmux_client_ports",
         "client_listener",
         "telnet_listener",
         "ssh_listener",

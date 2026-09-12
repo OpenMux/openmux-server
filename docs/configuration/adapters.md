@@ -7,9 +7,8 @@ OpenMux uses a modular adapter system. Adapters are configured under top-level s
 Top-level adapter sections supported by the server:
 - `loopback_ports`: Loopback Adapter (testing)
 - `command_ports`: Command Adapter (external processes)
-- `tcp_initiator_ports`: TCP Initiator Adapter (outbound TCP/SSL)
+- `tcp_initiator_ports`: TCP Initiator Adapter (outbound TCP/SSL; also connects to a remote OpenMux via `protocol: {type: openmux}`)
 - `serial_ports`: Serial Adapter (physical serial devices)
-- `openmux_client_ports`: OpenMux Client Adapter (connect to another OpenMux)
 
 Service adapters (not port lists):
 - `client_listener`: Client access server (TCP listener)
@@ -221,6 +220,15 @@ Supported options per port:
 - `auto_reconnect`: Auto-reconnect when disconnected (default: true)
 - `reconnect_delay`: Delay between reconnect attempts (default: 5.0)
 - `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above)
+- `protocol`: Selects the wire protocol for the connection (default: `plain`).
+  - `protocol.type`: `plain` (default, raw TCP), `conserver`, or `openmux`.
+  - `protocol.telnet_negotiation`: `none` (default) or `strip` (drop telnet IAC sequences), for `plain`.
+  - `protocol.username` / `protocol.password`: credentials for `conserver`.
+  - `protocol.remote_port`: required by the `openmux` type. Either `protocol.api_key` or
+    `protocol.username` + `protocol.password` must be provided to authenticate.
+
+To expose a port on a remote OpenMux server locally, use `protocol.type: openmux` (the
+former `openmux_client_ports` section was removed in ticket #72 and converted to this form):
 
 Examples:
 ```yaml
@@ -235,6 +243,16 @@ tcp_initiator_ports:
     use_tls: true
     ssl_verify: true
     timeout: 15.0
+
+  - name: remote_openmux
+    host: remote-openmux.example.com
+    port: 8023
+    use_tls: true
+    timeout: 10.0
+    protocol:
+      type: openmux
+      remote_port: server_console
+      api_key: your-api-key
 ```
 
 ## Serial Adapter (`serial_ports`)
@@ -319,36 +337,6 @@ Constraints:
 - Note: YAML 1.1 parses unquoted `on` / `off` as booleans. Quote policy
   strings in config files to be safe; the boolean result is the same `on`
   / `off` shorthand.
-## OpenMux Client Adapter (`openmux_client_ports`)
-
-Connect to a remote OpenMux server and expose a remote port locally.
-
-Authentication: either `api_key` or `username` + `password` is required.
-
-Supported options per port:
-- `name` (required): Unique port name
-- `host` (required): Remote OpenMux host
-- `port` (required): Remote OpenMux TCP port
-- `remote_port` (required): Port name on the remote OpenMux server
-- `api_key`: API key for authentication
-- `username`: Username for password auth
-- `password`: Password for password auth
-- `use_tls`: Enable TLS encryption (default: false)
-- `timeout`: Connect/auth timeout in seconds (default: 10.0)
-- `auto_reconnect`: Auto-reconnect when disconnected (default: true)
-- `reconnect_delay`: Delay between reconnect attempts (default: 5.0)
-
-Example:
-```yaml
-openmux_client_ports:
-  - name: remote_openmux
-    host: remote-openmux.example.com
-    port: 8080
-    remote_port: server_console
-    api_key: your-api-key
-    use_tls: true
-    timeout: 10.0
-```
 
 ## Client Listener (`client_listener`)
 

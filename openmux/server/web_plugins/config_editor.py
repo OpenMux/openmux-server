@@ -124,7 +124,7 @@ _SECRET_MASK = "********"
 
 # Port-like list sections whose items carry plaintext initiator credentials,
 # either at the top level (legacy) or nested under "protocol".
-_PORT_SECRET_SECTIONS = ("tcp_initiator_ports", "openmux_client_ports", "client_initiator_ports")
+_PORT_SECRET_SECTIONS = ("tcp_initiator_ports",)
 _PORT_SECRET_FIELDS = ("password", "api_key")
 
 

@@ -1,29 +1,31 @@
-"""Validation and configuration tests for openmux_client_ports compat alias.
+"""Validation tests for TcpInitiatorAdapter openmux connections.
 
-These tests verify that TcpInitiatorAdapter correctly handles the legacy
-openmux_client_ports config format (flat remote_port / api_key / username+password)
-as well as the new tcp_initiator_ports format with protocol: {type: openmux}.
+These verify the ``tcp_initiator_ports`` format with
+``protocol: {type: openmux}``. The deprecated ``openmux_client_ports``
+compat section was removed (ticket #72); configs using it are rejected
+by the config manager (schema validation), and the adapter no longer reads it.
 """
 
 import pytest
 
 from openmux.server.adapters.tcp_initiator import TcpInitiatorAdapter
 
-# ── openmux_client_ports (legacy flat format) ────────────────────────────────
+# ── openmux_client_ports (removed compat section; now rejected) ─────────────────
 
 
-def test_validate_config_accepts_openmux_section_with_api_key():
+def test_validate_config_rejects_removed_openmux_section_api_key():
+    # The compat alias is gone; only tcp_initiator_ports is read.
     cfg = {"openmux_client_ports": [{"name": "p1", "host": "h", "port": 8023, "remote_port": "r1", "api_key": "k"}]}
-    assert TcpInitiatorAdapter.validate_config(cfg) is True
+    assert TcpInitiatorAdapter.validate_config(cfg) is False
 
 
-def test_validate_config_accepts_openmux_section_with_user_pass():
+def test_validate_config_rejects_removed_openmux_section_user_pass():
     cfg = {
         "openmux_client_ports": [
             {"name": "p2", "host": "h", "port": 8023, "remote_port": "r2", "username": "u", "password": "p"}
         ]
     }
-    assert TcpInitiatorAdapter.validate_config(cfg) is True
+    assert TcpInitiatorAdapter.validate_config(cfg) is False
 
 
 @pytest.mark.parametrize(
@@ -60,34 +62,19 @@ def test_validate_config_new_format_rejects_missing_remote_port():
     assert TcpInitiatorAdapter.validate_config(cfg) is False
 
 
-# ── get_port_configurations with openmux_client_ports ────────────────────────
+# ── get_port_configurations ignores the removed openmux section ─────────────────
 
 
-def test_get_port_configurations_from_openmux_section():
+def test_get_port_configurations_ignores_removed_openmux_section():
+    # The removed compat section is no longer read, so no ports are derived from it.
     cfg = {
         "openmux_client_ports": [
-            {
-                "name": "alpha",
-                "host": "h1",
-                "port": 8023,
-                "remote_port": "r1",
-                "api_key": "k",
-                "use_tls": True,
-                "timeout": 12.5,
-            },
+            {"name": "alpha", "host": "h1", "port": 8023, "remote_port": "r1", "api_key": "k"},
             {"name": "beta", "host": "h2", "port": 9000, "remote_port": "r2", "username": "u", "password": "p"},
         ]
     }
     adapter = TcpInitiatorAdapter("test", cfg)
-    ports = adapter.get_port_configurations()
-    assert set(ports.keys()) == {"alpha", "beta"}
-    assert ports["alpha"]["use_tls"] is True
-    assert ports["alpha"]["timeout"] == 12.5
-    assert ports["beta"]["port"] == 9000
-    # protocol sub-key is injected
-    assert ports["alpha"]["protocol"]["type"] == "openmux"
-    assert ports["alpha"]["protocol"]["remote_port"] == "r1"
-    assert ports["beta"]["protocol"]["username"] == "u"
+    assert adapter.get_port_configurations() == {}
 
 
 def test_adapter_type_is_tcp_initiator():

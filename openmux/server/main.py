@@ -994,7 +994,7 @@ class OpenMuxServer:
         serial_section = new_cfg.get("serial_ports")
         loopback_section = new_cfg.get("loopback_ports")
         command_section = new_cfg.get("command_ports")
-        tcp_init_section = new_cfg.get("tcp_initiator_ports") or new_cfg.get("openmux_client_ports")
+        tcp_init_section = new_cfg.get("tcp_initiator_ports")
         telnet_section = new_cfg.get("telnet_listener")
         ssh_section = new_cfg.get("ssh_listener")
         muxcon_section = new_cfg.get("muxcon")

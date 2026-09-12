@@ -51,7 +51,7 @@ Note on configuration reloads: Hot-reload of port configuration is supported via
 ---
 ## 4. Adapter / Plugin Architecture
 ### 4.1 Plugin Registration
-`PluginRegistry._register_built_in_plugins()` imports each built‑in adapter class and registers an `AdapterPlugin` keyed by its config section (e.g. `loopback_ports`). Built‑ins include: loopback, command, client_listener, tcp_initiator, serial, muxcon, web_status, and openmux_client. External plugins can be registered at runtime via `GenericAdapterFactory.register_external_plugin(plugin)` before `create_adapters_from_config()` is called.
+`PluginRegistry._register_built_in_plugins()` imports each built‑in adapter class and registers an `AdapterPlugin` keyed by its config section (e.g. `loopback_ports`). Built‑ins include: loopback, command, client_listener, tcp_initiator, serial, muxcon, and web_status. External plugins can be registered at runtime via `GenericAdapterFactory.register_external_plugin(plugin)` before `create_adapters_from_config()` is called.
 
 ### 4.2 Adapter Creation Path
 For each registered section present in the config file, the factory resolves the corresponding plugin and instantiates an adapter with that section’s slice of configuration. Each adapter instance receives its slice of config. A `DynamicPortManager` is attached immediately, setting `adapter.port_manager`.

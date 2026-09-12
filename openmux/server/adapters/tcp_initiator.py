@@ -18,9 +18,6 @@ Configuration (list-of-dicts under tcp_initiator_ports):
                     port: 443
                     use_tls: true
                     description: "Firewall management interface"
-
-Legacy compatibility:
-- The legacy section key "client_initiator_ports" is still accepted (deprecated).
 """
 
 import asyncio
@@ -533,21 +530,12 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         """Validate adapter configuration structure.
 
         Supports two forms:
-        1. Dict containing key ``tcp_initiator_ports`` or ``openmux_client_ports`` (compat alias)
-           with list of port dicts.
-        2. Top-level list of port dicts (legacy style) or legacy key ``client_initiator_ports``.
+        1. Dict containing key ``tcp_initiator_ports`` with a list of port dicts.
+        2. Top-level list of port dicts (legacy style).
         """
         from .protocols import PROTOCOL_HANDLERS
 
         cfg = config.get("tcp_initiator_ports", config)
-        is_openmux_compat = False
-        if cfg is config:
-            cfg = config.get("openmux_client_ports", config)
-            if cfg is not config:
-                is_openmux_compat = True
-        if cfg is config:
-            cfg = config.get("client_initiator_ports", config)
-            # client_initiator_ports is a legacy plain-TCP alias, not openmux
         if not isinstance(cfg, list):
             return False
         for item in cfg:
@@ -566,14 +554,12 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             # Write-slot capacity (issue #59/#60): hard error so typos fail fast.
             if not _valid_write_mode(item):
                 return False
-            # For compat sections (openmux_client_ports), inject protocol sub-key
-            # before delegating to the handler's validate_config
-            validate_item = cls._inject_openmux_protocol(item) if is_openmux_compat and "protocol" not in item else item
-            prot = validate_item.get("protocol", {})
+            # Delegate to the protocol handler for a protocol sub-key (default: plain).
+            prot = item.get("protocol", {})
             ptype = (prot.get("type", "") or "plain").lower()
             handler_cls = PROTOCOL_HANDLERS.get(ptype)
             if handler_cls is not None:
-                problems = handler_cls.validate_config(validate_item)
+                problems = handler_cls.validate_config(item)
                 if problems:
                     return False
         return True
@@ -612,11 +598,6 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         items: List[Dict[str, Any]]
         if isinstance(root, dict) and isinstance(root.get("tcp_initiator_ports"), list):
             items = root["tcp_initiator_ports"]
-        elif isinstance(root, dict) and isinstance(root.get("openmux_client_ports"), list):
-            # Compat alias: inject protocol sub-key so TcpInitiatorPort uses OpenMuxHandler
-            items = [self._inject_openmux_protocol(i) for i in root["openmux_client_ports"]]
-        elif isinstance(root, dict) and isinstance(root.get("client_initiator_ports"), list):  # legacy
-            items = root["client_initiator_ports"]
         elif isinstance(root, list):
             items = root
         else:
@@ -626,25 +607,6 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             if isinstance(item, dict) and item.get("name"):
                 result[item["name"]] = dict(item)
         return result
-
-    @staticmethod
-    def _inject_openmux_protocol(item: Dict[str, Any]) -> Dict[str, Any]:
-        """Translate a legacy openmux_client_ports entry to tcp_initiator format.
-
-        Lifts ``remote_port``, ``api_key``, ``username``, ``password`` into a
-        ``protocol:`` sub-key so the unified handler can pick them up.
-        """
-        if "protocol" in item:
-            return item  # already in new format
-        merged = dict(item)
-        merged["protocol"] = {
-            "type": "openmux",
-            "remote_port": item.get("remote_port", ""),
-            "api_key": item.get("api_key", ""),
-            "username": item.get("username", ""),
-            "password": item.get("password", ""),
-        }
-        return merged
 
     def get_adapter_type(self) -> str:
         """Return adapter type identifier."""
@@ -718,7 +680,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         """Incrementally reconcile tcp_initiator ports.
 
         Args:
-            new_config: Dict with key 'tcp_initiator_ports' (or legacy 'client_initiator_ports') as list,
+            new_config: Dict with key 'tcp_initiator_ports' as list,
                         or a direct list of port dicts.
 
         Returns:
@@ -728,10 +690,6 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         if isinstance(new_config, dict):
             if isinstance(new_config.get("tcp_initiator_ports"), list):
                 items = list(new_config["tcp_initiator_ports"])  # shallow copy
-            elif isinstance(new_config.get("openmux_client_ports"), list):
-                items = [self._inject_openmux_protocol(i) for i in new_config["openmux_client_ports"]]
-            elif isinstance(new_config.get("client_initiator_ports"), list):
-                items = list(new_config["client_initiator_ports"])  # legacy
             else:
                 items = []
         elif isinstance(new_config, list):

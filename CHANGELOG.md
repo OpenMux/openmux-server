@@ -10,6 +10,38 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Config changes to check before upgrading
 
+- **`openmux_client_ports` is removed** (ticket #72). The section is no
+  longer recognized: the server will not create any ports from it, and a
+  config that still carries it fails schema validation (`--check-config`
+  exits non-zero). Convert each entry to `tcp_initiator_ports` with an
+  `openmux` protocol sub-key, lifting `remote_port`/`api_key`/`username`/
+  `password` into `protocol:`:
+
+  ```yaml
+  # before
+  openmux_client_ports:
+    - name: uplink
+      host: 10.0.0.9
+      port: 8023
+      remote_port: "8023"
+      api_key: "..."
+
+  # after
+  tcp_initiator_ports:
+    - name: uplink
+      host: 10.0.0.9
+      port: 8023
+      protocol:
+        type: openmux
+        remote_port: "8023"
+        api_key: "..."
+  ```
+
+  The older legacy key `client_initiator_ports` (the section's original
+  name; already rejected by the schema and unread by the factory) is no
+  longer read by the adapter either. Its remaining fallback branches were
+  removed.
+
 - **`serial_ports` is array-only** (ticket #71). The unified adapter dict
   form (`{adapter_type: serial, ports: [...]}`) is no longer accepted.
   It fails schema validation, the server refuses to start with it, and
@@ -147,14 +179,13 @@ Changes since v1.0.2 (2026-08-27).
   schema violations, 2 missing or unparseable file). The Config Editor now
   rejects edits that violate the schema. The runtime imports `jsonschema`;
   the Debian package declares the new `python3-jsonschema` dependency.
-- **Schema tightenings (the `openmux_client_ports` item is still a code
-  gap; removal tracked in ticket #72).**
+- **Schema tightenings (both `serial_ports` and `openmux_client_ports` items
+  are resolved; see the config changes above).**
   - `serial_ports` is an array of port mappings only. The unified adapter
     dict form (`{adapter_type: serial, ports: [...]}`) no longer passes
-    schema validation, and the code now rejects it too (ticket #71, done
-    alongside this release; see the config change above).
+    schema validation, and the code now rejects it too (ticket #71).
   - The deprecated `openmux_client_ports` section no longer passes schema
-    validation. The code still loads it until it is removed (ticket #72).
+    validation, and the code no longer reads it either (ticket #72).
   - Per-key MuxCon federation filters use the flat
     `public_keys[].advertise_filters` / `public_keys[].accept_filters`
     keys only. The nested `public_keys[].muxcon` wrapper no longer passes

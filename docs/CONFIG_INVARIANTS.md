@@ -4,7 +4,7 @@ This document defines non-negotiable invariants for the OpenMux server configura
 
 ## 1. Canonical Sections (Primary Format)
 Adapters are configured via top-level section keys. These keys are the *source of truth*:
-`server`, `authentication`, `logging`, `client_listener`, `serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`, `openmux_client_ports`, `muxcon`, `web_console`, and `web_status`.
+`server`, `authentication`, `logging`, `client_listener`, `serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`, `muxcon`, `web_console`, and `web_status`.
 New sections MUST be documented here before being accepted. Sidecar files (see §7) still materialize in-memory under these canonical keys.
 
 `port_actions` is also a canonical top-level section, but it has no adapter behind

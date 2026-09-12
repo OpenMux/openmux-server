@@ -1178,7 +1178,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         tables['serial_ports']._set(deepGet(current, 'serial_ports')||[]);
         tables['loopback_ports']._set(deepGet(current, 'loopback_ports')||[]);
         tables['command_ports']._set(deepGet(current, 'command_ports')||[]);
-        const tcpInitPorts = deepGet(current, 'tcp_initiator_ports') || deepGet(current, 'openmux_client_ports') || [];
+        const tcpInitPorts = deepGet(current, 'tcp_initiator_ports') || [];
         tables['tcp_initiator_ports']._set((Array.isArray(tcpInitPorts) ? tcpInitPorts : []).map(function(item){
           const flat = Object.assign({}, item);
           const prot = flat.protocol; delete flat.protocol;

@@ -269,9 +269,8 @@ async def test_status_message_set_on_remote_close_and_cleared_on_restart(monkeyp
 def test_adapter_validate_config_variants():
     # Preferred dict with tcp_initiator_ports
     assert TcpInitiatorAdapter.validate_config({"tcp_initiator_ports": [{"name": "a", "host": "h", "port": 1}]})
-    # Legacy dict with client_initiator_ports
-    assert TcpInitiatorAdapter.validate_config({"client_initiator_ports": [{"name": "a", "host": "h", "port": 1}]})
-    # validate_config expects a dict; legacy list case is covered via get_port_configurations()
+    # The removed legacy section keys are no longer recognized
+    assert not TcpInitiatorAdapter.validate_config({"client_initiator_ports": [{"name": "a", "host": "h", "port": 1}]})
     # Bad shapes
     assert not TcpInitiatorAdapter.validate_config({})
     assert not TcpInitiatorAdapter.validate_config({"tcp_initiator_ports": ["bad"]})
@@ -280,8 +279,9 @@ def test_adapter_validate_config_variants():
 def test_adapter_get_port_configurations_variants():
     a1 = TcpInitiatorAdapter("ti1", {"tcp_initiator_ports": [{"name": "a", "host": "h", "port": 1}]})
     assert a1.get_port_configurations()["a"]["port"] == 1
+    # The removed legacy section key derives no ports
     a2 = TcpInitiatorAdapter("ti2", {"client_initiator_ports": [{"name": "b", "host": "h", "port": 2}]})
-    assert a2.get_port_configurations()["b"]["port"] == 2
+    assert a2.get_port_configurations() == {}
     a3 = TcpInitiatorAdapter("ti3", {})
     # Emulate legacy top-level list by directly assigning to config
     a3.config = [{"name": "c", "host": "h", "port": 3}]  # type: ignore[assignment]

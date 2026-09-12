@@ -30,7 +30,7 @@
 # Known config_editor section names (case-insensitive; match server.yaml
 # top-level keys exactly):
 #   server, authentication, logging, loopback_ports, serial_ports,
-#   command_ports, tcp_initiator_ports, openmux_client_ports,
+#   command_ports, tcp_initiator_ports,
 #   client_listener, telnet_listener, ssh_listener, muxcon, web_console,
 #   web_status, port_actions
 

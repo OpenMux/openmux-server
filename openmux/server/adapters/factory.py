@@ -209,14 +209,13 @@ class PluginRegistry:
             ("openmux.server.web_console", "WebConsoleAdapter", "Web Console", "web_console"),
             ("muxcon", "UnifiedMuxConAdapter", "MuxCon Federation", "muxcon"),
             ("web_status", "WebStatusAdapter", "Web Status", "web_status"),
-            # openmux_client_ports is a compat alias handled by TcpInitiatorAdapter
-            ("tcp_initiator", "TcpInitiatorAdapter", "OpenMux Client (compat)", "openmux_client_ports"),
         ]
 
         for mod, cls, disp, section in built_ins:
             _import_and_register(mod, cls, disp, section)
 
-        # Note: legacy alias for client_initiator_ports has been removed; use tcp_initiator_ports
+        # Note: the legacy section keys client_initiator_ports and
+        # openmux_client_ports have been removed; use tcp_initiator_ports
 
         # These will be implemented during Phase 2 migration if/when available
         logger.debug("Built-in plugin registration complete")

@@ -45,7 +45,8 @@ serial_ports:
     # log_file: "logs/ports/console1.jsonl"
     # log_directions: [in, out]
 
-## Note: unified schema no longer supports `openmux_client_ports` top-level entries.
+## Note: the deprecated `openmux_client_ports` top-level section is fully removed
+## (ticket #72); use `tcp_initiator_ports` with `protocol: {type: openmux}`.
 
 logging:
   level: "INFO"
