@@ -756,8 +756,14 @@ class SerialAdapter(BaseGenericAdapter):
         if "serial_ports" in config:
             serial_config = config["serial_ports"]
 
-        # serial_config should be a list of port definitions
+        # The section is a list of port dicts (array-only, like every other
+        # *_ports section) — the unified adapter dict form is rejected.
         if not isinstance(serial_config, list):
+            logging.getLogger("openmux.adapter.serial").error(
+                f"Serial adapter configuration must contain a port list (a list of port "
+                f"entries under the 'serial_ports' section); got {type(serial_config).__name__}. "
+                "No serial ports are created for this adapter."
+            )
             return False
 
         # Validate each port configuration
@@ -842,18 +848,27 @@ class SerialAdapter(BaseGenericAdapter):
         setup) and is left for ``start()`` to warn about; ports are created
         dynamically afterward via ``reconcile_ports``.
         """
-        # Handle factory-wrapped config format
-        ports_config = []
-        if "serial_ports" in self.config:
-            # Factory wrapped format: {'serial_ports': [port_configs]}
-            ports_config = self.config["serial_ports"]
-        elif "ports" in self.config:
-            # Direct format: {'ports': [port_configs]}
-            ports_config = self.config["ports"]
+        # Canonical shape: a list of port entries. The factory wraps the bare
+        # section list under 'serial_ports'; a bare list reaches this point in
+        # direct-construction setups. A legacy {'ports': [...]} wrapper is no
+        # longer created; if one still arrives it is reported, not silently
+        # parsed.
+        if isinstance(self.config, list):
+            ports_config = self.config
         else:
-            # Check if config itself is the ports list
-            if isinstance(self.config, list):
-                ports_config = self.config
+            ports_config = self.config.get("serial_ports")
+            if ports_config is None and "ports" in self.config:
+                self.logger.error(
+                    "Serial adapter received a legacy {'ports': [...]} config shape; "
+                    "use the serial_ports port list. No ports were created; "
+                    "add ports with a soft reload."
+                )
+            if not isinstance(ports_config, list):
+                self.logger.error(
+                    f"Serial adapter config section must be a list of port entries; "
+                    f"got {type(ports_config).__name__}. No ports were created."
+                )
+                ports_config = []
 
         for port_config in ports_config:
             if not isinstance(port_config, dict):
@@ -1012,11 +1027,22 @@ class SerialAdapter(BaseGenericAdapter):
             self._recompute_duplicate_device_flags()
 
     def get_port_configurations(self) -> Dict[str, Dict[str, Any]]:
-        """Return mapping of port names to raw configuration dictionaries."""
+        """Return mapping of port names to raw configuration dictionaries.
+
+        Reads the canonical section shape: the factory-wrapped
+        ``{'serial_ports': [...]}`` config (a bare port list is also accepted
+        for direct-construction setups).
+        """
+        if isinstance(self.config, list):
+            port_list = self.config
+        else:
+            raw = self.config.get("serial_ports")
+            port_list = raw if isinstance(raw, list) else []
         port_configs = {}
-        for port_config in self.config.get("ports", []):
-            port_name = port_config["name"]
-            port_configs[port_name] = port_config
+        for port_config in port_list:
+            if not isinstance(port_config, dict) or "name" not in port_config:
+                continue
+            port_configs[port_config["name"]] = port_config
         return port_configs
 
     def get_adapter_type(self) -> str:
@@ -1076,22 +1102,19 @@ class SerialAdapter(BaseGenericAdapter):
 
         Args:
             new_config: Either a list of port dicts, or a dict containing
-                        {'serial_ports': [...]} or {'ports': [...]}.
+                        {'serial_ports': [...]}.
 
         Returns:
             Summary dict with counts and details: {added, removed, updated, unchanged}.
         """
-        # Normalize incoming configuration to a list of dicts
-        if isinstance(new_config, dict):
-            if "serial_ports" in new_config and isinstance(new_config["serial_ports"], list):
-                new_ports_list = list(new_config["serial_ports"])  # shallow copy
-            elif "ports" in new_config and isinstance(new_config["ports"], list):
-                new_ports_list = list(new_config["ports"])  # shallow copy
-            else:
-                # If dict but not expected shape, assume it's already a list-like config
-                new_ports_list = []
-        elif isinstance(new_config, list):
+        # Normalize incoming configuration to a list of dicts: a bare port
+        # list, or the wrapped {'serial_ports': [...]} form (the legacy
+        # 'ports' key is no longer created).
+        if isinstance(new_config, list):
             new_ports_list = list(new_config)
+        elif isinstance(new_config, dict):
+            raw = new_config.get("serial_ports")
+            new_ports_list = list(raw) if isinstance(raw, list) else []
         else:
             new_ports_list = []
 
@@ -1222,10 +1245,11 @@ class SerialAdapter(BaseGenericAdapter):
             except Exception as e:
                 self.logger.error(f"Failed to create serial port {name}: {e}", exc_info=True)
 
-        # Update adapter's config snapshot to reflect new state
+        # Update adapter's config snapshot to reflect new state (canonical
+        # 'serial_ports' key, the same shape __init__ consumed).
         try:
-            # Store under canonical 'ports' key for internal use
-            self.config["ports"] = [new_by_name[n] for n in sorted(new_by_name.keys())]
+            if isinstance(self.config, dict):
+                self.config["serial_ports"] = [new_by_name[n] for n in sorted(new_by_name.keys())]
         except Exception:
             pass
 

@@ -241,6 +241,10 @@ tcp_initiator_ports:
 
 Connect to physical serial devices (RS232, USB-to-serial, etc.).
 
+The section is a list of port entries (array-only, like every other
+`*_ports` section). Any other shape is a config error at load and hot
+reload; no serial port is created for an adapter with a malformed section.
+
 Supported options per port:
 - `name` (required): Unique port name
 - `description`: Human-readable description

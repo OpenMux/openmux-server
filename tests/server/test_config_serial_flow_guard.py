@@ -52,8 +52,8 @@ class TestRtsctsGuard:
             cm._validate_serial_ports_config()
         assert "bad" in str(exc.value)
 
-    def test_unified_dict_format_checked(self):
-        """The unified adapter-dict format is guarded the same way."""
+    def test_unified_dict_format_rejected(self):
+        """The historical unified adapter-dict form is rejected, array-only."""
         cm = _cm(
             {
                 "serial_ports": {
@@ -62,7 +62,23 @@ class TestRtsctsGuard:
                 }
             }
         )
-        with pytest.raises(ValueError, match="rtscts"):
+        with pytest.raises(ValueError, match="unified adapter dict"):
+            cm._validate_serial_ports_config()
+
+    def test_non_list_section_rejected_and_named(self):
+        cm = _cm({"serial_ports": {"nope": 1}})
+        with pytest.raises(ValueError, match="serial_ports must be a list of port entries") as exc:
+            cm._validate_serial_ports_config()
+        assert "no longer supported" in str(exc.value)
+
+    def test_port_entry_without_name_rejected(self):
+        cm = _cm({"serial_ports": [{"device": "/dev/ttyX"}]})
+        with pytest.raises(ValueError, match="missing required 'name'"):
+            cm._validate_serial_ports_config()
+
+    def test_non_dict_port_entry_rejected(self):
+        cm = _cm({"serial_ports": ["not-a-dict"]})
+        with pytest.raises(ValueError, match="must be a mapping of port fields"):
             cm._validate_serial_ports_config()
 
 

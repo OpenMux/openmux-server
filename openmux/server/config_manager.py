@@ -12,7 +12,7 @@ Key responsibilities
         * Required top-level sections: "server" (authentication now lives in a sidecar
             file). Server metadata remains in the main config file, while authentication
             is sourced from authentication.yaml.
-    * Serial ports: support both old list format and new unified adapter format {adapter_type: "serial", ports: [...]}; validate required fields.
+    * Serial ports: a list of port dicts (array-only, like every other *_ports section); validate required fields.
 - Provide getters that lazily load configuration on first access.
 - Persist configuration changes atomically with a simple .bak backup of the previous file.
 
@@ -34,7 +34,6 @@ Error handling & logging
 - Validation helpers raise ValueError on schema issues.
 
 Compatibility notes
-- Supports both legacy and unified serial port configuration formats to ease migration.
 - Normalizes host from bind_address when present to maintain backward compatibility.
 """
 
@@ -253,45 +252,30 @@ class ConfigManager:
     def _validate_serial_ports_config(self):
         """Validate the ``serial_ports`` section (if present).
 
-        Supports both legacy list format and the unified adapter dict format.
+        The section is a list of port dicts (array-only, like every other
+        ``*_ports`` section). The old unified adapter dict form
+        (``{adapter_type: serial, ports: [...]}``) is rejected. A missing
+        ``name`` on any port is also a hard error (``get_port_config`` and
+        the port construction path both read it).
 
         Raises:
             ValueError: If structure or required fields are invalid.
         """
         assert self.config is not None  # Type narrowing
-
-        # Handle both old and new format
         serial_config = self.config["serial_ports"]
 
-        # New unified format: serial_ports is a dict with adapter_type and ports
-        if isinstance(serial_config, dict) and "adapter_type" in serial_config:
-            # Unified adapter format
-            if serial_config.get("adapter_type") != "serial":
-                raise ValueError("serial_ports section must have adapter_type: serial")
+        if not isinstance(serial_config, list):
+            raise ValueError(
+                "serial_ports must be a list of port entries; the unified adapter dict "
+                "format ({adapter_type: serial, ports: [...]}) is no longer supported"
+            )
 
-            ports = serial_config.get("ports", [])
-            if not isinstance(ports, list):
-                raise ValueError("serial_ports.ports must be a list")
-
-            for i, port in enumerate(ports):
-                if "name" not in port:
-                    raise ValueError(f"Serial port at index {i} is missing required 'name' field")
-                if "device" not in port:
-                    raise ValueError(f"Serial port '{port['name']}' is missing required 'device' field")
-                if isinstance(port, dict):
-                    self._check_serial_flow_control_combos(port)
-        else:
-            # Old format: serial_ports is a list of port dicts
-            if not isinstance(serial_config, list):
-                raise ValueError("serial_ports must be a list or unified adapter config")
-
-            for i, port in enumerate(serial_config):
-                if "name" not in port:
-                    raise ValueError(f"Serial port at index {i} is missing required 'name' field")
-                if isinstance(port, dict):
-                    self._check_serial_flow_control_combos(port)
-                # In unified system, adapter type is determined by section name
-                # No need to check for 'adapter' field anymore
+        for i, port in enumerate(serial_config):
+            if not isinstance(port, dict):
+                raise ValueError(f"Serial port at index {i} must be a mapping of port fields, got {type(port).__name__}")
+            if "name" not in port:
+                raise ValueError(f"Serial port at index {i} is missing required 'name' field")
+            self._check_serial_flow_control_combos(port)
 
     def _validate_config(self, *, allow_inline_authentication: bool = False) -> None:
         """Run all validation and normalization steps on the config."""
@@ -378,8 +362,7 @@ class ConfigManager:
         """Return the ``serial_ports`` configuration section.
 
         Returns:
-            Either a list of port definitions (legacy) or a unified adapter
-            config dict with ``adapter_type`` and ``ports`` list.
+            A list of port definition dicts (the only supported shape).
         """
         if not self.config:
             self.load_config()

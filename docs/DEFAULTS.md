@@ -82,6 +82,7 @@ ssh_listener (per-listener entry)
 - control menu escape sequence: Ctrl+E then `c` (per-session; changeable at runtime with the `e` command, not persisted)
 
 serial_ports (per-port) (schema defaults, plus adapter runtime behavior)
+- Section shape: a list of port entries (array-only, like every other *_ports section). The unified adapter dict form (`{adapter_type: serial, ports: [...]}`) is rejected at load and hot reload (ticket #71).
 - baudrate: 9600
 - bytesize: 8
 - parity: N

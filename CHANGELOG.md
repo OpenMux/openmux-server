@@ -10,6 +10,28 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Config changes to check before upgrading
 
+- **`serial_ports` is array-only** (ticket #71). The unified adapter dict
+  form (`{adapter_type: serial, ports: [...]}`) is no longer accepted.
+  It fails schema validation, the server refuses to start with it, and
+  a hot reload refuses to apply it. Convert the section in `server.yaml`
+  from the dict form:
+
+  ```yaml
+  serial_ports:
+    adapter_type: serial
+    ports:
+      - name: console1
+        device: "/dev/ttyS0"
+  ```
+
+  to the array form used by every other `*_ports` section:
+
+  ```yaml
+  serial_ports:
+    - name: console1
+      device: "/dev/ttyS0"
+  ```
+
 - **Fresh Debian installs now generate a random admin password.** The
   packaged `authentication.yaml` template carries only the admin user with a
   `CHANGE_ME_ON_FIRST_BOOT` sentinel; postinst replaces it with a random
@@ -125,12 +147,12 @@ Changes since v1.0.2 (2026-08-27).
   schema violations, 2 missing or unparseable file). The Config Editor now
   rejects edits that violate the schema. The runtime imports `jsonschema`;
   the Debian package declares the new `python3-jsonschema` dependency.
-- **Schema tightenings (code still accepts these; removal tracked in
-  tickets #71 and #72).**
+- **Schema tightenings (the `openmux_client_ports` item is still a code
+  gap; removal tracked in ticket #72).**
   - `serial_ports` is an array of port mappings only. The unified adapter
     dict form (`{adapter_type: serial, ports: [...]}`) no longer passes
-    schema validation. The code still loads it until it is removed
-    (ticket #71).
+    schema validation, and the code now rejects it too (ticket #71, done
+    alongside this release; see the config change above).
   - The deprecated `openmux_client_ports` section no longer passes schema
     validation. The code still loads it until it is removed (ticket #72).
   - Per-key MuxCon federation filters use the flat

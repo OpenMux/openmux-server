@@ -424,3 +424,44 @@ async def test_reconcile_groups_in_place_visible_on_real_port(monkeypatch):
     # The PM wrapper's live property reads these attributes off the port.
     assert list(getattr(spw, "read_write_groups")) == ["oncall"]
     assert list(getattr(spw, "read_only_groups")) == ["viewers"]
+
+
+def test_validate_config_rejects_unified_dict_form(caplog):
+    """The historical unified adapter-dict section is rejected and named."""
+    caplog.set_level(logging.ERROR, logger="openmux.adapter.serial")
+    assert SerialAdapter.validate_config({"serial_ports": {"adapter_type": "serial", "ports": []}}) is False
+    assert "port list" in caplog.text
+
+
+def test_validate_config_rejects_non_dict_and_bad_ports():
+    assert SerialAdapter.validate_config("nope") is False
+    assert SerialAdapter.validate_config({"serial_ports": ["nope"]}) is False
+    assert SerialAdapter.validate_config({"serial_ports": [{"device": "/dev/ttyUSB0"}]}) is False  # missing name
+
+
+def test_validate_config_accepts_valid_wrapped():
+    assert SerialAdapter.validate_config({"serial_ports": [{"name": "a", "device": "/dev/ttyUSB0"}]}) is True
+
+
+def test_get_port_configurations_reads_canonical_shape():
+    """Reads the wrapped {'serial_ports': [...]} shape the factory produces."""
+    ports = [{"name": "a", "device": "/dev/ttyUSB0"}, {"name": "b", "device": "/dev/ttyUSB1"}]
+    adapter = SerialAdapter("serial_ports", {"serial_ports": ports})
+    assert adapter.get_port_configurations() == {"a": ports[0], "b": ports[1]}
+
+
+def test_get_port_configurations_empty_when_shape_missing():
+    adapter = SerialAdapter("serial_ports", {})
+    assert adapter.get_port_configurations() == {}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_updates_canonical_snapshot_key():
+    """Post-reconcile the snapshot lives under 'serial_ports' (the shape __init__ read)."""
+    adapter = _make_adapter()
+    adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0", baudrate=9600)  # type: ignore
+
+    summary = await adapter.reconcile_ports([{"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200}])
+    assert summary["updated"] == ["a"]
+    assert adapter.config["serial_ports"] == [{"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200}]
+    assert "ports" not in adapter.config
