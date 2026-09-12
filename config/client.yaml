@@ -13,9 +13,9 @@ servers:
   - name: remote
     host: 192.168.1.10
     port: 8023
-    username: user1
+    username: admin
     
   - name: network_device
     host: 192.168.1.20
     port: 8023
-    api_key: 12345abcde
+    api_key: <REPLACE_WITH_RANDOM_API_KEY>

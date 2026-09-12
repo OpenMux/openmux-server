@@ -394,6 +394,15 @@ Notes:
 ## Security Notes
 
 - Password hashes are stored as SHA-256 hashes
+- Packaged (Debian) installs generate a random admin password on every fresh
+  install. The installer prints it once and stores it in
+  `/etc/openmux/.initial_credentials` (root only). Change the password and
+  delete that file after the first login (see
+  [INSTALL.md](docs/INSTALL.md#first-run-deb-install)).
+- The repo default (`config/authentication.yaml`) is `admin` / `admin` for
+  local development only. Do not use it in production.
+- The server logs a warning at startup while any known default credential is
+  still configured; replace each one.
 - API keys should be kept secure
 - For production use, consider enabling TLS for all connections
 

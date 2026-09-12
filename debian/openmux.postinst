@@ -33,7 +33,28 @@ for cfg in authentication.yaml client.yaml security.yaml server.yaml; do
 	default_cfg="/usr/share/openmux/default-config/$cfg"
 	target_cfg="/etc/openmux/$cfg"
 	if [ -f "$default_cfg" ] && [ ! -e "$target_cfg" ]; then
-		cp "$default_cfg" "$target_cfg"
+		if [ "$cfg" = "authentication.yaml" ]; then
+			# Fresh install: replace the CHANGE_ME_ON_FIRST_BOOT sentinel with a
+			# per-install random admin password. The plaintext is stored once in
+			# /etc/openmux/.initial_credentials (0600) and printed on the console.
+			genpw=$(python3 /usr/share/openmux/generate-auth-config.py \
+			--template "$default_cfg" \
+			--output "$target_cfg" \
+			--credentials-out /etc/openmux/.initial_credentials) || {
+				echo "postinst: ERROR: could not generate the per-install admin password." >&2
+				echo "postinst: The install is left in a failed state. Repair it as root:" >&2
+				echo "postinst:   dpkg --configure openmux" >&2
+				echo "postinst: or re-run manually:" >&2
+				echo "postinst:   python3 /usr/share/openmux/generate-auth-config.py --template $default_cfg --output $target_cfg --credentials-out /etc/openmux/.initial_credentials" >&2
+				exit 1
+			}
+			chown root:openmux /etc/openmux/.initial_credentials || true
+			chmod 0600 /etc/openmux/.initial_credentials
+			echo "OpenMux: generated per-install admin password (see /etc/openmux/.initial_credentials):" >&2
+			echo "  $genpw" >&2
+		else
+			cp "$default_cfg" "$target_cfg"
+		fi
 	fi
 	if [ -e "$target_cfg" ]; then
 		chown root:openmux "$target_cfg" || true

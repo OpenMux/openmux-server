@@ -45,11 +45,11 @@ python -m openmux.client --list --server localhost --port 8023
 python -m openmux.client --server localhost --port 8023
 ```
 
-Default credentials for `config/loopback_test.yaml` come from
-`config/authentication.yaml`. For `config-local/authentication.yaml` (seeded by
-`make init-config`), check that file for the current username and password, or
-add your own user (see
-[Generate a user password hash](INSTALL.md#generate-a-user-password-hash)).
+Default credentials for `config/loopback_test.yaml` and `config-local/`
+(seeded by `make init-config`) are `admin` / `admin` from
+`config/authentication.yaml`. These defaults are for local development only;
+change the password or add your own user before pointing anything real at the
+server (see [Generate a user password hash](INSTALL.md#generate-a-user-password-hash)).
 
 You can also open the web console in a browser at `http://localhost` (or the
 `port`/`ssl_port` set in your config's `web_console` section).

@@ -256,6 +256,20 @@ sudo apt-get install -y ../openmux_1.0.1-48_all.deb
 sudo apt-get remove -y openmux
 ```
 
+### First run (.deb install)
+
+A fresh install generates a random admin password for the web console. The
+installer prints it on the console and stores it in
+`/etc/openmux/.initial_credentials` (root only). To complete setup:
+
+1. Log in at the web console as `admin` with that password.
+2. Open the Config Editor, Authentication view, and set a new admin password
+   (see [Generate a user password hash](#generate-a-user-password-hash)).
+3. Delete the one-time file: `sudo rm /etc/openmux/.initial_credentials`.
+
+The server also logs a warning at startup while any known default credential
+is still configured; resolve each warning the same way.
+
 ### Run (after .deb install)
 
 ```sh

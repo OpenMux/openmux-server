@@ -60,7 +60,7 @@ async def wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
 async def run_loopback_case() -> None:
     _log("[loopback] starting")
     adapter = TcpClientAdapter("127.0.0.1", 8123)
-    if not await adapter.connect() or not await adapter.authenticate_with_password("admin", "password"):
+    if not await adapter.connect() or not await adapter.authenticate_with_password("admin", "admin"):
         raise RuntimeError("Loopback session connect/auth failed")
     ports = await adapter.list_ports()
     if "loop1" not in ports:
@@ -80,7 +80,7 @@ async def run_loopback_case() -> None:
 async def run_command_case() -> None:
     _log("[command] starting")
     adapter = TcpClientAdapter("127.0.0.1", 8123)
-    if not await adapter.connect() or not await adapter.authenticate_with_password("admin", "password"):
+    if not await adapter.connect() or not await adapter.authenticate_with_password("admin", "admin"):
         raise RuntimeError("Command session connect/auth failed")
     ports = await adapter.list_ports()
     if "cat" not in ports:
@@ -104,7 +104,7 @@ async def run_serial_case() -> None:
         return
     _log("[serial] starting")
     adapter = TcpClientAdapter("127.0.0.1", 8123)
-    if not await adapter.connect() or not await adapter.authenticate_with_password("admin", "password"):
+    if not await adapter.connect() or not await adapter.authenticate_with_password("admin", "admin"):
         raise RuntimeError("Serial session connect/auth failed")
     ports = await adapter.list_ports()
     if "vserial1" not in ports:

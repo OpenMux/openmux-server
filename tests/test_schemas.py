@@ -146,6 +146,12 @@ def test_detection_rejects_empty_file(tmp_path: Path):
 def test_debian_authentication_config_matches_auth_schema():
     schema = yaml.safe_load((SCHEMA_DIR / "openmux_authentication_schema.yaml").read_text())
     config = yaml.safe_load((REPO_ROOT / "debian" / "package-config" / "authentication.yaml").read_text())
+    # The packaged template carries the CHANGE_ME_ON_FIRST_BOOT sentinel;
+    # postinst replaces it with a per-install random hash. Validate against
+    # a stand-in 64-hex hash to exercise the real schema shape.
+    for user in config.get("users", []):
+        if user.get("password_hash") == "CHANGE_ME_ON_FIRST_BOOT":
+            user["password_hash"] = "0" * 64
     errors = sorted(Draft202012Validator(schema).iter_errors(config), key=lambda e: list(e.path))
     assert not errors, f"debian authentication.yaml failed: {errors[0].message}"
 

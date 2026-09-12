@@ -24,4 +24,9 @@ Description: Serial port multiplexing server and client
  console scripts similar to pip installation:
   - openmux-server
   - openmux-client
-  - openmuxctl%
+  - openmuxctl
+postinst: # First run: the installer generated a random admin password for the
+ # web console. It was printed on the console above and is stored in
+ # /etc/openmux/.initial_credentials (root only). Log in at http://<host>/
+ # as admin, change the password in the Config Editor (Authentication
+ # view), then delete /etc/openmux/.initial_credentials.

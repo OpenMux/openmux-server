@@ -20,6 +20,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .security_policy import SecurityPolicy
 
+# Well-known credentials that shipped (or still ship) in the default config files.
+# Used only to warn when an operator left a documented default in place.
+KNOWN_DEFAULT_PASSWORD_HASHES = frozenset(
+    {
+        "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",  # sha256("admin"); repo dev default
+        "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",  # sha256("password"); former repo default
+        "58fd66f3110e038e19b613984a774418c59a9156c1dd88ce984fe8a7a8003f33",  # sha256("openmux"); former Debian default
+    }
+)
+KNOWN_DEFAULT_API_KEYS = frozenset({"automation-key", "monitoring-key"})
+
 
 class AuthManager:
     def __init__(self, config: Dict[str, Any], security_policy: Optional[SecurityPolicy] = None):
@@ -57,6 +68,7 @@ class AuthManager:
         self._failure_threshold = 5  # failures before lock engages
         self._security_policy = security_policy
         self._apply_security_policy(security_policy)
+        self._log_known_default_warnings(config)
 
     async def update_config(self, new_config: Dict[str, Any]):
         """Replace the active authentication configuration.
@@ -83,6 +95,35 @@ class AuthManager:
         self._pw_hmac_challenges.clear()
         # Re-apply security policy in case rate limits depend on config
         self._apply_security_policy(self._security_policy)
+        self._log_known_default_warnings(new_config)
+
+    def _log_known_default_warnings(self, auth_config: Dict[str, Any]) -> None:
+        """Warn when a known default credential is still configured.
+
+        Resolution order: each ``users[].password_hash`` is checked against
+        ``KNOWN_DEFAULT_PASSWORD_HASHES`` and each ``api_keys[].key`` against
+        ``KNOWN_DEFAULT_API_KEYS``. One warning is emitted per match. A clean
+        config produces no warning.
+        """
+        for user in auth_config.get("users", []) or []:
+            if not isinstance(user, dict):
+                continue
+            if str(user.get("password_hash", "")) in KNOWN_DEFAULT_PASSWORD_HASHES:
+                self.logger.warning(
+                    "User '%s' uses a known default password. Change it before "
+                    "relying on this install: open the web console Config Editor, or "
+                    "edit the users section of authentication.yaml.",
+                    user.get("username", "?"),
+                )
+        for key_entry in auth_config.get("api_keys", []) or []:
+            if not isinstance(key_entry, dict):
+                continue
+            if str(key_entry.get("key", "")) in KNOWN_DEFAULT_API_KEYS:
+                self.logger.warning(
+                    "API key '%s' uses a known default value. Replace it with a "
+                    "random key in the api_keys section of authentication.yaml.",
+                    key_entry.get("name", key_entry.get("key", "?")),
+                )
 
     def update_security_policy(self, policy: Optional[SecurityPolicy]) -> None:
         """Apply a new security policy at runtime."""

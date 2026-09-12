@@ -1,10 +1,10 @@
-api_keys:
-- key: automation-key
-  name: Automation
-  permissions: read-write
-- key: monitoring-key
-  name: Monitoring
-  permissions: read-only
+# DEV ONLY defaults. This file seeds config-local/ via `make init-config`
+# for local development. Do not use these credentials in production.
+# Change the admin password before any deployment.
+users:
+- permissions: admin
+  password_hash: 8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918  # admin
+  username: admin
 external_auth:
   allow_root: false
   enabled: false
@@ -15,13 +15,3 @@ external_auth:
   # helper: /usr/lib/openmux/openmux-pam-helper  # optional override
   service: openmux
   timeout: 10
-users:
-- permissions: admin
-  password_hash: 5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8
-  username: admin
-- permissions: read-write
-  password_hash: a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
-  username: user1
-- permissions: read-only
-  password_hash: 628a7476ada25574e51158f5e9cec7a6b0a3356c93466ec78a768be9b6a394e1
-  username: viewer

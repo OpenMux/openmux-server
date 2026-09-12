@@ -12,8 +12,8 @@ from openmux.server.console_manager import ConsoleManager
 from openmux.server.port_manager import PortManager
 from openmux.server.web_console import WebConsoleAdapter, _format_uptime, _read_hardware_info
 
-_USER_HASH = "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"  # md5("password")
-_AUTH = {"Authorization": f"Basic {base64.b64encode(b'u:password').decode()}"}
+_USER_HASH = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"  # sha256("admin")
+_AUTH = {"Authorization": f"Basic {base64.b64encode(b'u:admin').decode()}"}
 
 
 def _make_adapter(port, **cfg):

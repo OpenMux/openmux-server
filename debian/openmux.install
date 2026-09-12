@@ -9,6 +9,7 @@ config/security.yaml usr/share/openmux/default-config/
 debian/package-config/authentication.yaml usr/share/openmux/default-config/
 debian/package-config/client.yaml usr/share/openmux/default-config/
 debian/package-config/openmux.defaults /etc/defaults/
+scripts/generate_deb_auth_config.py usr/share/openmux/
 debian/openmux-server.service lib/systemd/system/
 # The web UI templates and static assets ship with the python package
 # (openmux/server/webui, installed to dist-packages via pyproject

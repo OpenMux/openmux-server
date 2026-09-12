@@ -10,6 +10,26 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Config changes to check before upgrading
 
+- **Fresh Debian installs now generate a random admin password.** The
+  packaged `authentication.yaml` template carries only the admin user with a
+  `CHANGE_ME_ON_FIRST_BOOT` sentinel; postinst replaces it with a random
+  password (24 characters) and stores the plaintext once in
+  `/etc/openmux/.initial_credentials` (0600, root:openmux). The password is
+  printed on the console and in the postinst message. Log in, change the
+  password in the Config Editor, then delete the credentials file.
+- **Demo users and default API keys are no longer shipped in the default
+  authentication files** (`config/authentication.yaml` and the Debian
+  package template). The `user1`/`viewer` users and the `automation-key` /
+  `monitoring-key` API keys are gone; only the admin user remains. If you
+  relied on the shipped demo users or API keys, define your own in
+  `authentication.yaml`.
+- **The dev default admin password changed from `password` to `admin`** in
+  `config/authentication.yaml` (local development only; existing `config-local/`
+  copies keep their old value until re-seeded).
+- **The server logs a startup warning while a known default credential is in
+  use** (the old `admin`/`password`, the old Debian `admin`/`openmux` hash, or
+  the old default API keys), naming the affected user or key.
+
 - **Default configs are generated for the Debian package; `config/` is the single source.** The packaged `server.yaml` is generated at build time from `config/server.yaml` with only the FHS overrides (`logging.file` → `/var/log/openmux/...`, `port_actions.actions_dir` → `/etc/openmux/actions`), and the packaged `security.yaml` now ships verbatim from `config/`. The hand-maintained copies in `debian/package-config/` for those two files are gone, so the packaged defaults can no longer drift from the repo defaults (the old packaged `security.yaml` was missing the `access_default` key). The packaged `authentication.yaml` still differs intentionally (no local automation API keys) and keeps living in `debian/package-config/`. No change to a running install: `/etc/openmux` is seeded only on first install and is never overwritten.
 
 - **Location keys are removed from `server.yaml`** (dirs move to packaging).

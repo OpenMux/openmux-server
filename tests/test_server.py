@@ -20,7 +20,7 @@ def sample_authentication():
         "users": [
             {
                 "username": "admin",
-                "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
+                "password_hash": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",
                 "permissions": "admin",
             },
             {
@@ -123,13 +123,13 @@ class TestAuthManager:
     @pytest.mark.unit
     def test_authenticate_user_valid(self, auth_manager):
         """Test authentication with valid credentials"""
-        assert auth_manager.authenticate_user("admin", "password") is True
+        assert auth_manager.authenticate_user("admin", "admin") is True
 
     @pytest.mark.unit
     def test_authenticate_user_invalid(self, auth_manager):
         """Test authentication with invalid credentials"""
         assert auth_manager.authenticate_user("admin", "wrong_password") is False
-        assert auth_manager.authenticate_user("unknown", "password") is False
+        assert auth_manager.authenticate_user("unknown", "admin") is False
 
     @pytest.mark.unit
     def test_authenticate_key_valid(self, auth_manager):

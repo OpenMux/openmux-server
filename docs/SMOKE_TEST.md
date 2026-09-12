@@ -27,7 +27,7 @@ python3 scripts/smoke_workflow.py --server-config config/integration_test.yaml
 What it does
 - Starts the OpenMux server on 127.0.0.1:8123 using the test config
 - Uses the TCP client adapter to:
-  - Authenticate as `admin` / `password` (from `config/authentication.yaml`)
+  - Authenticate as `admin` / `admin` (dev default from `config/authentication.yaml`; local development only)
   - LIST ports and ensure presence of `loop1` and `cat`
   - For `loop1`: write `hello-loop\n` and expect an echoed payload
   - For `cat`: write `hello-cat\n` and expect an echoed payload

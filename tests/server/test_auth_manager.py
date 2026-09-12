@@ -189,6 +189,43 @@ def test_get_ed25519_pubkeys_for_user_and_use_filters_by_username():
 # ---------------------------------------------------------------------------
 
 
+def test_known_default_credentials_warn_at_init(caplog):
+    """Known default password hashes and API keys log a warning at construction."""
+    cfg = {
+        "users": [{"username": "admin", "password_hash": sha256_hex("admin"), "permissions": "admin"}],
+        "api_keys": [{"name": "Automation", "key": "automation-key", "permissions": "read-write"}],
+    }
+    with caplog.at_level("WARNING"):
+        AuthManager(cfg)
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any("admin" in m for m in warnings)
+    assert any("Automation" in m for m in warnings)
+
+
+def test_clean_credentials_do_not_warn(caplog):
+    cfg = {
+        "users": [{"username": "admin", "password_hash": sha256_hex("a-long-unique-value"), "permissions": "admin"}],
+        "api_keys": [{"name": "Custom", "key": "" + "ab" * 16, "permissions": "read-write"}],
+    }
+    with caplog.at_level("WARNING"):
+        AuthManager(cfg)
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+@pytest.mark.asyncio
+async def test_known_default_credentials_warn_on_update(caplog):
+    am = AuthManager({"users": [{"username": "custom", "password_hash": sha256_hex("not-a-default")}]})
+    clean_cfg = {"users": [{"username": "custom", "password_hash": sha256_hex("not-a-default")}]}
+    dirty_cfg = {"users": [{"username": "admin", "password_hash": sha256_hex("password")}]}
+    with caplog.at_level("WARNING"):
+        await am.update_config(clean_cfg)
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        await am.update_config(dirty_cfg)
+    assert [r for r in caplog.records if "admin" in r.message]
+
+
 class TestGetUserGroups:
 
     def test_static_user_explicit_groups_plus_implicit_user(self):
