@@ -36,6 +36,27 @@ make run-server                  # runs --config-dir config-local
 The server logs each adapter it starts, for example the `client_listener` on
 port 8023 and the web console on port 80 (or 443 for HTTPS).
 
+## 1b. Reach the web console from other machines
+
+The web console binds `127.0.0.1` by default, so it opens only in a browser
+on the server itself. To serve it to other hosts you make two changes:
+
+1. Bind all interfaces: set `web_console.host: 0.0.0.0` in `server.yaml`
+   (dev: `config-local/server.yaml`; packaged: `/etc/openmux/server.yaml`).
+   The web console Config Editor > Server view edits the same key.
+2. If you must reach it by IP (no DNS name), put the IP in your TLS cert
+   check exception, or keep `use_tls: true` with `tls_autogen: true` and
+   accept the self-signed certificate for that IP in your browser
+   (auto-generated certificates carry the hostname, not the IP). For a
+   LAN-facing setup with a real name, set `ssl_cert`/`ssl_key` to a proper
+   certificate.
+
+Both changes are an explicit opt-out of the loopback default; a fresh
+install deliberately does not open the console to the network. Apply with a
+full reload (the Config Editor Reload view, `openmuxctl reload --full`, or
+the service restart) - a soft reload does not restart the web console
+listener.
+
 ## 2. Connect a client
 
 Use the CLI client to list and open ports.

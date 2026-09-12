@@ -401,6 +401,10 @@ Notes:
   [INSTALL.md](docs/INSTALL.md#first-run-deb-install)).
 - The repo default (`config/authentication.yaml`) is `admin` / `admin` for
   local development only. Do not use it in production.
+- The web console binds `127.0.0.1` by default. Opening it to the network is
+  an explicit change: set `web_console.host: 0.0.0.0` in `server.yaml` (or in
+  the web console Config Editor > Server view), then do a full reload. See
+  [docs/QUICKSTART.md](docs/QUICKSTART.md).
 - The server logs a warning at startup while any known default credential is
   still configured; replace each one.
 - API keys should be kept secure

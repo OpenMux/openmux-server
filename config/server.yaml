@@ -63,7 +63,10 @@ client_listener:
 web_console:
   enable_probes: true
   enable_ui: true
-  host: 0.0.0.0
+  # Loopback by default: the console is reachable from the local host only.
+  # To serve it to other hosts, set host: 0.0.0.0 (config file or web console
+  # Config Editor > Server > web_console.host). See docs/QUICKSTART.md.
+  host: 127.0.0.1
   plugins:
   - openmux.server.web_plugins.config_editor
   port: 80

@@ -270,6 +270,12 @@ installer prints it on the console and stores it in
 The server also logs a warning at startup while any known default credential
 is still configured; resolve each warning the same way.
 
+The web console binds `127.0.0.1` by default, so it is reachable from the
+local host only. To open it to other hosts, set
+`web_console.host: 0.0.0.0` in `/etc/openmux/server.yaml` (or via the web
+console Config Editor > Server view), then do a full reload - see
+[QUICKSTART.md](QUICKSTART.md#1b-reach-the-web-console-from-other-machines).
+
 ### Run (after .deb install)
 
 ```sh

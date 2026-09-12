@@ -29,6 +29,12 @@ Changes since v1.0.2 (2026-08-27).
 - **The server logs a startup warning while a known default credential is in
   use** (the old `admin`/`password`, the old Debian `admin`/`openmux` hash, or
   the old default API keys), naming the affected user or key.
+- **The web console now binds `127.0.0.1` by default** (`web_console.host` in
+  `server.yaml`; the packaged Debian config inherits this). Fresh installs no
+  longer serve the console on all interfaces. To reach it from other hosts,
+  set `web_console.host: 0.0.0.0` in your `server.yaml` (or via the web
+  console Config Editor > Server view) and do a full reload; see
+  `docs/QUICKSTART.md` section "Reach the web console from other machines".
 
 - **Default configs are generated for the Debian package; `config/` is the single source.** The packaged `server.yaml` is generated at build time from `config/server.yaml` with only the FHS overrides (`logging.file` → `/var/log/openmux/...`, `port_actions.actions_dir` → `/etc/openmux/actions`), and the packaged `security.yaml` now ships verbatim from `config/`. The hand-maintained copies in `debian/package-config/` for those two files are gone, so the packaged defaults can no longer drift from the repo defaults (the old packaged `security.yaml` was missing the `access_default` key). The packaged `authentication.yaml` still differs intentionally (no local automation API keys) and keeps living in `debian/package-config/`. No change to a running install: `/etc/openmux` is seeded only on first install and is never overwritten.
 
