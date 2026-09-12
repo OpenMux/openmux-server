@@ -429,7 +429,9 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             sbs = entry["scrollback_size"]
             if not isinstance(sbs, int) or sbs < 0:
                 return False
-        # Unified-only: reject legacy synonyms
+        # Unified-only: reject legacy synonyms. Defense in depth (ticket #75
+        # removed the serial runtime fallback); no code path reads either
+        # variant anymore, and the schema already rejects both with an ERROR.
         if "read_write_users" in entry or "read_write_users_max" in entry:
             return False
         if "max_read_write_users" in entry:

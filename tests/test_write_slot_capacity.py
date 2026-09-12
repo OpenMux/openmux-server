@@ -469,8 +469,9 @@ class TestAdapterValidation:
         assert adapter._resolve_max_rw_users({"name": "p", "device": "d"}) == "one"
         assert adapter._resolve_max_rw_users({"name": "p", "device": "d", "max_read_write_users": "none"}) == "none"
         assert adapter._resolve_max_rw_users({"name": "p", "device": "d", "max_read_write_users": 4}) == "multiple"
-        # Legacy read_write_users fallback key still honored.
-        assert adapter._resolve_max_rw_users({"name": "p", "device": "d", "read_write_users": 0}) == "none"
+        # The legacy read_write_users alias is ignored at runtime (ticket #75):
+        # it resolves to the default "one"; the schema ERROR at load is the only signal.
+        assert adapter._resolve_max_rw_users({"name": "p", "device": "d", "read_write_users": 0}) == "one"
         with pytest.raises(InvalidWriteMode):
             adapter._resolve_max_rw_users({"name": "p", "device": "d", "max_read_write_users": "two"})
 

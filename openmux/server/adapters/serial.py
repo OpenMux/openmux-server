@@ -782,25 +782,15 @@ class SerialAdapter(BaseGenericAdapter):
 
         The key holds `"one"`, `"multiple"`, or `"none"` (unset = "one"). Legacy
         integers still work and log a one-time deprecation line (0 -> none, 1
-        -> one, >= 2 -> multiple). The legacy `read_write_users` key is still
-        honored as a fallback (also deprecation-logged). Any other value is a
+        -> one, >= 2 -> multiple). Any other value is a
         hard error: no silent fallback, so a typo cannot quietly change who
-        drives the port.
+        drives the port. (The old `read_write_users` alias was a schema-level
+        rejection only from ticket #75 on: the runtime no longer reads it.)
         """
 
         value = port_config.get("max_read_write_users")
-        legacy = False
-        if value is None and "read_write_users" in port_config:
-            value = port_config.get("read_write_users")
-            legacy = True
         label = port_name or port_config.get("name") or "unknown"
-        mode = parse_write_mode(value, port_name=label, logger=self.logger)
-        if legacy:
-            self.logger.info(
-                "Port %s uses deprecated read_write_users; rename to max_read_write_users",
-                label,
-            )
-        return mode
+        return parse_write_mode(value, port_name=label, logger=self.logger)
 
     def _make_notifier(self) -> Callable[[str, Dict[str, Any]], None]:
         """Return a meta-notify callback bound to this adapter's port manager."""
@@ -1124,8 +1114,6 @@ class SerialAdapter(BaseGenericAdapter):
             # fills absent keys from SERIAL_PORT_DEFAULTS) so the comparison
             # is apples-to-apples when the port was built from a full dict.
             mru = port_cfg.get("max_read_write_users")
-            if mru is None and "read_write_users" in port_cfg:
-                mru = port_cfg.get("read_write_users")
             # Normalize to the stored mode (issue #59) silently on both sides:
             # the load path already emitted the deprecation line for legacy ints.
             mru = wire_to_mode(mru)
