@@ -30,6 +30,7 @@ dependencies = [
     "pyserial-asyncio>=0.6",
     "PyYAML>=6.0",
     "cryptography>=38.0.0",
+    "asyncssh>=2.14.0",
     "aiohttp>=3.9.0",
     "Jinja2>=3.1.0",
     "jsonschema>=4.18.0",
