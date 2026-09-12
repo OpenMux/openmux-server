@@ -78,7 +78,7 @@ if ! git checkout --detach "$REF" 2>/dev/null && \
   echo "error: ref not found: $REF" >&2
   exit 1
 fi
-echo "==> Building from $(git describe --tags --always) (commit $(git rev-parse --short HEAD), dirty files: $(git status --porcelain | wc -l | tr -d ' '))"
+echo "==> Building from $(git describe --tags --always) (commit $(git rev-parse --short HEAD), dirty files: $(git status --porcelain | wc -l | tr -d " "))"
 
 # --- build -------------------------------------------------------------
 echo "==> Running make deb (SNAPSHOT=$SNAPSHOT)..."
