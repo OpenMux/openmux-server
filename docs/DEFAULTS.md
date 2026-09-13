@@ -151,7 +151,7 @@ tcp_initiator_ports (per-port) (schema defaults)
 
 muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapters/muxcon.py)
 - auth_required: true (inbound peers must pass the Ed25519 challenge; the listener logs a warning when false)
-- advertise_filters / accept_filters (and per-key public_keys[] variants): default to **deny-all** (ticket #77). With all include lists empty, a direction shares or accepts nothing. Set an include entry (e.g. `include: ["*"]`) to share or accept; exclude always wins. The server logs a startup warning for each direction still in deny mode.
+- advertise_filters / accept_filters (and per-key public_keys[] variants): default to **deny-all** (ticket #77). With all include lists empty, a direction shares or accepts nothing. Set an include entry (e.g. `include: ["*"]`) to share or accept; exclude always wins. Filter changes take effect on a Soft Reload. The server logs a warning for each direction still in deny mode, once per deny period.
 - listeners[*]:
   - enabled: true
   - host: 0.0.0.0

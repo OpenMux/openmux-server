@@ -168,6 +168,107 @@ def test_warning_survives_no_port_manager(tmp_path, caplog):
 def test_unwrap_and_effective_helper_agree():
     assert UnifiedMuxConAdapter._unwrap_reconcile_config(None) == {}
     assert UnifiedMuxConAdapter._unwrap_reconcile_config("x") == {}
+
+
+# --- Soft-reload: adapter-level federation filter re-read + warning re-check (ticket #77) ---
+
+
+@pytest.mark.asyncio
+async def test_reconcile_rereads_adapter_level_federation_filters():
+    """A soft-reload that adds an include list must update the effective flags,
+    so new ports/connections use the new rules. (Pre-fix, the flat filter
+    keys were only read in __init__ and a soft reload silently ignored them.)
+    """
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [], "initiators": []}})
+    assert ad._adv_name_inc == [] and ad._acc_name_inc == []
+    await ad.reconcile_ports(
+        {
+            "muxcon": {
+                "listeners": [],
+                "initiators": [],
+                "advertise_filters": {"include": ["console_*"], "exclude": ["debug_*"]},
+                "accept_filters": {"server_include": ["hub-01"]},
+            }
+        }
+    )
+    assert ad._adv_name_inc == ["console_*"]
+    assert ad._adv_name_exc == ["debug_*"]
+    assert ad._acc_server_inc == ["hub-01"]
+    # Both directions have a non-empty include dimension -> out of deny mode,
+    # and their warning flags must be cleared.
+    assert ad._warned_adv_deny is False
+    assert ad._warned_acc_deny is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reentry_into_deny_warns_again(caplog):
+    """After a soft reload that clears an include list, the direction re-enters
+    deny mode and must re-warn (the flag resets when the direction LEAVES deny
+    mode, so re-entry is a new event). A direction that never left deny mode
+    must NOT re-warn (no log spam)."""
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [], "advertise_filters": {"include": ["*"]}}})
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    # No advertise warning (include: ["*"]); accept warns once.
+    assert len(_warn_lines(caplog)) == 1
+    assert "accepts no ports from any peer" in _warn_lines(caplog)[0]
+    caplog.clear()
+    # Soft reload: drop the advertise include (advertise re-enters deny mode);
+    # accept stays in deny mode for the whole process.
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        await ad.reconcile_ports({"muxcon": {"listeners": [], "initiators": []}})
+    msgs = _warn_lines(caplog)
+    assert len(msgs) == 1
+    # Re-entered advertise direction warns again...
+    assert "shares none of your 0 local port(s)" in msgs[0]
+    # ...but accept, which never left deny mode, does not re-warn.
+    assert "accepts no ports from any peer" not in msgs[0]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_staying_in_deny_does_not_respawn_warning(caplog):
+    """Repeated soft reloads while the direction stays in deny-all must not
+    re-warn every time (no log spam)."""
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [], "initiators": []}})
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    assert len(_warn_lines(caplog)) == 1
+    caplog.clear()
+    # Two more reconciles with still-empty filters: no re-warn.
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        await ad.reconcile_ports({"muxcon": {"listeners": [], "initiators": []}})
+        await ad.reconcile_ports({"muxcon": {"listeners": [], "initiators": []}})
+    assert len(_warn_lines(caplog)) == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_warns_only_for_reentered_direction(caplog):
+    """Per-direction independence: if only the accept direction re-enters deny
+    mode, only the accept direction is named in the re-warn."""
+    ad = UnifiedMuxConAdapter(
+        "mx",
+        {
+            "muxcon": {
+                "listeners": [],
+                "initiators": [],
+                "advertise_filters": {"include": ["*"]},
+                "accept_filters": {"include": ["*"]},
+            }
+        },
+    )
+    # Both directions out of deny -> no warning.
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    assert _warn_lines(caplog) == []
+    caplog.clear()
+    # Reconcile: keep the advertise include, clear the accept include (accept
+    # re-enters deny mode only).
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        await ad.reconcile_ports({"muxcon": {"listeners": [], "initiators": [], "advertise_filters": {"include": ["*"]}}})
+    msgs = _warn_lines(caplog)
+    assert len(msgs) == 1
+    assert "accepts no ports from any peer" in msgs[0]
+    assert "shares none" not in msgs[0]
     assert UnifiedMuxConAdapter._unwrap_reconcile_config({"muxcon": {"advertise_filters": {"include": ["a"]}}}) == {
         "advertise_filters": {"include": ["a"]}
     }

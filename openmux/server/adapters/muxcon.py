@@ -134,7 +134,6 @@ class FederationPeer:
 
     host: str
     port: int
-    # Future: share_ports, accept_ports, request_ports, auth
     options: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -355,25 +354,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # retry, so announce state must outlive a single dial attempt.
         self._tls_mode_announced: Dict[str, str] = {}
 
+        # Per-direction deny-all warning flags (ticket #77): True once that
+        # direction has warned and is still in deny mode; reset when a
+        # reconcile re-reads a non-empty include list so a later re-entry into
+        # deny-all can warn again. Must be initialized before
+        # _apply_federation_filters, which reads them to detect a leave.
+        self._warned_adv_deny = False
+        self._warned_acc_deny = False
         # --- Federated port filters (configurable include/exclude globs) ---
-        try:
-            advf = effective_config.get("advertise_filters", {}) or {}
-            accf = effective_config.get("accept_filters", {}) or {}
-        except Exception:
-            advf, accf = {}, {}
-        self._adv_name_inc = list((advf.get("include") or []))
-        self._adv_name_exc = list((advf.get("exclude") or []))
-        self._adv_adapter_inc = list((advf.get("adapter_include") or []))
-        self._adv_adapter_exc = list((advf.get("adapter_exclude") or []))
-        self._adv_server_inc = list((advf.get("server_include") or []))
-        self._adv_server_exc = list((advf.get("server_exclude") or []))
-
-        self._acc_name_inc = list((accf.get("include") or []))
-        self._acc_name_exc = list((accf.get("exclude") or []))
-        self._acc_adapter_inc = list((accf.get("adapter_include") or []))
-        self._acc_adapter_exc = list((accf.get("adapter_exclude") or []))
-        self._acc_server_inc = list((accf.get("server_include") or []))
-        self._acc_server_exc = list((accf.get("server_exclude") or []))
+        self._apply_federation_filters(effective_config)
 
         # Federated cache controls
         try:
@@ -392,9 +381,6 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         # Per-connection filter overrides (set once a connection authenticates)
         self._conn_filters = {}
-        # One-time guard for the default-allow filter deprecation warning
-        # (ticket #77): the warning is emitted once per process.
-        self._filter_empty_warned = False
 
     @staticmethod
     def _normalize_listener_conf(lst: Dict[str, Any]) -> Dict[str, Any]:
@@ -1370,6 +1356,46 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 raise ValueError("initiator.port must be 1-65535")
         return True
 
+    def _apply_federation_filters(self, effective_config: Dict[str, Any]) -> None:
+        """Read the adapter-level advertise/accept filter sets into flat attributes.
+
+        Called from ``__init__`` and from ``reconcile_ports`` (soft reload), so
+        a filter change applied via the Config Editor takes effect on the next
+        reconcile — and the per-direction deny-all warning (ticket #77) can
+        re-fire when a direction reverts to deny mode.
+
+        Also re-arms the per-direction warning flag when a direction LEAVES
+        deny mode (include becomes non-empty): the flag is reset to False so a
+        later re-entry into deny-all can warn again. When a direction stays in
+        deny mode the flag is left alone, so repeated reconciles do not
+        re-warn (no log spam).
+        """
+        try:
+            advf = effective_config.get("advertise_filters", {}) or {}
+            accf = effective_config.get("accept_filters", {}) or {}
+        except Exception:
+            advf, accf = {}, {}
+        self._adv_name_inc = list((advf.get("include") or []))
+        self._adv_name_exc = list((advf.get("exclude") or []))
+        self._adv_adapter_inc = list((advf.get("adapter_include") or []))
+        self._adv_adapter_exc = list((advf.get("adapter_exclude") or []))
+        self._adv_server_inc = list((advf.get("server_include") or []))
+        self._adv_server_exc = list((advf.get("server_exclude") or []))
+        self._acc_name_inc = list((accf.get("include") or []))
+        self._acc_name_exc = list((accf.get("exclude") or []))
+        self._acc_adapter_inc = list((accf.get("adapter_include") or []))
+        self._acc_adapter_exc = list((accf.get("adapter_exclude") or []))
+        self._acc_server_inc = list((accf.get("server_include") or []))
+        self._acc_server_exc = list((accf.get("server_exclude") or []))
+        # Reset the per-direction warning flag when the direction LEAVES deny
+        # mode, so a later re-entry (e.g. a soft reload that clears an include
+        # list) can warn again. When the direction stays in deny mode the flag
+        # is left alone, so repeated reconciles do not re-warn (no log spam).
+        if not self._filter_include_empty(self._adv_name_inc, self._adv_adapter_inc, self._adv_server_inc):
+            self._warned_adv_deny = False
+        if not self._filter_include_empty(self._acc_name_inc, self._acc_adapter_inc, self._acc_server_inc):
+            self._warned_acc_deny = False
+
     def _filter_include_empty(self, *lists: List[str]) -> bool:
         """True when every include-list dimension is empty for one direction.
 
@@ -1380,22 +1406,21 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         return not any(lists)
 
     def _log_empty_filter_warning(self) -> None:
-        """Warn once per process that federation filters are in deny-all mode.
+        """Warn once per direction that federation filters are in deny-all mode.
 
-        Federation now defaults to deny (ticket #77): without an include list,
-        a node shares none of its local ports and accepts no peer ports. The
+        Federation defaults to deny (ticket #77): without an include list, a
+        node shares none of its local ports and accepts no peer ports. The
         warning tells the operator that each empty direction is closed by
         default and points at the key to set; `include: ["*"]` restores the
-        old allow-all behavior for that direction. Per-direction: the advertise
-        and accept checks are independent. Emitted once per process, at
-        `start()` (the only path that re-reads the flat filter keys); a
-        soft reload calls `reconcile_ports`, which does not re-read the
-        keys, so it neither re-evaluates the warning nor changes the
-        effective set.
+        old allow-all behavior for that direction.
+
+        Called from `start()` and from `reconcile_ports` (soft reload).
+        Each direction warns at most once between filter changes: the per-
+        direction flag is reset by `_apply_federation_filters` whenever a
+        direction's include list is non-empty, so a direction that reverts
+        to deny-all (e.g. via a soft reload after an editor edit that
+        removed the include list) will warn again.
         """
-        if self._filter_empty_warned:
-            return
-        self._filter_empty_warned = True
         try:
             port_count = 0
             pm = getattr(self, "main_port_manager", None)
@@ -1403,12 +1428,20 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             if isinstance(ports, dict):
                 port_count = len(ports)
             directions = []
-            if self._filter_include_empty(self._adv_name_inc, self._adv_adapter_inc, self._adv_server_inc):
+            if (
+                self._filter_include_empty(self._adv_name_inc, self._adv_adapter_inc, self._adv_server_inc)
+                and not self._warned_adv_deny
+            ):
+                self._warned_adv_deny = True
                 directions.append(
                     f"shares none of your {port_count} local port(s) with peers "
                     "(set muxcon.advertise_filters include to share some)"
                 )
-            if self._filter_include_empty(self._acc_name_inc, self._acc_adapter_inc, self._acc_server_inc):
+            if (
+                self._filter_include_empty(self._acc_name_inc, self._acc_adapter_inc, self._acc_server_inc)
+                and not self._warned_acc_deny
+            ):
+                self._warned_acc_deny = True
                 directions.append("accepts no ports from any peer " "(set muxcon.accept_filters include to accept some)")
             if not directions:
                 return
@@ -1418,8 +1451,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 " set. To restore the old allow-all behavior for a direction, set"
                 " its include list to ['*']." % ("; ".join(directions))
             )
-        except Exception:  # justification: the warning must never break start(); a bad
-            # port_manager or malformed filter attrs only skips the log line
+        except Exception:  # justification: the warning must never break start() or
+            # reconcile; a bad port_manager or malformed filter attrs only
+            # skips the log line
             pass
 
     async def start(self) -> bool:
@@ -1638,10 +1672,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         Adds, removes, or restarts individual listener sockets and initiator
         dial loops in place, without disturbing unrelated already-established
         connections or the shared background loops (heartbeat/multipath/
-        retransmission/cache cleanup) started once in `start()`. Public keys
-        and per-key filters are always safe to replace wholesale since they
-        are only consulted at handshake time for brand-new connections, never
-        for ones already authenticated.
+        retransmission/cache cleanup) started once in `start()`. Public keys,
+        per-key filters, and the adapter-level federation filter keys are all
+        safe to replace wholesale since they are only consulted for brand-new
+        connections and new port registrations from now on, never for already
+        authenticated sessions. An adapter-level filter change therefore takes
+        effect on the next reconcile: a soft reload re-reads the six flat
+        filter keys via `_apply_federation_filters` and re-checks the
+        per-direction deny-all warning (ticket #77). Existing peers keep
+        their current port list until they reconnect or re-advertise.
 
         Args:
             new_config: Raw muxcon section - a dict (optionally wrapped as
@@ -1668,6 +1707,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if peer is not None:
                     new_peers[(peer.host, peer.port)] = peer
         initiators_summary = await self._reconcile_initiators(new_peers)
+
+        # Adapter-level federation filters: same invariant as public keys --
+        # the flat filter keys are consulted for every new connection and new
+        # port registration from now on. Existing peers keep their current
+        # port list until they reconnect or re-advertise.
+        self._apply_federation_filters(effective)
+        self._log_empty_filter_warning()
 
         # Public keys / per-key filters are always safe to replace wholesale.
         keys_before = len(self._auth_pubkeys)

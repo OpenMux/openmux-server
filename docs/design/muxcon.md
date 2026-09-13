@@ -11,7 +11,7 @@ and its data types
 The original design proposal,
 [specifications/Unified_MuxCon_Adapter_Specification.md](../../specifications/Unified_MuxCon_Adapter_Specification.md),
 is a pre-implementation draft. Its config keys (`federation_policies`,
-`node_pattern`, per-initiator `share_ports`/`accept_ports`/`request_ports`)
+`node_pattern`, and the per-initiator capability keys)
 and protocol frames (`CAPABILITIES:DECLARE`/`CONFIRMED`) were never built as
 written. This document replaces it as the source of truth for what MuxCon
 does today. For the full config option reference (defaults, types), see
@@ -462,9 +462,8 @@ Documented here so nobody re-discovers these by reading 5000 lines of
 - No `federation_policies`/`node_pattern` (glob/regex/prefix) matching
   engine — only the flat `advertise_filters`/`accept_filters` glob lists
   in section 4.1.
-- No per-initiator `share_ports`/`accept_ports`/`request_ports` capability
-  declarations — filtering is adapter/connection-level, not declared per
-  initiator entry.
+- No per-initiator capability declarations — filtering is adapter/
+  connection-level, not declared per initiator entry.
 - No `CAPABILITIES:DECLARE`/`CONFIRMED` bidirectional negotiation frames.
 - No binary wire-mode upgrade, despite the module docstring describing one
   (section 3).

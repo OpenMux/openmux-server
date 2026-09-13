@@ -57,20 +57,12 @@ muxcon:
     #  ssl_verify: false
     #  tls_tofu: true
     #  tls_known_peers_path: "~/.openmux/muxcon/remote_leaf/known_peers.yaml"
-    #  # Capability fields per spec (placeholders for future implementation)
-    #  share_ports: ["remote_*"]
-    #  accept_ports: []
-    #  request_ports: []
     - # identity is server.id; node_name deprecated
       host: "127.0.0.1"
       port: 7823
       use_tls: true
       ssl_verify: false
       tls_tofu: true
-      # Capability fields per spec (placeholders for future implementation)
-      share_ports: ["remote_*"]
-      accept_ports: []
-      request_ports: []
 
 logging:
   level: "INFO"

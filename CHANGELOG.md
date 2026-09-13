@@ -170,7 +170,8 @@ Changes since v1.0.2 (2026-08-27).
   - `muxcon.advertise_filters.include`: the local ports this node shares with peers.
   - `muxcon.accept_filters`: the peer-advertised ports this node accepts (set an `include`, `adapter_include`, or `server_include` list).
   - `include: ["*"]` is the explicit allow-all and matches the old default. Per-key `public_keys[].advertise_filters` / `public_keys[].accept_filters` still override the adapter-level default for the peers that authenticate with that key.
-  - At startup (and on a full reload) the server logs one warning per process for each direction still in deny mode, naming the key to set.
+  - A filter change takes effect on a Soft Reload (or Full Reload). The adapter re-reads the filter keys on reconcile; no restart is needed.
+  - The server logs a warning for each direction still in deny mode. Each direction warns once per deny period: setting an include removes the warning, and clearing it again warns once.
   - Fresh installs are unaffected: they configure federation explicitly, and the default configs carry no `muxcon` filters.
 
 ### Behavior changes (no config change required)
