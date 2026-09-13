@@ -710,9 +710,6 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         'muxcon.initiators': {
           host: 'Remote muxcon peer address to connect to.',
           port: 'Remote muxcon peer TCP port.',
-          share_ports: 'Ports to share with the remote peer (advertise).',
-          accept_ports: 'Ports you will accept from the remote peer.',
-          request_ports: 'Ports to request from the remote peer.',
           use_tls: 'Use TLS for the outbound connection.',
           ssl_verify: 'Verify the server certificate.',
           ssl_ca_cert: 'CA certificate to trust when verifying.',
@@ -1065,9 +1062,6 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         tables['muxcon.initiators'] = buildTable('muxcon.initiators', annotateColumnsWithDefaults('muxcon.initiators', annotateColumnsWithHelp('muxcon.initiators', [
           {key:'host', label:'Host', type:'string', required:true},
           {key:'port', label:'Port', type:'integer', min:1, max:65535, required:true},
-          {key:'share_ports', label:'Share ports', type:'array-string'},
-          {key:'accept_ports', label:'Accept ports', type:'array-string'},
-          {key:'request_ports', label:'Request ports', type:'array-string'},
           {key:'use_tls', label:'TLS', type:'boolean'},
           {key:'ssl_verify', label:'Verify', type:'boolean'},
           {key:'ssl_ca_cert', label:'CA cert', type:'string'},
@@ -1214,6 +1208,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         setVal('muxcon.auth_required', deepGet(current, 'muxcon.auth_required'));
         setVal('muxcon.auth_key_id', deepGet(current, 'muxcon.auth_key_id'));
         setVal('muxcon.auth_private_key', deepGet(current, 'muxcon.auth_private_key'));
+        try{ const _af=deepGet(current,'muxcon.advertise_filters'); setVal('muxcon.advertise_filters',_af?JSON.stringify(_af):''); }catch(_e){}
+        try{ const _acf=deepGet(current,'muxcon.accept_filters'); setVal('muxcon.accept_filters',_acf?JSON.stringify(_acf):''); }catch(_e){}
         tables['muxcon.listeners']._set(deepGet(current, 'muxcon.listeners')||[]);
         const inits = deepGet(current, 'muxcon.initiators')||[];
         tables['muxcon.initiators']._set(Array.isArray(inits)? inits: []);
@@ -1339,7 +1335,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         const tls = tables['telnet_listener']._get(); if(tls && tls.length>0) deepSet(out,'telnet_listener', tls);
         const shl = tables['ssh_listener']._get(); if(shl && shl.length>0) deepSet(out,'ssh_listener', shl);
         // muxcon
-        const listeners = tables['muxcon.listeners']._get(); const inits = tables['muxcon.initiators']._get(); const muxcon={}; ['heartbeat_interval','mpath_primary_stale_sec','mpath_failover_check_sec','mpath_strategy','mpath_preemptive_promote','mpath_neighbor_idle_drop_sec','federated_cache_enabled','federated_cache_ttl_sec','federated_cache_path','auth_required','auth_key_id','auth_private_key'].forEach(k=>{ const v=getVal('muxcon.'+k); if(v!==undefined) muxcon[k]=v; }); if(listeners && listeners.length>0) muxcon.listeners = listeners; if(inits && inits.length>0) muxcon.initiators = inits; const pkRows = tables['muxcon.public_keys']._get(); if(pkRows && pkRows.length>0) muxcon.public_keys = pkRows.map(r=>{ const m={key_id:r.key_id, public_key:r.public_key}; try{ if(r.advertise_filters){ m.advertise_filters = JSON.parse(r.advertise_filters); } }catch(_e){} try{ if(r.accept_filters){ m.accept_filters = JSON.parse(r.accept_filters); } }catch(_e){} return m; }); if(Object.keys(muxcon).length>0) deepSet(out,'muxcon', muxcon);
+        const listeners = tables['muxcon.listeners']._get(); const inits = tables['muxcon.initiators']._get(); const muxcon={}; ['heartbeat_interval','mpath_primary_stale_sec','mpath_failover_check_sec','mpath_strategy','mpath_preemptive_promote','mpath_neighbor_idle_drop_sec','federated_cache_enabled','federated_cache_ttl_sec','federated_cache_path','auth_required','auth_key_id','auth_private_key'].forEach(k=>{ const v=getVal('muxcon.'+k); if(v!==undefined) muxcon[k]=v; }); try{ const _av=getVal('muxcon.advertise_filters'); if(_av) muxcon.advertise_filters=JSON.parse(_av); }catch(_e){} try{ const _acv=getVal('muxcon.accept_filters'); if(_acv) muxcon.accept_filters=JSON.parse(_acv); }catch(_e){} if(listeners && listeners.length>0) muxcon.listeners = listeners; if(inits && inits.length>0) muxcon.initiators = inits; const pkRows = tables['muxcon.public_keys']._get(); if(pkRows && pkRows.length>0) muxcon.public_keys = pkRows.map(r=>{ const m={key_id:r.key_id, public_key:r.public_key}; try{ if(r.advertise_filters){ m.advertise_filters = JSON.parse(r.advertise_filters); } }catch(_e){} try{ if(r.accept_filters){ m.accept_filters = JSON.parse(r.accept_filters); } }catch(_e){} return m; }); if(Object.keys(muxcon).length>0) deepSet(out,'muxcon', muxcon);
         // web_status
         if(getVal('web_status.host')!==undefined || getVal('web_status.port')!==undefined){ deepSet(out,'web_status',{}); maybeSet('web_status.host','web_status.host'); maybeSet('web_status.port','web_status.port'); maybeSet('web_status.enable_http_api','web_status.enable_http_api'); maybeSet('web_status.cors_enable','web_status.cors_enable'); maybeSet('web_status.enable_fault_injection','web_status.enable_fault_injection'); }
         // web_console

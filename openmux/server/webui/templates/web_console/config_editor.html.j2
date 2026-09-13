@@ -302,6 +302,8 @@
       <div class="field"><label for="muxcon.auth_required">Auth required</label><input id="muxcon.auth_required" type="checkbox" /></div>
       <div class="field"><label for="muxcon.auth_key_id">Auth key id</label><input id="muxcon.auth_key_id" type="text" /></div>
       <div class="field"><label for="muxcon.auth_private_key">Private key</label><input id="muxcon.auth_private_key" type="text" /></div>
+      <div class="field"><label for="muxcon.advertise_filters">Advertise filters (JSON)</label><textarea id="muxcon.advertise_filters" rows="2" placeholder='{"include":["console_*"]}'></textarea><span class="help">Which local ports this node advertises to peers. Empty means deny-all: nothing is shared. Use include: [&quot;*&quot;] to share all. Glob patterns on port name, adapter type, or origin server id.</span></div>
+      <div class="field"><label for="muxcon.accept_filters">Accept filters (JSON)</label><textarea id="muxcon.accept_filters" rows="2" placeholder='{"server_include":["hub-01"]}'></textarea><span class="help">Which peer-advertised ports this node accepts. Empty means deny-all: nothing is accepted. Use include: [&quot;*&quot;] to accept all. Glob patterns on port name, adapter type, or origin server id.</span></div>
     </div>
   </div>
   </div>

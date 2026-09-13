@@ -216,6 +216,48 @@ def _restore_masked_secrets(payload: Dict[str, Any], current: Dict[str, Any]) ->
             _restore_fields(item.get("protocol"), match_protocol, _PORT_SECRET_FIELDS)
 
 
+# Issue #78: schema-valid, non-list keys the edit UI does not render, grouped
+# by section. The editor rebuilds each section from a fixed field list and the
+# apply path writes the payload verbatim (a per-section replace), so any one of
+# these keys is deleted from server.yaml on the first save.
+# ``_merge_preserve_unmodelled`` re-adds any of these the payload omits.
+#
+# Keep this in sync with the fields rendered by ``config_editor.js``: add a key
+# here when a schema-valid key is not a UI field (and is not meant to be one),
+# and remove it when the UI starts rendering it. A key the UI does render must
+# NOT be listed, or that field can no longer be cleared to empty from the UI
+# (the merge would re-add the stored value on clear).
+_PRESERVE_UNMODELLED_KEYS: Dict[str, Tuple[str, ...]] = {
+    "muxcon": ("auth_private_key_path",),
+    "web_console": ("hardware_info_file", "sso_trust_header", "sso_secret", "sso_max_skew_sec"),
+}
+
+
+def _merge_preserve_unmodelled(payload: Dict[str, Any], current: Dict[str, Any]) -> None:
+    """Re-add schema-valid keys the edit UI does not model, so a save is not a data loss (issue #78).
+
+    Runs server-side after ``_restore_masked_secrets``, so ``current`` holds
+    the real (unmasked) stored values. For each section the UI actually sent,
+    any key in ``_PRESERVE_UNMODELLED_KEYS[section]`` that is present in
+    ``current`` but absent from ``payload`` is copied back. Only listed
+    (unmodelled) keys are touched: a field the UI renders that the user
+    deliberately cleared (an absent value) stays cleared, and a section the UI
+    did not send is left alone, so a "delete this section" save stays a
+    deletion. Mutates ``payload`` in place.
+    """
+    if not isinstance(current, dict):
+        return
+    for section, preserved in _PRESERVE_UNMODELLED_KEYS.items():
+        if section not in payload or not isinstance(payload[section], dict):
+            continue
+        cur_section = current.get(section)
+        if not isinstance(cur_section, dict):
+            continue
+        for key in preserved:
+            if key not in payload[section] and key in cur_section:
+                payload[section][key] = cur_section[key]
+
+
 def _enforce_writable_sections(cm: ConfigManager, payload: Dict[str, Any]) -> Set[str]:
     try:
         policy = cm.get_security_policy()
@@ -376,6 +418,10 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
         # any field the user left untouched before validating/saving.
         current_cfg = cm.config or cm.load_config() or {}
         _restore_masked_secrets(payload, current_cfg)
+
+        # Preserve schema-valid keys the UI does not model (issue #78): a
+        # verbatim save would otherwise drop them from server.yaml.
+        _merge_preserve_unmodelled(payload, current_cfg)
 
         # security.yaml is not editable from this editor (issue #58):
         # discard any access_default the UI might carry.
