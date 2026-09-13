@@ -76,11 +76,11 @@ async def test_start_stop_without_listeners():
     assert ad.is_running is False
 
 
-# --- Default-allow federation filter deprecation warning (ticket #77) ---
+# --- Default-deny federation filter warning (ticket #77) ---
 
 
 def _warn_lines(caplog) -> list:
-    return [r.getMessage() for r in caplog.records if "MuxCon federation filter default is ALLOW-ALL" in r.getMessage()]
+    return [r.getMessage() for r in caplog.records if "MuxCon federation filters default to DENY-ALL" in r.getMessage()]
 
 
 def test_empty_filters_warn_at_start(tmp_path, caplog):
@@ -89,10 +89,12 @@ def test_empty_filters_warn_at_start(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger=LOG):
         ad._log_empty_filter_warning()
     msgs = _warn_lines(caplog)
-    # Both directions empty -> both are named.
+    # Both directions empty -> both are named, in deny mode.
     assert len(msgs) == 1
-    assert "advertises all 2 local port(s)" in msgs[0]
-    assert "accepts every port any peer advertises" in msgs[0]
+    assert "shares none of your 2 local port(s)" in msgs[0]
+    assert "accepts no ports from any peer" in msgs[0]
+    # The warning must name the allow-all opt-in so the operator can restore it.
+    assert "['*']" in msgs[0]
     # Re-emit must be a no-op (once per process).
     with caplog.at_level(logging.WARNING, logger=LOG):
         ad._log_empty_filter_warning()
@@ -105,8 +107,8 @@ def test_advertise_filters_set_no_advertise_warning(tmp_path, caplog):
         ad._log_empty_filter_warning()
     msgs = _warn_lines(caplog)
     assert len(msgs) == 1
-    assert "advertises all" not in msgs[0]
-    assert "accepts every port any peer advertises" in msgs[0]
+    assert "shares none" not in msgs[0]
+    assert "accepts no ports from any peer" in msgs[0]
 
 
 def test_accept_filters_set_no_accept_warning(tmp_path, caplog):
@@ -115,26 +117,28 @@ def test_accept_filters_set_no_accept_warning(tmp_path, caplog):
         ad._log_empty_filter_warning()
     msgs = _warn_lines(caplog)
     assert len(msgs) == 1
-    assert "advertises all 0 local port(s)" in msgs[0]
-    assert "accepts every port" not in msgs[0]
+    assert "shares none of your 0 local port(s)" in msgs[0]
+    assert "accepts no ports" not in msgs[0]
 
 
 def test_exclude_only_still_warns_include_empty(tmp_path, caplog):
-    # include empty means allow-all even when exclude is set.
+    # Under default-deny, exclude does not turn anything on: an empty include
+    # set is deny, so the warning fires even though exclude is set.
     ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [], "advertise_filters": {"exclude": ["debug_*"]}}})
     with caplog.at_level(logging.WARNING, logger=LOG):
         ad._log_empty_filter_warning()
-    assert "advertises all 0 local port(s)" in _warn_lines(caplog)[0]
+    assert "shares none of your 0 local port(s)" in _warn_lines(caplog)[0]
 
 
 def test_star_include_counts_as_constrained(tmp_path, caplog):
-    # include: ["*"] is the explicit share-everything opt-in.
+    # include: ["*"] is the explicit allow-all opt-in -> that direction is
+    # no longer in deny mode, so it is not named in the warning.
     ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [], "accept_filters": {"include": ["*"]}}})
     with caplog.at_level(logging.WARNING, logger=LOG):
         ad._log_empty_filter_warning()
     msgs = _warn_lines(caplog)
     assert len(msgs) == 1
-    assert "accepts every port" not in msgs[0]
+    assert "accepts no ports" not in msgs[0]
 
 
 def test_both_filters_set_no_warning(tmp_path, caplog):
@@ -154,11 +158,11 @@ def test_both_filters_set_no_warning(tmp_path, caplog):
 
 
 def test_warning_survives_no_port_manager(tmp_path, caplog):
-    # No pm attached -> port count 0, but the warning still comes out.
+    # No port manager attached -> port count 0, but the warning still comes out.
     ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": []}})
     with caplog.at_level(logging.WARNING, logger=LOG):
         ad._log_empty_filter_warning()
-    assert "advertises all 0 local port(s)" in _warn_lines(caplog)[0]
+    assert "shares none of your 0 local port(s)" in _warn_lines(caplog)[0]
 
 
 def test_unwrap_and_effective_helper_agree():

@@ -1373,25 +1373,25 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
     def _filter_include_empty(self, *lists: List[str]) -> bool:
         """True when every include-list dimension is empty for one direction.
 
-        The include lists use OR semantics (see `_allow_advertise_port_for_conn` /
-        `_allow_accept_port_for_conn`), so the direction is unconstrained only
-        when name, adapter, and server includes are all empty.
+        With default-deny (ticket #77), a port is shared or accepted only if it
+        matches at least one include dimension (OR across name / adapter /
+        server). All three empty means no port of that direction passes.
         """
         return not any(lists)
 
     def _log_empty_filter_warning(self) -> None:
-        """Warn once per process when federation filter includes are empty.
+        """Warn once per process that federation filters are in deny-all mode.
 
-        An empty or missing include list means "no constraint", so without
-        filters the node advertises every local port to every authenticated
-        peer and accepts every port any peer advertises (allow-all). Ticket
-        #77 will flip this to default-deny; until then the warning tells the
-        operator what is shared and points at the keys to set. Per-direction:
-        the advertise and accept checks are independent. Emitted once per
-        process, at `start()` (which runs at startup and on a full reload, the
-        only path that re-reads these flat filter keys). A soft reload calls
-        `reconcile_ports`, which does not re-read the flat keys, so it neither
-        re-evaluates this warning nor changes the effective set.
+        Federation now defaults to deny (ticket #77): without an include list,
+        a node shares none of its local ports and accepts no peer ports. The
+        warning tells the operator that each empty direction is closed by
+        default and points at the key to set; `include: ["*"]` restores the
+        old allow-all behavior for that direction. Per-direction: the advertise
+        and accept checks are independent. Emitted once per process, at
+        `start()` (the only path that re-reads the flat filter keys); a
+        soft reload calls `reconcile_ports`, which does not re-read the
+        keys, so it neither re-evaluates the warning nor changes the
+        effective set.
         """
         if self._filter_empty_warned:
             return
@@ -1405,18 +1405,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             directions = []
             if self._filter_include_empty(self._adv_name_inc, self._adv_adapter_inc, self._adv_server_inc):
                 directions.append(
-                    f"advertises all {port_count} local port(s) to every authenticated peer "
-                    "(set muxcon.advertise_filters to constrain)"
+                    f"shares none of your {port_count} local port(s) with peers "
+                    "(set muxcon.advertise_filters include to share some)"
                 )
             if self._filter_include_empty(self._acc_name_inc, self._acc_adapter_inc, self._acc_server_inc):
-                directions.append("accepts every port any peer advertises " "(set muxcon.accept_filters to constrain)")
+                directions.append("accepts no ports from any peer " "(set muxcon.accept_filters include to accept some)")
             if not directions:
                 return
             self.logger.warning(
-                "MuxCon federation filter default is ALLOW-ALL: %s. This default will"
-                " change to deny-all in a later release (see ticket #77). Until include"
-                " lists are set, an authenticated peer can open or receive any of these"
-                " ports." % ("; ".join(directions))
+                "MuxCon federation filters default to DENY-ALL: %s. This is the new"
+                " default (ticket #77); peers share nothing until include lists are"
+                " set. To restore the old allow-all behavior for a direction, set"
+                " its include list to ['*']." % ("; ".join(directions))
             )
         except Exception:  # justification: the warning must never break start(); a bad
             # port_manager or malformed filter attrs only skips the log line
@@ -4104,6 +4104,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 pat = self._first_match(server_id, server_exc)
                 self.logger.debug(f"[{conn_id}] ADV DROP name='{name}' server='{server_id}' reason=server excluded by '{pat}'")
             return False
+        # Default-deny (ticket #77): an empty include set matches no port.
+        if not (name_inc or adapter_inc or server_inc):
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(
+                    f"[{conn_id}] ADV DROP name='{name}' adapter='{adapter_type}' reason=no advertise include configured"
+                )
+            return False
         inc_name = not name_inc or self._match_any(name, name_inc)
         inc_adapter = not adapter_inc or self._match_any(adapter_type, adapter_inc)
         inc_server = not server_inc or (server_id and self._match_any(server_id, server_inc))
@@ -4124,7 +4131,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             return False
         if server_id and self._match_any(server_id, self._adv_server_exc):
             return False
-        # If includes are set, require a match
+        # Default-deny (ticket #77): an empty include set matches no port.
+        if not (self._adv_name_inc or self._adv_adapter_inc or self._adv_server_inc):
+            return False
         inc_name = not self._adv_name_inc or self._match_any(name, self._adv_name_inc)
         inc_adapter = not self._adv_adapter_inc or self._match_any(adapter_type, self._adv_adapter_inc)
         inc_server = not self._adv_server_inc or (server_id and self._match_any(server_id, self._adv_server_inc))
@@ -4164,6 +4173,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             if self.logger.isEnabledFor(logging.DEBUG):
                 pat = self._first_match(sid, server_exc)
                 self.logger.debug(f"[{conn_id}] ACC DROP name='{name}' server='{sid}' reason=server excluded by '{pat}'")
+            return False
+        # Default-deny (ticket #77): an empty include set matches no port.
+        if not (name_inc or adapter_inc or server_inc):
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(f"[{conn_id}] ACC DROP name='{name}' adapter='{atype}' reason=no accept include configured")
             return False
         # Include constraints
         inc_name = not name_inc or self._match_any(name, name_inc)

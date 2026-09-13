@@ -166,6 +166,12 @@ Changes since v1.0.2 (2026-08-27).
   - Legacy booleans still load: `true` means `on`, `false` means `off`.
   - Previously these flags were parsed but never applied to the device: the line state was left at the `open()` default. Omitted lines continue to be untouched, so configs without these keys keep their old behavior exactly.
   - `flow_control: rtscts` with a managed `rts` value is now a config error at load, save, and reload (the kernel owns the RTS pin in that mode). Set `rts` to `none` or omit it, or use another flow mode. DTR works under every flow mode.
+- **MuxCon federation filters default to deny-all** (ticket #77). A node shares no local port with peers, and accepts no port any peer advertises, until an include list is named. Before this change an empty `include` list meant "share/accept everything", so upgrading silences federation by default. To share or accept anything, set the adapter-level filter in `server.yaml`:
+  - `muxcon.advertise_filters.include`: the local ports this node shares with peers.
+  - `muxcon.accept_filters`: the peer-advertised ports this node accepts (set an `include`, `adapter_include`, or `server_include` list).
+  - `include: ["*"]` is the explicit allow-all and matches the old default. Per-key `public_keys[].advertise_filters` / `public_keys[].accept_filters` still override the adapter-level default for the peers that authenticate with that key.
+  - At startup (and on a full reload) the server logs one warning per process for each direction still in deny mode, naming the key to set.
+  - Fresh installs are unaffected: they configure federation explicitly, and the default configs carry no `muxcon` filters.
 
 ### Behavior changes (no config change required)
 
@@ -263,11 +269,6 @@ Changes since v1.0.2 (2026-08-27).
   - A federated port shows the origin's derived readiness, forwarded over the existing #62 `PORT_STATUS:` channel and inside `PORTS:FEDERATED`. A down muxcon link still takes precedence and shows red, because the freshest fact is the link outage.
   - Mixed-version peers and clients ignore the new field. No wire-protocol version bump, no config change.
 - **Enter respawn works after a stopped command port.** A port stopped by `idle_timeout_sec` or a manual stop could not be respawned: the "press Enter to respawn" notice showed, but every keystroke was a no-op write (log: `WRITE FAILED`) until the server restarted. A lone Enter (CR) now restarts the process on that path too, and other input on a stopped port re-emits the one-shot `PROCESS_NOT_RUNNING` notice. No config change.
-- **MuxCon logs a deprecation warning when federation filters default to allow-all** (ticket #77). An empty or missing `include` list today means "no constraint", so a node with no `advertise_filters` advertises every local port to every authenticated peer, and a node with no `accept_filters` accepts every port any peer advertises. The default will change to deny-all in a later release. Until then, at startup (and on a full reload) the server logs one warning per process per direction, naming how many local ports are shared and which key to set:
-  - `advertise_filters` include empty → "advertises all N local port(s) to every authenticated peer (set muxcon.advertise_filters to constrain)".
-  - `accept_filters` include empty → "accepts every port any peer advertises (set muxcon.accept_filters to constrain)".
-  - Per-key filters on `public_keys[]` do not silence the warning: that key overrides only the peers that authenticate with it, while the adapter-level default still applies to every other peer. Set the adapter-level include lists to silence it.
-  - No config change and no behavior change in this release. The warning fires only when the adapter-level include list is empty; setting any include entry removes it.
 ### Web console and observability
 
 - The About page shows the logged-in user: username, global permission, and console groups.

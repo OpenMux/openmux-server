@@ -471,6 +471,9 @@ async def test_advertise_local_ports_includes_group_acl(monkeypatch):
             ]
 
     ad.main_port_manager = PM()
+    # Default-deny (ticket #77): opt into advertise-all so this test checks that
+    # the group ACL is included in the ad, not the default-deny gate.
+    ad._adv_name_inc = ["*"]
 
     server, s_reader, s_writer, c_reader, c_writer = await _make_stream_pair()
     try:

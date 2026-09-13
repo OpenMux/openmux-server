@@ -467,6 +467,10 @@ $defs:
   # constraint on this dimension". Exclude patterns always win. Patterns are
   # case-sensitive globs (fnmatch), e.g. "console_*".
   #
+  # Default-deny (ticket #77): if ALL include lists in one direction are
+  # empty, that direction matches no port. Set include: ["*"] to share or
+  # accept everything.
+  #
   # Key pair            Matches against
   # include/exclude     the port NAME
   # adapter_*           the port's adapter TYPE (serial, loopback, command, ...)

@@ -645,6 +645,9 @@ async def test_control_heartbeat_req_ack_updates_state():
 @pytest.mark.asyncio
 async def test_ports_federated_register_and_stale_removal_and_routing():
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    # Default-deny (ticket #77): opt into accept-all so this test exercises the
+    # register/stale/route mechanics rather than the filter gate.
+    a._acc_name_inc = ["*"]
     a.main_port_manager = FakePM()
     conn_id = "in:10.0.0.1:5555:1"
     a.connections[conn_id] = {"writer": FakeWriter()}
@@ -1040,6 +1043,8 @@ def test_filter_helpers_and_advertise_list(monkeypatch):
         ]
 
     pm.get_port_list_with_federation = fake_list  # type: ignore
+    # Default-deny (ticket #77): opt into advertise-all so this test checks the exclude gate, not the default.
+    a._adv_name_inc = ["*"]
     a.main_port_manager = pm
     conn_id = "in:2.2.2.2:9999:1"
     a.connections[conn_id] = {"writer": FakeWriter(), "role": "server", "opened_at": time.time(), "auth_ok": True}
@@ -1227,6 +1232,7 @@ async def test_retx_loop_resend_and_rto_adjustment(monkeypatch):
 @pytest.mark.asyncio
 async def test_federated_stale_purge_removes_proxy(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._acc_name_inc = ["*"]  # default-deny (ticket #77): opt into accept-all
     pm = FakePM()
     a.main_port_manager = pm
     conn_id = "in:stale:1"
@@ -1345,6 +1351,7 @@ async def test_stream_ids_do_not_collide_across_ports_on_same_peer():
 async def test_send_local_port_list_uses_first_enabled_listener():
     # First enabled listener port should be used in ServerInfo
     a = UnifiedMuxConAdapter("mx", {"listeners": [{"enabled": False, "port": 7000}, {"enabled": True, "port": 8123}]})
+    a._adv_name_inc = ["*"]  # default-deny (ticket #77): share all local ports
     pm = FakePM()
     a.main_port_manager = pm
     conn_id = "in:list:1"
@@ -3317,6 +3324,7 @@ async def test_origin_port_list_forwards_status_message(monkeypatch):
 
     pm = PM()
     a.main_port_manager = pm
+    a._adv_name_inc = ["*"]  # default-deny (ticket #77): share all local ports
     a.server_id = "origin-srv"
     conn_id = "out:peer:1:1"
     w = FakeWriter()

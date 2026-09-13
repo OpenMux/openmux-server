@@ -214,7 +214,9 @@ page) lists the new connection.
 
 Filter which local ports a node advertises to peers, and which
 peer-advertised ports it accepts, with `advertise_filters`/`accept_filters`.
-Patterns are glob-style (`*` wildcards).
+Patterns are glob-style (`*` wildcards). The default is deny-all: a direction
+with no `include` shares or accepts nothing, so name an include list to share
+anything.
 
 ```yaml
 muxcon:

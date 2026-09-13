@@ -163,7 +163,7 @@ optional per-key overrides (flat keys on a `muxcon.public_keys[]` entry,
 applied once a connection authenticates with that key) each take:
 
 ```yaml
-include: []            # glob patterns on port name; empty = allow all
+include: []            # glob patterns on port name; an empty include set matches nothing (deny)
 exclude: []             # glob patterns on port name; exclude wins over include
 adapter_include: []     # glob patterns on adapter_type
 adapter_exclude: []
@@ -172,7 +172,11 @@ server_exclude: []
 ```
 
 Matching uses `fnmatch.fnmatchcase` (shell-style globs, e.g. `console_*`).
-Exclude always wins over include. There is no regex or prefix pattern
+The three set dimensions must all pass, and within a dimension exclude always
+wins over include. **The default is deny-all (ticket #77)**: a direction with
+no `include`, `adapter_include`, or `server_include` entry matches no port, so
+peers share nothing until an include list is named. `include: ["*"]` is the
+explicit allow-all opt-in. There is no regex or prefix pattern
 syntax (the original design draft's `node_pattern: {regex: ...}` /
 `{prefix: ...}` forms do not exist) — glob only.
 
