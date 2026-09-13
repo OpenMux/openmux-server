@@ -1,10 +1,13 @@
 import asyncio
+import logging
 import os
 from types import SimpleNamespace
 
 import pytest
 
 from openmux.server.adapters.muxcon import FederationPeer, UnifiedMuxConAdapter
+
+LOG = "openmux.adapter.muxcon.mx"
 
 
 def test_validate_config_and_status_basics(tmp_path):
@@ -71,3 +74,99 @@ async def test_start_stop_without_listeners():
     assert ok is True
     await ad.stop()
     assert ad.is_running is False
+
+
+# --- Default-allow federation filter deprecation warning (ticket #77) ---
+
+
+def _warn_lines(caplog) -> list:
+    return [r.getMessage() for r in caplog.records if "MuxCon federation filter default is ALLOW-ALL" in r.getMessage()]
+
+
+def test_empty_filters_warn_at_start(tmp_path, caplog):
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": []}})
+    ad.main_port_manager = SimpleNamespace(ports={"SHELL": object(), "console1": object()})
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    msgs = _warn_lines(caplog)
+    # Both directions empty -> both are named.
+    assert len(msgs) == 1
+    assert "advertises all 2 local port(s)" in msgs[0]
+    assert "accepts every port any peer advertises" in msgs[0]
+    # Re-emit must be a no-op (once per process).
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    assert len(_warn_lines(caplog)) == 1
+
+
+def test_advertise_filters_set_no_advertise_warning(tmp_path, caplog):
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [], "advertise_filters": {"include": ["console_*"]}}})
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    msgs = _warn_lines(caplog)
+    assert len(msgs) == 1
+    assert "advertises all" not in msgs[0]
+    assert "accepts every port any peer advertises" in msgs[0]
+
+
+def test_accept_filters_set_no_accept_warning(tmp_path, caplog):
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [], "accept_filters": {"server_include": ["hub-01"]}}})
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    msgs = _warn_lines(caplog)
+    assert len(msgs) == 1
+    assert "advertises all 0 local port(s)" in msgs[0]
+    assert "accepts every port" not in msgs[0]
+
+
+def test_exclude_only_still_warns_include_empty(tmp_path, caplog):
+    # include empty means allow-all even when exclude is set.
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [], "advertise_filters": {"exclude": ["debug_*"]}}})
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    assert "advertises all 0 local port(s)" in _warn_lines(caplog)[0]
+
+
+def test_star_include_counts_as_constrained(tmp_path, caplog):
+    # include: ["*"] is the explicit share-everything opt-in.
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": [], "accept_filters": {"include": ["*"]}}})
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    msgs = _warn_lines(caplog)
+    assert len(msgs) == 1
+    assert "accepts every port" not in msgs[0]
+
+
+def test_both_filters_set_no_warning(tmp_path, caplog):
+    ad = UnifiedMuxConAdapter(
+        "mx",
+        {
+            "muxcon": {
+                "listeners": [],
+                "advertise_filters": {"include": ["console_*"]},
+                "accept_filters": {"include": ["upstream_*"]},
+            }
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    assert _warn_lines(caplog) == []
+
+
+def test_warning_survives_no_port_manager(tmp_path, caplog):
+    # No pm attached -> port count 0, but the warning still comes out.
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {"listeners": []}})
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        ad._log_empty_filter_warning()
+    assert "advertises all 0 local port(s)" in _warn_lines(caplog)[0]
+
+
+def test_unwrap_and_effective_helper_agree():
+    assert UnifiedMuxConAdapter._unwrap_reconcile_config(None) == {}
+    assert UnifiedMuxConAdapter._unwrap_reconcile_config("x") == {}
+    assert UnifiedMuxConAdapter._unwrap_reconcile_config({"muxcon": {"advertise_filters": {"include": ["a"]}}}) == {
+        "advertise_filters": {"include": ["a"]}
+    }
+    bare = {"listeners": [], "advertise_filters": {"include": ["a"]}}
+    assert UnifiedMuxConAdapter._effective_section(bare) is bare
+    assert UnifiedMuxConAdapter._effective_section({"muxcon": {"listeners": []}}) == {"listeners": []}

@@ -366,6 +366,10 @@ Top-level keys:
 - `auth_required`: Require the Ed25519 challenge/response from inbound peers (default: true). When false, each started listener logs a warning.
 - `listeners`: List of listener configurations
 - `initiators`: List of outbound peers
+- `advertise_filters`: Adapter-level default filters over which local ports this node shares with peers (a `filter_set`). See below.
+- `accept_filters`: Adapter-level default filters over which peer-advertised ports this node accepts (a `filter_set`). See below. `public_keys[]` entries may also carry a per-key `advertise_filters`/`accept_filters` that override these defaults for connections authenticating with that key.
+
+A `filter_set` has six glob lists (case-sensitive, `*` wildcards): `include` / `exclude` (port name), `adapter_include` / `adapter_exclude` (adapter type), and `server_include` / `server_exclude` (origin server id; meaningfully the `accept` direction). An **empty or missing list means "no constraint"** (allow-all) on that dimension, and exclude patterns win over include. Today an empty include set advertises/accepts everything; the server logs a deprecation warning at startup and on a full reload for each unconstrained direction because the default will change to deny-all in a later release (ticket #77). Set `include: ["*"]` to state the allow-all intent explicitly, or `exclude: ["*"]` to block a direction.
 
 Identity note:
 - The node identity is derived from `server.id` at the top level

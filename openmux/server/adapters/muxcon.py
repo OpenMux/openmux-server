@@ -144,9 +144,24 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
     * Peer authentication / authorization
     """
 
+    @staticmethod
+    def _effective_section(config: Any) -> Dict[str, Any]:
+        """Return the muxcon section from either a wrapped ``{"muxcon": {...}}``
+        payload or a bare section dict. Used by ``__init__`` and
+        ``reconcile_ports()`` (via ``_unwrap_reconcile_config``) so both read
+        the same effective section shape.
+        """
+        if not isinstance(config, dict):
+            return {}
+        if "muxcon" in config and "listeners" not in config and "initiators" not in config:
+            section = config.get("muxcon")
+            if isinstance(section, dict):
+                return section
+            return {}
+        return config
+
     def __init__(self, name: str, config: Dict[str, Any]):
-        # Support both direct dict and wrapped under top-level 'muxcon'
-        effective_config = config.get("muxcon", config) if isinstance(config, dict) else config
+        effective_config = self._effective_section(config)
         super().__init__(name, effective_config)
         self.logger = logging.getLogger(f"openmux.adapter.muxcon.{self.name}")
 
@@ -377,6 +392,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         # Per-connection filter overrides (set once a connection authenticates)
         self._conn_filters = {}
+        # One-time guard for the default-allow filter deprecation warning
+        # (ticket #77): the warning is emitted once per process.
+        self._filter_empty_warned = False
 
     @staticmethod
     def _normalize_listener_conf(lst: Dict[str, Any]) -> Dict[str, Any]:
@@ -1352,6 +1370,58 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 raise ValueError("initiator.port must be 1-65535")
         return True
 
+    def _filter_include_empty(self, *lists: List[str]) -> bool:
+        """True when every include-list dimension is empty for one direction.
+
+        The include lists use OR semantics (see `_allow_advertise_port_for_conn` /
+        `_allow_accept_port_for_conn`), so the direction is unconstrained only
+        when name, adapter, and server includes are all empty.
+        """
+        return not any(lists)
+
+    def _log_empty_filter_warning(self) -> None:
+        """Warn once per process when federation filter includes are empty.
+
+        An empty or missing include list means "no constraint", so without
+        filters the node advertises every local port to every authenticated
+        peer and accepts every port any peer advertises (allow-all). Ticket
+        #77 will flip this to default-deny; until then the warning tells the
+        operator what is shared and points at the keys to set. Per-direction:
+        the advertise and accept checks are independent. Emitted once per
+        process, at `start()` (which runs at startup and on a full reload, the
+        only path that re-reads these flat filter keys). A soft reload calls
+        `reconcile_ports`, which does not re-read the flat keys, so it neither
+        re-evaluates this warning nor changes the effective set.
+        """
+        if self._filter_empty_warned:
+            return
+        self._filter_empty_warned = True
+        try:
+            port_count = 0
+            pm = getattr(self, "main_port_manager", None)
+            ports = getattr(pm, "ports", None)
+            if isinstance(ports, dict):
+                port_count = len(ports)
+            directions = []
+            if self._filter_include_empty(self._adv_name_inc, self._adv_adapter_inc, self._adv_server_inc):
+                directions.append(
+                    f"advertises all {port_count} local port(s) to every authenticated peer "
+                    "(set muxcon.advertise_filters to constrain)"
+                )
+            if self._filter_include_empty(self._acc_name_inc, self._acc_adapter_inc, self._acc_server_inc):
+                directions.append("accepts every port any peer advertises " "(set muxcon.accept_filters to constrain)")
+            if not directions:
+                return
+            self.logger.warning(
+                "MuxCon federation filter default is ALLOW-ALL: %s. This default will"
+                " change to deny-all in a later release (see ticket #77). Until include"
+                " lists are set, an authenticated peer can open or receive any of these"
+                " ports." % ("; ".join(directions))
+            )
+        except Exception:  # justification: the warning must never break start(); a bad
+            # port_manager or malformed filter attrs only skips the log line
+            pass
+
     async def start(self) -> bool:
         """Start listeners, initiators, and background loops.
 
@@ -1360,6 +1430,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             False on fatal error.
         """
         try:
+            self._log_empty_filter_warning()
             # If ConfigManager is accessible via main_port_manager, prefer the
             # top-level server section for identity (shared identity ladder in
             # openmux.common.identity).
@@ -1614,13 +1685,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
     @staticmethod
     def _unwrap_reconcile_config(new_config: Any) -> Dict[str, Any]:
         """Unwrap a raw muxcon reconcile config (dict, wrapped, or None) to a plain dict."""
-        if not isinstance(new_config, dict):
-            return {}
-        if "muxcon" in new_config and "listeners" not in new_config and "initiators" not in new_config:
-            effective = new_config.get("muxcon") or {}
-        else:
-            effective = new_config
-        return effective if isinstance(effective, dict) else {}
+        return UnifiedMuxConAdapter._effective_section(new_config)
 
     @staticmethod
     def _diff_keys(old_keys: Set[Any], new_keys: Set[Any]) -> Tuple[List[Any], List[Any], List[Any]]:
