@@ -414,18 +414,9 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
             adapter.logger.error("ConfigManager unavailable for apply()")
             return web.json_response({"error": True, "message": "ConfigManager unavailable"}, status=500)
 
-        # The UI only ever sees masked secrets; restore the stored values for
-        # any field the user left untouched before validating/saving.
-        current_cfg = cm.config or cm.load_config() or {}
-        _restore_masked_secrets(payload, current_cfg)
-
-        # Preserve schema-valid keys the UI does not model (issue #78): a
-        # verbatim save would otherwise drop them from server.yaml.
-        _merge_preserve_unmodelled(payload, current_cfg)
-
-        # security.yaml is not editable from this editor (issue #58):
-        # discard any access_default the UI might carry.
-        payload.pop("access_default", None)
+        # The UI only ever sees masked secrets and a fixed UI field set;
+        # reconstruct what a save would actually write before validating.
+        _prepare_payload_for_save(payload, cm)
 
         # Validate before saving
         ok, err, exc = _validate_payload(payload, cm)
@@ -619,6 +610,33 @@ def _validate_payload(payload: Dict[str, Any], cm: ConfigManager) -> Tuple[bool,
         return False, msg, e
 
 
+def _prepare_payload_for_save(payload: Dict[str, Any], cm: ConfigManager) -> Dict[str, Any]:
+    """Reconstruct the to-be-saved payload from the editor's masked view.
+
+    The browser only ever sees secret sentinels and a fixed UI field set, so
+    the raw payload is not the mapping a save would write. Apply the same
+    normalizations the save path relies on, in the same order:
+
+    1. ``_restore_masked_secrets`` swaps the ``********`` sentinels for the
+       stored values when the user left a secret untouched. A value the user
+       actually typed (a new hash) is kept as-is.
+    2. ``_merge_preserve_unmodelled`` re-adds schema-valid keys the UI does
+       not model (issue #78), so validation sees what a save would write.
+    3. ``access_default`` is discarded: ``security.yaml`` is not editable
+       from this editor (issue #58).
+
+    Mutates and returns ``payload``. Running the identical preparation in
+    ``_handle_validate`` keeps Validate and Save judging the same mapping, so
+    the Validate button can no longer fail on a value Save would transparently
+    substitute (e.g. the ``********`` secret sentinel).
+    """
+    current_cfg = cm.config or cm.load_config() or {}
+    _restore_masked_secrets(payload, current_cfg)
+    _merge_preserve_unmodelled(payload, current_cfg)
+    payload.pop("access_default", None)
+    return payload
+
+
 async def _handle_validate(request: web.Request) -> web.StreamResponse:
     adapter = request.app[ADAPTER_APP_KEY]
     # Require admin permission (no CSRF needed as no state change occurs)
@@ -633,6 +651,11 @@ async def _handle_validate(request: web.Request) -> web.StreamResponse:
     cm = _find_config_manager(adapter)
     if not cm:
         return web.json_response({"error": True, "message": "ConfigManager unavailable"}, status=500)
+
+    # Judge the same mapping the save path would write: restore masked secrets
+    # and re-add unmodelled keys, so the button cannot fail on a value that
+    # Save would transparently substitute (e.g. the ******** secret sentinel).
+    _prepare_payload_for_save(payload, cm)
 
     ok, err, exc = _validate_payload(payload, cm)
     if ok:

@@ -272,6 +272,7 @@ Changes since v1.0.2 (2026-08-27).
 - **Enter respawn works after a stopped command port.** A port stopped by `idle_timeout_sec` or a manual stop could not be respawned: the "press Enter to respawn" notice showed, but every keystroke was a no-op write (log: `WRITE FAILED`) until the server restarted. A lone Enter (CR) now restarts the process on that path too, and other input on a stopped port re-emits the one-shot `PROCESS_NOT_RUNNING` notice. No config change.
 ### Web console and observability
 
+- The Config Editor Validate button no longer always fails on the `password_hash` field. It validated the payload straight from the browser, where every stored secret sits as the `********` sentinel, so the schema pattern `^[0-9a-fA-F]{64}$` could never match. Save already restored the stored values before validating; Validate now runs the same preparation (secret restore and the unmodelled-key merge from ticket #78), so it judges the exact mapping a save would write.
 - The About page shows the logged-in user: username, global permission, and console groups.
 - The login page and status page show the messages of the day.
 - The Config Editor marks each field with its reload requirement (`live`, `soft`, `full`, `sighup`, `restart`) and shows the read-only `access_default` row.
