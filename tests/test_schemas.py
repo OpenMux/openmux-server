@@ -223,7 +223,6 @@ def test_code_read_keys_are_accepted(base: dict, extra: dict, where: str):
 
 
 def test_muxcon_code_read_keys_are_accepted():
-    _validate({"muxcon": {"server_id": "leaf-1"}})
     _validate({"muxcon": {"retx_initial_ms": 100, "retx_max_ms": 4000}})
     _validate({"muxcon": {"listeners": [{"host": "10.0.0.1"}]}})
     _validate({"muxcon": {"listeners": [{"bind_interface": "eth0", "routing_mark": 42}]}})
@@ -233,12 +232,27 @@ def test_muxcon_code_read_keys_are_accepted():
     _validate({"muxcon": {"public_keys": [{"key_id": "k1", "public_key": "AAA", "accept_filters": {"exclude": ["b"]}}]}})
 
 
-def test_server_metadata_fallback_name_keys_are_accepted():
-    # server.name and server.server_id are identity fallbacks read by the
-    # command, web_console, and muxcon adapters when `id` is absent.
-    _validate({"server": {"name": "leaf-1"}})
-    _validate({"server": {"server_id": "leaf-1"}})
-    # fail_fast_adapters read top-level when server.fail_fast_adapters is absent.
+def test_server_identity_key_is_accepted():
+    # server.id is the sole identity key (ticket #74); the schema accepts it.
+    _validate({"server": {"id": "leaf-1", "description": "Leaf"}})
+
+
+def test_removed_identity_keys_rejected():
+    # server.name / server.server_id / muxcon.server_id were identity
+    # fallbacks; the schema rejects them (ticket #74). The deprecation shim
+    # strips them at live load with a warning (see test_locations.py).
+    for cfg in (
+        {"server": {"name": "leaf-1"}},
+        {"server": {"server_id": "leaf-1"}},
+        {"server": {"id": "leaf-1", "name": "n", "server_id": "s"}},
+        {"muxcon": {"server_id": "leaf-1"}},
+    ):
+        errors = list(Draft202012Validator(_config_schema()).iter_errors(cfg))
+        assert errors, f"removed identity key must be rejected: {cfg}"
+
+
+def test_fail_fast_adapters_top_level():
+    # fail_fast_adapters is read top-level when server.fail_fast_adapters is absent.
     _validate({"server": {}, "fail_fast_adapters": False})
 
 

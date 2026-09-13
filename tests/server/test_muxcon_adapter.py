@@ -10,11 +10,13 @@ import sys
 import tempfile
 import time
 from collections import OrderedDict
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509 import NameOID, load_pem_x509_certificate
 
 from openmux.server.adapters.muxcon import FederationPeer, UnifiedMuxConAdapter
 
@@ -177,6 +179,38 @@ async def test_tls_context_builders_and_autogen(tmp_path, monkeypatch):
     # Autogen cert/key into the adapter's own state dir
     c, k = await a._ensure_autogen_cert(None)
     assert os.path.exists(c) and os.path.exists(k)
+
+
+def _autogen_cert_cn(cert_path: str) -> str:
+    with open(cert_path, "rb") as fh:
+        cert = load_pem_x509_certificate(fh.read())
+    attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    return str(attrs[0].value) if attrs else ""
+
+
+@pytest.mark.asyncio
+async def test_autogen_cert_cn_is_server_id(tmp_path, monkeypatch):
+    # The autogen cert CN carries the node identity: server.id is the sole
+    # identity key (ticket #74); the removed name/server_id keys must not
+    # feed the CN, and an unset id falls back to the system hostname.
+    monkeypatch.setattr(socket, "gethostname", lambda: "fallback-host-74")
+    monkeypatch.setenv("OPENMUX_STATE_DIR", str(tmp_path / "state-a"))
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    state = {"server": {"id": "cn-node-74", "name": "should-not-be-cn"}}
+    a.main_port_manager = SimpleNamespace(config_manager=SimpleNamespace(config=state, load_config=lambda: state))
+    a._resolve_local_identity()
+    assert a.server_id == "cn-node-74"
+    c, _ = await a._ensure_autogen_cert(None)
+    assert _autogen_cert_cn(c) == "cn-node-74"
+    # Unset id: the hostname placeholder from __init__ survives. A separate
+    # state dir avoids reusing the first adapter's already-written cert.
+    monkeypatch.setenv("OPENMUX_STATE_DIR", str(tmp_path / "state-b"))
+    a2 = UnifiedMuxConAdapter("mx2", {"listeners": []})
+    a2.main_port_manager = SimpleNamespace(config_manager=SimpleNamespace(config={}, load_config=lambda: {}))
+    a2._resolve_local_identity()
+    assert a2.server_id == "fallback-host-74"
+    c2, _ = await a2._ensure_autogen_cert(None)
+    assert _autogen_cert_cn(c2) == "fallback-host-74"
 
 
 @pytest.mark.asyncio

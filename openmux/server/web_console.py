@@ -3853,8 +3853,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
         key = ec.generate_private_key(ec.SECP256R1(), backend=default_backend())
         cn = None
         try:
-            # CN is the bare server identity (id/name/hostname); the human
-            # label lives in the realm / displayed name, not in the cert.
+            # CN is the bare server identity (server.id, else system
+            # hostname); the human label lives in the realm / displayed
+            # name, not in the cert.
             cn = get_server_id(self._server_section()) or socket.gethostname() or "OpenMux"
         except Exception:
             cn = "OpenMux"

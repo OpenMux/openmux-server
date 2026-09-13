@@ -20,7 +20,7 @@ Notes
 Top-level sections
 
 server
-- server.id: no default (runtime may fall back to hostname in muxcon)
+- server.id: sole identity key; no default (the shared resolver falls back to the system hostname when unset). `server.name`, `server.server_id`, and `muxcon.server_id` are removed (ticket #74): the schema rejects them and the ConfigManager strips them with a warning at load.
 - server.description: no default. This is the server's human-readable display name: shown on the web console login/About pages, the telnet/SSH port menus, the CLI client port listing, and the web Basic-Auth dialog. When blank, the display name derives to "OpenMux <server.id | hostname>".
 - control socket and pidfile: `openmux.sock` / `openmux.pid` inside the run dir — no config keys; see [LOCATIONS.md](LOCATIONS.md)
 

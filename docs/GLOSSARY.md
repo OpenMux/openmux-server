@@ -20,6 +20,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Auth Manager | The component that holds user and API key auth data (`AuthManager`). | authenticator |
 | Port Manager | The component that tracks all active ports and routes data to clients (`PortManager`). | — |
 | Console Manager | The component that connects the interactive console protocol to `PortManager` (`ConsoleManager`). | management console (use "console" alone) |
+| Server identity | The value that identifies this node: the `server.id` config key, else the system hostname. One shared resolver feeds every surface (federation handshake, cert CN, SSO node claim, banners). | node_name, server.name (removed), server.server_id (removed), muxcon.server_id (removed) |
 | Dynamic Port Manager | The per-adapter helper that creates and destroys ports at runtime (`DynamicPortManager`). | — |
 
 ## Port Lifecycle

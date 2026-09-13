@@ -307,21 +307,31 @@ _REMOVED_TOP_LEVEL = (
     ("web_console", "static_dir"),
     ("web_console", "template_dir"),
 )
+# Identity keys removed in favor of the single server.id (ticket #74).
+# Shipped through the same one-release strip-and-warn shim as the location
+# keys: a stale conffile keeps booting with a warning instead of failing
+# the schema check.
+_REMOVED_IDENTITY_KEYS = (
+    ("server", "name"),
+    ("server", "server_id"),
+    ("muxcon", "server_id"),
+)
 _REMOVED_LISTENER_KEYS = ("tls_dir", "tls_known_peers_path")
 
 
 def removed_location_keys(config: Any) -> List[str]:
-    """Dotted paths of removed location keys still present in ``config``.
+    """Dotted paths of removed config keys still present in ``config``.
 
-    Pure detection, used by the deprecation shim (``absorb_removed_location_keys``)
-    and by tests:
+    Covers both the location keys moved to env-based resolution and the
+    removed identity keys (ticket #74). Pure detection, used by the
+    deprecation shim (``absorb_removed_location_keys``) and by tests:
 
     Args:
         config: Parsed config mapping (the full server.yaml dict).
 
     Returns:
-        List[str]: Dotted keys, e.g. ``["logging.log_dir"]``. Empty when the
-        config is clean or not a mapping.
+        List[str]: Dotted keys, e.g. ``["logging.log_dir", "server.name"]``.
+        Empty when the config is clean or not a mapping.
     """
     found: List[str] = []
     return _detect_removed_location_keys(config)
@@ -333,6 +343,10 @@ def _detect_removed_location_keys(config: Any) -> List[str]:
     if not isinstance(config, dict):
         return found
     for section, key in _REMOVED_TOP_LEVEL:
+        sec = config.get(section)
+        if isinstance(sec, dict) and key in sec:
+            found.append(f"{section}.{key}")
+    for section, key in _REMOVED_IDENTITY_KEYS:
         sec = config.get(section)
         if isinstance(sec, dict) and key in sec:
             found.append(f"{section}.{key}")
@@ -378,15 +392,27 @@ def absorb_removed_location_keys(config: Any, logger: Optional[Any] = None) -> L
         sec = config.get(section)
         if isinstance(sec, dict) and key in sec:
             del sec[key]
+    for section, key in _REMOVED_IDENTITY_KEYS:
+        sec = config.get(section)
+        if isinstance(sec, dict) and key in sec:
+            del sec[key]
     if logger is not None:
+        identity_paths = {f"{section}.{key}" for section, key in _REMOVED_IDENTITY_KEYS}
         for path in keys:
-            try:
-                logger.warning(
+            if path in identity_paths:
+                message = (
+                    "Config key %s is no longer an identity key and is ignored; "
+                    "remove it from your configuration and set server.id (leave it "
+                    "unset for the system hostname) until the next minor release."
+                )
+            else:
+                message = (
                     "Config key %s is no longer supported and is ignored; remove it from your "
                     "configuration (it is resolved via the environment in packaged installs)"
-                    " until the next minor release.",
-                    path,
+                    " until the next minor release."
                 )
+            try:
+                logger.warning(message, path)
             except Exception:  # justification: warning is best-effort; the key is stripped either way
                 pass
     return keys

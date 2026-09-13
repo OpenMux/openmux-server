@@ -10,6 +10,18 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Config changes to check before upgrading
 
+- **`server.name`, `server.server_id`, and `muxcon.server_id` are no longer
+  identity keys** (ticket #74). `server.id` is now the single identity key:
+  the MuxCon federation handshake `ID=`, the MuxCon and web-console autogen
+  cert CN, the SSO node claim, and the command port banner all use it, and
+  the system hostname is the only fallback. Configs that set identity only
+  via one of the removed keys (and had no `server.id`) drop to the hostname
+  identity on upgrade — set `server.id`. The removed keys are rejected by
+  the schema and `--check-config`; at live load the ConfigManager strips
+  them with a warning for one release. `server.description` is now the only
+  free-form label (it no longer doubles as a muxcon description fallback
+  read from `server.name`).
+
 - **`openmux_client_ports` is removed** (ticket #72). The section is no
   longer recognized: the server will not create any ports from it, and a
   config that still carries it fails schema validation (`--check-config`

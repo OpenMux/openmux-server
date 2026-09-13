@@ -37,7 +37,7 @@ def _server_schema() -> dict:
 def _valid_server_config() -> dict:
     """A minimal config that satisfies the top-level anyOf constraints."""
     return {
-        "server": {"name": "test"},
+        "server": {"id": "test-server"},
         "loopback_ports": [{"name": "lb1"}],
         "web_status": {},
     }

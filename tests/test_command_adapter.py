@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -83,6 +84,26 @@ async def test_stopped_notice_and_client_notice_prefix(monkeypatch):
     port.on_client_count_changed(1)
     got2 = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
     assert b"PROCESS_NOT_RUNNING srv-123/cp1" in got2
+
+
+@pytest.mark.asyncio
+async def test_stopped_prefix_ignores_removed_name_key(monkeypatch):
+    # server.name is not an identity key (ticket #74): with only name set, the
+    # prefix falls back to the system hostname, never to the name.
+    monkeypatch.setattr(socket, "gethostname", lambda: "fallback-host-74")
+    pm = CapturingPortManager({"server": {"name": "should-not-appear"}})
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    port = CommandPort("cp-name", {"command": "echo"}, adapter)
+    assert port._stopped_prefix() == "fallback-host-74/cp-name "
+
+
+@pytest.mark.asyncio
+async def test_stopped_prefix_path_like_id_strips_prefix():
+    # A path-like server.id is simplified to its last segment.
+    pm = CapturingPortManager({"server": {"id": "/opt/paths/node-9"}})
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    port = CommandPort("cp-path", {"command": "echo"}, adapter)
+    assert port._stopped_prefix() == "node-9/cp-path "
 
 
 @pytest.mark.asyncio

@@ -335,7 +335,7 @@ This completes the authoritative startup narrative capturing order, decision bra
 This section codifies how MuxCon federation connections establish and expose stable identities, how multiple transport paths between the same peer are grouped, and how process restarts are detected and rolled forward without manual intervention.
 
 ### 16.1 Terminology
-- **server_id**: Stable configured identifier for a node in the federation. Defaults to the host name if not explicitly set. Intended to remain constant across process restarts.
+- **server_id**: Stable configured identifier for a node in the federation. It is the value of `server.id` (the sole identity key, ticket #74); it falls back to the system hostname when `server.id` is unset. Intended to remain constant across process restarts. `server.name`, `server.server_id`, and `muxcon.server_id` were removed (ticket #74).
 - **instance_id**: Ephemeral UUID generated at process start. Changes on every restart; used to distinguish old vs new generations of connections from the same `server_id`.
 - **node_name**: Removed. `server_id` is the only identity field; it is surfaced using the unified `node:` key prefix.
 

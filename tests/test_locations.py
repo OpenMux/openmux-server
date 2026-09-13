@@ -261,6 +261,42 @@ class _WarnLog:
         self.messages.append(fmt % args if args else fmt)
 
 
+def test_removed_keys_identity(clean_env):
+    # The removed identity keys (ticket #74) are detected like the location
+    # keys; server.id (the sole identity key) and server.description are not.
+    cfg = {
+        "server": {"id": "s1", "name": "n1", "server_id": "sid1", "description": "d"},
+        "muxcon": {"server_id": "m1", "retx_initial_ms": 100},
+    }
+    found = locations.removed_location_keys(cfg)
+    assert "server.name" in found
+    assert "server.server_id" in found
+    assert "muxcon.server_id" in found
+    assert "server.id" not in found
+    assert "server.description" not in found
+    assert "muxcon.retx_initial_ms" not in found
+
+
+def test_absorb_strips_identity_keys_with_warning(clean_env):
+    log = _WarnLog()
+    cfg = {
+        "server": {"id": "s1", "name": "n1", "server_id": "sid1"},
+        "muxcon": {"server_id": "m1"},
+    }
+    found = locations.absorb_removed_location_keys(cfg, logger=log)
+    assert found == ["server.name", "server.server_id", "muxcon.server_id"]
+    # Values stripped in place; the surviving keys are untouched.
+    assert cfg["server"] == {"id": "s1"}
+    assert cfg["muxcon"] == {}
+    # The identity warning points at server.id.
+    assert len(log.messages) == 3
+    assert all("server.id" in m for m in log.messages)
+    # Idempotent: a second pass finds nothing and warns nothing new.
+    before = len(log.messages)
+    assert locations.absorb_removed_location_keys(cfg, logger=log) == []
+    assert len(log.messages) == before
+
+
 def test_absorb_strips_and_warns_once_per_key(clean_env):
     log = _WarnLog()
     cfg = {
@@ -313,3 +349,12 @@ def test_absorb_noop_on_clean_config(clean_env):
     cfg = {"server": {"id": "s1"}, "logging": {"file": "/tmp/a.log"}}
     assert locations.absorb_removed_location_keys(cfg, logger=log) == []
     assert log.messages == []
+
+
+def test_absorb_noop_on_server_id_only_clean_config(clean_env):
+    # server.id alone (the pristine config shape) never trips the shim.
+    log = _WarnLog()
+    cfg = {"server": {"id": "primary-server", "description": "Primary OpenMux Server"}}
+    assert locations.absorb_removed_location_keys(cfg, logger=log) == []
+    assert log.messages == []
+    assert locations.removed_location_keys(cfg) == []

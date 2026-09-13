@@ -2,12 +2,18 @@
 
 One place that knows how the server identifies itself. Every surface that
 shows the server's name (web console, Basic-Auth headers, telnet/SSH menu
-banners, the CLI client's LIST banner, the MuxCon federation advert, the
-autogen TLS CN) uses the same ladder instead of a per-surface default:
+banners, the CLI client's LIST banner, the command port banner, the MuxCon
+federation advert, the autogen TLS CN) uses the same resolution instead of a
+per-surface default:
 
 1. ``server.description``  - the operator's free-form label
-2. ``OpenMux {id}``        - derived from ``server.id``, ``server.name``,
-                             or the system hostname, in that order
+2. ``OpenMux {id}``        - derived from ``server.id``, or the system
+                             hostname when ``id`` is absent
+
+``server.id`` is the sole identity key. ``server.name``,
+``server.server_id``, and ``muxcon.server_id`` are removed (ticket #74):
+the schema rejects them and the ConfigManager deprecation shim strips them
+with a warning at load time.
 
 The derived form keeps "OpenMux" as a product prefix and appends the node
 identity, so several OpenMux consoles are distinguishable in browser dialogs
@@ -22,17 +28,18 @@ from typing import Any, Optional
 def get_server_id(server_cfg: Optional[Any]) -> Optional[str]:
     """Return the server's identity value from a ``server`` config section.
 
-    Resolution order: ``server.id``, ``server.name``, ``server.server_id``.
-    Returns None when none is set (callers fall back to the hostname).
+    ``server.id`` is the sole identity key (ticket #74). Returns None when it
+    is absent or blank; callers fall back to the system hostname.
+    ``server.name`` / ``server.server_id`` are not read: the schema rejects
+    them and the deprecation shim strips them at load time.
     """
     if not isinstance(server_cfg, dict):
         return None
-    for key in ("id", "name", "server_id"):
-        val = server_cfg.get(key)
-        if val is not None:
-            text = str(val).strip()
-            if text:
-                return text
+    val = server_cfg.get("id")
+    if val is not None:
+        text = str(val).strip()
+        if text:
+            return text
     return None
 
 
@@ -47,7 +54,7 @@ def get_server_label(server_cfg: Optional[Any], hostname: Optional[str] = None) 
 
     Returns:
         ``server.description`` when set, else ``"OpenMux {id}"`` where id is
-        ``server.id|name|server_id|hostname``. Never empty.
+        ``server.id`` or the system hostname. Never empty.
     """
     desc = None
     if isinstance(server_cfg, dict):

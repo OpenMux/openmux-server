@@ -190,9 +190,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 continue
             self.peers.append(peer)
         # Identity & protocol
-        # Canonical identity comes from top-level server.id, with system hostname as fallback.
-        # node_name is deprecated and no longer used.
-        self.server_id = effective_config.get("server_id", socket.gethostname())
+        # Placeholder only: the real identity is server.id (the top-level
+        # config), resolved from the ConfigManager in start(); start()
+        # keeps this value when server.id is unset (hostname fallback).
+        self.server_id = socket.gethostname()
         # Human-friendly display label (from the shared identity ladder in
         # openmux.common.identity: server.description else "OpenMux <id>");
         # populated during start() when ConfigManager is available.
@@ -1456,6 +1457,37 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # skips the log line
             pass
 
+    def _resolve_local_identity(self) -> None:
+        """Read server.id (the sole identity key, ticket #74) from the top-level
+        config and set ``self.server_id`` / ``self.server_description``.
+
+        The hostname placeholder from ``__init__`` is kept when ``server.id`` is
+        unset. Called from ``start()``; the config manager is reached through
+        ``main_port_manager`` when it is injected (tests use the same path).
+        """
+        try:
+            srv: Optional[Dict[str, Any]] = None
+            cfg_mgr = getattr(self, "main_port_manager", None)
+            cfg_mgr = getattr(cfg_mgr, "config_manager", None)
+            if cfg_mgr is not None:
+                cfg = getattr(cfg_mgr, "config", None)
+                if not cfg:
+                    getcm = getattr(cfg_mgr, "load_config", None)
+                    if callable(getcm):
+                        getcm()
+                    cfg = getattr(cfg_mgr, "config", None)
+                if isinstance(cfg, dict):
+                    raw = cfg.get("server")
+                    if isinstance(raw, dict):
+                        srv = raw
+            if srv is not None:
+                # server.id is the sole identity key (ticket #74); the
+                # hostname placeholder from __init__ survives when unset.
+                self.server_id = get_server_id(srv) or self.server_id
+                self.server_description = get_server_label(srv)
+        except Exception:
+            self.logger.warning("MuxCon: could not read server identity from config; using defaults", exc_info=True)
+
     async def start(self) -> bool:
         """Start listeners, initiators, and background loops.
 
@@ -1465,31 +1497,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         try:
             self._log_empty_filter_warning()
-            # If ConfigManager is accessible via main_port_manager, prefer the
-            # top-level server section for identity (shared identity ladder in
-            # openmux.common.identity).
-            try:
-                srv: Optional[Dict[str, Any]] = None
-                cfg_mgr = getattr(self, "main_port_manager", None)
-                cfg_mgr = getattr(cfg_mgr, "config_manager", None)
-                if cfg_mgr is not None:
-                    cfg = getattr(cfg_mgr, "config", None)
-                    if not cfg:
-                        getcm = getattr(cfg_mgr, "load_config", None)
-                        if callable(getcm):
-                            getcm()
-                        cfg = getattr(cfg_mgr, "config", None)
-                    if isinstance(cfg, dict):
-                        raw = cfg.get("server")
-                        if isinstance(raw, dict):
-                            srv = raw
-                if srv is not None:
-                    sid = get_server_id(srv)
-                    if sid:
-                        self.server_id = sid
-                    self.server_description = get_server_label(srv)
-            except Exception:
-                self.logger.warning("MuxCon: could not read server identity from config; using defaults", exc_info=True)
+            # Top-level server.id is the identity (shared resolver in
+            # openmux.common.identity); the hostname placeholder from
+            # __init__ survives when server.id is unset.
+            self._resolve_local_identity()
             self._stop_event.clear()
 
             # Start listeners (multi or single)

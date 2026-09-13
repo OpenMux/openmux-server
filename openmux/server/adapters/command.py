@@ -15,6 +15,7 @@ import termios
 import tty
 from typing import Any, Dict, List, Optional, Set
 
+from ...common.identity import get_server_id
 from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
@@ -1067,15 +1068,17 @@ class CommandPort:
     def _stopped_prefix(self) -> str:
         """Return standardized prefix for stopped status messages.
 
-        Uses a server identifier (from config or hostname) plus port name
-        if available and meaningful, filtering generic adapter names.
+        Uses the server identity (``server.id``, else system hostname —
+        see the shared resolver in ``openmux.common.identity``) plus the
+        port name. Generic adapter names are filtered by the caller.
 
         Returns:
             str: Formatted prefix including trailing space.
         """
         try:
-            # Try to extract server id from top-level config if available
-            server_cfg = None
+            # server.id is the sole identity key (ticket #74); the shared
+            # resolver also covers the hostname fallback.
+            cfg_obj = None
             try:
                 cfg_mgr = getattr(getattr(self.adapter, "main_port_manager", None), "config_manager", None)
                 if cfg_mgr:
@@ -1088,15 +1091,12 @@ class CommandPort:
                             Exception
                         ):  # justification: newline mapping write drain best-effort; failures cause disconnect upstream
                             cfg_obj = None
-                    if isinstance(cfg_obj, dict):
-                        server_cfg = cfg_obj.get("server")
             except Exception:  # justification: writer transform pipeline failure; outer caller logs aggregate error
-                server_cfg = None
+                cfg_obj = None
             server_id = None
-            if isinstance(server_cfg, dict):
-                server_id = server_cfg.get("id") or server_cfg.get("name")
+            if isinstance(cfg_obj, dict):
+                server_id = get_server_id(cfg_obj.get("server"))
             if not server_id:
-                # Fallback ONLY to hostname (do not use adapter name)
                 try:
                     server_id = socket.gethostname()
                 except Exception:  # justification: local echo enqueue is advisory; dropping echo is acceptable
