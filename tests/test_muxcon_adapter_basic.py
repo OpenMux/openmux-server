@@ -35,10 +35,8 @@ def test_auth_manager_key_import_and_filters():
             return [
                 {
                     "key_id": "kid1",
-                    "muxcon": {
-                        "advertise_filters": {"include": ["a*"], "exclude": ["b*"]},
-                        "accept_filters": {"adapter_include": ["loopback"]},
-                    },
+                    "advertise_filters": {"include": ["a*"], "exclude": ["b*"]},
+                    "accept_filters": {"adapter_include": ["loopback"]},
                 }
             ]
 

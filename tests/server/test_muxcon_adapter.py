@@ -131,7 +131,7 @@ def test_auth_helpers_and_filters_merge():
 
         def get_public_keys_for_use(self, use: str):
             return [
-                {"key_id": "k1", "muxcon": {"advertise_filters": {"include": ["a*"], "exclude": ["b*"]}}},
+                {"key_id": "k1", "advertise_filters": {"include": ["a*"], "exclude": ["b*"]}},
                 {"key_id": "k2", "accept_filters": {"include": ["*"], "exclude": []}},
             ]
 

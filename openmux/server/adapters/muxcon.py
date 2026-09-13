@@ -450,9 +450,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         pub = self._load_ed25519_public_key(pks, kid)
                         if pub:
                             self._auth_pubkeys[kid] = pub
-                        mux = rec.get("muxcon") or {}
-                        adv = mux.get("advertise_filters") or rec.get("advertise_filters") or {}
-                        acc = mux.get("accept_filters") or rec.get("accept_filters") or {}
+                        adv = rec.get("advertise_filters") or {}
+                        acc = rec.get("accept_filters") or {}
                         self._key_filters[str(kid)] = {
                             "advertise_filters": self._normalize_filter_set(adv),
                             "accept_filters": self._normalize_filter_set(acc),
@@ -1257,9 +1256,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         kid = str(rec.get("key_id")) if rec.get("key_id") is not None else None
                         if not kid:
                             continue
-                        mux = rec.get("muxcon") or {}
-                        adv = mux.get("advertise_filters") or rec.get("advertise_filters") or {}
-                        acc = mux.get("accept_filters") or rec.get("accept_filters") or {}
+                        adv = rec.get("advertise_filters") or {}
+                        acc = rec.get("accept_filters") or {}
 
                         def _norm(d: Dict[str, Any]) -> Dict[str, List[str]]:
                             if not isinstance(d, dict):
