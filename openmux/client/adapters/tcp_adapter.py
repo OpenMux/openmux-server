@@ -630,6 +630,9 @@ class TcpClientAdapter(BaseClientAdapter):
                 # Store raw metadata for callers if attribute available
                 try:
                     self.last_port_metadata = list(dedup.values())  # type: ignore[attr-defined]
+                    srv = payload.get("server") if isinstance(payload, dict) else None
+                    if isinstance(srv, dict):
+                        self.last_server_info = srv  # type: ignore[attr-defined]
                 except Exception:
                     # Justification: optional metadata assignment failure should not impact
                     # functional port listing; ignore to maintain backward compatibility

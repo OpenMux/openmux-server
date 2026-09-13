@@ -928,7 +928,7 @@ class OpenMuxServer:
         - Reload YAML from disk using ConfigManager
         - Update AuthManager configuration live
         - Update the running web console's UI-only settings in place (motd,
-          logged_in_motd, realm)
+          logged_in_motd)
         - Reconcile ports for adapters that support online updates (serial, loopback, command,
           tcp initiator, telnet listener)
         - Reconcile the client listener: capacity/timeout bounds update in place; a
@@ -976,7 +976,7 @@ class OpenMuxServer:
         except Exception as e:
             self.logger.error(f"[reload-soft:{req_id}] Auth update failed: {e}", exc_info=True)
 
-        # Hot-apply UI-only web_console settings (motd, logged_in_motd, realm).
+        # Hot-apply UI-only web_console settings (motd, logged_in_motd).
         # The web console endpoint is NOT restarted by soft reload, but these
         # values are read per request/render, so they update in place.
         try:

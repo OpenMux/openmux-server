@@ -37,6 +37,7 @@ from .listener_common import (
     parse_login,
     read_take_target,
     render_port_list,
+    resolve_server_label,
 )
 
 # Sentinel 'target' value that puts a listener into interactive port-menu mode.
@@ -896,7 +897,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                 entries = await asyncio.wait_for(getter(), timeout=1.0)
         except Exception:
             entries = []
-        process.stdout.write(render_port_list(entries))
+        process.stdout.write(render_port_list(entries, header=resolve_server_label(self.main_port_manager)))
         await process.stdout.drain()
 
     async def _send_and_exit(self, process: Any, payload: bytes) -> None:

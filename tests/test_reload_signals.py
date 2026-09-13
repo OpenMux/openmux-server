@@ -75,7 +75,7 @@ async def test_soft_reload_method(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_soft_reload_hot_applies_web_console_ui_config(monkeypatch, tmp_path):
     """Soft reload updates the web console's UI-only settings (motd,
-    logged_in_motd, realm) in place without restarting the endpoint."""
+    logged_in_motd) in place without restarting the endpoint."""
     cfg_path = _write_isolated_config(tmp_path)
 
     server = OpenMuxServer(cfg_path, log_level="DEBUG")
@@ -89,12 +89,11 @@ async def test_soft_reload_hot_applies_web_console_ui_config(monkeypatch, tmp_pa
     from openmux.server.web_console import WebConsoleAdapter
 
     wc = WebConsoleAdapter(
-        "web_console", {"motd": "Old login motd", "logged_in_motd": "Old logged-in motd", "realm": "OldRealm"}
+        "web_console", {"motd": "Old login motd", "logged_in_motd": "Old logged-in motd"}
     )
     server.web_console = wc
     assert wc.motd == "Old login motd"
     assert wc.logged_in_motd == "Old logged-in motd"
-    assert wc.realm == "OldRealm"
 
     # Rewrite the on-disk web_console section with new values.
     with open(cfg_path) as f:
@@ -104,7 +103,6 @@ async def test_soft_reload_hot_applies_web_console_ui_config(monkeypatch, tmp_pa
         "  port: 8081\n"
         '  motd: "New\\nline one\\nline two"\n'
         '  logged_in_motd: "New logged-in motd"\n'
-        '  realm: "NewRealm"\n'
     )
     with open(cfg_path, "w") as f:
         f.write(cfg_text)
@@ -113,8 +111,7 @@ async def test_soft_reload_hot_applies_web_console_ui_config(monkeypatch, tmp_pa
 
     assert wc.motd == "New\nline one\nline two"
     assert wc.logged_in_motd == "New logged-in motd"
-    assert wc.realm == "NewRealm"
-    assert res["adapters"]["web_console"] == {"motd": True, "logged_in_motd": True, "realm": True}
+    assert res["adapters"]["web_console"] == {"motd": True, "logged_in_motd": True}
 
 
 @pytest.mark.asyncio
@@ -131,8 +128,8 @@ async def test_soft_reload_web_console_unchanged_reports_unchanged(monkeypatch, 
 
     from openmux.server.web_console import WebConsoleAdapter
 
-    # Values match the isolated config (no motd keys, realm default "OpenMux"),
-    # so a soft reload must report no change.
+    # Values match the isolated config (no motd keys), so a soft reload
+    # must report no change.
     wc = WebConsoleAdapter("web_console", {})
     server.web_console = wc
 
@@ -146,7 +143,27 @@ async def test_soft_reload_web_console_unchanged_reports_unchanged(monkeypatch, 
     res = await server.reload_adapters_soft(context={"origin": "test"})
 
     assert res["adapters"]["web_console"] == "unchanged"
-    assert wc.motd == "" and wc.logged_in_motd == "" and wc.realm == "OpenMux"
+    assert wc.motd == "" and wc.logged_in_motd == ""
+
+
+def test_web_console_realm_derives_from_server_section():
+    """The web console realm (display label) derives from the global server
+    config section, not from a per-console config key."""
+    from openmux.server.web_console import WebConsoleAdapter
+
+    # No server_config wired: falls back to a hostname-derived label.
+    wc = WebConsoleAdapter("web_console", {})
+    assert wc.realm.startswith("OpenMux ")
+
+    # With a server_config that sets id, the label follows the id.
+    wc2 = WebConsoleAdapter("web_console", {})
+    wc2.server_config = {"server": {"id": "rack01", "description": "Rack 01 OpenMux"}}
+    assert wc2.realm == "Rack 01 OpenMux"
+
+    # With only id (no description), it derives to "OpenMux <id>".
+    wc3 = WebConsoleAdapter("web_console", {})
+    wc3.server_config = {"server": {"id": "rack02"}}
+    assert wc3.realm == "OpenMux rack02"
 
 
 @pytest.mark.asyncio

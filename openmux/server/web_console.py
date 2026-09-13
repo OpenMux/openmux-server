@@ -28,6 +28,7 @@ import os
 import platform
 import re
 import secrets
+import socket
 import ssl
 import sys
 import time
@@ -38,6 +39,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from aiohttp import web
 
+from openmux.common.identity import basic_authenticate_header, get_server_id, get_server_label
 from openmux.server.access_control import capacity_display_label, capacity_to_wire, holder_id_short
 from openmux.server.adapters.lifecycle import READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE
 from openmux.server.data_logger import DataLogger
@@ -155,7 +157,7 @@ def _about_server_info(adapter, ports_snapshot: Optional[list] = None) -> Dict[s
         _uptime,
         _endpoints,
         lambda: {"base_path": adapter._effective_base_path(None)},
-        lambda: {"realm": getattr(adapter, "realm", "OpenMux")},
+        lambda: {"realm": adapter.realm},
         lambda: {"ports_total": len(ports_snapshot if ports_snapshot is not None else adapter._get_ports_snapshot())},
         lambda: {"hardware": _read_hardware_info(getattr(adapter, "hardware_info_file", None))},
     ]
@@ -444,7 +446,9 @@ async def auth_middleware(request: web.Request, handler):
         if authenticated_via_basic:
             return await handler(request)
         # Basic Auth attempted but failed -> 401 for programmatic clients
-        return web.Response(status=401, text="Unauthorized\n", headers={"WWW-Authenticate": f'Basic realm="{adapter.realm}"'})
+        return web.Response(
+            status=401, text="Unauthorized\n", headers={"WWW-Authenticate": basic_authenticate_header(adapter.realm)}
+        )
 
     # 2) Session cookie (_attach_session_user already fails safe, returning False on error)
     if _attach_session_user():
@@ -452,7 +456,9 @@ async def auth_middleware(request: web.Request, handler):
 
     # Not authenticated -> for API/probe endpoints, return 401 Basic challenge; else redirect to login
     if path == "/readyz" or path == _pref("/readyz") or path.startswith("/api/") or path.startswith(_pref("/api/")):
-        return web.Response(status=401, text="Unauthorized\n", headers={"WWW-Authenticate": f'Basic realm="{adapter.realm}"'})
+        return web.Response(
+            status=401, text="Unauthorized\n", headers={"WWW-Authenticate": basic_authenticate_header(adapter.realm)}
+        )
     next_url = urllib.parse.quote(str(request.rel_url))
     # Redirect to base-scoped login
     login_url = _pref("/login") + f"?next={next_url}"
@@ -1367,7 +1373,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
         host: 0.0.0.0 (str)
         port: 8081 (int)
         enable_ui: true (bool)  # serve landing page
-        realm: "OpenMux" (str)  # Basic-Auth realm (soft-reloadable)
         motd: <multiline text> (str, optional)  # public message of the day, shown
                 # on the login page only; hidden when blank (soft-reloadable)
         logged_in_motd: <multiline text> (str, optional)  # message of the day for
@@ -1375,7 +1380,43 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 # hidden when blank (soft-reloadable)
         enable_probes: true (bool)  # register /healthz, /livez, /readyz endpoints
         probes_include_details: false (bool)  # when true, probes return JSON with version/uptime/clients
+
+    The displayed name (login page, About, ``WWW-Authenticate`` Basic realm)
+    is derived from the global server identity, not set here. See the
+    ``realm`` property.
     """
+
+    @property
+    def realm(self) -> str:
+        """Human-readable server label shown to users.
+
+        Resolved from the global ``server`` config section (see
+        ``openmux.common.identity``): ``server.description`` when set, else
+        ``"OpenMux <server.id | name | hostname>"``. The web console has no
+        per-adapter override; set ``server.description`` in ``server.yaml``.
+        """
+        return get_server_label(self._server_section())
+
+    def _server_section(self) -> Dict[str, Any]:
+        """Return the ``server`` config section, preferring live config.
+
+        Reads the running config manager (so the label tracks a soft/full
+        reload without a process restart) and falls back to the snapshot
+        captured at adapter creation.
+        """
+        pm = getattr(self, "main_port_manager", None)
+        cfg_mgr = getattr(pm, "config_manager", None)
+        cfg = getattr(cfg_mgr, "config", None)
+        if isinstance(cfg, dict):
+            section = cfg.get("server")
+            if isinstance(section, dict):
+                return section
+        snapshot = getattr(self, "server_config", None)
+        if isinstance(snapshot, dict):
+            section = snapshot.get("server")
+            if isinstance(section, dict):
+                return section
+        return {}
 
     def __init__(self, name: str, config: Dict[str, Any]):
         super().__init__(name, config)
@@ -1383,7 +1424,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self.host = cfg.get("host", "0.0.0.0")
         self.port = int(cfg.get("port", 8081))  # Default port for the web console
         self.enable_ui = bool(cfg.get("enable_ui", True))
-        self.realm = str(cfg.get("realm", "OpenMux"))
         # Messages of the day: free-form multiline text; blank values hide it.
         #   motd           - public, shown on the login page only
         #   logged_in_motd - shown at the top of the status page; may hold
@@ -1553,23 +1593,18 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
         Recomputes each value exactly the way ``__init__`` does, so a soft
         reload converges to the same state as a fresh start with the same
-        config (including clearing a previously-set value). Only settings
-        read per request/render are applied - no rebind or restart needed:
-        ``realm`` (shown in 401 headers and login pages) and the two
-        messages of the day (``motd`` on the login page, ``logged_in_motd``
-        for authenticated users). Network settings (host, port, TLS) are
-        NOT applied here; they require a full reload.
+        config (including clearing a previously-set value). Only the two
+        messages of the day are stored as attributes and so applied here
+        (``motd`` on the login page, ``logged_in_motd`` for authenticated
+        users). The displayed server name is derived from the global
+        ``server`` section and is re-read on every render, so no stored state
+        needs updating for it. Network settings (host, port, TLS) are NOT
+        applied here; they require a full reload.
 
         Returns a dict of {key: changed} for each key updated.
         """
         cfg = web_console_cfg if isinstance(web_console_cfg, dict) else {}
         changed: Dict[str, bool] = {}
-        # realm: "OpenMux" when the key is absent (mirrors __init__'s default)
-        realm_raw = cfg.get("realm", "OpenMux")
-        new_realm = str(realm_raw) if realm_raw is not None else ""
-        changed["realm"] = new_realm != self.realm
-        if changed["realm"]:
-            self.realm = new_realm
         for key in ("motd", "logged_in_motd"):
             raw = cfg.get(key)
             # Blank/missing -> "" (hidden), mirroring __init__
@@ -3818,17 +3853,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
         key = ec.generate_private_key(ec.SECP256R1(), backend=default_backend())
         cn = None
         try:
-            # Prefer server id from config manager if present
-            server_id = None
-            cfg_mgr = getattr(getattr(self, "console_manager", None), "config_manager", None)
-            if cfg_mgr and hasattr(cfg_mgr, "config"):
-                server_cfg = getattr(cfg_mgr, "config", {}).get("server", {})
-                server_id = server_cfg.get("id") or server_cfg.get("name")
-            if not server_id:
-                import socket
-
-                server_id = socket.gethostname()
-            cn = str(server_id)
+            # CN is the bare server identity (id/name/hostname); the human
+            # label lives in the realm / displayed name, not in the cert.
+            cn = get_server_id(self._server_section()) or socket.gethostname() or "OpenMux"
         except Exception:
             cn = "OpenMux"
 

@@ -72,7 +72,6 @@ web_console:
   - openmux.server.web_plugins.config_editor
   port: 80
   probes_include_details: true
-  realm: OpenMux
   respect_forwarded_prefix: false
   ssl_port: 443
   tls_autogen: true

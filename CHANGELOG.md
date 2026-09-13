@@ -156,10 +156,12 @@ Changes since v1.0.2 (2026-08-27).
   - The `ACTION` id must equal the filename. A mismatch is reported.
   - Ungranted files (`test_*` scripts, helper modules) never run and appear nowhere.
   - Grant ids that resolve to no file on disk are reported with the ports they are assigned to.
+- **`web_console.realm` is removed.** The `realm` key no longer exists in `server.yaml` (it fails schema validation now that the key is gone). The name shown on the web console login/About pages, in the web Basic-Auth dialog, and in the telnet/SSH port menus now derives from the top-level `server` section: `server.description` when set, else `OpenMux <server.id | hostname>`. To change the displayed server name, set `server.description` in `server.yaml` (no reload needed — it re-reads on each render). The CLI client also now shows the server identity in its port listing, and the web Basic-Auth `WWW-Authenticate` header is now correctly quoted/escaped. Remove any `realm:` line from your `web_console:` block.
+
 - **`web_console.motd` and `web_console.logged_in_motd`** are new optional keys. Free-form multiline text; a blank value hides the notice.
   - `motd` shows on the login page (public).
   - `logged_in_motd` shows at the top of the status page for authenticated users.
-  - Both apply on soft reload, together with `realm`.
+  - Both apply on soft reload.
 - **Serial `dtr` and `rts` now take signal-line policies** (`server.yaml`, issue #63). Values: `none` (default: untouched), `on`, `off`, `presence-on`, `presence-off`.
   - Legacy booleans still load: `true` means `on`, `false` means `off`.
   - Previously these flags were parsed but never applied to the device: the line state was left at the `open()` default. Omitted lines continue to be untouched, so configs without these keys keep their old behavior exactly.

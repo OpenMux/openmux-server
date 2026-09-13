@@ -85,4 +85,3 @@ web_console:
   use_tls: true
   tls_autogen: true
   respect_forwarded_prefix: true
-  realm: OpenMux

@@ -20,6 +20,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Set
 
+from openmux.common.identity import get_server_id, get_server_label
 from openmux.server.access_control import capacity_to_wire, holder_id_short
 from openmux.server.port_utils import resolve_port_connected_state, safe_get_port
 
@@ -1020,6 +1021,26 @@ class TcpServerAdapter(BaseGenericAdapter):
         except Exception:
             return None
 
+    def _server_info(self) -> Dict[str, str]:
+        """Build the ``server`` object for the LIST payload.
+
+        Carries the server identity (``id``) and the human-readable display
+        label (``description``) via the shared identity ladder, so the CLI
+        client can show which server it is talking to. Absent on older servers.
+        """
+        try:
+            pm = getattr(self.console_manager, "port_manager", None)
+            cfg_mgr = getattr(pm, "config_manager", None)
+            cfg = getattr(cfg_mgr, "config", None)
+            section = cfg.get("server") if isinstance(cfg, dict) else None
+            if not isinstance(section, dict):
+                section = self.config.get("server") if isinstance(self.config, dict) else None
+            if not isinstance(section, dict):
+                section = {}
+            return {"id": get_server_id(section) or "", "description": get_server_label(section)}
+        except Exception:
+            return {"id": "", "description": get_server_label(None)}
+
     async def handle_list_ports_request(self, client: "ClientSession"):
         """Send JSON list of available ports to client.
 
@@ -1070,6 +1091,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                 "type": "PORT_LIST",
                 "count": len(ports),
                 "ports": ports,
+                "server": self._server_info(),
                 "elapsed_ms": elapsed_ms,
                 "timed_out": timed_out,
             }

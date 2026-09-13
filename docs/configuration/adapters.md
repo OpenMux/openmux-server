@@ -486,14 +486,16 @@ web_status:
 
 Integrated HTTP server for the xterm.js console UI and WebSocket streaming per port. Supports HTTP Basic Auth and optional HTTPS.
 
-Reload behavior: a soft reload applies only `realm`, `motd`, and
-`logged_in_motd`. All other `web_console` keys require a full reload.
+Reload behavior: a soft reload applies only `motd` and `logged_in_motd`. All
+other `web_console` keys require a full reload. The display name shown on the
+login page, About page, and the Basic-Auth dialog comes from the top-level
+`server.description` (deriving to "OpenMux <id>" when absent) and re-reads on
+each render, so it needs no reload at all.
 
 Supported keys:
 - `host`: Bind address (default: `0.0.0.0`)
 - `port`: HTTP/HTTPS port (default: 8081)
 - `enable_ui`: Serve HTML UI endpoints (default: true)
-- `realm`: HTTP Basic-Auth realm name (default: "OpenMux"). Pick up changes with a soft reload.
 - `motd`: Public message of the day. Shown on the login page only. Multiline; hidden when blank (default: not set). Pick up changes with a soft reload.
 - `logged_in_motd`: Message of the day for authenticated users. Shown at the top of the status page. May hold sensitive text; never shown before login. Multiline; hidden when blank (default: not set). Pick up changes with a soft reload.
 - `base_path`: URL prefix for all routes (default: `/`)

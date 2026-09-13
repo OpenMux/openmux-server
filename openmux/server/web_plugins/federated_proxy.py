@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+from openmux.common.identity import basic_authenticate_header
+
 from . import ADAPTER_APP_KEY
 
 # Federated admin proxy plugin (skeleton). Proxies selected admin endpoints to
@@ -261,7 +263,7 @@ async def _handle_proxy(request: web.Request) -> web.StreamResponse:
         return web.Response(
             status=401,
             text="Unauthorized\n",
-            headers={"WWW-Authenticate": f'Basic realm="{getattr(adapter, "realm", "OpenMux")}"'},
+            headers={"WWW-Authenticate": basic_authenticate_header(getattr(adapter, "realm", "OpenMux"))},
         )
     try:
         perms = adapter.auth_manager.get_user_permissions(username) if getattr(adapter, "auth_manager", None) else None

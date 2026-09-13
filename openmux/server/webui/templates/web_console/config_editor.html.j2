@@ -231,7 +231,7 @@
     <div class="section-header"><span class="title">Guidance</span> <span class="desc">When to use what</span></div>
     <div class="section">
       <ul style="margin:0 0 0 18px; padding:0;">
-        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, web console MOTD and realm, edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports, the console access default (the access_default key in security.yaml), and client-listener Max connections / Timeout (applied in place; host, port, and enable need a Full Reload).</li>
+        <li>Use <b>Soft Reload</b> for: Authentication updates (users/API keys/external auth), muxcon public keys, web console MOTDs, edits to Serial/Loopback/Command/TCP-initiator/Telnet-listener ports, the console access default (the access_default key in security.yaml), and client-listener Max connections / Timeout (applied in place; host, port, and enable need a Full Reload). The server label (server description) applies on the next render without any reload.</li>
         <li>Use <b>Full Reload</b> for: client-listener host/port/enable, muxcon advanced settings (heartbeat, multipath, cache, core auth), web status and web console network/TLS settings, and web console plugins.</li>
         <li>Use <b>kill -HUP</b> for: the log level only (the Soft Reload button does not change the log level).</li>
         <li>Use a <b>process restart</b> for: the control socket path, PID file path, and the logging file/rotation settings.</li>
@@ -338,7 +338,7 @@
   </div>
 
   <div class="config-section" data-config-section="web_console">
-    <div class="section-header"><span class="title">Web console</span><span class="reload-hint reload-hint-full" title="Network and TLS settings need a Full Reload; MOTD and realm apply on a Soft Reload">FULL</span> <span class="desc">Admin UI and WS console</span></div>
+    <div class="section-header"><span class="title">Web console</span><span class="reload-hint reload-hint-full" title="Network and TLS settings need a Full Reload; the MOTDs apply on a Soft Reload (the displayed server name comes from the Server section and needs no reload)">FULL</span> <span class="desc">Admin UI and WS console</span></div>
     <div class="section">
       <div class="field"><label for="web_console.host">Host</label><input id="web_console.host" type="text" /></div>
       <div class="field"><label for="web_console.port">Port</label><input id="web_console.port" type="number" min="1" max="65535" /></div>
@@ -346,7 +346,6 @@
       <div class="field"><label for="web_console.base_path">Base path</label><input id="web_console.base_path" type="text" placeholder="/" /></div>
       <div class="field"><label for="web_console.respect_forwarded_prefix">Respect X-Forwarded-Prefix</label><input id="web_console.respect_forwarded_prefix" type="checkbox" /></div>
       <div class="field"><label for="web_console.enable_ui">Enable UI</label><input id="web_console.enable_ui" type="checkbox" /></div>
-      <div class="field"><label for="web_console.realm">Realm</label><input id="web_console.realm" type="text" /></div>
       <div class="field field-multiline"><label for="web_console.motd">Login MOTD</label><textarea id="web_console.motd" rows="3" placeholder="Shown on the login page only"></textarea></div>
       <div class="field field-multiline"><label for="web_console.logged_in_motd">Logged-in MOTD</label><textarea id="web_console.logged_in_motd" rows="4" placeholder="Shown after login; may hold sensitive text"></textarea></div>
       <div class="field"><label for="web_console.static_dir">Static dir</label><input id="web_console.static_dir" type="text" /></div>

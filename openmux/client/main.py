@@ -424,7 +424,17 @@ class OpenMuxClient:
         except Exception:
             meta_entries = None
 
-        print_client_info(f"Ports on {connection.host}:{connection.port}:")
+        # Server identity (when the server reports it in the LIST payload)
+        # so multiple OpenMux nodes are distinguishable in the listing.
+        srv = getattr(connection, "last_server_info", None) or {}
+        srv_label = srv.get("description") if isinstance(srv, dict) else None
+        srv_id = srv.get("id") if isinstance(srv, dict) else None
+        if srv_label and srv_id:
+            print_client_info(f"Ports on {connection.host}:{connection.port} ({srv_label}, server_id={srv_id}):")
+        elif srv_label:
+            print_client_info(f"Ports on {connection.host}:{connection.port} ({srv_label}):")
+        else:
+            print_client_info(f"Ports on {connection.host}:{connection.port}:")
         if meta_entries:
             # Optional: detect duplicate names to hint users about composite ids
             try:

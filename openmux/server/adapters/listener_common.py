@@ -83,9 +83,19 @@ def ip_allowed(peer_ip: str, compiled_acl: List[AclEntry]) -> bool:
     return False
 
 
-def render_port_list(entries: List[Dict[str, Any]]) -> bytes:
-    """Render a port-list entry sequence as CRLF-terminated plain text."""
-    lines = [b"Available ports:\r\n"]
+def render_port_list(entries: List[Dict[str, Any]], header: Optional[str] = None) -> bytes:
+    """Render a port-list entry sequence as CRLF-terminated plain text.
+
+    When ``header`` is a non-empty server label, the leading line becomes
+    ``Available ports on <header>:`` so a user at an interactive menu can
+    tell which OpenMux node they are talking to. Otherwise it stays
+    ``Available ports:``.
+    """
+    lines = []
+    if header:
+        lines.append(f"Available ports on {header}:\r\n".encode())
+    else:
+        lines.append(b"Available ports:\r\n")
     for entry in entries or []:
         name = entry.get("name", "?")
         origin = entry.get("origin_server_id")
@@ -93,6 +103,28 @@ def render_port_list(entries: List[Dict[str, Any]]) -> bytes:
         label = f"{origin}::{name}" if origin else name
         lines.append(f"  {label}  {status}\r\n".encode())
     return b"".join(lines)
+
+
+def resolve_server_label(main_port_manager: Any) -> str:
+    """Resolve the human server label for listener menu banners.
+
+    Reads the ``server`` section from the running config reachable through the
+    port manager's injected config manager and applies the shared identity
+    ladder. Returns an empty string when it cannot be resolved, which leaves
+    the port-list header unchanged (no "on " suffix).
+    """
+    try:
+        from openmux.common.identity import get_server_label
+
+        cfg_mgr = getattr(main_port_manager, "config_manager", None)
+        cfg = getattr(cfg_mgr, "config", None)
+        section = cfg.get("server") if isinstance(cfg, dict) else None
+        if not isinstance(section, dict):
+            return ""
+        label = get_server_label(section)
+        return label if label else ""
+    except Exception:
+        return ""
 
 
 @dataclass
@@ -323,6 +355,7 @@ __all__ = [
     "compile_acl",
     "ip_allowed",
     "render_port_list",
+    "resolve_server_label",
     "EscapeState",
     "feed_escape_byte",
     "CONTROL_MENU_HELP",

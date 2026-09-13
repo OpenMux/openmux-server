@@ -105,6 +105,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from cryptography.x509.oid import NameOID
 
+from openmux.common.identity import get_server_id, get_server_label
 from openmux.server.access_control import capacity_from_wire, capacity_to_wire, wire_to_mode
 from openmux.server.locations import muxcon_known_peers_path, muxcon_tls_dir
 from openmux.server.port_utils import safe_get_port
@@ -178,7 +179,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # Canonical identity comes from top-level server.id, with system hostname as fallback.
         # node_name is deprecated and no longer used.
         self.server_id = effective_config.get("server_id", socket.gethostname())
-        # Optional human-friendly description (from server.description); populated during start() when ConfigManager is available
+        # Human-friendly display label (from the shared identity ladder in
+        # openmux.common.identity: server.description else "OpenMux <id>");
+        # populated during start() when ConfigManager is available.
         self.server_description = ""
         import uuid as _uuid
 
@@ -1357,31 +1360,31 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             False on fatal error.
         """
         try:
-            # If ConfigManager is accessible via main_port_manager, prefer top-level server.id/description
+            # If ConfigManager is accessible via main_port_manager, prefer the
+            # top-level server section for identity (shared identity ladder in
+            # openmux.common.identity).
             try:
+                srv: Optional[Dict[str, Any]] = None
                 cfg_mgr = getattr(self, "main_port_manager", None)
-                if cfg_mgr is not None:
-                    cfg_mgr = getattr(cfg_mgr, "config_manager", None)
-                srv = None
+                cfg_mgr = getattr(cfg_mgr, "config_manager", None)
                 if cfg_mgr is not None:
                     cfg = getattr(cfg_mgr, "config", None)
                     if not cfg:
-                        # lazy load
                         getcm = getattr(cfg_mgr, "load_config", None)
                         if callable(getcm):
                             getcm()
                         cfg = getattr(cfg_mgr, "config", None)
                     if isinstance(cfg, dict):
-                        srv = cfg.get("server") or {}
-                if isinstance(srv, dict):
-                    sid = srv.get("id") or srv.get("server_id")
+                        raw = cfg.get("server")
+                        if isinstance(raw, dict):
+                            srv = raw
+                if srv is not None:
+                    sid = get_server_id(srv)
                     if sid:
-                        self.server_id = str(sid)
-                    sdesc = srv.get("description") or srv.get("name")
-                    if sdesc:
-                        self.server_description = str(sdesc)
+                        self.server_id = sid
+                    self.server_description = get_server_label(srv)
             except Exception:
-                pass
+                self.logger.warning("MuxCon: could not read server identity from config; using defaults", exc_info=True)
             self._stop_event.clear()
 
             # Start listeners (multi or single)

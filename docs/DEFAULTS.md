@@ -21,7 +21,7 @@ Top-level sections
 
 server
 - server.id: no default (runtime may fall back to hostname in muxcon)
-- server.description: no default
+- server.description: no default. This is the server's human-readable display name: shown on the web console login/About pages, the telnet/SSH port menus, the CLI client port listing, and the web Basic-Auth dialog. When blank, the display name derives to "OpenMux <server.id | hostname>".
 - control socket and pidfile: `openmux.sock` / `openmux.pid` inside the run dir — no config keys; see [LOCATIONS.md](LOCATIONS.md)
 
 authentication
@@ -209,7 +209,6 @@ web_console (runtime defaults from openmux/server/web_console.py)
 - base_path: /
 - respect_forwarded_prefix: true
 - enable_ui: true (schema default)
-- realm: OpenMux (schema default)
 - motd: not set (public, login page only; blank hides it)
 - logged_in_motd: not set (logged-in users only; blank hides it)
 - enable_probes: true (schema default)

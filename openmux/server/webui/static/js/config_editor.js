@@ -131,7 +131,7 @@
       const FIELD_HELP = {
         'server.id': 'Unique server identifier used in federation and status; if empty, hostname may be used.',
         'security.access_default': 'Server-wide default for console ports with no group lists (security.yaml). allow = every authenticated user connects; deny = only admin connects. Read-only here; edit config/security.yaml by hand.',
-        'server.description': 'Human-readable description shown in UIs and status.',
+        'server.description': 'Human-readable server name shown on the login page, About page, port menus, and Basic-Auth dialogs. When blank, the server shows "OpenMux <id/hostname>".',
         'server.control_socket': 'Unix domain socket path for openmuxctl and local control. Default logs/openmux.sock; env OPENMUX_CTL_SOCK overrides.',
         'server.pidfile': 'PID file written on startup to enable kill -HUP/-USR1 control. Default logs/openmux.pid; env OPENMUX_PIDFILE overrides.',
 
@@ -170,7 +170,6 @@
         'web_console.host': 'Bind address for the admin web console.',
         'web_console.port': 'TCP port for the admin web console.',
         'web_console.enable_ui': 'Serve the HTML UI (disable to expose only APIs).',
-        'web_console.realm': 'HTTP Basic-Auth realm displayed in login dialogs.',
         'web_console.motd': 'Public message of the day shown on the login page. Multiline is supported; empty hides it.',
         'web_console.logged_in_motd': 'Message of the day for authenticated users (top of the status page). Never shown on the login page; may hold sensitive text.',
         'web_console.static_dir': 'Directory for static assets (xterm, css, js).',
@@ -818,11 +817,11 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         // update in place, so they are soft.
         'client_listener.max_connections': 'soft',
         'client_listener.connection_timeout': 'soft',
-        // Web console UI text is hot-applied on a soft reload (realm is read
-        // per request, the MOTDs on each render); the rest of the web_console
-        // section needs a full reload, so the SOFT marks override the section
-        // badge for these three fields.
-        'web_console.realm': 'soft',
+        // Web console UI text is hot-applied on a soft reload (the MOTDs are
+        // read on each render); the displayed server name comes from the Server
+        // section and is re-read on every render with no reload. The rest of the
+        // web_console section needs a full reload, so the SOFT marks override the
+        // section badge for these two fields.
         'web_console.motd': 'soft',
         'web_console.logged_in_motd': 'soft',
       };
@@ -1236,7 +1235,6 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         setVal('web_console.base_path', deepGet(current, 'web_console.base_path'));
         setVal('web_console.respect_forwarded_prefix', deepGet(current, 'web_console.respect_forwarded_prefix'));
         setVal('web_console.enable_ui', deepGet(current, 'web_console.enable_ui'));
-        setVal('web_console.realm', deepGet(current, 'web_console.realm'));
         setVal('web_console.motd', deepGet(current, 'web_console.motd'));
         setVal('web_console.logged_in_motd', deepGet(current, 'web_console.logged_in_motd'));
         setVal('web_console.static_dir', deepGet(current, 'web_console.static_dir'));
@@ -1345,7 +1343,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         // web_status
         if(getVal('web_status.host')!==undefined || getVal('web_status.port')!==undefined){ deepSet(out,'web_status',{}); maybeSet('web_status.host','web_status.host'); maybeSet('web_status.port','web_status.port'); maybeSet('web_status.enable_http_api','web_status.enable_http_api'); maybeSet('web_status.cors_enable','web_status.cors_enable'); maybeSet('web_status.enable_fault_injection','web_status.enable_fault_injection'); }
         // web_console
-        if(getVal('web_console.host')!==undefined || getVal('web_console.port')!==undefined){ deepSet(out,'web_console',{}); ['host','port','ssl_port','base_path','respect_forwarded_prefix','enable_ui','realm','motd','logged_in_motd','static_dir','template_dir','enable_probes','probes_include_details','use_tls','ssl_cert','ssl_key','tls_autogen','tls_dir','session_ttl_seconds'].forEach(k=>{ maybeSet('web_console.'+k,'web_console.'+k); }); }
+        if(getVal('web_console.host')!==undefined || getVal('web_console.port')!==undefined){ deepSet(out,'web_console',{}); ['host','port','ssl_port','base_path','respect_forwarded_prefix','enable_ui','motd','logged_in_motd','static_dir','template_dir','enable_probes','probes_include_details','use_tls','ssl_cert','ssl_key','tls_autogen','tls_dir','session_ttl_seconds'].forEach(k=>{ maybeSet('web_console.'+k,'web_console.'+k); }); }
         // web_console.plugins from table -> array of strings
         const wcpl = tables['web_console.plugins'] && tables['web_console.plugins']._get ? tables['web_console.plugins']._get() : [];
         if (wcpl && wcpl.length>0) {

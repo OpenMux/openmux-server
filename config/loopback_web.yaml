@@ -28,7 +28,6 @@ web_console:
   host: 127.0.0.1
   port: 8082
   probes_include_details: true
-  realm: OpenMux
   tls_autogen: false
   use_tls: false
 web_status:

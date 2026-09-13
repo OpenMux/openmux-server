@@ -31,6 +31,7 @@ from .listener_common import (
     parse_login,
     read_take_target,
     render_port_list,
+    resolve_server_label,
 )
 from .protocols.plain import TelnetIacStripper
 
@@ -781,7 +782,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 entries = await asyncio.wait_for(getter(), timeout=1.0)
         except Exception:
             entries = []
-        writer.write(render_port_list(entries))
+        writer.write(render_port_list(entries, header=resolve_server_label(self.main_port_manager)))
         await writer.drain()
 
     async def _close_quiet(self, writer: asyncio.StreamWriter) -> None:
