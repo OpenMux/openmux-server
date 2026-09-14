@@ -87,7 +87,7 @@ html, body { height: 100%; margin: 0; background: var(--bg-app); color: var(--te
 
 /* Layout Wrapper */
 .app-layout { display: flex; height: 100vh; overflow: hidden; }
-.sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; transition: width 0.2s ease, opacity 0.2s ease; flex-shrink: 0; white-space: nowrap; }
+.sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; transition: width 0.2s ease, opacity 0.2s ease; flex-shrink: 0; white-space: nowrap; position: relative; }
 .sidebar.collapsed { width: 0; border-right: none; opacity: 0; overflow: hidden; }
 .main-content { flex: 1; display: flex; flex-direction: column; overflow: auto; min-width: 0; position: relative; }
 
@@ -205,6 +205,13 @@ body.mode-readonly header.site { background: #2a2200; border-bottom-color: #6b5a
 .ro-menu-info { padding: 7px 14px 5px; font-size: 11px; color: var(--text-muted, #888); border-bottom: 1px solid var(--border, #444); }
 .ro-menu-item { display: block; width: 100%; padding: 9px 14px; background: none; border: none; color: var(--text-main, #e0e0e0); cursor: pointer; text-align: left; font: inherit; font-size: 13px; }
 .ro-menu-item:hover { background: var(--bg-hover, #2a2a2a); }
+/* Port list options menu - same dropdown pattern as .ro-menu, anchored to the
+   buttons span on the Console row (see layout.html.j2 #console-row-buttons). */
+#console-row-buttons { position: relative; display: inline-flex; }
+.port-labels-menu { position: absolute; top: calc(100% + 4px); right: 0; background: var(--bg-card, #1e1e1e); border: 1px solid var(--border, #444); border-radius: 6px; min-width: 190px; z-index: 30; box-shadow: 0 4px 16px rgba(0,0,0,0.4); overflow: hidden; }
+.port-labels-menu-item { display: block; width: 100%; padding: 9px 14px; background: none; border: none; color: var(--text-main, #e0e0e0); cursor: pointer; text-align: left; font: inherit; font-size: 13px; }
+.port-labels-menu-item:hover { background: var(--bg-hover, #2a2a2a); }
+.port-labels-menu-item-off { color: var(--text-dim, #888); }
 
 /* Ambient viewer-presence badge (issue #48) - neutral color, distinct from the
    yellow read-only indicator; same dropdown pattern as .ro-menu. */
@@ -336,6 +343,13 @@ body.mode-readonly header.site { background: #2a2200; border-bottom-color: #6b5a
 .nav-item:hover .icon, .nav-item.active .icon { opacity: 1; }
 
 /* Sidebar Toggle Button */
+/* Thin drag strip on the sidebar's right edge (layout.js persists the width
+   to omx_sidebar_width; same drag pattern as actionTermSplitter in console.js).
+   .resizing kills the width transition so the edge tracks the cursor. */
+#sidebar-resize-handle { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 15; }
+#sidebar-resize-handle:hover { background: var(--accent-color); opacity: 0.4; }
+.sidebar.resizing { transition: none; }
+
 .sidebar-toggle { background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 8px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; }
 
 /* Adjust Header for Sidebar Layout */
@@ -361,6 +375,9 @@ header.site, header.site { border-bottom: 1px solid var(--border-color); backgro
 .nav-sub-item { display: block; padding: 4px 16px 4px 42px; color: var(--text-muted); text-decoration: none; font-size: 13px; border-left: 3px solid transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nav-sub-item:hover { color: var(--text-bright); background: var(--bg-sub-nav-hover); }
 .nav-sub-item.active { color: var(--text-bright); background: var(--bg-sub-nav-active); border-left-color: var(--accent-color); }
+/* Optional dimmed port description in the sidebar list (port-labels "show
+   description" preference; applied by layout.js as a child span). */
+.nav-sub-item .port-desc { opacity: 0.7; }
 .nav-sub-empty { display: block; padding: 8px 16px 8px 42px; color: var(--text-dim); font-style: italic; font-size: 12px; }
 .nav-more { background: none; border: none; color: var(--text-dim); cursor: pointer; width: 100%; text-align: left; padding: 4px 16px 4px 42px; font-size: 12px; }
 .nav-more:hover { color: var(--text-muted); }

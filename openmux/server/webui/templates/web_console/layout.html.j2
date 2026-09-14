@@ -50,11 +50,18 @@
               <span class="icon">💻</span> Console
             </a>
             <button class="nav-expand" id="console-expand-btn" onclick="toggleConsolePorts(event)" title="Show ports">+</button>
+            <span id="console-row-buttons">
+              <button class="nav-expand" id="port-labels-btn" onclick="togglePortLabelsMenu(event)" title="Port list options">⚙</button>
+              <div class="port-labels-menu" id="port-labels-menu" style="display:none">
+                <button class="port-labels-menu-item" id="plShowServer" onclick="togglePortLabelPref(event, 'server')">Show server</button>
+                <button class="port-labels-menu-item" id="plShowDesc" onclick="togglePortLabelPref(event, 'desc')">Show description</button>
+              </div>
+            </span>
           </div>
           <div class="nav-sub" id="console-ports" style="display:none">
             {% if nav_ports %}
               {% for p in nav_ports %}
-                <a class="nav-sub-item {% if current_port == p.name %}active{% endif %}" href="{{ base_path }}/console?port={{ p.name }}">{{ p.name }}</a>
+                <a class="nav-sub-item {% if current_port == p.name %}active{% endif %}" href="{{ base_path }}/console?port={{ p.name }}" data-origin="{{ p.get('origin_server_id') or 'local' }}" data-desc="{{ p.get('description') or '' }}">{{ p.name }}</a>
               {% endfor %}
             {% else %}
               <div class="nav-sub-empty">No ports</div>
@@ -101,6 +108,7 @@
             <span class="icon">ℹ️</span> About
           </a>
         </div>
+        <div id="sidebar-resize-handle" title="Drag to resize the sidebar"></div>
       </aside>
       <div class="main-content">
         <header class="site">

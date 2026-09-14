@@ -26,6 +26,42 @@
     });
   }
 
+  // Sidebar width: user-resizable via the right-edge handle, persisted per
+  // browser (omx_sidebar_width), same drag pattern as actionTermSplitter in
+  // console.js. The min/max clamp keeps the list usable and the main pane alive.
+  const SIDEBAR_WIDTH_KEY = 'omx_sidebar_width';
+  const SIDEBAR_MIN_W = 160;
+  const SIDEBAR_MAX_W = 600;
+  function clampSidebarWidth(w) {
+      const max = Math.min(SIDEBAR_MAX_W, Math.floor(window.innerWidth * 0.6));
+      return Math.max(SIDEBAR_MIN_W, Math.min(w, max));
+  }
+  try {
+      const savedW = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
+      if (savedW >= SIDEBAR_MIN_W && savedW <= SIDEBAR_MAX_W) sidebar.style.width = clampSidebarWidth(savedW) + 'px';
+  } catch (_) {}
+
+  const resizeHandle = document.getElementById('sidebar-resize-handle');
+  if (resizeHandle) {
+      let resizing = false;
+      resizeHandle.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          resizing = true;
+          sidebar.classList.add('resizing');
+      });
+      document.addEventListener('mousemove', (e) => {
+          if (!resizing) return;
+          sidebar.style.width = clampSidebarWidth(e.clientX) + 'px';
+          try { if (window.fitTerminal) window.fitTerminal(); } catch (_) {}
+      });
+      document.addEventListener('mouseup', () => {
+          if (!resizing) return;
+          resizing = false;
+          sidebar.classList.remove('resizing');
+          try { localStorage.setItem(SIDEBAR_WIDTH_KEY, parseInt(sidebar.style.width, 10)); } catch (_) {}
+      });
+  }
+
   window.toggleConsolePorts = function(e) {
       e.preventDefault();
       e.stopPropagation();
@@ -169,4 +205,110 @@
           setTheme(current === 'light' ? 'dark' : 'light');
       });
   }
+
+  // Port list label options: independent "show server" and "show description"
+  // toggles (omx_port_show_server / omx_port_show_desc, same localStorage
+  // pattern as the other omx_* prefs). They combine into four label forms:
+  // port | port (description) | server::port | server::port (description).
+  // Port names are re-read from each link's href port= param (never from the
+  // mutated text), so click routing, active highlighting, and centering - all
+  // href-based elsewhere - are unaffected.
+  // The server renders the list sorted by port name; capture that order once so
+  // toggling "show server" off can restore it exactly (a live DOM read would
+  // return the already-sorted order after an earlier "show server" pass).
+  const NATURAL_PORT_ORDER = (() => {
+      const pl = document.getElementById('console-ports');
+      return pl ? Array.from(pl.querySelectorAll('a.nav-sub-item[data-origin]')) : [];
+  })();
+  const PORT_LABELS_SERVER_KEY = 'omx_port_show_server';
+  const PORT_LABELS_DESC_KEY = 'omx_port_show_desc';
+
+  function portLabelPrefs() {
+      return {
+          server: !!localStorage.getItem(PORT_LABELS_SERVER_KEY),
+          desc: !!localStorage.getItem(PORT_LABELS_DESC_KEY),
+      };
+  }
+
+  function portLabelDesc(desc) {
+      return String(desc.replace(/\s+/g, ' ')).trim();
+  }
+
+  function applyPortLabels() {
+      const prefs = portLabelPrefs();
+      const setMenuState = (btnId, on) => {
+          const btn = document.getElementById(btnId);
+          if (!btn) return;
+          if (on) btn.classList.remove('port-labels-menu-item-off');
+          else btn.classList.add('port-labels-menu-item-off');
+      };
+      setMenuState('plShowServer', prefs.server);
+      setMenuState('plShowDesc', prefs.desc);
+      const list = document.getElementById('console-ports');
+      if (!list) return;
+      const portItems = Array.from(list.querySelectorAll('a.nav-sub-item[data-origin]'));
+      for (const item of portItems) {
+          const href = item.getAttribute('href') || '';
+          let name = '';
+          try { name = new URL(href, window.location.origin).searchParams.get('port') || ''; } catch (e) {}
+          if (!name) continue;
+          const origin = item.getAttribute('data-origin') || 'local';
+          const desc = portLabelDesc(item.getAttribute('data-desc') || '');
+          const main = prefs.server ? origin + '::' + name : name;
+          const fullText = prefs.desc && desc ? main + ' (' + desc + ')' : main;
+          item.textContent = main;
+          item.title = fullText;
+          const oldDesc = item.querySelector('.port-desc');
+          if (oldDesc) oldDesc.remove();
+          if (prefs.desc && desc) {
+              const span = document.createElement('span');
+              span.className = 'port-desc';
+              span.textContent = ' (' + desc + ')';
+              item.appendChild(span);
+          }
+          item.setAttribute('data-sort-name', name);
+          item.setAttribute('data-sort-origin', origin);
+      }
+      // "Show server" also reorders the list: by server id, then port name
+      // (numeric-aware, matching the server's by-port sort). Toggling it off
+      // restores the server-rendered order.
+      if (prefs.server) {
+          for (const item of [...portItems].sort((a, b) =>
+              a.dataset.sortOrigin.localeCompare(b.dataset.sortOrigin, undefined, {sensitivity: 'base', numeric: true})
+              || a.dataset.sortName.localeCompare(b.dataset.sortName, undefined, {sensitivity: 'base', numeric: true}))) {
+              list.appendChild(item);
+          }
+      } else {
+          for (const item of NATURAL_PORT_ORDER) {
+              if (item.isConnected) list.appendChild(item);
+          }
+      }
+  }
+
+  window.togglePortLabelPref = function(e, which) {
+      e.preventDefault();
+      e.stopPropagation();
+      const key = which === 'server' ? PORT_LABELS_SERVER_KEY : PORT_LABELS_DESC_KEY;
+      if (localStorage.getItem(key)) localStorage.removeItem(key);
+      else localStorage.setItem(key, '1');
+      applyPortLabels();
+  };
+
+  window.togglePortLabelsMenu = function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      const menu = document.getElementById('port-labels-menu');
+      if (!menu) return;
+      menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+  };
+  window.closePortLabelsMenu = function() {
+      const menu = document.getElementById('port-labels-menu');
+      if (menu) menu.style.display = 'none';
+  };
+  document.addEventListener('click', () => {
+      const menu = document.getElementById('port-labels-menu');
+      if (menu) menu.style.display = 'none';
+  });
+  window.applyPortLabels = applyPortLabels;
+  applyPortLabels();
 })();
