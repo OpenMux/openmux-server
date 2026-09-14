@@ -205,6 +205,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                     spec.effective_host = sockname[0]
                     spec.effective_port = sockname[1]
             except Exception:
+                # justification: optional metadata; the bound value is authoritative
                 pass
             return True
         except Exception as exc:
@@ -956,6 +957,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             if isinstance(peer, str):
                 return peer
         except Exception:
+            # justification: heuristic peer lookup; "unknown" is the safe fallback
             pass
         return "unknown"
 

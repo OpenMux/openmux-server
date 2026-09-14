@@ -98,6 +98,7 @@ class ConserverHandler(TcpProtocolHandler):
             try:
                 await w1.wait_closed()
             except Exception:
+                # justification: shutdown cleanup; the transport may already be closed
                 pass
 
         # ── Phase 2: group ────────────────────────────────────────────────

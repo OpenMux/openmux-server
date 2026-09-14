@@ -724,6 +724,7 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     total_retx += int(retx_count or 0)
                 except Exception:
+                    # justification: optional metrics; counters default to zero
                     pass
                 # Bytes TX/RX per peer
                 tx_bytes = 0
@@ -740,6 +741,7 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
                     total_tx_bytes += tx_bytes
                     total_rx_bytes += rx_bytes
                 except Exception:
+                    # justification: optional metrics; counters default to zero
                     pass
                 for cid, meta in grp.get("conns", {}).items():
                     opened_at = meta.get("opened_at")

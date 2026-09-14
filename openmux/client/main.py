@@ -156,6 +156,7 @@ class OpenMuxClient:
                     data = yaml.safe_load(f) or {}
                     return data if isinstance(data, dict) else {}
             except Exception:
+                # justification: format probe; the json fallback follows
                 pass
             try:
                 import json

@@ -124,7 +124,7 @@ class ClientLoggingManager:
                     for h in list(lg.handlers):
                         h.setLevel(logging.NOTSET)
         except Exception:
-            # Defensive: logging reconfiguration should never crash the app
+            # justification: defensive guard; logging reconfiguration must never crash the app
             pass
 
     def get_logger(self, name):

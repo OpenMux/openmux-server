@@ -307,6 +307,7 @@ class ConfigManager:
                 self.logger.debug("get_server_host is deprecated; proxying to client_listener.host")
                 return host
         except Exception:
+            # justification: deprecated proxy lookup; the legacy caller keeps working
             pass
         return "127.0.0.1"
 
@@ -326,6 +327,7 @@ class ConfigManager:
                 self.logger.debug("get_server_port is deprecated; proxying to client_listener.port")
                 return port
         except Exception:
+            # justification: deprecated proxy lookup; the legacy caller keeps working
             pass
         return 8023
 

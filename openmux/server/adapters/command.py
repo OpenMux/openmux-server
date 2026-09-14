@@ -198,6 +198,7 @@ class CommandPort:
                         {"event": "command_status_changed", "status_message": self.status_message},
                     )
             except Exception:
+                # justification: optional notification; UI event delivery is best-effort
                 pass
         else:
             self.status_message = str(message or "")
@@ -229,6 +230,7 @@ class CommandPort:
                     {"event": event, "connected": new_state, "status_message": self.status_message},
                 )
         except Exception:
+            # justification: optional notification; UI event delivery is best-effort
             pass
 
     async def write_data(self, data: bytes) -> int:
@@ -366,6 +368,7 @@ class CommandPort:
                 if self._idle_stop_task and not self._idle_stop_task.done():
                     self._idle_stop_task.cancel()
             except Exception:
+                # justification: idempotent task cancel
                 pass
             # If configured for on-demand spawn, ensure the process is running now
             if self.spawn_on_demand and (not self.process_active):
@@ -400,7 +403,7 @@ class CommandPort:
                                 except Exception:
                                     self.logger.error("Error stopping %s after idle timeout", self.name, exc_info=True)
                         except asyncio.CancelledError:
-                            # New client connected or adapter shutting down; ignore
+                            # justification: task was cancelled on purpose; awaiting it observes the cancellation
                             pass
                         finally:
                             self._idle_stop_task = None
@@ -768,6 +771,7 @@ class CommandPort:
                 else:
                     await asyncio.wait_for(self._output_flush_event.wait(), timeout=self._output_batch_timeout)
             except asyncio.TimeoutError:
+                # justification: expected wake-up; the buffer is checked every tick
                 pass
 
             now = asyncio.get_event_loop().time()
@@ -951,6 +955,7 @@ class CommandPort:
                 if self._idle_stop_task and not self._idle_stop_task.done():
                     self._idle_stop_task.cancel()
             except Exception:
+                # justification: idempotent task cancel
                 pass
             self._idle_stop_task = None
 
@@ -976,6 +981,7 @@ class CommandPort:
                 if self._output_flush_event:
                     self._output_flush_event.set()
             except Exception:
+                # justification: idempotent flusher wake
                 pass
             if self._output_flush_task:
                 self._output_flush_task.cancel()
@@ -1286,6 +1292,7 @@ class CommandWriter:
             try:
                 await asyncio.wait_for(self._flush_event.wait(), timeout=self._batch_timeout)
             except asyncio.TimeoutError:
+                # justification: expected wake-up; the buffer is checked every tick
                 pass  # Timeout reached, flush whatever is in the buffer
             self._flush_event.clear()
             async with self._write_buffer_lock:
@@ -1563,6 +1570,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if isinstance(desc, str) and desc:
                         setattr(port, "description", desc)
                 except Exception:
+                    # justification: in-place live update; the next reload retries
                     pass
                 # In-place update for the RW/RO access-group lists. These are
                 # deliberately NOT in _material_cfg, so a groups-only change
@@ -1575,6 +1583,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if list(getattr(port, "read_only_groups", None) or []) != new_ro:
                         setattr(port, "read_only_groups", new_ro)
                 except Exception:
+                    # justification: in-place live update; the next reload retries
                     pass
                 # In-place update of the process-lifecycle flags. These change
                 # a port that stays in service (e.g. a live client session), so
@@ -1598,6 +1607,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                         ):
                             port.idle_timeout_sec = new_idle
                 except Exception:
+                    # justification: in-place live update; the next reload retries
                     pass
                 unchanged.append(n)
             else:
@@ -1624,6 +1634,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             self.config["command_ports"] = [new_by_name[k] for k in sorted(new_by_name.keys())]
         except Exception:
+            # justification: optional snapshot; the authoritative config is on disk
             pass
 
         summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}

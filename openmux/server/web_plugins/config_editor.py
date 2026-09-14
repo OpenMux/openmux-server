@@ -27,6 +27,7 @@ def _find_config_manager(adapter) -> Optional[ConfigManager]:
             if cm:
                 return cm  # type: ignore[return-value]
         except Exception:
+            # justification: probe step; the next resolution path is tried
             pass
         # 2) port_manager.config_manager
         try:
@@ -34,6 +35,7 @@ def _find_config_manager(adapter) -> Optional[ConfigManager]:
             if cm:
                 return cm  # type: ignore[return-value]
         except Exception:
+            # justification: probe step; the next resolution path is tried
             pass
         # 3) console_manager.config_manager (direct)
         try:
@@ -41,6 +43,7 @@ def _find_config_manager(adapter) -> Optional[ConfigManager]:
             if cm:
                 return cm  # type: ignore[return-value]
         except Exception:
+            # justification: probe step; the next resolution path is tried
             pass
         # 4) adapter.config_manager (unlikely, but cheap)
         try:
@@ -48,6 +51,7 @@ def _find_config_manager(adapter) -> Optional[ConfigManager]:
             if cm:
                 return cm  # type: ignore[return-value]
         except Exception:
+            # justification: probe step; the next resolution path is tried
             pass
         return None
     except Exception:
@@ -427,6 +431,7 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
                 else:
                     adapter.logger.error("Config validation failed: %s", err or "<no message>")
             except Exception:
+                # justification: logging failure must not change the request outcome
                 pass
             return web.json_response({"error": True, "message": err or "Validation failed"}, status=400)
 
@@ -477,17 +482,20 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
     try:
         adapter.logger.info(f"[reload-soft:{req_id}] request from {request.remote or '?'} user={username or '?'}")
     except Exception:
+        # justification: logging failure must not change the request outcome
         pass
     adapter._require_permission(request, ("admin",))
     try:
         has_csrf = bool(request.headers.get("X-OMX-CSRF"))
         adapter.logger.debug(f"[reload-soft:{req_id}] CSRF header present={has_csrf}")
     except Exception:
+        # justification: logging failure must not change the request outcome
         pass
     if not adapter._check_csrf(request):
         try:
             adapter.logger.warning(f"[reload-soft:{req_id}] CSRF check failed")
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
         raise web.HTTPForbidden(text="CSRF")
 
@@ -496,6 +504,7 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
         try:
             adapter.logger.error(f"[reload-soft:{req_id}] Server reload API unavailable (server={bool(server)})")
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
         return web.json_response({"error": True, "message": "Server reload API unavailable"}, status=500)
     try:
@@ -512,6 +521,7 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
         try:
             adapter.logger.error(f"[reload-soft:{req_id}] Soft reload failed: {e}", exc_info=True)
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
         return web.json_response({"error": True, "message": str(e)}, status=500)
 
@@ -528,6 +538,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
     try:
         adapter.logger.info(f"[reload-full:{req_id}] request from {request.remote or '?'} user={username or '?'}")
     except Exception:
+        # justification: logging failure must not change the request outcome
         pass
     adapter._require_permission(request, ("admin",))
     # Log presence of CSRF header to aid debugging (not the value)
@@ -535,11 +546,13 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
         has_csrf = bool(request.headers.get("X-OMX-CSRF"))
         adapter.logger.debug(f"[reload-full:{req_id}] CSRF header present={has_csrf}")
     except Exception:
+        # justification: logging failure must not change the request outcome
         pass
     if not adapter._check_csrf(request):
         try:
             adapter.logger.warning(f"[reload-full:{req_id}] CSRF check failed")
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
         raise web.HTTPForbidden(text="CSRF")
 
@@ -548,6 +561,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
         try:
             adapter.logger.error(f"[reload-full:{req_id}] Server reload API unavailable (server={bool(server)})")
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
         return web.json_response({"error": True, "message": "Server reload API unavailable"}, status=500)
     try:
@@ -567,6 +581,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
         try:
             adapter.logger.error(f"[reload-full:{req_id}] Full reload failed: {e}", exc_info=True)
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
         return web.json_response({"error": True, "message": str(e)}, status=500)
 
@@ -602,6 +617,7 @@ def _validate_payload(payload: Dict[str, Any], cm: ConfigManager) -> Tuple[bool,
             if logger is not None:
                 logger.exception("Config validation failed")
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
         # Ensure non-empty, useful error messages are returned to the UI
         msg = str(e).strip()
@@ -666,6 +682,7 @@ async def _handle_validate(request: web.Request) -> web.StreamResponse:
         else:
             adapter.logger.error("Config validation failed: %s", err or "<no message>")
     except Exception:
+        # justification: logging failure must not change the request outcome
         pass
     return web.json_response({"ok": False, "error": True, "message": err or "Validation failed"}, status=400)
 
@@ -704,6 +721,7 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
         try:
             adapter.logger.error("Config schema endpoint fell back to the permissive schema", exc_info=True)
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
 
     if not loaded:
@@ -829,6 +847,7 @@ def _read_defaults_doc() -> Dict[str, Any]:
                         return float(v)
                     return int(v)
             except Exception:
+                # justification: heuristic value parse; the raw string is kept
                 pass
             # IP-like values or paths remain strings
             return v

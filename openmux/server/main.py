@@ -115,7 +115,7 @@ class OpenMuxServer:
                 console_enabled=logging_cfg.get("console", True),
             )
         except Exception:
-            # Non-fatal if logging recompute fails; continue with prior setup
+            # justification: non-fatal logging recompute; the prior setup stays
             pass
 
         # Point the DataLogger default ports/ directory at the resolved log base
@@ -124,7 +124,7 @@ class OpenMuxServer:
             base, _main_file = _resolve_logging_paths(None, logging_cfg.get("file"))
             DataLogger.get().set_base_dir(str(base))
         except Exception:
-            # Best-effort repoint; keep the default location on failure
+            # justification: best-effort repoint; the default location stays
             pass
 
         # Initialize core components
@@ -146,7 +146,7 @@ class OpenMuxServer:
         try:
             setattr(self.console_manager, "server", self)
         except Exception:
-            # Best-effort; some unit tests may stub ConsoleManager differently
+            # justification: best-effort back-reference; stub managers may differ
             pass
 
         # Legacy connection adapters removed; keep empty structure for status API compatibility
@@ -376,6 +376,7 @@ class OpenMuxServer:
                         "via OPENMUX_RUN_DIR (or OPENMUX_CTL_SOCK as an override)"
                     )
                 except Exception:
+                    # justification: cosmetic deprecation notice; the path resolution continues
                     pass
         if not path:
             path = _locations_control_socket()
@@ -409,6 +410,7 @@ class OpenMuxServer:
                 if value:
                     return value, True
         except Exception:
+            # justification: optional lookup; the fallback path returns the default
             pass
         return None, False
 
@@ -943,6 +945,7 @@ class OpenMuxServer:
                 f"[reload-soft:{req_id}] Initiating soft reload (origin={ (context or {}).get('origin', 'unknown') })"
             )
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
 
         summary: Dict[str, Any] = {"auth_updated": False, "adapters": {}}
@@ -1026,6 +1029,7 @@ class OpenMuxServer:
                         _running = True
                         break
                 except Exception:
+                    # justification: optional lookup; the adapter bookkeeping is still correct
                     pass
             if _running or not _factory:
                 continue
@@ -1144,6 +1148,7 @@ class OpenMuxServer:
         try:
             self.logger.info(f"[reload-soft:{req_id}] Completed with summary: {summary}")
         except Exception:
+            # justification: logging failure must not change the request outcome
             pass
         return summary
 
@@ -1174,6 +1179,7 @@ class OpenMuxServer:
         try:
             await self._stop_control_socket()
         except Exception:
+            # justification: shutdown cleanup; the stop already handles and logs its own failures
             pass
 
     async def reload_adapters_full(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1222,6 +1228,7 @@ class OpenMuxServer:
                     f"[reload-full:{req_id}] Initiating STOP phase by {origin} user={user} remote={remote}; targets={len(targets)}: {', '.join(targets)}"
                 )
             except Exception:
+                # justification: logging failure must not change the request outcome
                 pass
             for adapter in old:
                 try:
@@ -1262,6 +1269,7 @@ class OpenMuxServer:
                     try:
                         summary["stopped_adapters"].append({"name": aname, "type": atype})
                     except Exception:
+                        # justification: optional response detail; the stopped count above is the authoritative tally
                         pass
                 except Exception as e:
                     self.logger.error(f"Error stopping adapter {adapter.name}: {e}", exc_info=True)
@@ -1269,6 +1277,7 @@ class OpenMuxServer:
             try:
                 self.logger.info(f"[reload-full:{req_id}] Stop phase complete: {summary['stopped']} adapters processed")
             except Exception:
+                # justification: logging failure must not change the request outcome
                 pass
             # Clear adapter list and detach from port manager
             self.unified_adapters = []
@@ -1278,6 +1287,7 @@ class OpenMuxServer:
             try:
                 self.port_manager.set_unified_adapters([])
             except Exception:
+                # justification: optional wiring; the port manager keeps its old list
                 pass
 
             # Reload configuration from disk
@@ -1319,6 +1329,7 @@ class OpenMuxServer:
                         summary["created_adapters"].append({"name": getattr(a, "name", "?"), "type": atype})
                         self.logger.debug(f"[reload-full:{req_id}] Created: {getattr(a, 'name', '?')} ({atype})")
                 except Exception:
+                    # justification: cosmetic response detail; the adapter list itself is already set
                     pass
             except Exception as e:
                 self.logger.error(f"Full reload: adapter creation failed: {e}", exc_info=True)
@@ -1331,12 +1342,14 @@ class OpenMuxServer:
             try:
                 self.port_manager.set_unified_adapters(self.unified_adapters)
             except Exception:
+                # justification: optional wiring; the port manager keeps its old list
                 pass
 
             # Wire dependencies
             try:
                 self.logger.info(f"[reload-full:{req_id}] Wiring adapter dependencies")
             except Exception:
+                # justification: logging failure must not change the request outcome
                 pass
             for adapter in self.unified_adapters:
                 try:
@@ -1356,6 +1369,7 @@ class OpenMuxServer:
                             f"[reload-full:{req_id}] Wired dependencies for {getattr(adapter, 'name', '?')} ({atype})"
                         )
                     except Exception:
+                        # justification: logging failure must not change the request outcome
                         pass
                 except Exception as e:
                     self.logger.error(
@@ -1367,6 +1381,7 @@ class OpenMuxServer:
             try:
                 self.logger.info(f"[reload-full:{req_id}] Starting {len(self.unified_adapters)} adapters")
             except Exception:
+                # justification: logging failure must not change the request outcome
                 pass
             for adapter in self.unified_adapters:
                 try:
@@ -1409,12 +1424,14 @@ class OpenMuxServer:
                                     elif "host" in det and "port" in det:
                                         entry["endpoint"] = f"{det.get('host')}:{det.get('port')}"
                             except Exception:
+                                # justification: optional summary detail; the reload proceeds
                                 pass
                             summary["started_adapters"].append(entry)
                             self.logger.info(
                                 f"[reload-full:{req_id}] Started {entry.get('name')} ({entry.get('type')}) {entry.get('endpoint','')} in {_time.monotonic()-_s0:.3f}s"
                             )
                         except Exception:
+                            # justification: logging failure must not change the request outcome
                             pass
                     else:
                         summary["errors"].append(
@@ -1429,6 +1446,7 @@ class OpenMuxServer:
                     f"[reload-full:{req_id}] Reload complete: stopped={summary['stopped']} created={len(summary['created_adapters'])} started={summary['started']} errors={len(summary['errors'])}"
                 )
             except Exception:
+                # justification: logging failure must not change the request outcome
                 pass
 
             # If we deferred self WebConsole restart, schedule it in the background now
@@ -1684,6 +1702,7 @@ def _setup_shutdown_handlers(loop, server):
         try:
             await server._stop_control_socket()
         except Exception:
+            # justification: shutdown cleanup; the socket may already be closed
             pass
 
     # Reload handler (SIGHUP): soft reload via server API and reconfigure logging
@@ -1870,11 +1889,13 @@ def _setup_basic_logging(
         try:
             setattr(_setup_basic_logging, "_max_bytes", max(0, int(max_log_size)))
         except Exception:
+            # justification: idempotent attribute injection
             pass
     if log_backup_count is not None:
         try:
             setattr(_setup_basic_logging, "_backup_count", max(0, int(log_backup_count)))
         except Exception:
+            # justification: idempotent attribute injection
             pass
     if console_enabled is not None:
         setattr(_setup_basic_logging, "_console_enabled", bool(console_enabled))
@@ -1972,6 +1993,7 @@ def _setup_basic_logging(
                 for h in list(lg.handlers):
                     h.setLevel(logging.NOTSET)
     except Exception:
+        # justification: defensive guard; logging reconfiguration must never crash startup
         pass
 
     try:

@@ -677,6 +677,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if isinstance(new_desc, str) and new_desc:
                         setattr(self.ports[n], "description", new_desc)
                 except Exception:
+                    # justification: in-place live update; the next reload retries
                     pass
                 # In-place update for the RW/RO access-group lists. These are
                 # deliberately NOT in _material_cfg, so a groups-only change
@@ -690,6 +691,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if list(getattr(_live_port, "read_only_groups", None) or []) != new_ro:
                         setattr(_live_port, "read_only_groups", new_ro)
                 except Exception:
+                    # justification: in-place live update; the next reload retries
                     pass
                 unchanged.append(n)
             else:
@@ -716,6 +718,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             self.config["loopback_ports"] = [new_by_name[k] for k in sorted(new_by_name.keys())]
         except Exception:
+            # justification: optional snapshot; the authoritative config is on disk
             pass
 
         summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}

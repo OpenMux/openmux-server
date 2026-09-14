@@ -208,6 +208,7 @@ class _OpenMuxSshServer(asyncssh.SSHServer):
             try:
                 auth_manager.clear_auth_failures(self._pending_username, self._peer_ip)
             except Exception:
+                # justification: optional rate-limit housekeeping; the session proceeds
                 pass
         if self._conn is not None:
             self._conn.set_extra_info(
@@ -220,11 +221,13 @@ class _OpenMuxSshServer(asyncssh.SSHServer):
             try:
                 auth_manager.register_auth_failure(self._pending_username, self._peer_ip)
             except Exception:
+                # justification: optional rate-limit bookkeeping; the login flow continues
                 pass
         if self._pw_attempts >= _AUTH_MAX_ATTEMPTS and self._conn is not None:
             try:
                 self._conn.close()
             except Exception:
+                # justification: shutdown cleanup; the attempt limit already fired
                 pass
 
 
@@ -348,6 +351,7 @@ class SshListenerAdapter(BaseGenericAdapter):
         try:
             os.chmod(_HOST_KEY_PATH, 0o600)
         except OSError:
+            # justification: best-effort permission tightening; the key file stays usable
             pass
         self.logger.info("Generated new SSH host key at %s", _HOST_KEY_PATH)
         return key
@@ -375,6 +379,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                 spec.effective_host = spec.bind_host
                 spec.effective_port = server.get_port()
             except Exception:
+                # justification: optional metadata; the bound value is authoritative
                 pass
             self.logger.info("SSH listener '%s' bound to %s:%s", spec.name, spec.bind_host, spec.effective_port)
             return True

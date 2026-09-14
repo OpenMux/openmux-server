@@ -53,6 +53,7 @@ async def _handle_list(request: web.Request) -> web.StreamResponse:
                     }
                 )
         except Exception:
+            # justification: optional list enrichment; the response tolerates a miss
             pass
     import json
 
@@ -190,6 +191,7 @@ def _rewrite_location(loc: str, upstream_base: str, proxied_prefix: str) -> str:
         if loc.startswith("/"):
             return proxied_prefix + loc
     except Exception:
+        # justification: heuristic location rewrite; the original location is returned
         pass
     return loc
 
@@ -357,7 +359,7 @@ async def _handle_proxy(request: web.Request) -> web.StreamResponse:
                     sig_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
                     return f"v1e;{kid};{payload_b64};{sig_b64}"
             except Exception:
-                # Fall through to None
+                # justification: optional sso signature; the request proceeds unsigned
                 pass
             return None
         except Exception:

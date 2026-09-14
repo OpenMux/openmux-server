@@ -54,7 +54,7 @@ class PortManager:
             if listener not in self._meta_listeners:
                 self._meta_listeners.append(listener)
         except Exception:
-            # Non-fatal; listeners are best-effort
+            # justification: idempotent listener registration
             pass
 
     def unregister_meta_listener(self, listener: Callable[[str, Optional[Dict[str, Any]]], Any]) -> None:
@@ -63,6 +63,7 @@ class PortManager:
             if listener in self._meta_listeners:
                 self._meta_listeners.remove(listener)
         except Exception:
+            # justification: idempotent listener cleanup
             pass
 
     def notify_meta_updated(self, port_name: str, changes: Optional[Dict[str, Any]] = None) -> None:
@@ -94,7 +95,7 @@ class PortManager:
                     # Ignore misbehaving listeners
                     continue
         except Exception:
-            # Notification failures are non-fatal
+            # justification: optional notification; a misbehaving listener must not block the port path
             pass
 
     def set_unified_adapters(self, unified_adapters):
@@ -287,6 +288,7 @@ class PortManager:
                         status.get("status_message"),
                     )
                 except Exception:
+                    # justification: optional status detail; the core status fields are set
                     pass
                 return status
 
@@ -326,6 +328,7 @@ class PortManager:
                             while True:
                                 self.data_queue.get_nowait()
                         except asyncio.QueueEmpty:
+                            # justification: queue drained as intended; emptiness is the exit signal
                             pass
 
             async def write_data(self, data: bytes) -> bool:
@@ -488,6 +491,7 @@ class PortManager:
                         if hasattr(port, "last_seen"):
                             port_info["last_seen"] = float(getattr(port, "last_seen"))
                     except Exception:
+                        # justification: optional metadata; the port listing stays complete
                         pass
                     # Optional serial configuration and live line status from remote metadata
                     try:
@@ -495,15 +499,17 @@ class PortManager:
                         if sc is not None:
                             port_info["serial_config"] = sc
                     except Exception:
+                        # justification: optional metadata; the port listing stays complete
                         pass
                     try:
                         ls = getattr(meta, "line_status", None)
                         if ls is not None:
                             port_info["line_status"] = ls
                     except Exception:
+                        # justification: optional metadata; the port listing stays complete
                         pass
             except Exception:
-                # Justification: Non-federated ports or unexpected structure; ignore enrichment
+                # justification: optional metadata; the port listing stays complete
                 pass
 
             # Enrich unified-wrapper ports (e.g., Serial) with config/line-status when available
@@ -531,8 +537,10 @@ class PortManager:
                             if ls:
                                 port_info.setdefault("line_status", ls)
                         except Exception:
+                            # justification: optional metadata; the port listing stays complete
                             pass
             except Exception:
+                # justification: optional metadata; the port listing stays complete
                 pass
             port_list.append(port_info)
 
@@ -540,6 +548,7 @@ class PortManager:
         try:
             port_list.sort(key=lambda p: natural_sort_key(str((p or {}).get("name", ""))))
         except Exception:
+            # justification: best-effort ordering; the list renders unsorted on failure
             pass
         return port_list
 
@@ -683,6 +692,7 @@ class PortManager:
             try:
                 self.notify_meta_updated(port_name, {"event": "client_connected", "client_id": str(client_id)})
             except Exception:
+                # justification: optional notification; UI event delivery is best-effort
                 pass
             # If this is a federated port (RemotePortProxy), proactively open stream when connected
             try:
@@ -755,6 +765,7 @@ class PortManager:
                     try:
                         self.notify_meta_updated(port_name, {"event": "client_disconnected", "client_id": str(client_id)})
                     except Exception:
+                        # justification: optional notification; UI event delivery is best-effort
                         pass
 
                     # If this is a federated port and no more clients are connected,
@@ -1063,6 +1074,7 @@ class PortManager:
                     try:
                         self.logger.debug(f"READ FROM PORT: port={port_name} bytes={len(data)}")
                     except Exception:
+                        # justification: queue drained as intended; emptiness is the exit signal
                         pass
                 return data
             except asyncio.QueueEmpty:
@@ -1308,6 +1320,7 @@ class PortManager:
             try:
                 self.notify_meta_updated(port_name, {"event": "port_registered", "adapter": getattr(adapter, "name", None)})
             except Exception:
+                # justification: optional notification; UI event delivery is best-effort
                 pass
             return True
 
@@ -1331,10 +1344,12 @@ class PortManager:
                 try:
                     DataLogger.get().invalidate_port_cache(port_name)
                 except Exception:
+                    # justification: optional cache invalidation; log files resolve lazily
                     pass
                 try:
                     self.notify_meta_updated(port_name, {"event": "port_unregistered"})
                 except Exception:
+                    # justification: optional notification; UI event delivery is best-effort
                     pass
                 return True
             else:
@@ -1438,6 +1453,7 @@ class PortManager:
             try:
                 self.notify_meta_updated(port_name, {"event": "federated_port_registered"})
             except Exception:
+                # justification: optional notification; UI event delivery is best-effort
                 pass
             return port_name
 
@@ -1481,6 +1497,7 @@ class PortManager:
                 try:
                     self.notify_meta_updated(port_name, {"event": "federated_port_unregistered"})
                 except Exception:
+                    # justification: optional notification; UI event delivery is best-effort
                     pass
 
         except Exception as e:

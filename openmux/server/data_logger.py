@@ -262,6 +262,7 @@ class DataLogger:
                                 evt = ev.meta.get("event")
                                 extras = " ".join(f"{k}={v}" for k, v in ev.meta.items() if k != "event")
                         except Exception:
+                            # justification: optional event metadata; the record still lands
                             pass
                         text = f"[event] {evt or 'meta'}" + (f" {extras}" if extras else "")
                         line = template.format(
@@ -474,7 +475,7 @@ class DataLogger:
             try:
                 self.queue.put_nowait(ev)
             except asyncio.QueueFull:
-                # Drop if overloaded
+                # justification: backpressure: dropping is the intended overflow policy
                 pass
         except Exception:
             self.logger.error("Error recording data event", exc_info=True)

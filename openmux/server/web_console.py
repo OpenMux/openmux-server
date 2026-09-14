@@ -165,6 +165,7 @@ def _about_server_info(adapter, ports_snapshot: Optional[list] = None) -> Dict[s
         try:
             info.update(getter())
         except Exception:
+            # justification: optional status section; the page renders without it
             pass
     # Split the full PEP 440 version at the local segment so the template can
     # show the base ("1.0.1.post48") as the hero and the full string
@@ -231,6 +232,7 @@ def _port_clients_value(port: Dict[str, Any]) -> int:
         try:
             return int(val)
         except Exception:
+            # justification: heuristic parse; the next source is used
             pass
     connected = port.get("connected_clients")
     if isinstance(connected, list):
@@ -239,6 +241,7 @@ def _port_clients_value(port: Dict[str, Any]) -> int:
         try:
             return int(connected)
         except Exception:
+            # justification: heuristic parse; the next source is used
             pass
     return 0
 
@@ -370,6 +373,7 @@ async def auth_middleware(request: web.Request, handler):
                 try:
                     del adapter._sessions[sid]
                 except Exception:
+                    # justification: idempotent expiry of a stale session
                     pass
                 return False
             sess["last_seen"] = now
@@ -379,6 +383,7 @@ async def auth_middleware(request: web.Request, handler):
                 if ip and not sess.get("ip"):
                     sess["ip"] = ip
             except Exception:
+                # justification: optional metadata; the session proceeds without an ip
                 pass
             request["username"] = sess.get("username")
             return True
@@ -423,6 +428,7 @@ async def auth_middleware(request: web.Request, handler):
                     request["perm_override"] = po
                 authenticated_via_sso = True
     except Exception:
+        # justification: sso header parse is advisory; the basic fallback follows
         pass
     if authenticated_via_sso:
         return await handler(request)
@@ -528,6 +534,7 @@ async def handle_console(request: web.Request) -> web.Response:
                 try:
                     adapter.logger.debug(f"xterm assets still missing: {asset_exc}")
                 except Exception:
+                    # justification: redundant; the asset failure is already reported
                     pass
         username = request.get("username")
         try:
@@ -746,6 +753,7 @@ async def handle_login(request: web.Request) -> web.Response:
                     try:
                         resp.del_cookie(name, path=p)
                     except Exception:
+                        # justification: best-effort cookie expiry
                         pass
             resp.set_cookie(adapter._session_cookie_name, sid, **cookie_kwargs)
             raise resp
@@ -761,6 +769,7 @@ async def handle_login(request: web.Request) -> web.Response:
             nxt = request.rel_url.query.get("next") or "/"
             raise web.HTTPFound(location=str(nxt))
     except Exception:
+        # justification: heuristic session check; the login page is the fallback
         pass
     next_q = request.rel_url.query.get("next") or "/"
     body = adapter._render_login(error=False, next_url=next_q)
@@ -775,6 +784,7 @@ async def handle_logout(request: web.Request) -> web.Response:
         if sid and adapter._sessions.get(sid):
             del adapter._sessions[sid]
     except Exception:
+        # justification: idempotent expiry of a stale session
         pass
     nxt = request.rel_url.query.get("next") or "/login"
     resp = web.HTTPFound(location=str(nxt))
@@ -788,6 +798,7 @@ async def handle_logout(request: web.Request) -> web.Response:
             try:
                 resp.del_cookie(name, path=p)
             except Exception:
+                # justification: best-effort cookie expiry
                 pass
     return resp
 
@@ -922,6 +933,7 @@ async def handle_api_reload(request: web.Request) -> web.Response:
             for k, lst in wants.items():
                 cm.config[k] = lst
     except Exception:
+        # justification: optional snapshot; the authoritative config is on disk
         pass
 
     # Build backward-compatible aggregated summary at top-level
@@ -1004,9 +1016,11 @@ def _rw_holders_for_port(adapter: Any, port_name: str) -> list:
                         meta = resolver(cid) if callable(resolver) else {}
                         ip = meta.get("ip") or "unknown"
                     except Exception:
+                        # justification: optional metadata; the holder list tolerates a missing ip
                         pass
                     holders.append(f"[{holder_id_short(cid)}] {username}@{ip} (rw)")
     except Exception:
+        # justification: optional metadata; the holder list stays usable
         pass
     return holders
 
@@ -1024,6 +1038,7 @@ def _max_rw_users_for_port(adapter: Any, port_name: str) -> Optional[int]:
         if port_obj is not None:
             return capacity_to_wire(getattr(port_obj, "max_read_write_users", 1))
     except Exception:
+        # justification: optional metadata; None is the safe answer
         pass
     return None
 
@@ -1050,6 +1065,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                 adapter._client_meta = {}
             adapter._client_meta[client_id] = {"ip": ip, "username": username, "port": port_name, "type": "websocket"}
     except Exception:
+        # justification: optional metadata; the client works without it
         pass
 
     # Optional: push metadata over WS when requested by client (via query flag 'meta=1')
@@ -1135,6 +1151,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                         payload["max_rw_users"] = max_rw
                 await ws.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
             except Exception:
+                # justification: best-effort control message; the UI tolerates a miss
                 pass
             try:
                 # Initial viewer-presence snapshot for this client's own badge (issue #48);
@@ -1144,6 +1161,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                 presence = {"type": "presence", "viewers": viewers}
                 await ws.send_str("OMXCTRL " + json.dumps(presence, separators=(",", ":")))
             except Exception:
+                # justification: best-effort control message; the UI tolerates a miss
                 pass
 
         # Register this client for event-driven meta pushes on this port
@@ -1155,14 +1173,17 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                 try:
                     await adapter._broadcast_meta(port_name)
                 except Exception:
+                    # justification: best-effort meta push; the next event retries
                     pass
             except Exception:
+                # justification: best-effort meta push; the next event retries
                 pass
     except Exception as e:
         adapter.logger.error(f"Error connecting web client to port {port_name}: {e}", exc_info=True)
         try:
             await ws.close(code=1011, message=b"Attach error")
         except Exception:
+            # justification: best-effort error close; the attach failure is already logged above
             pass
         _cleanup_ws()
         return ws
@@ -1194,17 +1215,20 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 try:
                                     await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
+                                    # justification: best-effort control message; the UI tolerates a miss
                                     pass
                                 continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "release_rw":
                                 try:
                                     await adapter.console_manager.demote_client_to_read_only(client_id, port_name)
                                 except Exception:
+                                    # justification: best-effort mode change; the client keeps its mode
                                     pass
                                 resp = {"type": "client_mode", "ok": True, "mode": "read-only"}
                                 try:
                                     await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
+                                    # justification: best-effort control message; the UI tolerates a miss
                                     pass
                                 continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "force_promote":
@@ -1242,6 +1266,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                 try:
                                     await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
+                                    # justification: best-effort control message; the UI tolerates a miss
                                     pass
                                 continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "query_rw_holders":
@@ -1253,6 +1278,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                         resp["max_rw_users"] = max_rw
                                     await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
+                                    # justification: best-effort control message; the UI tolerates a miss
                                     pass
                                 continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "request_scrollback":
@@ -1266,7 +1292,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                     adapter.logger.debug(f"scrollback send error for {port_name}", exc_info=True)
                                 continue  # handled control; do not forward
                     except Exception:
-                        # Fall through to data path if control parsing fails
+                        # justification: best-effort control message; the UI tolerates a miss
                         pass
                     data = msg.data.encode("utf-8", errors="ignore")
                 elif msg.type == web.WSMsgType.BINARY:
@@ -1286,6 +1312,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
         try:
             await ws.close(code=1011, message=b"Server shutting down")
         except Exception:
+            # justification: best-effort close; the socket may already be gone
             pass
     except Exception as e:
         adapter.logger.error(f"Websocket loop error for {port_name}: {e}", exc_info=True)
@@ -1307,6 +1334,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                 if not subs:
                     adapter._meta_subscribers.pop(port_name, None)
         except Exception:
+            # justification: idempotent subscription cleanup
             pass
         try:
             if adapter.console_manager and hasattr(adapter.console_manager, "disconnect_client_from_port"):
@@ -1315,6 +1343,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                 if hasattr(adapter.console_manager, "unregister_client_channel"):
                     adapter.console_manager.unregister_client_channel(client_id)
             except Exception:
+                # justification: idempotent routing cleanup; a stale entry is harmless
                 pass
         except Exception:
             pass
@@ -1324,6 +1353,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
             if hasattr(adapter, "_client_meta"):
                 adapter._client_meta.pop(client_id, None)
         except Exception:
+            # justification: idempotent metadata cleanup
             pass
         adapter.logger.info(f"Web client {client_id} disconnected from port {port_name}")
 
@@ -1568,6 +1598,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 if xbp:
                     return xbp
             except Exception:
+                # justification: heuristic header parse; the configured base path applies
                 pass
         return ""
 
@@ -1777,6 +1808,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if pm and hasattr(pm, "register_meta_listener"):
                 pm.register_meta_listener(self._on_port_meta_update)  # type: ignore[arg-type]
         except Exception:
+            # justification: optional meta subscription; the port still functions
             pass
 
     def set_auth_manager(self, auth_manager):
@@ -1911,6 +1943,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 try:
                     await self._http_runner_http.cleanup()
                 except Exception:
+                    # justification: shutdown cleanup; the transport may already be closed
                     pass
                 self._http_runner_http = None
                 self._http_site_http = None
@@ -1918,6 +1951,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 try:
                     await self._http_runner_https.cleanup()
                 except Exception:
+                    # justification: shutdown cleanup; the transport may already be closed
                     pass
                 self._http_runner_https = None
                 self._http_site_https = None
@@ -1928,12 +1962,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if runner is not None:
                 await runner.cleanup()
         except Exception:
+            # justification: shutdown cleanup; the transport may already be closed
             pass
         # Close any open websockets
         for ws in list(self._ws_to_client.keys()):
             try:
                 await ws.close()
             except Exception:
+                # justification: shutdown cleanup; the transport may already be closed
                 pass
         self._clients.clear()
         self._ws_to_client.clear()
@@ -2029,16 +2065,19 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 try:
                     self._jinja_env.filters["fmt_ts"] = _fmt_ts
                 except Exception:
+                    # justification: optional template filter; the default formatting applies
                     pass
                 try:
                     self.logger.info(f"WebConsole templates enabled: {tdir}")
                 except Exception:
+                    # justification: optional template filter; the default formatting applies
                     pass
             else:
                 self._jinja_env = None
                 try:
                     self.logger.error("WebConsole templates disabled: template_dir missing or not a directory: %s", tdir)
                 except Exception:
+                    # justification: log emission is best-effort; the template-free fallback applies either way
                     pass
         except Exception:
             # jinja2 not installed or couldn't initialize
@@ -2046,6 +2085,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             try:
                 self.logger.error("WebConsole templates unavailable: jinja2 is not installed")
             except Exception:
+                # justification: log emission is best-effort; the template-free fallback applies either way
                 pass
 
     def _render_console(
@@ -2222,6 +2262,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             hb_interval = fed.get("heartbeat_interval_sec")
             peers_cfg = fed.get("peers_configured") or []
         except Exception:
+            # justification: optional status detail; the section renders without it
             pass
         base_path = self._effective_base_path(None)
         sort_key = data.get("sort_key") or "name"
@@ -2334,6 +2375,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 except Exception:
                     continue
         except Exception:
+            # justification: optional lookup; the overview renders without the adapter
             pass
         return None
 
@@ -2375,6 +2417,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     loop = asyncio.get_running_loop()
                     loop.create_task(self._broadcast_meta(port_name, changes))
                 except Exception:
+                    # justification: optional debounced meta push; the next event retries
                     pass
                 return
 
@@ -2386,6 +2429,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     loop = asyncio.get_running_loop()
                     loop.call_later(delay, lambda: asyncio.create_task(self._broadcast_meta(port_name)))
                 except Exception:
+                    # justification: best-effort meta push; the next event retries
                     pass
                 return
             self._meta_debounce[port_name] = now
@@ -2393,8 +2437,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._broadcast_meta(port_name))
             except Exception:
+                # justification: best-effort meta push; the next event retries
                 pass
         except Exception:
+            # justification: best-effort meta push; the next event retries
             pass
 
     async def _broadcast_meta(self, port_name: str, changes: Optional[Dict[str, Any]] = None) -> None:
@@ -2414,6 +2460,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         try:
                             combined.update(p)
                         except Exception:
+                            # justification: best-effort snapshot merge; earlier entries stay
                             pass
                 info = combined if combined else None
             except Exception:
@@ -2457,6 +2504,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                     "flow_control": cfg.get("flow_control"),
                                 }
                         except Exception:
+                            # justification: optional status detail; the port entry stays complete
                             pass
                     elif hasattr(port_obj, "is_connected"):
                         live_connected = bool(getattr(port_obj, "is_connected"))
@@ -2517,8 +2565,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     try:
                         self._meta_subscribers.get(port_name, set()).discard(cid)
                     except Exception:
+                        # justification: idempotent subscription cleanup
                         pass
         except Exception:
+            # justification: idempotent subscription cleanup
             pass
 
     def _gather_federation_overview(self) -> Dict[str, Any]:
@@ -2544,6 +2594,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                             }
                         )
                 except Exception:
+                    # justification: optional status detail; the peer list renders without options
                     pass
                 # active connections
                 try:
@@ -2638,6 +2689,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                         if psnap.get("readiness"):
                                             prepped["readiness"] = psnap.get("readiness")
                                 except Exception:
+                                    # justification: optional status detail; the port entry stays complete
                                     pass
                                 ports_registered.append(prepped)
                                 ports_registered.append(prepped)
@@ -2651,6 +2703,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                     "line_status": line_status,
                                 }
                         except Exception:
+                            # justification: optional status detail; the port entry stays complete
                             pass
                         # Counts per connection
                         try:
@@ -2696,6 +2749,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                             }
                         )
                 except Exception:
+                    # justification: optional status detail; the connection list stays complete
                     pass
 
             # In web_console context, we already expose port list at top via _get_ports_snapshot(); enrich from there
@@ -2855,6 +2909,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 try:
                     total_retx += int(retx_count or 0)
                 except Exception:
+                    # justification: optional metrics; counters default to zero
                     pass
                 tx_bytes = 0
                 rx_bytes = 0
@@ -2870,6 +2925,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     total_tx_bytes += tx_bytes
                     total_rx_bytes += rx_bytes
                 except Exception:
+                    # justification: optional metrics; counters default to zero
                     pass
                 for cid, meta in grp.get("conns", {}).items():
                     opened_at = meta.get("opened_at")
@@ -2882,6 +2938,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         server_id = cinfo.get("server_id")
                         instance_id = cinfo.get("instance_id")
                     except Exception:
+                        # justification: optional metadata; the connection entry tolerates missing ids
                         pass
                     if server_id:
                         server_ids.add(server_id)
@@ -3031,6 +3088,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     except Exception:
                         continue
             except Exception:
+                # justification: optional enumeration; the list degrades gracefully
                 pass
             # Also include active login sessions so a user "logged in" is visible even before attaching to a port
             try:
@@ -3049,6 +3107,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     except Exception:
                         continue
             except Exception:
+                # justification: optional enumeration; the list degrades gracefully
                 pass
         except Exception:
             return out
@@ -3069,6 +3128,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 if parts:
                     return parts[0]
         except Exception:
+            # justification: heuristic client-ip lookup; the next source is tried, else the default
             pass
         try:
             fwd = request.headers.get("Forwarded")
@@ -3089,17 +3149,20 @@ class WebConsoleAdapter(BaseGenericAdapter):
                             return host
                         return val
         except Exception:
+            # justification: heuristic client-ip lookup; the next source is tried, else the default
             pass
         try:
             if request.remote:
                 return str(request.remote)
         except Exception:
+            # justification: heuristic client-ip lookup; the next source is tried, else the default
             pass
         try:
             peer = request.transport.get_extra_info("peername") if request.transport else None
             if isinstance(peer, (list, tuple)) and peer:
                 return str(peer[0])
         except Exception:
+            # justification: heuristic client-ip lookup; the next source is tried, else the default
             pass
         return None
 
@@ -3124,6 +3187,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 meta["port"] = m.get("port")
                 return meta
         except Exception:
+            # justification: optional client metadata; empty meta is the safe answer
             pass
         # Try console manager mapping to identify manager and pull IPs from TCP listener
         try:
@@ -3146,10 +3210,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                 meta["type"] = "tcp"
                                 return meta
                         except Exception:
+                            # justification: heuristic lookup; the next source is tried
                             pass
                     # Otherwise, assume manager is this (web_console) or another ws-capable manager
                     meta["type"] = meta.get("type") or ("websocket" if str(client_id).startswith("ws:") else None)
         except Exception:
+            # justification: optional client metadata; empty meta is the safe answer
             pass
         if "type" not in meta:
             meta["type"] = "websocket" if str(client_id).startswith("ws:") else None
@@ -3231,6 +3297,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 if isinstance(override, str) and override:
                     return override
         except Exception:
+            # justification: optional request metadata; the session permission applies
             pass
         if username and self.auth_manager:
             try:
@@ -3324,6 +3391,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                 if ls_val is not None:
                                     info["last_seen"] = float(ls_val)
                         except Exception:
+                            # justification: optional metadata; the port entry stays complete
                             pass
                         # If this is a loopback port, ensure dummy serial metadata so UI shows info badges
                         try:
@@ -3343,6 +3411,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                 if not info.get("line_status"):
                                     info["line_status"] = {"DCD": False, "DSR": True, "CTS": True, "RTS": True, "DTR": True}
                         except Exception:
+                            # justification: optional status detail; the default line status applies
                             pass
                         # If this is a federated remote proxy, enrich with serial/line-status from metadata
                         try:
@@ -3423,12 +3492,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                         if sm:
                                             info["status_message"] = sm
                                     except Exception:
+                                        # justification: optional status detail; the previous reason stays
                                         pass
                                     try:
                                         lr = getattr(port, "link_reason", None)
                                         if lr:
                                             info["status_message"] = lr
                                     except Exception:
+                                        # justification: optional status detail; the previous reason stays
                                         pass
                                     # Readiness (issue #68): RemotePortProxy.get_status()
                                     # already derives a link-aware value, so only fill
@@ -3449,10 +3520,13 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                                 else (READINESS_IDLE if not _alive else READINESS_ACTIVE)
                                             )
                                     except Exception:
+                                        # justification: optional readiness derivation; the base status remains
                                         pass
                                 except Exception:
+                                    # justification: optional readiness derivation; the base status remains
                                     pass
                         except Exception:
+                            # justification: optional status enrichment wrapper; the base entry stays complete
                             pass
                         # Attach clients info when available
                         try:
@@ -3490,6 +3564,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                             }
                                         )
                                     except Exception:
+                                        # justification: optional client detail; the counts stay accurate
                                         pass
                                 if usernames:
                                     info["clients"] = usernames
@@ -3531,10 +3606,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                                 except Exception:
                                                     continue
                                         except Exception:
+                                            # justification: optional enumeration; the list degrades gracefully
                                             pass
                                     if details:
                                         info["client_details"] = details
                                 except Exception:
+                                    # justification: optional enumeration; the list degrades gracefully
                                     pass
                             else:
                                 # If the port doesn't expose connected_clients, approximate from our meta
@@ -3569,16 +3646,20 @@ class WebConsoleAdapter(BaseGenericAdapter):
                                             if det:
                                                 info["client_details"] = det
                                         except Exception:
+                                            # justification: optional enumeration; the list degrades gracefully
                                             pass
                                 except Exception:
+                                    # justification: optional enumeration; the list degrades gracefully
                                     pass
                         except Exception:
+                            # justification: optional client detail; the counts stay accurate
                             pass
                         ports.append(info)
                         try:
                             if info.get("name"):
                                 seen_names.add(str(info["name"]))
                         except Exception:
+                            # justification: best-effort dedupe; the listing tolerates a repeat
                             pass
                     except Exception:
                         continue
@@ -3590,6 +3671,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         try:
             ports.sort(key=lambda p: natural_sort_key(str((p or {}).get("name", ""))))
         except Exception:
+            # justification: best-effort ordering; the list renders unsorted on failure
             pass
         return ports
 
@@ -3747,15 +3829,18 @@ class WebConsoleAdapter(BaseGenericAdapter):
             try:
                 info["details"]["ssl_port"] = self.ssl_port
             except Exception:
+                # justification: optional status detail; the rest of the snapshot renders
                 pass
             try:
                 info["details"]["http_redirect"] = http_redirect
             except Exception:
+                # justification: optional status detail; the rest of the snapshot renders
                 pass
         if self._started_monotonic is not None:
             try:
                 info["details"]["uptime_seconds"] = max(0.0, time.monotonic() - self._started_monotonic)
             except Exception:
+                # justification: optional status detail; the rest of the snapshot renders
                 pass
         return info
 
@@ -3773,6 +3858,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if _dist_version:
                 version = _dist_version("openmux")  # type: ignore
         except Exception:
+            # justification: heuristic version lookup; "unknown" is the fallback
             pass
         data: Dict[str, Any] = {
             "component": "web_console",
@@ -3823,6 +3909,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         try:
             ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20:@STRENGTH")
         except Exception:
+            # justification: best-effort hardening; the default ciphers stay in force
             pass
         return ctx
 

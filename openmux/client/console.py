@@ -241,6 +241,7 @@ class ConsoleUI:
                     try:
                         await self.connection.close()
                     except Exception:
+                        # justification: shutdown cleanup; the adapter close is idempotent
                         pass
                     # If auto reconnect is enabled, start it and keep UI running
                     if self.reconnect_mode == "auto":
@@ -599,6 +600,7 @@ class ConsoleUI:
                 try:
                     await self.connection.close()
                 except Exception:
+                    # justification: shutdown cleanup; the adapter close is idempotent
                     pass
                 self.is_running = False
 

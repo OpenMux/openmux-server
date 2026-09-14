@@ -217,6 +217,7 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
     try:
         await writer.drain()
     except Exception:
+        # justification: best-effort prompt echo; the client may have left mid-prompt
         pass
     target = ""
     while True:
@@ -232,6 +233,7 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
             try:
                 await writer.drain()
             except Exception:
+                # justification: best-effort prompt echo; the client may have left mid-prompt
                 pass
             return target or None, True
         if ch in (b"\x7f", b"\x08"):  # backspace: erase the echoed byte
@@ -239,6 +241,7 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
             try:
                 await writer.drain()
             except Exception:
+                # justification: best-effort prompt echo; the client may have left mid-prompt
                 pass
             if target:
                 target = target[:-1]
@@ -247,6 +250,7 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
         try:
             await writer.drain()
         except Exception:
+            # justification: best-effort prompt echo; the client may have left mid-prompt
             pass
         target += ch.decode("latin1", errors="ignore")
 

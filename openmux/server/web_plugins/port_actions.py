@@ -236,6 +236,7 @@ def _load_catalog(
                 try:
                     mtimes[action.id] = path.stat().st_mtime
                 except OSError:
+                    # justification: optional mtime cache; the script reloads on next check
                     pass
     return catalog, errors
 
@@ -559,6 +560,7 @@ async def _handle_ws_run_events(request: web.Request) -> web.StreamResponse:
         try:
             await ws.close()
         except Exception:
+            # justification: shutdown cleanup; the transport may already be closed
             pass
     return ws
 

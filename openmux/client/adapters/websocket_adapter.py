@@ -109,6 +109,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                         server_id = sid
                         port_name = base
                 except ValueError:
+                    # justification: heuristic parse of a federated port name; the plain name is kept
                     pass
             # Build path
             if server_id:
@@ -154,6 +155,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                     if msg and msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                         raise RuntimeError("websocket closed on first receive")
                 except asyncio.TimeoutError:
+                    # justification: no handshake frame yet; the loop keeps waiting
                     pass
             except Exception:
                 await session.close()
@@ -317,6 +319,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                     try:
                         await self._aiohttp_session.close()
                     except Exception:
+                        # justification: shutdown cleanup; the transport may already be closed
                         pass
                 return None
             # For ping/pong or other control frames, return empty to indicate no payload
@@ -331,6 +334,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 try:
                     await self._aiohttp_session.close()
                 except Exception:
+                    # justification: shutdown cleanup; the transport may already be closed
                     pass
             return None
 
@@ -341,6 +345,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 try:
                     await self._aiohttp_session.close()
                 except Exception:
+                    # justification: shutdown cleanup; the transport may already be closed
                     pass
                 finally:
                     self._aiohttp_session = None

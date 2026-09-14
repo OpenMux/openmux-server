@@ -533,6 +533,7 @@ class TcpClientAdapter(BaseClientAdapter):
                             return True
                         # Fall through to legacy if not success
                     except Exception:
+                        # justification: HMAC auth attempt; the legacy path follows on failure
                         pass
             # Plaintext legacy disabled
             self.logger.error("Plaintext password authentication disabled; server requires HMAC or another method")
@@ -634,9 +635,7 @@ class TcpClientAdapter(BaseClientAdapter):
                     if isinstance(srv, dict):
                         self.last_server_info = srv  # type: ignore[attr-defined]
                 except Exception:
-                    # Justification: optional metadata assignment failure should not impact
-                    # functional port listing; ignore to maintain backward compatibility
-                    # with older adapter instances lacking the attribute.
+                    # justification: optional metadata; the functional port list is unaffected
                     pass
                 return list(dedup.keys())
             except Exception as e:

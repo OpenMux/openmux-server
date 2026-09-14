@@ -734,6 +734,7 @@ class ConsoleManager:
             try:
                 self.client_to_manager[client_id] = self.client_manager
             except Exception:
+                # justification: idempotent cache write; a failure just re-enters the fallback branch on the next send
                 pass
         return success
 
@@ -799,7 +800,7 @@ class ConsoleManager:
                     f"Registered client manager: {getattr(client_manager, 'name', type(client_manager).__name__)}"
                 )
         except Exception:
-            # Non-fatal if this fails; legacy path remains
+            # justification: optional bookkeeping; the single-manager field was already set above
             pass
 
     def register_client_channel(self, client_id: str, client_manager: Any) -> None:
@@ -817,6 +818,7 @@ class ConsoleManager:
             if getattr(self, "client_managers", None) is not None and client_manager not in self.client_managers:
                 self.client_managers.append(client_manager)
         except Exception:
+            # justification: idempotent routing cache; delivery falls back to the manager broadcast loop
             pass
 
     def unregister_client_channel(self, client_id: str) -> None:
@@ -828,6 +830,7 @@ class ConsoleManager:
             if client_id in self.client_to_manager:
                 del self.client_to_manager[client_id]
         except Exception:
+            # justification: idempotent routing cleanup; a stale entry is harmless and re-resolved on re-registration
             pass
 
     def register_client_port(self, client_id: str, port_name: str) -> None:
@@ -1189,6 +1192,7 @@ class ConsoleManager:
                 if username:
                     return self.auth_manager.get_user_permissions(username)
             except Exception:
+                # justification: optional metadata; the caller default applies
                 pass
         return None
 
@@ -1254,6 +1258,7 @@ class ConsoleManager:
                 if ip:
                     return str(ip)
             except Exception:
+                # justification: optional metadata; the default applies
                 pass
         return "unknown"
 
@@ -1348,6 +1353,7 @@ class ConsoleManager:
                     if client.get("client_id") == client_id:
                         return client.get("mode", "read-only")
         except Exception:
+            # justification: heuristic lookup; defaulting to read-only is safe
             pass
         return "read-only"
 

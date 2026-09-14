@@ -128,3 +128,6 @@ id_ed25519*
 *.img
 action_scripts/
 config-local/
+
+# Local scratch/working files (Copilot temp artifacts, notes)
+.scratch/

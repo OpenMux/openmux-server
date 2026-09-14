@@ -534,6 +534,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         if isinstance(priv2, Ed25519PrivateKey):
                             return priv2
                     except Exception:
+                        # justification: key format probe; the next parser is tried
                         pass
                     self.logger.warning(f"MuxCon auth private key '{path}' is not an Ed25519 key")
                     return None
@@ -544,6 +545,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         if isinstance(priv, Ed25519PrivateKey):
                             return priv
                     except Exception:
+                        # justification: key format probe; the next parser is tried
                         pass
                     self.logger.warning(f"Failed to parse MuxCon auth private key '{path}' as PEM or OpenSSH")
                     return None
@@ -553,6 +555,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if len(raw) == 32:
                     return Ed25519PrivateKey.from_private_bytes(raw)
             except Exception:
+                # justification: key format probe; the next parser is tried
                 pass
             self.logger.warning(f"MuxCon auth private key '{path}' is not PEM, OpenSSH, or a raw 32-byte base64 Ed25519 key")
             return None
@@ -727,12 +730,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     meta.status_message = status_message or None
                 except Exception:
+                    # justification: optional status detail; the proxy stays functional
                     pass
                 try:
                     meta.readiness = readiness or None
                 except Exception:
+                    # justification: optional status detail; the proxy stays functional
                     pass
         except Exception:
+            # justification: optional status detail; the proxy stays functional
             pass
         # Bump the local meta channel so the web console re-renders the port
         # with the fresh reason. (No upstream relay: re-publishing of remote
@@ -743,6 +749,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             if pm and hasattr(pm, "notify_meta_updated"):
                 pm.notify_meta_updated(port_name, {"event": "federated_status_message_changed"})
         except Exception:
+            # justification: optional notification; UI event delivery is best-effort
             pass
 
     async def _broadcast_viewer_presence(
@@ -838,12 +845,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             proxy.remote_viewers = viewers
         except Exception:
+            # justification: optional metadata; the badge catches up on the next event
             pass
         try:
             pm = getattr(self, "main_port_manager", None)
             if pm and hasattr(pm, "notify_meta_updated"):
                 pm.notify_meta_updated(port_name, {"event": "federated_viewers_updated"})
         except Exception:
+            # justification: optional notification; UI event delivery is best-effort
             pass
         await self._relay_viewers_upstream(conn_id, port_name, proxy, viewers)
 
@@ -863,11 +872,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             local_port.remote_viewers = viewers
         except Exception:
+            # justification: optional metadata; the badge catches up on the next event
             pass
         try:
             if pm and hasattr(pm, "notify_meta_updated"):
                 pm.notify_meta_updated(port_name, {"event": "federated_viewers_updated"})
         except Exception:
+            # justification: optional notification; UI event delivery is best-effort
             pass
 
     async def _relay_viewers_upstream(self, conn_id: str, port_name: str, proxy: Any, viewers: List[Dict[str, Any]]) -> None:
@@ -1254,6 +1265,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     try:
                         self.logger.info(f"MuxCon adapter imported {len(imported)} public key(s) from AuthManager (compat)")
                     except Exception:
+                        # justification: optional compat import; the auth keys are loaded
                         pass
             # Import per-key filter metadata similarly when not locally configured
             if (not getattr(self, "_key_filters", None)) and auth_manager and hasattr(auth_manager, "get_public_keys_for_use"):
@@ -1285,6 +1297,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if kf:
                     self._key_filters = kf
         except Exception:
+            # justification: best-effort filter parse; the old filter mapping stays in force
             pass
 
     def _apply_per_connection_filters(self, conn_id: str, key_id: Optional[str]) -> None:
@@ -1535,6 +1548,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if self.federated_cache_enabled and self.federated_cache_ttl_sec > 0 and not self._cache_cleanup_task:
                     self._cache_cleanup_task = asyncio.create_task(self._cache_cleanup_loop())
             except Exception:
+                # justification: optional background task; the adapter runs without the sweep
                 pass
 
             # Load any persisted federated cache
@@ -1542,6 +1556,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if self.federated_cache_enabled:
                     await self._load_federated_cache()
             except Exception:
+                # justification: optional persisted cache; the in-memory state stays authoritative
                 pass
 
             self.is_running = True
@@ -1823,6 +1838,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     except Exception:
                         self.logger.debug(f"Shutdown local session cleanup failed for {pk}", exc_info=True)
             except Exception:
+                # justification: shutdown cleanup; per-peer failures are already logged
                 pass
 
             # Cancel initiator dial loops
@@ -1859,6 +1875,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         await self._cache_cleanup_task
                 self._cache_cleanup_task = None
             except Exception:
+                # justification: shutdown cleanup; the task may already be done
                 pass
 
             self.is_running = False
@@ -1970,6 +1987,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     try:
                         self._update_peer_proxies_live_state()
                     except Exception:
+                        # justification: optional live-state recompute; the next event retries
                         pass
                     await asyncio.sleep(self.heartbeat_interval)
                 except asyncio.CancelledError:
@@ -1977,6 +1995,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 except Exception:  # justification: failover loop scheduling optional; adapter still functions
                     await asyncio.sleep(self.heartbeat_interval)
         except asyncio.CancelledError:
+            # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
             self.logger.debug(f"Heartbeat loop exited with error: {e}", exc_info=True)
@@ -2597,6 +2616,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                     IPV6_BOUND_IF = 125  # <netinet6/in6.h>
                                     sock.setsockopt(socket.IPPROTO_IPV6, IPV6_BOUND_IF, if_index)
                             except Exception:
+                                # justification: optional socket routing hint; the connection works without it
                                 pass
                     else:
                         # Try generic if_nametoindex + IP_BOUND_IF if present
@@ -2605,6 +2625,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             IP_BOUND_IF = 25
                             sock.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, if_index)
                         except Exception:
+                            # justification: optional socket routing hint; the connection works without it
                             pass
             except Exception as e:
                 self.logger.warning(f"Failed to apply interface binding '{interface}': {e}")
@@ -2632,6 +2653,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 sock.close()
             except Exception:
+                # justification: socket cleanup after a failed setup
                 pass
             raise
 
@@ -2707,6 +2729,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 frame = self.proto.create_control_frame(0, seq, f"AUTH:PK:CHALLENGE:{pkid}:{nonce_b64}")
                 await self._send_protocol_frame(writer, frame)
         except Exception:
+            # justification: handshake step; the read loop reaps a stalled connection
             pass
         try:
             self._register_mpath_connection(conn_id)
@@ -2729,6 +2752,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             self._refresh_conn_proxies()
         except Exception:
+            # justification: optional mapping rebuild; the previous mapping stays in effect
             pass
 
     def _make_listen_socket(
@@ -2772,6 +2796,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                     IPV6_BOUND_IF = 125
                                     s.setsockopt(socket.IPPROTO_IPV6, IPV6_BOUND_IF, if_index)
                             except Exception:
+                                # justification: optional socket routing hint; the connection works without it
                                 pass
                     else:
                         try:
@@ -2780,6 +2805,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 IP_BOUND_IF = 25
                                 s.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, if_index)
                         except Exception:
+                            # justification: optional socket routing hint; the connection works without it
                             pass
                 except Exception as e:
                     self.logger.warning(f"Listener interface bind '{interface}' failed: {e}")
@@ -2800,6 +2826,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 s.close()
             except Exception:
+                # justification: socket cleanup after a failed setup
                 pass
             raise
 
@@ -2874,6 +2901,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             self._refresh_conn_proxies()
         except Exception:
+            # justification: optional mapping rebuild; the previous mapping stays in effect
             pass
         # If peer doesn't require auth, advertise immediately after handshake
         try:
@@ -2961,6 +2989,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             notice = self.proto.create_control_frame(0, seq, "AUTH:REQUIRED")
                             await self._send_protocol_frame(writer_obj, notice)
                         except Exception:
+                            # justification: advisory notice; unauthenticated frames are rejected anyway
                             pass
                         continue
                     # Update last_seen on data activity
@@ -2994,6 +3023,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         ack = self.proto.create_ack_frame(int(frame.get("seq") or 0), ack_seq)
                         await self._send_protocol_frame(writer_obj, ack)
                     except Exception:
+                        # justification: protocol ack; the peer retransmits on timeout
                         pass
                 elif ftype == "O":
                     # Require authentication before accepting stream opens
@@ -3003,6 +3033,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             notice = self.proto.create_control_frame(0, seq, "AUTH:REQUIRED")
                             await self._send_protocol_frame(writer_obj, notice)
                         except Exception:
+                            # justification: advisory notice; unauthenticated frames are rejected anyway
                             pass
                         continue
                     # Update last_seen on open stream
@@ -3100,6 +3131,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             notice = self.proto.create_control_frame(0, seq, "AUTH:REQUIRED")
                             await self._send_protocol_frame(writer_obj, notice)
                         except Exception:
+                            # justification: advisory notice; unauthenticated frames are rejected anyway
                             pass
                         continue
                     # Update last_seen on close stream
@@ -3169,8 +3201,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         if buf and acked in buf:
                             buf.pop(acked, None)
                     except Exception:
+                        # justification: optional retx bookkeeping; the data was delivered
                         pass
         except asyncio.CancelledError:
+            # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
             self.logger.warning(f"Read loop error on {conn_id}: {e}", exc_info=True)
@@ -3239,6 +3273,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         if pk not in peer_keys:
                             peer_keys.append(pk)
                 except Exception:
+                    # justification: optional enumeration; the known groups are still scanned
                     pass
 
             for pk in peer_keys:
@@ -3255,6 +3290,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         try:
                             proxy.is_connected = live
                         except Exception:
+                            # justification: optional live-state hint; the stale detection is advisory
                             pass
                         # Local offline reason (issue #62): set on the flip to
                         # "no live path", keep while still down, clear on recover.
@@ -3270,6 +3306,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 src_server = src_server or "unknown"
                                 proxy.link_reason = f"MuxCon link to {src_server} is down"
                         except Exception:
+                            # justification: optional status detail; the proxy stays registered
                             pass
                         # When transitioning to disconnected, best-effort notify via data queue
                         if not live:
@@ -3283,6 +3320,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 src_path = f"{src_server}::{pname}"
                                 self._emit_link_notice_once(proxy, "stale", src_path)
                             except Exception:
+                                # justification: optional notice; the UI badge catches up on the next event
                                 pass
                         # Notify PortManager/meta listeners
                         try:
@@ -3293,14 +3331,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                     if hasattr(proxy, "last_seen"):
                                         payload["last_seen"] = float(getattr(proxy, "last_seen"))
                                 except Exception:
+                                    # justification: optional notification; UI event delivery is best-effort
                                     pass
                                 pm.notify_meta_updated(pname, payload)
                         except Exception:
+                            # justification: optional notification; UI event delivery is best-effort
                             pass
                     except Exception:
                         continue
         except Exception:
-            # Non-fatal best-effort update
+            # justification: optional notification; UI event delivery is best-effort
             pass
 
     # ================= Fault Injection Methods =================
@@ -3458,6 +3498,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             self._unregister_mpath_connection(conn_id)
         except Exception:
+            # justification: optional multipath cleanup; the record is already removed
             pass
         # Fetch connection record after unregister attempt (may be absent)
         conn = self.connections.pop(conn_id, None)
@@ -3466,10 +3507,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 self._wire_state.pop(conn_id, None)
             except Exception:
+                # justification: idempotent state cleanup
                 pass
             try:
                 self._hb_state.pop(conn_id, None)
             except Exception:
+                # justification: idempotent state cleanup
                 pass
             self.logger.info(f"Connection closed: {conn_id}")
             # `_unregister_mpath_connection` above already ran; if the group just
@@ -3513,6 +3556,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         if proxies:
                             peer_key = node_key
                     except Exception:
+                        # justification: optional key resolution; the fallback key is used
                         pass
                 # Attempt to determine server_id for unregister
                 server_id = None
@@ -3537,6 +3581,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             src_server = src_server or "unknown"
                             proxy.link_reason = f"MuxCon link to {src_server} is down"
                         except Exception:
+                            # justification: optional status detail; the proxy stays registered
                             pass
                         if hasattr(proxy, "disconnect") and callable(proxy.disconnect):
                             if asyncio.iscoroutinefunction(proxy.disconnect):
@@ -3555,6 +3600,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             src_path = f"{src_server}::{pname}"
                             self._emit_link_notice_once(proxy, "disconnected", src_path)
                         except Exception:
+                            # justification: optional notice; the UI badge catches up on the next event
                             pass
                         self.logger.info(
                             f"Marked federated port '{pname}' disconnected; no active paths remain for {peer_key}"
@@ -3565,6 +3611,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             if pm and hasattr(pm, "notify_meta_updated"):
                                 pm.notify_meta_updated(pname, {"event": "federated_disconnected", "peer_key": peer_key})
                         except Exception:
+                            # justification: optional notification; UI event delivery is best-effort
                             pass
                     except Exception as e:
                         self.logger.debug(f"Error marking proxy {pname} disconnected for peer {peer_key}: {e}", exc_info=True)
@@ -3576,6 +3623,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         try:
                             setattr(proxy, "last_seen", getattr(proxy, "last_seen", now_ts))
                         except Exception:
+                            # justification: optional metadata; the timestamp stays as is
                             pass
                         try:
                             if pm and hasattr(pm, "notify_meta_updated"):
@@ -3602,8 +3650,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     self._update_peer_proxies_live_state(peer_key)
                 except Exception:
+                    # justification: optional live-state recompute; the next event retries
                     pass
         except Exception:
+            # justification: optional live-state recompute; the next event retries
             pass
         # Cleanup heartbeat state for this connection
         try:
@@ -3614,6 +3664,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             self._refresh_conn_proxies()
         except Exception:
+            # justification: optional mapping rebuild; the previous mapping stays in effect
             pass
         # If this was the peer's last path, drop its origin-side session state
         # (pumps, fed: pseudo-clients, local stream map) so nothing keeps draining
@@ -3659,14 +3710,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     proxy.data_queue.put_nowait(msg)
                 except Exception:
+                    # justification: best-effort notice delivery; the queue may be full or gone
                     pass
             try:
                 setattr(proxy, "_last_link_notice", state)
                 setattr(proxy, "_last_link_notice_ts", now_ts)
             except Exception:
+                # justification: idempotent one-shot marker
                 pass
         except Exception:
-            # Best-effort only
+            # justification: idempotent one-shot marker
             pass
 
     async def _cache_cleanup_loop(self):
@@ -3677,6 +3730,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     self._purge_offline_cached_ports()
                 except Exception:
+                    # justification: background sweep; the next tick retries
                     pass
         except asyncio.CancelledError:
             return
@@ -3718,10 +3772,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                     try:
                                         pm.notify_meta_updated(pname, {"event": "federated_port_unregistered_ttl"})
                                     except Exception:
+                                        # justification: optional notification; UI event delivery is best-effort
                                         pass
                                 except Exception:
                                     getattr(pm, "ports", {}).pop(pname, None)
                         except Exception:
+                            # justification: optional notification; UI event delivery is best-effort
                             pass
                         proxies.pop(pname, None)
                         try:
@@ -3765,6 +3821,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 status_msg = getattr(meta, "status_message", None)
                                 readiness_cached = getattr(meta, "readiness", None)
                             except Exception:
+                                # justification: optional cache enrichment; the core entry is still written
                                 pass
                         ent[pname] = {
                             "connected": bool(getattr(proxy, "is_connected", False)),
@@ -3857,6 +3914,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         try:
                             proxy.last_seen = float(rec.get("last_seen", 0) or 0)
                         except Exception:
+                            # justification: optional status detail; the proxy stays registered
                             pass
                         # Register with PortManager if available (via the normal
                         # registration path so the data callback gets installed -
@@ -4042,6 +4100,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         else:
                             line_status = {"DCD": False, "DSR": True, "CTS": True, "RTS": True, "DTR": True}
                 except Exception:
+                    # justification: optional metadata; the default line status applies
                     pass
                 metas.append(
                     PortMetadata(
@@ -4287,6 +4346,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 frame = self.proto.create_control_frame(0, seq, "AUTH:ERROR:no_client_key")
                                 await self._send_protocol_frame(writer, frame)
                         except Exception:
+                            # justification: protocol step; the peer re-authenticates on reconnect
                             pass
                         return
                     # AUTH:PK:RESPONSE:<key_id>:<sig_b64> (server side)
@@ -4737,6 +4797,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if lpp is not None:
                     pref = int(lpp)
             except Exception:
+                # justification: optional multipath bookkeeping; the default preference applies
                 pass
         now_ts = time.time()
         grp["conns"][conn_id] = {"opened_at": opened_at, "pref": pref, "last_seen": now_ts, "last_rx_seen": now_ts}
@@ -4776,6 +4837,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             self._refresh_conn_proxies()
         except Exception:
+            # justification: optional mapping rebuild; the previous mapping stays in effect
             pass
 
     def _rekey_mpath_connection(self, conn_id: str) -> None:
@@ -4838,6 +4900,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             old_sid = self._peer_next_stream_id.pop(current_key, 0)
                             self._peer_next_stream_id[new_key] = max(old_sid, self._peer_next_stream_id.get(new_key, 0))
                     except Exception:
+                        # justification: optional stream-id rekey; the allocator keeps its max
                         pass
             # Insert into new group (merge if exists)
             new_grp = self._mpath_groups.setdefault(new_key, {"conns": OrderedDict(), "primary": None, "rr_index": 0})
@@ -4854,6 +4917,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 self._refresh_conn_proxies()
             except Exception:
+                # justification: optional mapping rebuild; the previous mapping stays in effect
                 pass
         except Exception as e:
             self.logger.debug(f"Rekey failed for {conn_id}: {e}", exc_info=True)
@@ -4898,6 +4962,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             self._refresh_conn_proxies()
         except Exception:
+            # justification: optional mapping rebuild; the previous mapping stays in effect
             pass
 
     def _refresh_conn_proxies(self) -> None:
@@ -4921,7 +4986,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     mapping[cid] = (self._peer_proxies or {}).get(pk, {})
             self._conn_proxies = mapping
         except Exception:
-            # Best-effort; leave previous mapping
+            # justification: optional enumeration; the known groups are still scanned
             pass
 
     def _select_mpath_connection(self, peer_key: str) -> Optional[str]:
@@ -5026,6 +5091,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         if hb_window > effective_stale_sec:
                             effective_stale_sec = hb_window
                     except Exception:
+                        # justification: optional window tuning; the stale window default applies
                         pass
                     stale_cutoff = now - effective_stale_sec if effective_stale_sec > 0 else None
                     for key, grp in list(self._mpath_groups.items()):
@@ -5060,12 +5126,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                             if not grp["conns"]:
                                                 self._mpath_groups.pop(key, None)
                                         except Exception:
+                                            # justification: optional failover prune; the close task still runs
                                             pass
                                         # Close asynchronously to clean up transport and state
                                         asyncio.create_task(self._close_connection(cid))
                                         # Skip further processing for this cid in this iteration
                                 except Exception:
-                                    # Best-effort pruning; ignore per-connection errors
+                                    # justification: best-effort failover sweep; per-connection errors do not stop the scan
                                     pass
                         primary = grp.get("primary")
                         if not primary:
@@ -5148,6 +5215,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     pass
                 await asyncio.sleep(self.mpath_failover_check_sec)
         except asyncio.CancelledError:
+            # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
             self.logger.debug(f"mpath failover loop exited with error: {e}", exc_info=True)
@@ -5251,6 +5319,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 self._peer_bytes_tx[peer_key] = self._peer_bytes_tx.get(peer_key, 0) + len(data)
             except Exception:
+                # justification: optional metrics; the data path is unaffected
                 pass
             await self._send_protocol_frame(writer, frame)
             # Track for retransmission under peer_key
@@ -5259,6 +5328,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     self._peer_sendbuf[peer_key] = {}
                 self._peer_sendbuf[peer_key][seq] = (conn_id, stream_id, data, time.time())
             except Exception:
+                # justification: optional metrics; the data path is unaffected
                 pass
             return True
         except Exception as e:
@@ -5384,6 +5454,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "peer may have restarted - see issue #55"
             )
         except Exception:
+            # justification: optional rate-limiter state; the warning above already fired
             pass
 
     async def _flush_stuck_gap(self, peer_key: str, conn_id: str, st: Dict[str, Any], expected: int) -> None:
@@ -5419,6 +5490,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 self._peer_bytes_rx[peer_key] = self._peer_bytes_rx.get(peer_key, 0) + len(data2)
             except Exception:
+                # justification: optional metrics; the data path is unaffected
                 pass
             await self._route_data_frame(conn_id, sid2, data2, cur)
             cur += 1
@@ -5457,6 +5529,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     self._peer_bytes_rx[peer_key] = self._peer_bytes_rx.get(peer_key, 0) + len(data)
                 except Exception:
+                    # justification: optional metrics; the data path is unaffected
                     pass
                 await self._route_data_frame(conn_id, stream_id, data, seq)
                 expected += 1
@@ -5466,6 +5539,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     try:
                         self._peer_bytes_rx[peer_key] = self._peer_bytes_rx.get(peer_key, 0) + len(data2)
                     except Exception:
+                        # justification: optional metrics; the data path is unaffected
                         pass
                     await self._route_data_frame(conn_id, sid2, data2, expected)
                     expected += 1
@@ -5476,6 +5550,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 self._peer_bytes_rx[peer_key] = self._peer_bytes_rx.get(peer_key, 0) + len(data)
             except Exception:
+                # justification: optional metrics; the data path is unaffected
                 pass
             buf[seq] = (stream_id, data)
             gap_since = st.get("gap_since")
@@ -5526,9 +5601,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 self._peer_retx_count[peer_key] = self._peer_retx_count.get(peer_key, 0) + 1
                                 self._peer_bytes_tx[peer_key] = self._peer_bytes_tx.get(peer_key, 0) + len(data)
                             except Exception:
+                                # justification: optional metrics; the data path is unaffected
                                 pass
                             self.logger.debug(f"[RETX] Resent seq={seq} sid={stream_id} via {cid} for {peer_key}")
                         except Exception:
+                            # justification: optional metrics; the data path is unaffected
                             pass
                 # increase/decrease rto mildly based on HB
                 try:
@@ -5540,9 +5617,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         avg_rtt = max(1, sum(rtt_candidates) // max(1, len(rtt_candidates))) / 1000.0
                         rto = min(self.retx_max_ms / 1000.0, max(self.retx_initial_ms / 1000.0, avg_rtt * 2.5))
                 except Exception:
+                    # justification: optional retransmission tuning; the default rto stays
                     pass
                 await asyncio.sleep(0.05)
         except asyncio.CancelledError:
+            # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
             self.logger.debug(f"Retransmission loop error: {e}", exc_info=True)
@@ -5617,16 +5696,19 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                     getattr(pm, "ports", {}).pop(pname, None)
                                     self.logger.info(f"Unregistered stale federated port: {pname}")
                     except Exception:
+                        # justification: best-effort stale unregistration; the remaining ports are untouched
                         pass
                     try:
                         if hasattr(proxy, "disconnect"):
                             await proxy.disconnect()
                     except Exception:
+                        # justification: best-effort stale-proxy close; the port is already removed
                         pass
                 # Proxies changed for this peer group; refresh per-connection mapping
                 try:
                     self._refresh_conn_proxies()
                 except Exception:
+                    # justification: optional mapping rebuild; the previous mapping stays in effect
                     pass
             except Exception as e:
                 self.logger.debug(f"Stale proxy purge failed for {peer_key}: {e}", exc_info=True)
@@ -5703,6 +5785,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "(stale stream id, peer restarted, or session not cleaned up - see issue #54)"
             )
         except Exception:
+            # justification: optional rate-limiter state; the warning above already fired
             pass
 
     async def _stop_local_session(self, peer_key: str, stream_id: int, reason: str = "") -> None:
@@ -5727,6 +5810,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             if peer_key in self._local_session_map:
                 self._local_session_map[peer_key].pop(stream_id, None)
         except Exception:
+            # justification: idempotent session cleanup
             pass
         if task is not None and not task.done():
             task.cancel()
@@ -5763,6 +5847,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if sid not in slots:
                     slots.append(sid)
         except Exception:
+            # justification: idempotent session cleanup
             pass
         for sid in slots:
             try:
@@ -5772,10 +5857,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             self._local_session_map.pop(peer_key, None)
         except Exception:
+            # justification: idempotent session cleanup
             pass
         try:
             self._session_map.pop(peer_key, None)
         except Exception:
+            # justification: idempotent session cleanup
             pass
 
     async def _maybe_cleanup_empty_peer(self, peer_key: Optional[str]) -> None:
@@ -5966,6 +6053,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         )
                     )
             except Exception:
+                # justification: optional chain metadata; the proxy registers without hops
                 pass
         else:
             # Optional legacy string server ids (not required per request)
@@ -5983,6 +6071,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         )
                     )
             except Exception:
+                # justification: optional chain metadata; the proxy registers without hops
                 pass
         # Optional serial/line-status details if peer provides them
         serial_cfg = None
@@ -6052,6 +6141,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     try:
                         setattr(existing, "adapter", self)
                     except Exception:
+                        # justification: idempotent rebind; the proxy is already functional
                         pass
                     setattr(existing, "connection_id", peer_key)
                     setattr(existing, "metadata", metadata)
@@ -6062,6 +6152,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     try:
                         existing.max_read_write_users = wire_to_mode(getattr(metadata, "max_rw_users", None))
                     except Exception:
+                        # justification: in-place live update; the next reload retries
                         pass
                     if hasattr(existing, "is_connected"):
                         existing.is_connected = True
@@ -6072,6 +6163,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         if hasattr(existing, "link_reason"):
                             existing.link_reason = ""
                     except Exception:
+                        # justification: optional status detail; the origin reason resurfaces
                         pass
                     # A proxy loaded from the federated cache may have been
                     # registered without its data callback (issue #56): inbound
@@ -6144,8 +6236,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         try:
                             self._refresh_conn_proxies()
                         except Exception:
+                            # justification: optional mapping rebuild; the previous mapping stays in effect
                             pass
                     except Exception:
+                        # justification: optional mapping rebuild; the previous mapping stays in effect
                         pass
                     reused = True
         except Exception as e:
@@ -6202,6 +6296,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     try:
                         self._refresh_conn_proxies()
                     except Exception:
+                        # justification: optional mapping rebuild; the previous mapping stays in effect
                         pass
                     try:
                         self._save_federated_cache()
@@ -6239,6 +6334,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     f"Closed stale remote stream sid={sid} ({key}) for port={proxy.remote_port_name} on reconnect"
                 )
             except Exception:
+                # justification: best-effort stale-stream close; the local cleanup proceeds
                 pass
         stale.clear()
 
@@ -6275,6 +6371,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     await pm.demote_client(proxy.remote_port_name, cid)
                 except Exception:
+                    # justification: optional local demotion; the user can take the slot
                     pass
 
     # --- Wire helpers: frame send/read ---
@@ -6307,6 +6404,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if parsed:
                         _, _, _, seq_val = parsed
                 except Exception:
+                    # justification: optional log annotation; the frame is still sent
                     pass
                 if seq_val is not None:
                     self.logger.debug(f"TX frame: {hdr_preview} seq={seq_val}")
@@ -6596,6 +6694,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 self.last_seen = time.time()
             except Exception:
+                # justification: optional liveness marker
                 pass
             if self.data_callback:
                 try:
@@ -6632,6 +6731,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 self.last_seen = time.time()
             except Exception:
+                # justification: optional liveness marker
                 pass
             await self.adapter._send_data_mpath(self.connection_id, session_id, data)
             return len(data)
@@ -6707,6 +6807,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     ):
                         self.adapter._session_map[self.connection_id].pop(sid, None)
                 except Exception:
+                    # justification: idempotent session cleanup
                     pass
                 await self.adapter._send_stream_close_mpath(self.connection_id, sid, "client_disconnect")
                 self.logger.info(f"Closed remote stream sid={sid} for client={client_id} on port={self.remote_port_name}")
@@ -6828,6 +6929,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         ):
                             self.adapter._session_map[self.connection_id].pop(sid, None)
                     except Exception:
+                        # justification: idempotent session cleanup
                         pass
                 self._client_sessions.clear()
             except Exception as e:
@@ -6844,6 +6946,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 self.last_seen = time.time()
             except Exception:
+                # justification: optional liveness marker
                 pass
             return True
 
@@ -6864,6 +6967,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     self._stale_sessions.update(self._client_sessions)
                 except Exception:
+                    # justification: idempotent state cleanup
                     pass
                 await self.close_all_streams()
                 self.state = PortState.DESTROYED

@@ -66,6 +66,7 @@ async def send_command(sock_path: str, payload: dict) -> int:
             writer.close()
             await writer.wait_closed()
         except Exception:
+            # justification: shutdown cleanup; the transport may already be closed
             pass
 
 

@@ -410,6 +410,7 @@ class SerialPortWrapper:
             try:
                 await self.reconnect_task
             except asyncio.CancelledError:
+                # justification: task was cancelled on purpose; awaiting it observes the cancellation
                 pass
 
         if self.connection_task and not self.connection_task.done():
@@ -417,6 +418,7 @@ class SerialPortWrapper:
             try:
                 await self.connection_task
             except asyncio.CancelledError:
+                # justification: task was cancelled on purpose; awaiting it observes the cancellation
                 pass
 
         # Close connection
@@ -450,6 +452,7 @@ class SerialPortWrapper:
                     try:
                         await self.read_task
                     except asyncio.CancelledError:
+                        # justification: task was cancelled on purpose; awaiting it observes the cancellation
                         pass
                     except Exception as e:
                         self.logger.error(f"Read loop error: {e}", exc_info=True)
@@ -570,6 +573,7 @@ class SerialPortWrapper:
                 try:
                     await self.read_task
                 except asyncio.CancelledError:
+                    # justification: task was cancelled on purpose; awaiting it observes the cancellation
                     pass
 
             if self.writer:
@@ -807,6 +811,7 @@ class SerialAdapter(BaseGenericAdapter):
                 if mpm and hasattr(mpm, "notify_meta_updated"):
                     mpm.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
             except Exception:
+                # justification: optional notification; UI event delivery is best-effort
                 pass
 
         return _notif
@@ -1210,6 +1215,7 @@ class SerialAdapter(BaseGenericAdapter):
                         if isinstance(desc, str) and desc and desc != getattr(spw, "description", None):
                             spw.description = desc
                     except Exception:
+                        # justification: in-place live update; the next reload retries
                         pass
                     # In-place update for the RW/RO access-group lists. These
                     # fields are deliberately NOT in _material_config, so a
@@ -1223,6 +1229,7 @@ class SerialAdapter(BaseGenericAdapter):
                         if list(spw.read_only_groups or []) != new_ro:
                             spw.read_only_groups = new_ro
                     except Exception:
+                        # justification: in-place live update; the next reload retries
                         pass
                 unchanged.append(name)
             else:
@@ -1251,6 +1258,7 @@ class SerialAdapter(BaseGenericAdapter):
             if isinstance(self.config, dict):
                 self.config["serial_ports"] = [new_by_name[n] for n in sorted(new_by_name.keys())]
         except Exception:
+            # justification: optional snapshot; the authoritative config is on disk
             pass
 
         summary = {

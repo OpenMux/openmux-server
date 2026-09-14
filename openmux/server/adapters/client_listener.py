@@ -173,6 +173,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             if pm and hasattr(pm, "register_meta_listener"):
                 pm.register_meta_listener(self._on_port_meta_update)  # type: ignore[arg-type]
         except Exception:
+            # justification: optional meta subscription; the port still functions
             pass
 
     def _emit_notice_to_port_clients(self, port_name: str, message: str) -> None:
@@ -185,6 +186,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                 except Exception:
                     continue
         except Exception:
+            # justification: best-effort notice; delivery failure is non-fatal
             pass
 
     def _on_port_meta_update(self, port_name: str, changes: Optional[Dict[str, Any]] = None):
@@ -232,7 +234,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                     ):
                         self._emit_notice_to_port_clients(port_name, "\r\n[Reconnected]\r\n")
         except Exception:
-            # Non-fatal
+            # justification: optional UI notification; port state is unchanged
             pass
 
     def set_auth_manager(self, auth_manager):
@@ -683,6 +685,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                         else:
                             await client.send_raw_data(b"\r\n[Write blocked: console is in read-only mode]\r\n")
                     except Exception:
+                        # justification: best-effort notice; the write block already happened
                         pass
             except Exception as e:
                 self.logger.error(f"Error writing chunk to port {client.connected_port}: {e}", exc_info=True)
@@ -769,6 +772,7 @@ class TcpServerAdapter(BaseGenericAdapter):
         try:
             await client.send_raw_data(CTRL_MARKER + json.dumps(resp, separators=(",", ":")).encode("utf-8") + b"\n")
         except Exception:
+            # justification: best-effort control reply; the client tolerates a miss
             pass
         return True
 
@@ -780,6 +784,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             if port_obj is not None:
                 return list(getattr(port_obj, "connected_clients", []))
         except Exception:
+            # justification: optional metadata; an empty list is the safe answer
             pass
         return []
 
@@ -819,6 +824,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                 meta = resolver(client_id) or {}
                 return meta.get("ip") or "unknown"
             except Exception:
+                # justification: optional metadata; the caller default applies
                 pass
         return "unknown"
 
@@ -830,6 +836,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             if port_obj is not None:
                 return capacity_to_wire(getattr(port_obj, "max_read_write_users", 1))
         except Exception:
+            # justification: optional metadata; None is the safe answer
             pass
         return None
 
@@ -928,6 +935,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                         if hasattr(self.console_manager, "register_client_channel"):
                             self.console_manager.register_client_channel(client.client_id, self)
                     except Exception:
+                        # justification: optional routing registration; delivery falls back to the manager broadcast loop
                         pass
 
                     # Get the actual access mode from console manager
@@ -958,6 +966,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                             if is_up is False:
                                 await client.send_raw_data(b"\r\n[Port disconnected on server]\r\n")
                     except Exception:
+                        # justification: best-effort notice; the connect request proceeds
                         pass
                     self.logger.info(f"Client {client.client_id} connected to port {port_name} in {access_mode} mode")
                 else:
@@ -1170,6 +1179,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                 if hasattr(self.console_manager, "unregister_client_channel"):
                     self.console_manager.unregister_client_channel(client.client_id)
             except Exception:
+                # justification: idempotent routing cleanup; a stale entry is harmless and re-resolved on re-registration
                 pass
 
         client.connected_port = None
@@ -1409,6 +1419,7 @@ class ClientSession:
                     try:
                         self.writer.write_eof()
                     except (AttributeError, RuntimeError):
+                        # justification: graceful half-close unavailable on this transport
                         pass
                 self.writer.close()
                 try:

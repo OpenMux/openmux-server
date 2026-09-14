@@ -192,6 +192,7 @@ class TcpInitiatorPort:
             try:
                 await self._idle_disconnect_task
             except asyncio.CancelledError:
+                # justification: task was cancelled on purpose; awaiting it observes the cancellation
                 pass
             self._idle_disconnect_task = None
         if self.reconnect_task:
@@ -199,6 +200,7 @@ class TcpInitiatorPort:
             try:
                 await self.reconnect_task
             except asyncio.CancelledError:
+                # justification: task was cancelled on purpose; awaiting it observes the cancellation
                 pass
             self.reconnect_task = None
         if self.read_task:
@@ -206,6 +208,7 @@ class TcpInitiatorPort:
             try:
                 await self.read_task
             except asyncio.CancelledError:
+                # justification: task was cancelled on purpose; awaiting it observes the cancellation
                 pass
             self.read_task = None
         await self._disconnect()
@@ -329,6 +332,7 @@ class TcpInitiatorPort:
                     self._set_status_message(f"Read error on {self.host}:{self.port}: {e}")
                     break
         except asyncio.CancelledError:
+            # justification: task was cancelled on purpose; awaiting it observes the cancellation
             pass
 
     async def _handle_received_data(self, data: bytes) -> None:
@@ -355,6 +359,7 @@ class TcpInitiatorPort:
                     if not success:
                         await asyncio.sleep(self.reconnect_delay)
         except asyncio.CancelledError:
+            # justification: task was cancelled on purpose; awaiting it observes the cancellation
             pass
 
     async def _connection_manager(self) -> None:
@@ -405,10 +410,12 @@ class TcpInitiatorPort:
                     try:
                         await self.reconnect_task
                     except asyncio.CancelledError:
+                        # justification: task was cancelled on purpose; awaiting it observes the cancellation
                         pass
                     self.reconnect_task = None
                 await self._disconnect()
         except asyncio.CancelledError:
+            # justification: task was cancelled on purpose; awaiting it observes the cancellation
             pass
 
     async def write_data(self, data: bytes) -> int:
@@ -442,6 +449,7 @@ class TcpInitiatorPort:
             try:
                 await asyncio.wait_for(self._flush_event.wait(), timeout=self._batch_timeout)
             except asyncio.TimeoutError:
+                # justification: expected wake-up; the buffer is checked every tick
                 pass
             self._flush_event.clear()
             async with self._write_buffer_lock:
@@ -521,6 +529,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 if mpm and hasattr(mpm, "notify_meta_updated"):
                     mpm.notify_meta_updated(pname, payload)  # type: ignore[attr-defined]
             except Exception:
+                # justification: optional notification; UI event delivery is best-effort
                 pass
 
         return _notif
@@ -778,6 +787,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                     if isinstance(desc, str) and desc:
                         setattr(port, "description", desc)
                 except Exception:
+                    # justification: in-place live update; the next reload retries
                     pass
                 # In-place update for the RW/RO access-group lists. These are
                 # deliberately NOT in _material_cfg, so a groups-only change
@@ -790,6 +800,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                     if list(getattr(port, "read_only_groups", None) or []) != new_ro:
                         setattr(port, "read_only_groups", new_ro)
                 except Exception:
+                    # justification: in-place live update; the next reload retries
                     pass
                 unchanged.append(n)
             else:
@@ -815,6 +826,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         try:
             self.config["tcp_initiator_ports"] = [new_by_name[k] for k in sorted(new_by_name.keys())]
         except Exception:
+            # justification: optional snapshot; the authoritative config is on disk
             pass
 
         return {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
