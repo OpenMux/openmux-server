@@ -479,11 +479,7 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
     adapter = request.app[ADAPTER_APP_KEY]
     req_id = uuid.uuid4().hex[:8]
     username = request.get("username")
-    try:
-        adapter.logger.info(f"[reload-soft:{req_id}] request from {request.remote or '?'} user={username or '?'}")
-    except Exception:
-        # justification: logging failure must not change the request outcome
-        pass
+    adapter.logger.info("[reload-soft:%s] request from %s user=%s", req_id, request.remote or "?", username or "?")
     adapter._require_permission(request, ("admin",))
     try:
         has_csrf = bool(request.headers.get("X-OMX-CSRF"))
@@ -492,20 +488,12 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
         # justification: logging failure must not change the request outcome
         pass
     if not adapter._check_csrf(request):
-        try:
-            adapter.logger.warning(f"[reload-soft:{req_id}] CSRF check failed")
-        except Exception:
-            # justification: logging failure must not change the request outcome
-            pass
+        adapter.logger.warning("[reload-soft:%s] CSRF check failed", req_id)
         raise web.HTTPForbidden(text="CSRF")
 
     server = getattr(getattr(adapter, "console_manager", None), "server", None)
     if not server or not hasattr(server, "reload_adapters_soft"):
-        try:
-            adapter.logger.error(f"[reload-soft:{req_id}] Server reload API unavailable (server={bool(server)})")
-        except Exception:
-            # justification: logging failure must not change the request outcome
-            pass
+        adapter.logger.error("[reload-soft:%s] Server reload API unavailable (server=%s)", req_id, bool(server))
         return web.json_response({"error": True, "message": "Server reload API unavailable"}, status=500)
     try:
         ctx = {
@@ -518,11 +506,7 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
         summary = await server.reload_adapters_soft(context=ctx)
         return web.json_response({"ok": True, "summary": summary})
     except Exception as e:
-        try:
-            adapter.logger.error(f"[reload-soft:{req_id}] Soft reload failed: {e}", exc_info=True)
-        except Exception:
-            # justification: logging failure must not change the request outcome
-            pass
+        adapter.logger.error("[reload-soft:%s] Soft reload failed: %s", req_id, e, exc_info=True)
         return web.json_response({"error": True, "message": str(e)}, status=500)
 
 
@@ -535,11 +519,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
     adapter = request.app[ADAPTER_APP_KEY]
     req_id = uuid.uuid4().hex[:8]
     username = request.get("username")
-    try:
-        adapter.logger.info(f"[reload-full:{req_id}] request from {request.remote or '?'} user={username or '?'}")
-    except Exception:
-        # justification: logging failure must not change the request outcome
-        pass
+    adapter.logger.info("[reload-full:%s] request from %s user=%s", req_id, request.remote or "?", username or "?")
     adapter._require_permission(request, ("admin",))
     # Log presence of CSRF header to aid debugging (not the value)
     try:
@@ -549,20 +529,12 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
         # justification: logging failure must not change the request outcome
         pass
     if not adapter._check_csrf(request):
-        try:
-            adapter.logger.warning(f"[reload-full:{req_id}] CSRF check failed")
-        except Exception:
-            # justification: logging failure must not change the request outcome
-            pass
+        adapter.logger.warning("[reload-full:%s] CSRF check failed", req_id)
         raise web.HTTPForbidden(text="CSRF")
 
     server = getattr(getattr(adapter, "console_manager", None), "server", None)
     if not server or not hasattr(server, "reload_adapters_full"):
-        try:
-            adapter.logger.error(f"[reload-full:{req_id}] Server reload API unavailable (server={bool(server)})")
-        except Exception:
-            # justification: logging failure must not change the request outcome
-            pass
+        adapter.logger.error("[reload-full:%s] Server reload API unavailable (server=%s)", req_id, bool(server))
         return web.json_response({"error": True, "message": "Server reload API unavailable"}, status=500)
     try:
         adapter.logger.info(f"[reload-full:{req_id}] Invoking server.reload_adapters_full()")
@@ -578,11 +550,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
         adapter.logger.info(f"[reload-full:{req_id}] Completed in {time.time()-start:.3f}s summary={summary}")
         return web.json_response({"ok": True, "summary": summary})
     except Exception as e:
-        try:
-            adapter.logger.error(f"[reload-full:{req_id}] Full reload failed: {e}", exc_info=True)
-        except Exception:
-            # justification: logging failure must not change the request outcome
-            pass
+        adapter.logger.error("[reload-full:%s] Full reload failed: %s", req_id, e, exc_info=True)
         return web.json_response({"error": True, "message": str(e)}, status=500)
 
 
@@ -718,11 +686,7 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
                 loaded = True
     except Exception:
         loaded = False
-        try:
-            adapter.logger.error("Config schema endpoint fell back to the permissive schema", exc_info=True)
-        except Exception:
-            # justification: logging failure must not change the request outcome
-            pass
+        adapter.logger.error("Config schema endpoint fell back to the permissive schema", exc_info=True)
 
     if not loaded:
         # Permissive fallback schema

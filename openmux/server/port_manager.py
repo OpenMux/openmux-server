@@ -1071,11 +1071,7 @@ class PortManager:
             try:
                 data = port.data_queue.get_nowait()
                 if data:
-                    try:
-                        self.logger.debug(f"READ FROM PORT: port={port_name} bytes={len(data)}")
-                    except Exception:
-                        # justification: queue drained as intended; emptiness is the exit signal
-                        pass
+                    self.logger.debug("READ FROM PORT: port=%s bytes=%d", port_name, len(data))
                 return data
             except asyncio.QueueEmpty:
                 return None

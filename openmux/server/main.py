@@ -370,14 +370,10 @@ class OpenMuxServer:
         if not path:
             path, deprecated = self._config_string_path(("server", "control_socket"), ("runtime", "control_socket"))
             if deprecated:
-                try:
-                    self.logger.warning(
-                        "Using deprecated runtime.control_socket; remove it, the control socket resolves "
-                        "via OPENMUX_RUN_DIR (or OPENMUX_CTL_SOCK as an override)"
-                    )
-                except Exception:
-                    # justification: cosmetic deprecation notice; the path resolution continues
-                    pass
+                self.logger.warning(
+                    "Using deprecated runtime.control_socket; remove it, the control socket resolves "
+                    "via OPENMUX_RUN_DIR (or OPENMUX_CTL_SOCK as an override)"
+                )
         if not path:
             path = _locations_control_socket()
         if not path:
@@ -429,10 +425,7 @@ class OpenMuxServer:
         """
         pidfile = os.environ.get("OPENMUX_PIDFILE")
         if pidfile:
-            try:
-                self.logger.warning("OPENMUX_PIDFILE is deprecated; use OPENMUX_RUN_DIR instead. Honoring it for one release.")
-            except Exception:  # justification: logger best-effort; keep the value
-                pass
+            self.logger.warning("OPENMUX_PIDFILE is deprecated; use OPENMUX_RUN_DIR instead. Honoring it for one release.")
             return os.path.expanduser(pidfile)
         config_pid, deprecated = self._config_string_path(("server", "pidfile"), ("runtime", "pidfile"))
         if config_pid:
@@ -940,13 +933,8 @@ class OpenMuxServer:
         Returns a summary dict mirroring the web plugin for consistency.
         """
         req_id = (context or {}).get("req_id") or "sig"
-        try:
-            self.logger.info(
-                f"[reload-soft:{req_id}] Initiating soft reload (origin={ (context or {}).get('origin', 'unknown') })"
-            )
-        except Exception:
-            # justification: logging failure must not change the request outcome
-            pass
+        origin = (context or {}).get("origin", "unknown")
+        self.logger.info("[reload-soft:%s] Initiating soft reload (origin=%s)", req_id, origin)
 
         summary: Dict[str, Any] = {"auth_updated": False, "adapters": {}}
         # Reload config
@@ -1145,11 +1133,7 @@ class OpenMuxServer:
             except Exception:
                 continue
 
-        try:
-            self.logger.info(f"[reload-soft:{req_id}] Completed with summary: {summary}")
-        except Exception:
-            # justification: logging failure must not change the request outcome
-            pass
+        self.logger.info("[reload-soft:%s] Completed with summary: %s", req_id, summary)
         return summary
 
     async def shutdown(self):
@@ -1274,11 +1258,7 @@ class OpenMuxServer:
                 except Exception as e:
                     self.logger.error(f"Error stopping adapter {adapter.name}: {e}", exc_info=True)
                     summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "stop_error": str(e)})
-            try:
-                self.logger.info(f"[reload-full:{req_id}] Stop phase complete: {summary['stopped']} adapters processed")
-            except Exception:
-                # justification: logging failure must not change the request outcome
-                pass
+            self.logger.info("[reload-full:%s] Stop phase complete: %s adapters processed", req_id, summary["stopped"])
             # Clear adapter list and detach from port manager
             self.unified_adapters = []
             # Note: deliberately not clearing self.web_console here - if its stop was
@@ -1346,11 +1326,7 @@ class OpenMuxServer:
                 pass
 
             # Wire dependencies
-            try:
-                self.logger.info(f"[reload-full:{req_id}] Wiring adapter dependencies")
-            except Exception:
-                # justification: logging failure must not change the request outcome
-                pass
+            self.logger.info("[reload-full:%s] Wiring adapter dependencies", req_id)
             for adapter in self.unified_adapters:
                 try:
                     if hasattr(adapter, "main_port_manager"):
@@ -1378,11 +1354,7 @@ class OpenMuxServer:
                     summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "wire_error": str(e)})
 
             # Start adapters
-            try:
-                self.logger.info(f"[reload-full:{req_id}] Starting {len(self.unified_adapters)} adapters")
-            except Exception:
-                # justification: logging failure must not change the request outcome
-                pass
+            self.logger.info("[reload-full:%s] Starting %d adapters", req_id, len(self.unified_adapters))
             for adapter in self.unified_adapters:
                 try:
                     aname = getattr(adapter, "name", "?")
@@ -1441,13 +1413,14 @@ class OpenMuxServer:
                     self.logger.error(f"Full reload: start failed for {getattr(adapter, 'name', '?')}: {e}", exc_info=True)
                     summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "start_error": str(e)})
 
-            try:
-                self.logger.info(
-                    f"[reload-full:{req_id}] Reload complete: stopped={summary['stopped']} created={len(summary['created_adapters'])} started={summary['started']} errors={len(summary['errors'])}"
-                )
-            except Exception:
-                # justification: logging failure must not change the request outcome
-                pass
+            self.logger.info(
+                "[reload-full:%s] Reload complete: stopped=%s created=%s started=%s errors=%s",
+                req_id,
+                summary["stopped"],
+                len(summary["created_adapters"]),
+                summary["started"],
+                len(summary["errors"]),
+            )
 
             # If we deferred self WebConsole restart, schedule it in the background now
             if summary.get("web_console_restart_deferred") and deferred_old_wc is not None and deferred_new_wc is not None:

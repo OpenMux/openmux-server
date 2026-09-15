@@ -1261,11 +1261,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     for kid, pub in imported.items():
                         if kid not in self._auth_pubkeys:
                             self._auth_pubkeys[kid] = pub
-                    try:
-                        self.logger.info(f"MuxCon adapter imported {len(imported)} public key(s) from AuthManager (compat)")
-                    except Exception:
-                        # justification: optional compat import; the auth keys are loaded
-                        pass
+                    self.logger.info("MuxCon adapter imported %d public key(s) from AuthManager (compat)", len(imported))
             # Import per-key filter metadata similarly when not locally configured
             if (not getattr(self, "_key_filters", None)) and auth_manager and hasattr(auth_manager, "get_public_keys_for_use"):
                 records = auth_manager.get_public_keys_for_use("muxcon") or []
@@ -2921,10 +2917,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         writer_obj = conn.get("writer")
         if not isinstance(writer_obj, asyncio.StreamWriter):
             # Writer missing or invalid; close connection context
-            try:
-                self.logger.warning(f"Connection {conn_id} has no valid writer; closing")
-            except Exception:  # justification: logging guard best-effort; ignore logger failure
-                pass
+            self.logger.warning("Connection %s has no valid writer; closing", conn_id)
             await self._close_connection(conn_id)
             return
         try:
@@ -4752,10 +4745,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     )
                     asyncio.create_task(self._close_connection(old_cid))
         except Exception as e:
-            try:
-                self.logger.debug(f"Rollover check failed for {conn_id}: {e}", exc_info=True)
-            except Exception:  # justification: logging failure should not interrupt cleanup
-                pass
+            self.logger.debug("Rollover check failed for %s: %s", conn_id, e, exc_info=True)
 
     def _register_mpath_connection(self, conn_id: str) -> None:
         """Register a connection in its multipath group and choose / update primary.

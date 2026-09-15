@@ -56,6 +56,11 @@ Acceptable justification categories:
 Not acceptable:
 - Swallowing protocol, transport, authentication, parsing, or persistence errors
 - Using silence to hide noisy but fixable bugs
+- Wrapping a logging call in `try/except`: the stdlib logger is exception-safe
+  (a handler that fails writes to stderr instead of raising), so such a guard
+  catches nothing. Put the log call after a successful guard instead, and
+  format message arguments lazily (``logger.info("... %s", value)``). The
+  `make test` gate rejects a new guard of this shape.
 
 ### Narrowing Exceptions
 Where practical, prefer specific exceptions (e.g. `asyncio.TimeoutError`, `json.JSONDecodeError`, `OSError`). Broad handlers exist mainly where many error types map to a single recovery path.

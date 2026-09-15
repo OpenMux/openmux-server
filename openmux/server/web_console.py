@@ -531,11 +531,7 @@ async def handle_console(request: web.Request) -> web.Response:
                 await adapter._ensure_assets()
             except Exception as asset_exc:
                 adapter._asset_error = str(asset_exc)
-                try:
-                    adapter.logger.debug(f"xterm assets still missing: {asset_exc}")
-                except Exception:
-                    # justification: redundant; the asset failure is already reported
-                    pass
+                adapter.logger.debug("xterm assets still missing: %s", asset_exc)
         username = request.get("username")
         try:
             plugin_nav = adapter._get_allowed_plugin_nav(username, request=request)
@@ -2030,15 +2026,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
         if not self.static_dir:
             self.static_dir = str(_locations_static_dir())
         if not Path(self.template_dir).is_dir():
-            try:
-                self.logger.error("template_dir does not exist: %s", self.template_dir)
-            except Exception:  # justification: logging best-effort; startup proceeds
-                pass
+            self.logger.error("template_dir does not exist: %s", self.template_dir)
         if not Path(self.static_dir).is_dir():
-            try:
-                self.logger.warning("static_dir does not exist: %s", self.static_dir)
-            except Exception:  # justification: logging best-effort; startup proceeds
-                pass
+            self.logger.warning("static_dir does not exist: %s", self.static_dir)
 
         # Attempt to set up Jinja2 if available and directory exists
         try:
@@ -2070,26 +2060,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 except Exception:
                     # justification: optional template filter; the default formatting applies
                     pass
-                try:
-                    self.logger.info(f"WebConsole templates enabled: {tdir}")
-                except Exception:
-                    # justification: optional template filter; the default formatting applies
-                    pass
+                self.logger.info("WebConsole templates enabled: %s", tdir)
             else:
                 self._jinja_env = None
-                try:
-                    self.logger.error("WebConsole templates disabled: template_dir missing or not a directory: %s", tdir)
-                except Exception:
-                    # justification: log emission is best-effort; the template-free fallback applies either way
-                    pass
+                self.logger.error("WebConsole templates disabled: template_dir missing or not a directory: %s", tdir)
         except Exception:
             # jinja2 not installed or couldn't initialize
             self._jinja_env = None
-            try:
-                self.logger.error("WebConsole templates unavailable: jinja2 is not installed")
-            except Exception:
-                # justification: log emission is best-effort; the template-free fallback applies either way
-                pass
+            self.logger.error("WebConsole templates unavailable: jinja2 is not installed")
 
     def _render_console(
         self,

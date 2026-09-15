@@ -411,8 +411,5 @@ def absorb_removed_location_keys(config: Any, logger: Optional[Any] = None) -> L
                     "configuration (it is resolved via the environment in packaged installs)"
                     " until the next minor release."
                 )
-            try:
-                logger.warning(message, path)
-            except Exception:  # justification: warning is best-effort; the key is stripped either way
-                pass
+            logger.warning(message, path)
     return keys
