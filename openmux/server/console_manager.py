@@ -189,7 +189,7 @@ class ConsoleManager:
             if port and hasattr(port, "connect_client"):
                 await port.connect_client(client, permissions)
         except Exception:
-            pass
+            self.logger.error("connect_client: unified attach failed for port %s", port_name, exc_info=True)
 
         self.logger.info(f"Client connected to {port_name}")
         return True
@@ -214,7 +214,7 @@ class ConsoleManager:
                     if port and hasattr(port, "disconnect_client"):
                         await port.disconnect_client(client)
                 except Exception:
-                    pass
+                    self.logger.error("disconnect_client: port-side detach failed for port %s", port_name, exc_info=True)
 
                 # Remove client from console
                 self.console_clients[port_name].remove(client)

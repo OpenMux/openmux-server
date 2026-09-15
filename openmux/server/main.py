@@ -912,7 +912,7 @@ class OpenMuxServer:
                             self.logger.error("reload_ports: invalid serial_ports config; skipping")
                             continue
                     except Exception:
-                        pass
+                        self.logger.error("reload_ports: validate_config raised for serial adapter %s", a.name, exc_info=True)
                     try:
                         res = await a.reconcile_ports({"serial_ports": new_list})
                         summary["serial"] = res

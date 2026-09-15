@@ -539,7 +539,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                 process.stderr.write(b"Only interactive sessions are supported.\r\n")
                 await process.stderr.drain()
             except Exception:
-                pass
+                self.logger.debug("SSH: could not deliver exit notice", exc_info=True)
             process.exit(1)
             return
         if not self.main_port_manager:
@@ -547,7 +547,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                 process.stdout.write(b"Server unavailable\r\n")
                 await process.stdout.drain()
             except Exception:
-                pass
+                self.logger.debug("SSH: could not deliver exit notice", exc_info=True)
             process.exit(1)
             return
 
@@ -581,7 +581,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                     process.stdout.write(b"Failed to attach to port\r\n")
                 await process.stdout.drain()
             except Exception:
-                pass
+                self.logger.debug("SSH: could not deliver attach-denied notice", exc_info=True)
             process.exit(1)
             return
         self.sessions[client_id] = session
@@ -677,6 +677,7 @@ class SshListenerAdapter(BaseGenericAdapter):
             try:
                 remaining += await session.process.stdin.readexactly(2 - len(remaining))
             except Exception:
+                # justification: a read failure ends the session; the reader loop sees the EOF
                 pass
         if len(remaining) < 2:
             return b"", 0
@@ -771,7 +772,9 @@ class SshListenerAdapter(BaseGenericAdapter):
             await session.process.stdout.drain()
             session.bytes_out += len(text)
         except Exception:
-            pass
+            self.logger.error(
+                "SSH session write failed (client=%s port=%s)", session.client_id, session.port_name, exc_info=True
+            )
 
     async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
         """Deliver a cross-adapter access-mode notice as human text.
@@ -910,7 +913,7 @@ class SshListenerAdapter(BaseGenericAdapter):
             process.stdout.write(payload)
             await process.stdout.drain()
         except Exception:
-            pass
+            self.logger.error("SSH: failed to deliver port list before exit", exc_info=True)
         process.exit(1)
 
     async def _attach_session(self, session: SshSession) -> Tuple[bool, Optional[str]]:
@@ -938,7 +941,7 @@ class SshListenerAdapter(BaseGenericAdapter):
             try:
                 self.console_manager.register_client_channel(session.client_id, self)
             except Exception:
-                pass
+                self.logger.error("register_client_channel failed for SSH client %s", session.client_id, exc_info=True)
         return bool(ok), reason
 
     async def _disconnect_session(self, client_id: str, *, reason: str) -> None:
@@ -951,6 +954,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                     if hasattr(self.console_manager, "unregister_client_channel"):
                         self.console_manager.unregister_client_channel(client_id)
                 except Exception:
+                    # justification: teardown routing cleanup; the port disconnect below is logged on failure
                     pass
                 await self.console_manager.disconnect_client_from_port(client_id, session.port_name)
         except Exception:
@@ -959,6 +963,7 @@ class SshListenerAdapter(BaseGenericAdapter):
             session.process.close()
             await session.process.wait_closed()
         except Exception:
+            # justification: teardown cleanup; the session is exiting regardless
             pass
         self.logger.info(
             "SSH client %s closed (%s) in=%d out=%d",

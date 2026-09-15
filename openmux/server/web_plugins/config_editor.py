@@ -337,7 +337,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
             )
             return web.Response(body=html_text.encode("utf-8"), content_type="text/html")
     except Exception:
-        pass
+        adapter.logger.warning("Config Editor HTML render failed; serving JSON fallback", exc_info=True)
     # Fallback JSON (if templates not available)
     try:
         cm = _find_config_manager(adapter)

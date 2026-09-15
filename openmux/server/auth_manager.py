@@ -743,7 +743,9 @@ class AuthManager:
                             "expires": time.time() + 300,
                         }
                 except Exception:
-                    pass
+                    self.logger.error(
+                        "external auth: could not parse response for user %s; groups not cached", username, exc_info=True
+                    )
             if not ok:
                 stderr_msg = proc.stderr.decode("utf-8", errors="replace").strip()
                 self.logger.warning(

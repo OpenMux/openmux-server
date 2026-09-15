@@ -1093,4 +1093,4 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             writer.write("\r\n".join(headers).encode("utf-8"))
             await writer.drain()
         except Exception:
-            pass
+            self.logger.warning("web_status: failed to send CORS preflight response", exc_info=True)

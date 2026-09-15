@@ -8,6 +8,7 @@ sees exactly the bytes a normal read-write console client would see.
 """
 
 import asyncio
+import logging
 import re
 from typing import Any, Callable, Dict, List, Optional
 
@@ -18,6 +19,8 @@ from openmux.server.actions.errors import ActionSessionError, ActionTimeoutError
 # `prompt()`'s `color` param and docs/design/port_actions.md, "Operator input").
 # "none" (the default) keeps the console's built-in attention color.
 VALID_PROMPT_COLORS = {"none", "red", "green", "blue", "pink", "yellow", "orange", "purple"}
+
+logger = logging.getLogger("openmux.server.actions.session")
 
 
 def _truncate(text: str, limit: int = 2000) -> str:
@@ -78,6 +81,7 @@ class ActionSession:
             try:
                 self._on_debug(message)
             except Exception:
+                # justification: best-effort UI callback; the action flow continues
                 pass
 
     def _client_queue(self) -> Optional[asyncio.Queue]:
@@ -116,6 +120,7 @@ class ActionSession:
             try:
                 self._on_progress(step, percent)
             except Exception:
+                # justification: best-effort UI callback; the action flow continues
                 pass
 
     def log(self, message: str) -> None:
@@ -130,6 +135,7 @@ class ActionSession:
             try:
                 self._on_log(message)
             except Exception:
+                # justification: best-effort UI callback; the action flow continues
                 pass
 
     def debug(self, message: str) -> None:
@@ -263,7 +269,7 @@ class ActionSession:
             try:
                 self._on_input_wait(text, kind, normalized_choices, self._current_step, color)
             except Exception:
-                pass
+                logger.error("action _on_input_wait callback failed; the user will not see prompt %r", text, exc_info=True)
         if timeout is None:
             return await self._operator_input.get()
         try:

@@ -528,6 +528,7 @@ class OpenMuxClient:
                         if len(examples) >= 3:
                             break
                 except Exception:
+                    # justification: optional detail collection for the duplicate-name error message
                     pass
                 if examples:
                     print_client_info(

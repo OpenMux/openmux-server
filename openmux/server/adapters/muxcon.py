@@ -467,8 +467,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     except Exception:
                         continue
         except Exception:
-            # Non-fatal; leave maps empty
-            pass
+            self.logger.error("muxcon: public key load failed; per-key auth is disabled", exc_info=True)
 
     @staticmethod
     def _normalize_filter_set(d: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -1321,7 +1320,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             }
             self.logger.info(f"Applied per-key muxcon filters for conn={conn_id} key_id={key_id}")
         except Exception:
-            pass
+            self.logger.error("muxcon: failed to apply per-connection filters for conn=%s", conn_id, exc_info=True)
 
     @classmethod
     def validate_config(cls, config: Dict[str, Any]) -> bool:
@@ -2747,7 +2746,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             await self._maybe_advertise_local_ports(conn_id)
         except Exception:
-            pass
+            self.logger.error("muxcon: local port advertisement failed for %s", conn_id, exc_info=True)
         # Refresh per-connection proxy mapping once connection metadata/grouping is established
         try:
             self._refresh_conn_proxies()
@@ -2907,7 +2906,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             await self._maybe_advertise_local_ports(conn_id)
         except Exception:
-            pass
+            self.logger.error("muxcon: local port advertisement failed for %s", conn_id, exc_info=True)
 
     async def _read_loop(self, conn_id: str):
         """Read frames for a connection and dispatch to handlers.
@@ -3637,14 +3636,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                     },
                                 )
                         except Exception:
-                            pass
+                            self.logger.error("cached-offline notify failed for proxy %s", pname, exc_info=True)
                 except Exception:
-                    pass
+                    self.logger.error("muxcon: group transition failed for peer %s", peer_key, exc_info=True)
                 # Persist cache after transition to offline
                 try:
                     self._save_federated_cache()
                 except Exception:
-                    pass
+                    self.logger.error("muxcon: failed to save federated cache", exc_info=True)
             else:
                 # Paths remain in group; recompute live-state (may be all stale)
                 try:
@@ -3783,7 +3782,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         try:
                             self._save_federated_cache()
                         except Exception:
-                            pass
+                            self.logger.error("muxcon: failed to save federated cache", exc_info=True)
                 except Exception:
                     continue
 
@@ -3843,7 +3842,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             with open(self.federated_cache_path, "w", encoding="utf-8") as f:
                 json.dump(data, f)
         except Exception:
-            pass
+            self.logger.error("muxcon: failed to save federated cache", exc_info=True)
 
     async def _load_federated_cache(self) -> None:
         """Load cached federated proxies from JSON file and register placeholders.
@@ -3936,7 +3935,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     except Exception:
                         continue
         except Exception:
-            pass
+            self.logger.error("muxcon: failed to load federated cache", exc_info=True)
 
     async def _maybe_advertise_local_ports(self, conn_id: str) -> None:
         """Advertise local ports once when allowed.
@@ -4381,7 +4380,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 try:
                                     self._apply_per_connection_filters(conn_id, kid)
                                 except Exception:
-                                    pass
+                                    self.logger.error(
+                                        "muxcon: failed to apply per-connection filters for conn=%s", conn_id, exc_info=True
+                                    )
                                 seq = self._next_frame_seq(conn_id)
                                 frame = self.proto.create_control_frame(0, seq, "AUTH:OK")
                                 await self._send_protocol_frame(writer, frame)
@@ -4389,14 +4390,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 try:
                                     await self._maybe_advertise_local_ports(conn_id)
                                 except Exception:
-                                    pass
+                                    self.logger.error("muxcon: local port advertisement failed for %s", conn_id, exc_info=True)
                             else:
                                 seq = self._next_frame_seq(conn_id)
                                 frame = self.proto.create_control_frame(0, seq, "AUTH:ERROR:bad_signature")
                                 await self._send_protocol_frame(writer, frame)
                                 await self._close_connection(conn_id)
                         except Exception:
-                            pass
+                            self.logger.error("muxcon: AUTH:PK:RESPONSE processing failed for %s", conn_id, exc_info=True)
                         return
                 # AUTH:OK (client side update) - only initiator-side (client role) connections
                 # may set auth_ok from an inbound AUTH:OK. A server-side (acceptor) connection
@@ -4413,12 +4414,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 if self._auth_key_id:
                                     self._apply_per_connection_filters(conn_id, self._auth_key_id)
                             except Exception:
-                                pass
+                                self.logger.error(
+                                    "muxcon: failed to apply per-connection filters for conn=%s", conn_id, exc_info=True
+                                )
                             # After AUTH:OK, advertise our ports
                             try:
                                 await self._maybe_advertise_local_ports(conn_id)
                             except Exception:
-                                pass
+                                self.logger.error("muxcon: local port advertisement failed for %s", conn_id, exc_info=True)
                         elif conn:
                             self.logger.warning(
                                 f"[{conn_id}] AUTH:OK received on non-client-role connection; closing "
@@ -4426,7 +4429,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             )
                             await self._close_connection(conn_id)
                     except Exception:
-                        pass
+                        self.logger.error("muxcon: AUTH:OK processing failed for %s", conn_id, exc_info=True)
                     return
                 if payload.startswith("AUTH:ERROR"):
                     # Server reported auth failure; log actionable hints and close
@@ -6249,7 +6252,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 self._save_federated_cache()
             except Exception:
-                pass
+                self.logger.error("muxcon: failed to save federated cache", exc_info=True)
             return
 
         # Create remote proxy and register with port manager
@@ -6301,9 +6304,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     try:
                         self._save_federated_cache()
                     except Exception:
-                        pass
+                        self.logger.error("muxcon: failed to save federated cache", exc_info=True)
                 except Exception:
-                    pass
+                    self.logger.error("muxcon: remote port registration failed for %s", name, exc_info=True)
         else:
             self.logger.warning("No main_port_manager set; cannot register federated ports")
 

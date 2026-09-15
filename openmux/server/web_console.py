@@ -448,7 +448,7 @@ async def auth_middleware(request: web.Request, handler):
                     request["username"] = username
                     authenticated_via_basic = True
         except Exception:
-            pass
+            adapter.logger.debug("Basic auth header could not be processed", exc_info=True)
         if authenticated_via_basic:
             return await handler(request)
         # Basic Auth attempted but failed -> 401 for programmatic clients
@@ -519,7 +519,7 @@ async def handle_index(request: web.Request) -> web.Response:
     except web.HTTPException:
         raise
     except Exception:
-        pass
+        adapter.logger.error("handle_index: unexpected error; serving status page fallback", exc_info=True)
     return await _render_status_page(request, adapter, default_status_path="/")
 
 
@@ -922,7 +922,9 @@ async def handle_api_reload(request: web.Request) -> web.Response:
                         ):
                             await adapter.console_manager.disconnect_client_from_port(cid, pname)
                 except Exception:
-                    pass
+                    adapter.logger.error(
+                        "find_adapter: disconnect_client_from_port failed (client=%s port=%s)", cid, pname, exc_info=True
+                    )
     except Exception as e:
         adapter.logger.warning(f"Post-reconcile disconnect failed: {e}")
 
@@ -1126,7 +1128,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
             if hasattr(adapter.console_manager, "register_client_channel"):
                 adapter.console_manager.register_client_channel(client_id, adapter)
         except Exception:
-            pass
+            adapter.logger.error("register_client_channel failed for WS client %s", client_id, exc_info=True)
         adapter.logger.info(
             f"Web client {client_id} connected to port {port_name} " + (f"({mode})" if attached else "(meta-only)")
         )
@@ -1346,7 +1348,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                 # justification: idempotent routing cleanup; a stale entry is harmless
                 pass
         except Exception:
-            pass
+            adapter.logger.warning("Web console WS teardown error for client %s", client_id, exc_info=True)
         adapter._clients.pop(client_id, None)
         adapter._ws_to_client.pop(ws, None)
         try:
@@ -1795,6 +1797,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 if not cfg.get("ssl_cert") or not cfg.get("ssl_key"):
                     return False
         except Exception:
+            # justification: heuristic validation; a failure is treated as an invalid config by the caller
             pass
         return 1 <= port <= 65535
 
