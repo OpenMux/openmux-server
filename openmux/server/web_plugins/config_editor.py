@@ -295,9 +295,9 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
             user_permission = adapter._get_effective_permission(username, request)  # type: ignore[attr-defined]
         except Exception:
             user_permission = None
-    try:
-        env = getattr(adapter, "_jinja_env", None)
-        if env:
+    env = getattr(adapter, "_jinja_env", None)
+    if env is not None:
+        try:
             tmpl = env.get_template("config_editor.html.j2")
             plugin_nav = (
                 adapter._get_allowed_plugin_nav(username, request=request)
@@ -336,28 +336,11 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
                 motd=getattr(adapter, "logged_in_motd", "") or "",
             )
             return web.Response(body=html_text.encode("utf-8"), content_type="text/html")
-    except Exception:
-        adapter.logger.warning("Config Editor HTML render failed; serving JSON fallback", exc_info=True)
-    # Fallback JSON (if templates not available)
-    try:
-        cm = _find_config_manager(adapter)
-        config = cm.config if cm and getattr(cm, "config", None) is not None else {}
-        writable_sections, writable_enforced = _get_writable_metadata(cm)
-    except Exception:
-        config = {}
-        writable_sections, writable_enforced = [], False
-    import json
-
-    return web.Response(
-        body=json.dumps(
-            {
-                "config": _mask_config_secrets(config),
-                "writable_sections": writable_sections,
-                "writable_enforced": writable_enforced,
-            }
-        ).encode("utf-8"),
-        content_type="application/json",
-    )
+        except Exception:
+            adapter.logger.error("Config Editor HTML render failed", exc_info=True)
+            raise web.HTTPInternalServerError(text="Failed to render Config Editor.\n")
+    adapter.logger.error("Config Editor unavailable: template engine not initialized")
+    raise web.HTTPInternalServerError(text="Config Editor is unavailable: server templates are missing.\n")
 
 
 async def _handle_data(request: web.Request) -> web.StreamResponse:
