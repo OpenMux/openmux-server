@@ -120,7 +120,8 @@ A separate, experimental "binary framing mode" is mentioned in the module's
 own docstring ("optional upgrade to a compact binary framing mode") but
 **no such upgrade path is implemented** — there is no code that ever
 switches a connection's wire mode away from ASCII. Every connection stays
-ASCII-framed for its whole lifetime today.
+ASCII-framed for its whole lifetime today. A design proposal for that
+upgrade is in [muxcon_binary.md](muxcon_binary.md).
 
 ## 4. Federated ports
 
@@ -466,7 +467,8 @@ Documented here so nobody re-discovers these by reading 5000 lines of
   connection-level, not declared per initiator entry.
 - No `CAPABILITIES:DECLARE`/`CONFIRMED` bidirectional negotiation frames.
 - No binary wire-mode upgrade, despite the module docstring describing one
-  (section 3).
+  (section 3). The proposed design is in
+  [muxcon_binary.md](muxcon_binary.md) (not implemented).
 - No CLI (`openmuxctl`) command surfaces muxcon status or fault injection;
   only the `web_status` HTTP API does.
 - `server.node_name` does not exist; use `server.id`.
