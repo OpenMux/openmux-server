@@ -133,10 +133,10 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.server = await asyncio.start_server(self._handle_client_connection, self.host, self.port)
             self.is_running = True
             await self.server.start_serving()
-            self.logger.info(f"WebStatus HTTP server listening on {self.host}:{self.port}")
+            self.logger.info("WebStatus HTTP server listening on %s:%s", self.host, self.port)
             return True
         except Exception as e:
-            self.logger.error(f"Failed to start WebStatus server: {e}", exc_info=True)
+            self.logger.error("Failed to start WebStatus server: %s", e, exc_info=True)
             return False
 
     async def stop(self) -> None:
@@ -171,7 +171,7 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             await self._handle_http_session(reader, writer)
         except Exception as e:
-            self.logger.debug(f"HTTP session error: {e}", exc_info=True)
+            self.logger.debug("HTTP session error: %s", e, exc_info=True)
         finally:
             self.clients.pop(client_id, None)
             try:

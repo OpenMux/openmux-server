@@ -167,12 +167,15 @@ class PortManager:
                 # Reuse the canonical wrapper factory and cache in ports
                 wrapper = self._create_unified_port_wrapper(unified_port, adapter)
                 self.ports[port_name] = wrapper
-                self.logger.debug(f"Created unified port wrapper for {port_name} (adapter={adapter.name})")
+                self.logger.debug("Created unified port wrapper for %s (adapter=%s)", port_name, adapter.name)
                 return True
             except Exception as e:
                 # Justification: wrapper creation is best-effort; continue scanning other adapters
                 self.logger.debug(
-                    f"Wrapper creation failed for {port_name} on adapter {getattr(adapter, 'name', '?')}: {e}",
+                    "Wrapper creation failed for %s on adapter %s: %s",
+                    port_name,
+                    getattr(adapter, "name", "?"),
+                    e,
                     exc_info=True,
                 )
                 continue
@@ -272,7 +275,8 @@ class PortManager:
                             status.update(extra)
                     except Exception:
                         self.logger.debug(
-                            f"Unified port {self.name} get_status_snapshot failed",
+                            "Unified port %s get_status_snapshot failed",
+                            self.name,
                             exc_info=True,
                         )
                 elif hasattr(self.unified_port, "status_snapshot"):
@@ -302,7 +306,8 @@ class PortManager:
                         except Exception:
                             # justification: hook failure should not block port add; log and continue
                             self.logger.error(
-                                f"on_client_count_changed hook error (add_client) for unified port {self.name}",
+                                "on_client_count_changed hook error (add_client) for unified port %s",
+                                self.name,
                                 exc_info=True,
                             )
 
@@ -319,7 +324,8 @@ class PortManager:
                         except Exception:
                             # justification: hook failure should not block client removal; log and continue
                             self.logger.error(
-                                f"on_client_count_changed hook error (remove_client) for unified port {self.name}",
+                                "on_client_count_changed hook error (remove_client) for unified port %s",
+                                self.name,
                                 exc_info=True,
                             )
                     # When last client disconnects, clear any remaining buffered data
@@ -344,7 +350,7 @@ class PortManager:
                         return True
                     except Exception:
                         # justification: unified write error already contained; log traceback for diagnosis
-                        self.logger.error(f"Unified write_to_port error for {self.name}", exc_info=True)
+                        self.logger.error("Unified write_to_port error for %s", self.name, exc_info=True)
                         return False
                 # Fallback: underlying loopback port writer
                 writer = getattr(self.unified_port, "_writer", None)
@@ -358,7 +364,7 @@ class PortManager:
                             return written > 0
                     except Exception:
                         # justification: fallback writer failure non-fatal; log traceback
-                        self.logger.error(f"Unified underlying writer error for {self.name}", exc_info=True)
+                        self.logger.error("Unified underlying writer error for %s", self.name, exc_info=True)
                         return False
                 return False
 
@@ -369,13 +375,13 @@ class PortManager:
                         await self.unified_port.stop()
                     except Exception:
                         # justification: stop hook failure should not prevent broader shutdown; log
-                        self.logger.error(f"Unified port stop() error for {self.name}", exc_info=True)
+                        self.logger.error("Unified port stop() error for %s", self.name, exc_info=True)
                 elif hasattr(self.unified_port, "disconnect"):
                     try:
                         await self.unified_port.disconnect()
                     except Exception:
                         # justification: disconnect hook failure should not block cleanup; log
-                        self.logger.error(f"Unified port disconnect() error for {self.name}", exc_info=True)
+                        self.logger.error("Unified port disconnect() error for %s", self.name, exc_info=True)
 
         return UnifiedPortWrapper(unified_port, adapter)
 
@@ -580,7 +586,8 @@ class PortManager:
         except Exception:
             # justification: a failing hook must never block the client add/remove
             self.logger.error(
-                f"on_client_count_changed hook failed for port {getattr(port, 'name', None)}",
+                "on_client_count_changed hook failed for port %s",
+                getattr(port, "name", None),
                 exc_info=True,
             )
 
@@ -619,11 +626,16 @@ class PortManager:
                     is_up = bool(getattr(port, "is_connected"))
                     if not is_up:
                         self.logger.info(
-                            f"Allowing client {username} ({client_id}) on {port_name}: federated connection down (meta-only attach)"
+                            "Allowing client %s (%s) on %s: federated connection down (meta-only attach)",
+                            username,
+                            client_id,
+                            port_name,
                         )
             except Exception:
                 self.logger.error(
-                    f"Error checking federated connection status for client {username} on {port_name}",
+                    "Error checking federated connection status for client %s on %s",
+                    username,
+                    port_name,
                     exc_info=True,
                 )
 
@@ -648,7 +660,7 @@ class PortManager:
                     1 for c in port.connected_clients if c.get("mode") == "read-write" and c.get("client_id") != client_id
                 )
                 if current_rw >= capacity:
-                    self.logger.warning(f"Port {port_name} is at maximum read-write capacity ({current_rw}/{capacity})")
+                    self.logger.warning("Port %s is at maximum read-write capacity (%s/%s)", port_name, current_rw, capacity)
                     return False
 
             # Add client (the client object will be provided by the console manager)
@@ -673,7 +685,7 @@ class PortManager:
                 port.connected_clients.append(client_info)
                 if hasattr(port, "client_queues"):
                     port.client_queues[client_id] = asyncio.Queue(maxsize=100)
-                self.logger.info(f"Added client {username} ({client_id}) to port {port_name} in {mode} mode")
+                self.logger.info("Added client %s (%s) to port %s in %s mode", username, client_id, port_name, mode)
             # Lifecycle event: client connected
             try:
                 DataLogger.get().record_meta(
@@ -685,7 +697,8 @@ class PortManager:
                 )
             except Exception:
                 self.logger.debug(
-                    f"DataLogger lifecycle record failed for {port_name} (client_connected)",
+                    "DataLogger lifecycle record failed for %s (client_connected)",
+                    port_name,
                     exc_info=True,
                 )
             # Notify meta listeners (clients count, status, etc.)
@@ -704,10 +717,10 @@ class PortManager:
                     else:
                         # Defer opening the remote stream until federation reconnects
                         self.logger.info(
-                            f"Deferring remote stream open for {port_name} (client {client_id}): federated connection down"
+                            "Deferring remote stream open for %s (client %s): federated connection down", port_name, client_id
                         )
             except Exception as e:
-                self.logger.warning(f"Failed to proactively open remote stream for {port_name}: {e}", exc_info=True)
+                self.logger.warning("Failed to proactively open remote stream for %s: %s", port_name, e, exc_info=True)
             # Fire the adapter client-count hook on the canonical add path
             # (issue #63): the wrapper's own add_client is never called here,
             # so serial signal lines / command idle timeout / tcp-initiator
@@ -738,7 +751,7 @@ class PortManager:
                     port.connected_clients.pop(i)
                     if hasattr(port, "client_queues"):
                         port.client_queues.pop(client_id, None)
-                    self.logger.debug(f"Removed client {client_id} from port {port_name}")
+                    self.logger.debug("Removed client %s from port %s", client_id, port_name)
                     # Lifecycle event: client disconnected
                     try:
                         DataLogger.get().record_meta(
@@ -750,7 +763,8 @@ class PortManager:
                         )
                     except Exception:
                         self.logger.debug(
-                            f"DataLogger lifecycle record failed for {port_name} (client_disconnected)",
+                            "DataLogger lifecycle record failed for %s (client_disconnected)",
+                            port_name,
                             exc_info=True,
                         )
                     # Close remote stream for federated ports
@@ -760,7 +774,7 @@ class PortManager:
                             if close_fn:
                                 await close_fn(client_id)
                     except Exception as e:
-                        self.logger.warning(f"Failed to close remote stream for {port_name}: {e}", exc_info=True)
+                        self.logger.warning("Failed to close remote stream for %s: %s", port_name, e, exc_info=True)
                     # Notify meta listeners (client disconnected)
                     try:
                         self.notify_meta_updated(port_name, {"event": "client_disconnected", "client_id": str(client_id)})
@@ -779,12 +793,13 @@ class PortManager:
                             )
                             and len(port.connected_clients) == 0
                         ):
-                            self.logger.info(f"No more clients connected to federated port {port_name}, closing session")
+                            self.logger.info("No more clients connected to federated port %s, closing session", port_name)
                             await self._close_federation_session(port_name, port)
                     except AttributeError:
                         # Not a federated port, skip session cleanup
                         self.logger.error(
-                            f"Federated session cleanup attribute error for {port_name}",
+                            "Federated session cleanup attribute error for %s",
+                            port_name,
                             exc_info=True,
                         )
                     # Fire the adapter client-count hook on the canonical
@@ -798,7 +813,7 @@ class PortManager:
         wrapper_port = self.get_port(port_name)
         if wrapper_port and hasattr(wrapper_port, "unified_port"):
             # This is a unified port wrapper
-            self.logger.info(f"Attempting to remove client {client_id} from unified port {port_name}")
+            self.logger.info("Attempting to remove client %s from unified port %s", client_id, port_name)
             self.logger.info(
                 f"Current connected_clients: {[c.get('client_id', 'unknown') for c in wrapper_port.connected_clients]}"
             )
@@ -807,7 +822,7 @@ class PortManager:
             for client in wrapper_port.connected_clients:
                 if client["client_id"] == client_id:
                     wrapper_port.remove_client(client)
-                    self.logger.debug(f"Removed client {client_id} from unified port {port_name}")
+                    self.logger.debug("Removed client %s from unified port %s", client_id, port_name)
                     # The wrapper's remove_client fires the hook for the
                     # underlying port; the legacy branch above fires it for
                     # ports that bypass the wrapper. Both are idempotent on
@@ -815,7 +830,7 @@ class PortManager:
                     self._fire_client_count_hook(wrapper_port)
                     return True
 
-            self.logger.warning(f"Client {client_id} not found in unified port {port_name}")
+            self.logger.warning("Client %s not found in unified port %s", client_id, port_name)
             return False
 
         return False
@@ -831,7 +846,7 @@ class PortManager:
             # For now, just log that we would close the session
             # In a proper implementation, we'd need access to the federation adapter
             # that manages this specific port
-            self.logger.info(f"Would close federation session for port {port_name}")
+            self.logger.info("Would close federation session for port %s", port_name)
 
             # If the port has a write_data method (it's a RemotePortProxy),
             # we can try to access its server adapter to notify about port closure
@@ -839,10 +854,10 @@ class PortManager:
                 server_adapter = port.server_adapter
                 if hasattr(server_adapter, "handle_port_session_close"):
                     await server_adapter.handle_port_session_close(port_name)
-                    self.logger.info(f"Notified server adapter about port {port_name} session close")
+                    self.logger.info("Notified server adapter about port %s session close", port_name)
 
         except Exception as e:
-            self.logger.error(f"Error closing federation session for port {port_name}: {e}", exc_info=True)
+            self.logger.error("Error closing federation session for port %s: %s", port_name, e, exc_info=True)
 
     async def promote_client(self, port_name: str, client: Any) -> bool:
         """Promote a client's mode to read-write (ConsoleManager compatibility).
@@ -882,7 +897,7 @@ class PortManager:
         for client_info in port.connected_clients:
             if client_info["client_id"] == client_id:
                 client_info["mode"] = "read-write"
-                self.logger.info(f"Promoted client {client_id} to read-write mode on port {port_name}")
+                self.logger.info("Promoted client %s to read-write mode on port %s", client_id, port_name)
                 # Lifecycle event: client promoted
                 try:
                     DataLogger.get().record_meta(
@@ -894,7 +909,8 @@ class PortManager:
                     )
                 except Exception:
                     self.logger.debug(
-                        f"DataLogger lifecycle record failed for {port_name} (client_promoted)",
+                        "DataLogger lifecycle record failed for %s (client_promoted)",
+                        port_name,
                         exc_info=True,
                     )
                 return True
@@ -918,7 +934,7 @@ class PortManager:
         for client_info in port.connected_clients:
             if client_info["client_id"] == client_id:
                 client_info["mode"] = "read-only"
-                self.logger.info(f"Demoted client {client_id} to read-only mode on port {port_name}")
+                self.logger.info("Demoted client %s to read-only mode on port %s", client_id, port_name)
                 try:
                     DataLogger.get().record_meta(
                         port_name=port_name,
@@ -929,7 +945,8 @@ class PortManager:
                     )
                 except Exception:
                     self.logger.debug(
-                        f"DataLogger lifecycle record failed for {port_name} (client_demoted)",
+                        "DataLogger lifecycle record failed for %s (client_demoted)",
+                        port_name,
                         exc_info=True,
                     )
                 return True
@@ -972,11 +989,13 @@ class PortManager:
                     break
 
             if not client_has_write:
-                self.logger.warning(f"WRITE BLOCKED: client={client_id} mode={client_mode or 'unknown'} port={port_name}")
+                self.logger.warning("WRITE BLOCKED: client=%s mode=%s port=%s", client_id, client_mode or "unknown", port_name)
                 return False
 
             try:
-                self.logger.debug(f"WRITE ALLOW: client={client_id} -> port={port_name} bytes={len(data)} type={type(port)}")
+                self.logger.debug(
+                    "WRITE ALLOW: client=%s -> port=%s bytes=%s type=%s", client_id, port_name, len(data), type(port)
+                )
                 # Log inbound client->port write
                 try:
                     DataLogger.get().record(
@@ -994,7 +1013,7 @@ class PortManager:
                 # Pass client_id to write_data if it's a RemotePortProxy
                 if hasattr(port, "remote_port_name"):
                     if hasattr(port, "is_connected") and not bool(getattr(port, "is_connected")):
-                        self.logger.error(f"WRITE BLOCKED: federated connection not found for {port_name}")
+                        self.logger.error("WRITE BLOCKED: federated connection not found for %s", port_name)
                         return False
                     result = await port.write_data(data, client_id=client_id)  # type: ignore
                 else:
@@ -1003,11 +1022,11 @@ class PortManager:
                 # reporting whether the underlying adapter actually accepted the data
                 # (e.g. False when the local serial/tcp_initiator connection is down).
                 if isinstance(result, bool) and not result:
-                    self.logger.warning(f"WRITE FAILED: adapter reported write failure for port={port_name}")
+                    self.logger.warning("WRITE FAILED: adapter reported write failure for port=%s", port_name)
                     return False
                 return True
             except Exception as e:
-                self.logger.error(f"Failed to write to port {port_name}: {e}", exc_info=True)
+                self.logger.error("Failed to write to port %s: %s", port_name, e, exc_info=True)
                 return False
 
         return False
@@ -1076,7 +1095,7 @@ class PortManager:
             except asyncio.QueueEmpty:
                 return None
             except Exception as e:
-                self.logger.error(f"Error getting data from port {port_name}: {e}", exc_info=True)
+                self.logger.error("Error getting data from port %s: %s", port_name, e, exc_info=True)
                 return None
 
         return None
@@ -1102,12 +1121,12 @@ class PortManager:
             port = self.ports[port_name]
             try:
                 data = await port.data_queue.get()
-                self.logger.debug(f"READ FROM PORT: port={port_name} bytes={len(data)}")
+                self.logger.debug("READ FROM PORT: port=%s bytes=%s", port_name, len(data))
                 return data
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                self.logger.error(f"Error getting data from port {port_name}: {e}", exc_info=True)
+                self.logger.error("Error getting data from port %s: %s", port_name, e, exc_info=True)
                 return None
 
         return None
@@ -1146,7 +1165,7 @@ class PortManager:
                         port_obj=getattr(port, "unified_port", None) or port,
                     )
                 except Exception:
-                    self.logger.debug(f"DataLogger record failed for {port_name}", exc_info=True)
+                    self.logger.debug("DataLogger record failed for %s", port_name, exc_info=True)
 
                 # Append to scrollback ring buffer (always, regardless of clients)
                 scrollback_size = getattr(port, "scrollback_size", 0)
@@ -1166,10 +1185,12 @@ class PortManager:
                                 q.get_nowait()
                                 q.put_nowait(data)
                                 port.dropped_chunks = getattr(port, "dropped_chunks", 0) + 1
-                                self.logger.debug(f"Queue full for {port_name}:{cid}; dropped oldest chunk")
+                                self.logger.debug("Queue full for %s:%s; dropped oldest chunk", port_name, cid)
                             except Exception:
                                 self.logger.warning(
-                                    f"Data queue contention for {port_name}:{cid}; dropping data",
+                                    "Data queue contention for %s:%s; dropping data",
+                                    port_name,
+                                    cid,
                                     exc_info=True,
                                 )
 
@@ -1189,28 +1210,31 @@ class PortManager:
                     if should_enqueue and port.data_queue is not None:
                         try:
                             port.data_queue.put_nowait(data)
-                            self.logger.debug(f"Queued {len(data)} bytes for port {port_name} to {len(client_list)} clients")
+                            self.logger.debug(
+                                "Queued %s bytes for port %s to %s clients", len(data), port_name, len(client_list)
+                            )
                         except asyncio.QueueFull:
                             try:
                                 port.data_queue.get_nowait()
                                 port.data_queue.put_nowait(data)
                                 port.dropped_chunks = getattr(port, "dropped_chunks", 0) + 1
                                 self.logger.debug(
-                                    f"Queue full for {port_name}; dropped oldest chunk to enqueue {len(data)} bytes"
+                                    "Queue full for %s; dropped oldest chunk to enqueue %s bytes", port_name, len(data)
                                 )
                             except Exception:
                                 self.logger.warning(
-                                    f"Data queue contention for port {port_name}; dropping data after retry",
+                                    "Data queue contention for port %s; dropping data after retry",
+                                    port_name,
                                     exc_info=True,
                                 )
                                 return False
                     else:
-                        self.logger.debug(f"No clients connected to port {port_name}; logged and not queued")
+                        self.logger.debug("No clients connected to port %s; logged and not queued", port_name)
                 return True
             except Exception as e:
-                self.logger.error(f"Error handling data for port {port_name}: {e}", exc_info=True)
+                self.logger.error("Error handling data for port %s: %s", port_name, e, exc_info=True)
                 return False
-        self.logger.error(f"Port {port_name} not found for data handling")
+        self.logger.error("Port %s not found for data handling", port_name)
         return False
 
     def get_scrollback(self, port_name: str) -> bytes:
@@ -1282,7 +1306,9 @@ class PortManager:
                             return c.get("mode")
         except Exception:
             self.logger.error(
-                f"Error determining client mode for client_id={client_id} port_name={port_name}",
+                "Error determining client mode for client_id=%s port_name=%s",
+                client_id,
+                port_name,
                 exc_info=True,
             )
         return None
@@ -1312,7 +1338,7 @@ class PortManager:
             # Add to the main ports dictionary
             self.ports[port_name] = wrapper
 
-            self.logger.info(f"Registered unified port {port_name} from adapter {adapter.name}")
+            self.logger.info("Registered unified port %s from adapter %s", port_name, adapter.name)
             try:
                 self.notify_meta_updated(port_name, {"event": "port_registered", "adapter": getattr(adapter, "name", None)})
             except Exception:
@@ -1321,7 +1347,7 @@ class PortManager:
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to register unified port {port_name}: {e}", exc_info=True)
+            self.logger.error("Failed to register unified port %s: %s", port_name, e, exc_info=True)
             return False
 
     async def unregister_unified_port(self, port_name: str) -> bool:
@@ -1336,7 +1362,7 @@ class PortManager:
         try:
             if port_name in self.ports:
                 del self.ports[port_name]
-                self.logger.info(f"Unregistered unified port {port_name}")
+                self.logger.info("Unregistered unified port %s", port_name)
                 try:
                     DataLogger.get().invalidate_port_cache(port_name)
                 except Exception:
@@ -1349,11 +1375,11 @@ class PortManager:
                     pass
                 return True
             else:
-                self.logger.warning(f"Unified port {port_name} not found for unregistration")
+                self.logger.warning("Unified port %s not found for unregistration", port_name)
                 return False
 
         except Exception as e:
-            self.logger.error(f"Failed to unregister unified port {port_name}: {e}", exc_info=True)
+            self.logger.error("Failed to unregister unified port %s: %s", port_name, e, exc_info=True)
             return False  # Compatibility methods for ConsoleManager
 
     async def connect_client(self, port_name: str, client: Any, permissions: str) -> bool:
@@ -1415,7 +1441,7 @@ class PortManager:
         """
         try:
             port_name = metadata.name
-            self.logger.debug(f"Registering federated port: {port_name}")
+            self.logger.debug("Registering federated port: %s", port_name)
 
             # Add the RemotePortProxy to the ports dictionary
             self.ports[port_name] = remote_proxy
@@ -1428,24 +1454,25 @@ class PortManager:
             async def federated_data_callback(data: bytes):
                 """Callback for federated port data - integrates with console manager"""
                 try:
-                    self.logger.debug(f"🚀 FEDERATED CALLBACK: Received {len(data)} bytes for port {port_name}")
+                    self.logger.debug("🚀 FEDERATED CALLBACK: Received %s bytes for port %s", len(data), port_name)
                     ok = await self.send_data(port_name, data, require_clients=False)
                     if not ok and hasattr(remote_proxy, "data_queue"):
                         try:
                             remote_proxy.data_queue.put_nowait(data)
                         except Exception:
                             self.logger.warning(
-                                f"🚀 FEDERATED CALLBACK: Failed fallback queue enqueue for {port_name}",
+                                "🚀 FEDERATED CALLBACK: Failed fallback queue enqueue for %s",
+                                port_name,
                                 exc_info=True,
                             )
-                    self.logger.debug(f"Processed {len(data)} bytes for federated port {port_name}")
+                    self.logger.debug("Processed %s bytes for federated port %s", len(data), port_name)
                 except Exception as e:
-                    self.logger.error(f"Error in federated port data callback for {port_name}: {e}", exc_info=True)
+                    self.logger.error("Error in federated port data callback for %s: %s", port_name, e, exc_info=True)
 
             # Set the data callback on the remote proxy
             remote_proxy.set_data_callback(federated_data_callback)
 
-            self.logger.debug(f"Registered runtime port {port_name} with data callback")
+            self.logger.debug("Registered runtime port %s with data callback", port_name)
             try:
                 self.notify_meta_updated(port_name, {"event": "federated_port_registered"})
             except Exception:
@@ -1455,7 +1482,9 @@ class PortManager:
 
         except Exception as e:
             self.logger.error(
-                f"Failed to register federated port {getattr(metadata, 'name', 'unknown')}: {e}",
+                "Failed to register federated port %s: %s",
+                getattr(metadata, "name", "unknown"),
+                e,
                 exc_info=True,
             )
             return None
@@ -1489,7 +1518,7 @@ class PortManager:
             for port_name in ports_to_remove:
                 del self.ports[port_name]
                 removed_ports.append(port_name)
-                self.logger.info(f"Unregistered federated port: {port_name}")
+                self.logger.info("Unregistered federated port: %s", port_name)
                 try:
                     self.notify_meta_updated(port_name, {"event": "federated_port_unregistered"})
                 except Exception:
@@ -1497,6 +1526,6 @@ class PortManager:
                     pass
 
         except Exception as e:
-            self.logger.error(f"Error unregistering federated ports for server {server_id}: {e}", exc_info=True)
+            self.logger.error("Error unregistering federated ports for server %s: %s", server_id, e, exc_info=True)
 
         return removed_ports

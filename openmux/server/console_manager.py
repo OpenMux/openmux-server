@@ -76,7 +76,7 @@ class ConsoleManager:
             # it straight back out would only feed an unnecessary A<->B broadcast loop.
             await self.broadcast_presence(port_name, notify_federation=False)
         except Exception:
-            self.logger.debug(f"Failed to re-broadcast presence for {port_name}", exc_info=True)
+            self.logger.debug("Failed to re-broadcast presence for %s", port_name, exc_info=True)
 
     async def port_exists(self, port_name: str) -> bool:
         """Return whether a port exists.
@@ -147,7 +147,7 @@ class ConsoleManager:
 
             return console_list
         except Exception as e:
-            self.logger.error(f"Error listing consoles: {e}", exc_info=True)
+            self.logger.error("Error listing consoles: %s", e, exc_info=True)
             return []
 
     async def connect_client(self, client, port_name: str) -> bool:
@@ -191,7 +191,7 @@ class ConsoleManager:
         except Exception:
             self.logger.error("connect_client: unified attach failed for port %s", port_name, exc_info=True)
 
-        self.logger.info(f"Client connected to {port_name}")
+        self.logger.info("Client connected to %s", port_name)
         return True
 
     async def disconnect_client(self, client) -> None:
@@ -219,7 +219,7 @@ class ConsoleManager:
                 # Remove client from console
                 self.console_clients[port_name].remove(client)
 
-                self.logger.debug(f"Client disconnected from {port_name}")
+                self.logger.debug("Client disconnected from %s", port_name)
 
                 # If no clients are left on this console, clean up
                 if not self.console_clients[port_name]:
@@ -251,7 +251,7 @@ class ConsoleManager:
         privilege.
         """
         if self._has_write_slots(port):
-            self.logger.info(f"Granting read-write access to user {username} for port {port_name} ({context})")
+            self.logger.info("Granting read-write access to user %s for port %s (%s)", username, port_name, context)
             return "read-write"
         if write_capacity(getattr(port, "max_read_write_users", 1)) == 0.0:
             self.logger.info(
@@ -260,7 +260,7 @@ class ConsoleManager:
             )
         else:
             self.logger.info(
-                f"Read-write slots full; granting read-only access to user {username} for port {port_name} ({context})"
+                "Read-write slots full; granting read-only access to user %s for port %s (%s)", username, port_name, context
             )
         return "read-only"
 
@@ -349,9 +349,9 @@ class ConsoleManager:
         entitled, deny_reason = self._taker_entitled(port, port_name, permissions, username)
         if not entitled:
             if deny_reason:
-                self.logger.info(f"Denying user {username} for port {port_name}: {deny_reason}")
+                self.logger.info("Denying user %s for port %s: %s", username, port_name, deny_reason)
                 return None, deny_reason
-            self.logger.info(f"Granting read-only access to user {username} for port {port_name}")
+            self.logger.info("Granting read-only access to user %s for port %s", username, port_name)
             return "read-only", None
         # Admin bypasses access control but not capacity (issue #59): under a
         # ``none`` (0-writer) port admin gets read-only like everyone else.
@@ -382,7 +382,7 @@ class ConsoleManager:
         # Get user permissions; an unrecognized identity (no role assigned) gets no access at all.
         permissions = self.auth_manager.get_user_permissions(username)
         if permissions is None:
-            self.logger.warning(f"Denying connection for '{username}' to port {port_name}: no permissions assigned")
+            self.logger.warning("Denying connection for '%s' to port %s: no permissions assigned", username, port_name)
             return False, None, "no_permissions"
 
         port = None
@@ -393,7 +393,7 @@ class ConsoleManager:
 
         mode, reason = self._resolve_access_mode(port, port_name, permissions, username)
         if mode is None:
-            self.logger.warning(f"Denying connection for '{username}' to port {port_name}: {reason}")
+            self.logger.warning("Denying connection for '%s' to port %s: %s", username, port_name, reason)
             return False, None, reason
 
         # A federated (remote_muxcon) port's origin server is the sole authority on
@@ -410,7 +410,7 @@ class ConsoleManager:
         success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
         if not success and mode == "read-write":
             mode = "read-only"
-            self.logger.info(f"Read-write slot full for {username} on port {port_name}; falling back to read-only")
+            self.logger.info("Read-write slot full for %s on port %s; falling back to read-only", username, port_name)
             success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
 
         if not success:
@@ -430,7 +430,7 @@ class ConsoleManager:
             if await self._request_federated_promotion(port, port_name, client_id):
                 mode = "read-write"
 
-        self.logger.info(f"Client {username} ({client_id}) connected to port {port_name} in {mode} mode")
+        self.logger.info("Client %s (%s) connected to port %s in %s mode", username, client_id, port_name, mode)
 
         # Update every already-attached viewer's presence badge; the new client's own
         # channel isn't registered yet, so the caller sends it an initial snapshot itself
@@ -438,7 +438,7 @@ class ConsoleManager:
         try:
             await self.broadcast_presence(port_name)
         except Exception:
-            self.logger.debug(f"broadcast_presence failed after connect for {port_name}", exc_info=True)
+            self.logger.debug("broadcast_presence failed after connect for %s", port_name, exc_info=True)
 
         return True, mode, None
 
@@ -465,11 +465,11 @@ class ConsoleManager:
         # Remove from map
         del self.client_port_map[client_id]
 
-        self.logger.info(f"Client {client_id} disconnected from port {port_name}")
+        self.logger.info("Client %s disconnected from port %s", client_id, port_name)
         try:
             await self.broadcast_presence(port_name)
         except Exception:
-            self.logger.debug(f"broadcast_presence failed after disconnect for {port_name}", exc_info=True)
+            self.logger.debug("broadcast_presence failed after disconnect for %s", port_name, exc_info=True)
         return True
 
     async def _request_federated_promotion(self, port: Any, port_name: str, client_id: str) -> bool:
@@ -488,7 +488,7 @@ class ConsoleManager:
             origin_mode = await port.request_read_write_for_client(client_id)
         except Exception:
             origin_mode = "read-only"
-            self.logger.debug(f"FEDRW promotion request failed for {client_id} on {port_name}", exc_info=True)
+            self.logger.debug("FEDRW promotion request failed for %s on %s", client_id, port_name, exc_info=True)
         if origin_mode != "read-write":
             return False
         return await self.port_manager.promote_client(port_name, client_id)
@@ -515,18 +515,18 @@ class ConsoleManager:
             port = None
         if port is not None and hasattr(port, "request_read_write_for_client"):
             if not await self._request_federated_promotion(port, port_name, client_id):
-                self.logger.info(f"Origin denied read-write promotion for {client_id} on federated port {port_name}")
+                self.logger.info("Origin denied read-write promotion for %s on federated port %s", client_id, port_name)
                 return False
 
         # Promote client
         success = await self.port_manager.promote_client(port_name, client_id)
 
         if success:
-            self.logger.info(f"Client {client_id} promoted to read-write on port {port_name}")
+            self.logger.info("Client %s promoted to read-write on port %s", client_id, port_name)
             try:
                 await self.broadcast_presence(port_name)
             except Exception:
-                self.logger.debug(f"broadcast_presence failed after promote for {port_name}", exc_info=True)
+                self.logger.debug("broadcast_presence failed after promote for %s", port_name, exc_info=True)
 
         return success
 
@@ -566,12 +566,12 @@ class ConsoleManager:
                     try:
                         await port.release_read_write_for_client(client_id)
                     except Exception:
-                        self.logger.debug(f"FEDRW release failed for {client_id} on {port_name}", exc_info=True)
-            self.logger.info(f"Client {client_id} demoted to read-only on port {port_name}")
+                        self.logger.debug("FEDRW release failed for %s on %s", client_id, port_name, exc_info=True)
+            self.logger.info("Client %s demoted to read-only on port %s", client_id, port_name)
             try:
                 await self.broadcast_presence(port_name)
             except Exception:
-                self.logger.debug(f"broadcast_presence failed after demote for {port_name}", exc_info=True)
+                self.logger.debug("broadcast_presence failed after demote for %s", port_name, exc_info=True)
 
         return success
 
@@ -604,7 +604,7 @@ class ConsoleManager:
             del self.data_forwarding_tasks[client_id]
         task = asyncio.create_task(self._forward_data_to_client(port_name, client_id))
         self.data_forwarding_tasks[client_id] = task
-        self.logger.info(f"Created forwarding task for {port_name} → {client_id}")
+        self.logger.info("Created forwarding task for %s → %s", port_name, client_id)
 
     def _stop_client_forwarding_task(self, client_id: str):
         """Cancel the forwarding task for a specific client.
@@ -616,7 +616,7 @@ class ConsoleManager:
             task = self.data_forwarding_tasks[client_id]
             task.cancel()
             del self.data_forwarding_tasks[client_id]
-            self.logger.info(f"Stopped forwarding task for client {client_id}")
+            self.logger.info("Stopped forwarding task for client %s", client_id)
 
     def _stop_port_data_forwarding(self, port_name: str):
         """Cancel all client forwarding tasks associated with a port.
@@ -652,13 +652,13 @@ class ConsoleManager:
         if data is None:
             # Only log every 50 polls to reduce spam
             if port_count % 50 == 0:
-                self.logger.debug(f"Data forwarder: About to call get_port_data for {port_name} (poll #{port_count})")
+                self.logger.debug("Data forwarder: About to call get_port_data for %s (poll #%s)", port_name, port_count)
         elif data:
-            self.logger.debug(f"Data forwarder: get_port_data returned {len(data)} bytes (poll #{port_count})")
+            self.logger.debug("Data forwarder: get_port_data returned %s bytes (poll #%s)", len(data), port_count)
         else:
             # Only log every 20 empty reads to reduce spam
             if port_count % 20 == 0:
-                self.logger.debug(f"Data forwarder: No data from port (poll #{port_count})")
+                self.logger.debug("Data forwarder: No data from port (poll #%s)", port_count)
 
     def _log_forwarded_data_details(self, port_name: str, client_id: str, data: bytes):
         """Log forwarded data details for loopback ports.
@@ -697,10 +697,10 @@ class ConsoleManager:
                     self.logger.debug("Data forwarder: About to call send_data_to_client (mapped)")
                 ok = await mgr.send_data_to_client(client_id, data)
                 if "loopback" in port_name:
-                    self.logger.debug(f"FORWARD TO CLIENT RESULT (mapped): {'Success' if ok else 'Failed'}")
+                    self.logger.debug("FORWARD TO CLIENT RESULT (mapped): %s", "Success" if ok else "Failed")
                 return ok
             except Exception as e:
-                self.logger.warning(f"Client mapped manager send failed for {client_id}: {e}", exc_info=True)
+                self.logger.warning("Client mapped manager send failed for %s: %s", client_id, e, exc_info=True)
                 # fall through to try other managers
 
         # Next, try all known client managers (multi-manager support)
@@ -715,20 +715,20 @@ class ConsoleManager:
                         self.client_to_manager[client_id] = m
                         break
                 except Exception as e:
-                    self.logger.debug(f"Manager {getattr(m, 'name', type(m).__name__)} send error: {e}")
+                    self.logger.debug("Manager %s send error: %s", getattr(m, "name", type(m).__name__), e)
             if any_success:
                 return True
 
         # Back-compat: fall back to single manager if set
         if not (hasattr(self, "client_manager") and self.client_manager):
-            self.logger.warning(f"No client manager available to forward data to client {client_id}")
+            self.logger.warning("No client manager available to forward data to client %s", client_id)
             return False
 
         if "loopback" in port_name:
             self.logger.debug("Data forwarder: About to call send_data_to_client (legacy)")
         success = await self.client_manager.send_data_to_client(client_id, data)
         if "loopback" in port_name:
-            self.logger.debug(f"FORWARD TO CLIENT RESULT (legacy): {'Success' if success else 'Failed'}")
+            self.logger.debug("FORWARD TO CLIENT RESULT (legacy): %s", "Success" if success else "Failed")
         # Cache mapping even for legacy path to reduce future lookups
         if success:
             try:
@@ -751,11 +751,11 @@ class ConsoleManager:
             # Capture the queue reference once; task is recreated on reconnect.
             port_wrapper = self.port_manager.get_port(port_name)
             if port_wrapper is None or not hasattr(port_wrapper, "client_queues"):
-                self.logger.error(f"Port {port_name} has no client_queues; forwarding for {client_id} cannot start")
+                self.logger.error("Port %s has no client_queues; forwarding for %s cannot start", port_name, client_id)
                 return
             q = port_wrapper.client_queues.get(client_id)
             if q is None:
-                self.logger.error(f"No delivery queue for {client_id} on {port_name}")
+                self.logger.error("No delivery queue for %s on %s", client_id, port_name)
                 return
 
             chunk_count = 0
@@ -769,20 +769,20 @@ class ConsoleManager:
 
                     success = await self._send_data_to_client(client_id, port_name, data)
                     if not success:
-                        self.logger.warning(f"Failed to send data to client {client_id} on {port_name}")
+                        self.logger.warning("Failed to send data to client %s on %s", client_id, port_name)
                     else:
-                        self.logger.debug(f"Forwarded {len(data)} bytes from {port_name} to {client_id}")
+                        self.logger.debug("Forwarded %s bytes from %s to %s", len(data), port_name, client_id)
 
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    self.logger.error(f"Error forwarding data to {client_id} on {port_name}: {e}", exc_info=True)
+                    self.logger.error("Error forwarding data to %s on %s: %s", client_id, port_name, e, exc_info=True)
                     await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
             self.logger.info(f"Data forwarding for {port_name} \u2192 {client_id} was cancelled")
         except Exception as e:
-            self.logger.error(f"Unexpected error in forwarding task for {client_id}: {e}", exc_info=True)
+            self.logger.error("Unexpected error in forwarding task for %s: %s", client_id, e, exc_info=True)
 
     def register_client_manager(self, client_manager):
         """Register the client manager for callbacks.
@@ -797,7 +797,7 @@ class ConsoleManager:
             if client_manager not in self.client_managers:
                 self.client_managers.append(client_manager)
                 self.logger.info(
-                    f"Registered client manager: {getattr(client_manager, 'name', type(client_manager).__name__)}"
+                    "Registered client manager: %s", getattr(client_manager, "name", type(client_manager).__name__)
                 )
         except Exception:
             # justification: optional bookkeeping; the single-manager field was already set above
@@ -870,7 +870,7 @@ class ConsoleManager:
         try:
             return bool(await mgr.send_control_frame_to_client(client_id, payload))
         except Exception:
-            self.logger.debug(f"send_control_frame_to_client failed for {client_id}", exc_info=True)
+            self.logger.debug("send_control_frame_to_client failed for %s", client_id, exc_info=True)
             return False
 
     async def broadcast_control_frame_to_port(self, port_name: str, payload: Dict[str, Any]) -> int:
@@ -894,7 +894,7 @@ class ConsoleManager:
                 if await self.send_control_frame_to_client(client_id, payload):
                     delivered += 1
             except Exception:
-                self.logger.debug(f"broadcast_control_frame_to_port failed for {client_id}", exc_info=True)
+                self.logger.debug("broadcast_control_frame_to_port failed for %s", client_id, exc_info=True)
         return delivered
 
     def _resolve_take_target(
@@ -981,7 +981,7 @@ class ConsoleManager:
                 port_obj=port,
             )
         except Exception:
-            self.logger.debug(f"DataLogger takeover record failed for {port_name}", exc_info=True)
+            self.logger.debug("DataLogger takeover record failed for %s", port_name, exc_info=True)
         return True, "ok"
 
     def _log_empty_slot_grant(self, port: Any, port_name: str, taker_id: str, taker_username: str) -> None:
@@ -1006,7 +1006,7 @@ class ConsoleManager:
                 port_obj=port,
             )
         except Exception:
-            self.logger.debug(f"DataLogger takeover record failed for {port_name}", exc_info=True)
+            self.logger.debug("DataLogger takeover record failed for %s", port_name, exc_info=True)
 
     async def take_write_slot(self, taker_id: str, port_name: str, target: Optional[str] = None) -> Tuple[bool, str]:
         """Take the port's write slot from another holder (issue #59 Part 2).
@@ -1099,7 +1099,7 @@ class ConsoleManager:
             try:
                 origin_mode = await port.take_write_slot_for_client(taker_id, target)
             except Exception:
-                self.logger.debug(f"FEDRW TAKE request failed for {taker_id} on {port_name}", exc_info=True)
+                self.logger.debug("FEDRW TAKE request failed for %s on %s", taker_id, port_name, exc_info=True)
                 origin_mode = "read-only"
             if origin_mode == "read-write":
                 # The origin granted the takeover. Mirror it onto our LOCAL
@@ -1216,7 +1216,7 @@ class ConsoleManager:
                 port_obj=port,
             )
         except Exception:
-            self.logger.debug(f"DataLogger takeover record failed for {port_name}", exc_info=True)
+            self.logger.debug("DataLogger takeover record failed for %s", port_name, exc_info=True)
 
     def _read_write_holders(self, port_name: str) -> List[Dict[str, Any]]:
         """Return the raw connected-client records currently in read-write mode."""
@@ -1326,7 +1326,7 @@ class ConsoleManager:
             try:
                 self.port_manager.notify_meta_updated(port_name, {"event": "presence_changed", "viewers": viewers})
             except Exception:
-                self.logger.debug(f"notify_meta_updated(presence_changed) failed for {port_name}", exc_info=True)
+                self.logger.debug("notify_meta_updated(presence_changed) failed for %s", port_name, exc_info=True)
         return await self.broadcast_control_frame_to_port(port_name, {"type": "presence", "viewers": viewers})
 
     def get_client_mode(self, client_id: str, port_name: str) -> Optional[str]:

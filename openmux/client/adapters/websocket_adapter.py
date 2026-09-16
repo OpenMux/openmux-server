@@ -72,7 +72,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
         try:
             import aiohttp  # noqa: F401
         except Exception as e:
-            self.logger.error(f"aiohttp import failed: {e}")
+            self.logger.error("aiohttp import failed: %s", e)
             return False
         # If no port_name was supplied we operate in "discovery" mode: we do not
         # establish a WebSocket data channel yet, but still consider the adapter
@@ -135,7 +135,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 token = base64.b64encode(f"{self.basic_user}:{self.basic_password}".encode("utf-8")).decode("ascii")
                 headers["Authorization"] = f"Basic {token}"
             timeout = aiohttp.ClientTimeout(total=self.timeout)
-            self.logger.info(f"Connecting (raw WS) to {url}")
+            self.logger.info("Connecting (raw WS) to %s", url)
             session = aiohttp.ClientSession(timeout=timeout)
             try:
                 self.websocket = await session.ws_connect(url, headers=headers)
@@ -168,7 +168,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
             self.username = self.basic_user
             return True
         except Exception as e:
-            self.logger.error(f"WebSocket connect failed: {e}", exc_info=True)
+            self.logger.error("WebSocket connect failed: %s", e, exc_info=True)
             return False
 
     async def authenticate_with_password(self, username: str, password: str) -> bool:  # compatibility shim
@@ -198,12 +198,12 @@ class WebSocketClientAdapter(BaseClientAdapter):
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url, headers=headers) as resp:
                     if resp.status != 200:
-                        self.logger.warning(f"Port list HTTP {resp.status}")
+                        self.logger.warning("Port list HTTP %s", resp.status)
                         return []
                     data = await resp.json(content_type=None)
                     return data.get("ports", []) if isinstance(data, dict) else []
         except Exception as e:
-            self.logger.error(f"HTTP port listing failed: {e}", exc_info=True)
+            self.logger.error("HTTP port listing failed: %s", e, exc_info=True)
             return []
 
     async def connect_to_port(self, port_name: str) -> bool:
@@ -222,7 +222,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 await self.websocket.send_bytes(data)
             return True
         except Exception as e:
-            self.logger.error(f"Send failed: {e}", exc_info=True)
+            self.logger.error("Send failed: %s", e, exc_info=True)
             self.is_connected = False
             return False
 
@@ -241,7 +241,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
             await self.websocket.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
             return True
         except Exception as e:
-            self.logger.error(f"Failed to send control frame: {e}", exc_info=True)
+            self.logger.error("Failed to send control frame: %s", e, exc_info=True)
             return False
 
     async def request_read_write(self) -> bool:
@@ -328,7 +328,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
             # Timeout just means no data yet; return empty marker
             return b""
         except Exception as e:
-            self.logger.error(f"Read failed: {e}", exc_info=True)
+            self.logger.error("Read failed: %s", e, exc_info=True)
             self.is_connected = False
             if self._aiohttp_session:
                 try:
@@ -357,7 +357,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 await self._aiohttp_session.close()
             self.logger.info("WebSocket closed")
         except Exception as e:
-            self.logger.error(f"Close error: {e}", exc_info=True)
+            self.logger.error("Close error: %s", e, exc_info=True)
         finally:
             self.is_connected = False
             self.is_authenticated = False

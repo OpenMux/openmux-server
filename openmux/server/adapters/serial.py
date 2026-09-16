@@ -352,7 +352,7 @@ class SerialPortWrapper:
             return
         old = self._client_count
         self._client_count = count
-        self.logger.info(f"Client count changed for serial port {self.name}: {old} -> {count}")
+        self.logger.info("Client count changed for serial port %s: %s -> %s", self.name, old, count)
         self._apply_line_levels_for_count(count)
 
     async def start(self) -> bool:
@@ -369,7 +369,7 @@ class SerialPortWrapper:
             self.state = PortState.DEGRADED
             return False
 
-        self.logger.info(f"Starting serial port {self.name} on {self.device}")
+        self.logger.info("Starting serial port %s on %s", self.name, self.device)
         self.state = PortState.CREATING
 
         # Start connection supervisor in background
@@ -388,7 +388,7 @@ class SerialPortWrapper:
             return
         if self.connection_task is not None and not self.connection_task.done():
             return
-        self.logger.info(f"Resuming serial port {self.name} on {self.device}")
+        self.logger.info("Resuming serial port %s on %s", self.name, self.device)
         self.state = PortState.CREATING
         self.connection_task = asyncio.create_task(self._connect_loop())
         self.state = PortState.ACTIVE
@@ -398,7 +398,7 @@ class SerialPortWrapper:
 
         Idempotent; safe to call multiple times.
         """
-        self.logger.info(f"Stopping serial port {self.name}")
+        self.logger.info("Stopping serial port %s", self.name)
         self.state = PortState.DESTROYING
 
         # Stop auto-reconnection
@@ -455,7 +455,7 @@ class SerialPortWrapper:
                         # justification: task was cancelled on purpose; awaiting it observes the cancellation
                         pass
                     except Exception as e:
-                        self.logger.error(f"Read loop error: {e}", exc_info=True)
+                        self.logger.error("Read loop error: %s", e, exc_info=True)
 
                     # Connection lost, clean up
                     await self._disconnect()
@@ -473,7 +473,7 @@ class SerialPortWrapper:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Connection loop error: {e}", exc_info=True)
+                self.logger.error("Connection loop error: %s", e, exc_info=True)
                 if self.auto_reconnect:
                     await asyncio.sleep(self.reconnect_delay)
 
@@ -490,10 +490,10 @@ class SerialPortWrapper:
 
                 now = _time.monotonic()
                 if self._last_missing_warn_ts is None or (now - self._last_missing_warn_ts) >= 3600:
-                    self.logger.warning(f"Serial device {self.device} does not exist")
+                    self.logger.warning("Serial device %s does not exist", self.device)
                     self._last_missing_warn_ts = now
                 else:
-                    self.logger.debug(f"Serial device {self.device} still not found")
+                    self.logger.debug("Serial device %s still not found", self.device)
                 self._set_status_message(f"Serial device {self.device} not found", connected=False)
                 return False
 
@@ -502,11 +502,11 @@ class SerialPortWrapper:
                 try:
                     st = os.stat(self.device)
                     if stat.S_ISCHR(st.st_mode):
-                        self.logger.debug(f"Device {self.device} is a character device")
+                        self.logger.debug("Device %s is a character device", self.device)
                     else:
-                        self.logger.warning(f"Device {self.device} is not a character device")
+                        self.logger.warning("Device %s is not a character device", self.device)
                 except Exception as e:
-                    self.logger.warning(f"Could not check device type: {e}", exc_info=True)
+                    self.logger.warning("Could not check device type: %s", e, exc_info=True)
 
             # Import serial_asyncio
             try:
@@ -540,8 +540,8 @@ class SerialPortWrapper:
             try:
                 self._apply_line_levels_for_count(self._client_count)
             except Exception:
-                self.logger.error(f"Error applying initial signal lines to {self.name}", exc_info=True)
-            self.logger.info(f"Successfully connected to {self.device}")
+                self.logger.error("Error applying initial signal lines to %s", self.name, exc_info=True)
+            self.logger.info("Successfully connected to %s", self.device)
             # Reason for a previous failed cycle no longer applies now that we
             # are connected (issue #62); also clears the "Disconnected from ..."
             # reason on reconnect after a drop.
@@ -558,7 +558,7 @@ class SerialPortWrapper:
             # No traceback: the error message already carries the errno detail
             # (e.g. termios EIO), and the connect loop retries with this same
             # failure every cycle, so a stack trace only adds noise.
-            self.logger.error(f"Failed to connect to {self.device}: {e}")
+            self.logger.error("Failed to connect to %s: %s", self.device, e)
             self._set_status_message(f"Failed to open {self.device}: {e}", connected=False)
             return False
 
@@ -581,10 +581,10 @@ class SerialPortWrapper:
                 if hasattr(self.writer, "wait_closed"):
                     await self.writer.wait_closed()
 
-            self.logger.info(f"Disconnected from {self.device}")
+            self.logger.info("Disconnected from %s", self.device)
 
         except Exception as e:
-            self.logger.error(f"Error disconnecting from {self.device}: {e}", exc_info=True)
+            self.logger.error("Error disconnecting from %s: %s", self.device, e, exc_info=True)
         finally:
             # Reset managed lines to their active level so a stale idle signal
             # (presence-* driving the line low) never lingers across a reconnect.
@@ -595,7 +595,7 @@ class SerialPortWrapper:
                     active, _idle = self._line_policy(line)
                     self._apply_line(line, active)
             except Exception:
-                self.logger.error(f"Error resetting signal lines on {self.name}", exc_info=True)
+                self.logger.error("Error resetting signal lines on %s", self.name, exc_info=True)
             self._dtr_driven = None
             self._rts_driven = None
             self.is_connected = False
@@ -653,7 +653,7 @@ class SerialPortWrapper:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Error reading from {self.device}: {e}", exc_info=True)
+                self.logger.error("Error reading from %s: %s", self.device, e, exc_info=True)
                 # Reason for the drop (issue #62) so the banner can show it
                 self._set_status_message(f"Read error on {self.device}: {e}")
                 # Proactively notify disconnect on read error
@@ -685,10 +685,10 @@ class SerialPortWrapper:
         try:
             self.writer.write(data)
             await self.writer.drain()
-            self.logger.debug(f"Wrote {len(data)} bytes to {self.device}")
+            self.logger.debug("Wrote %s bytes to %s", len(data), self.device)
             return len(data)
         except Exception as e:
-            self.logger.error(f"Error writing to {self.device}: {e}", exc_info=True)
+            self.logger.error("Error writing to %s: %s", self.device, e, exc_info=True)
             raise
 
     def get_status_snapshot(self) -> Dict[str, Any]:
@@ -839,10 +839,10 @@ class SerialAdapter(BaseGenericAdapter):
         for name, wrapper in self.serial_ports.items():
             if name in flagged:
                 if wrapper.state in (PortState.CONFIGURED, PortState.CREATING, PortState.ACTIVE):
-                    self.logger.error(f"Serial port {name} is offline: {wrapper.status_message}")
+                    self.logger.error("Serial port %s is offline: %s", name, wrapper.status_message)
                 wrapper.state = PortState.DEGRADED
             elif wrapper.status_message:
-                self.logger.info(f"Serial port {name} no longer duplicates a device; connecting again")
+                self.logger.info("Serial port %s no longer duplicates a device; connecting again", name)
                 wrapper.status_message = ""
                 wrapper.resume_if_idle()
 
@@ -877,7 +877,7 @@ class SerialAdapter(BaseGenericAdapter):
 
         for port_config in ports_config:
             if not isinstance(port_config, dict):
-                self.logger.error(f"Invalid port config (not a dict): {port_config}")
+                self.logger.error("Invalid port config (not a dict): %s", port_config)
                 continue
 
             try:
@@ -886,11 +886,11 @@ class SerialAdapter(BaseGenericAdapter):
                 port_wrapper = self._build_port(port_config)
                 self.serial_ports[port_wrapper.name] = port_wrapper
 
-                self.logger.info(f"Configured serial port {port_wrapper.name} -> {port_wrapper.device}")
+                self.logger.info("Configured serial port %s -> %s", port_wrapper.name, port_wrapper.device)
 
             except Exception as e:
                 port_name = port_config.get("name", "unknown") if isinstance(port_config, dict) else "unknown"
-                self.logger.error(f"Failed to configure serial port {port_name}: {e}", exc_info=True)
+                self.logger.error("Failed to configure serial port %s: %s", port_name, e, exc_info=True)
                 raise
 
         # One port per unix device (issue #57): flag ports that share a device
@@ -933,10 +933,10 @@ class SerialAdapter(BaseGenericAdapter):
         if self.is_running:
             return True
 
-        self.logger.info(f"Starting serial adapter {self.name}")
+        self.logger.info("Starting serial adapter %s", self.name)
 
         if not self.serial_ports:
-            self.logger.warning(f"No ports configured for serial adapter {self.name}")
+            self.logger.warning("No ports configured for serial adapter %s", self.name)
             self.is_running = True
             return True
 
@@ -952,19 +952,19 @@ class SerialAdapter(BaseGenericAdapter):
                         unified_port=port_wrapper,
                         adapter=self,
                     )
-                    self.logger.info(f"Registered serial port {port_name} with port manager")
+                    self.logger.info("Registered serial port %s with port manager", port_name)
 
                 success_count += 1
 
             except Exception as e:
-                self.logger.error(f"Failed to start serial port {port_name}: {e}", exc_info=True)
+                self.logger.error("Failed to start serial port %s: %s", port_name, e, exc_info=True)
 
         if success_count > 0:
             self.is_running = True
-            self.logger.info(f"Serial adapter {self.name} started with {success_count}/{len(self.serial_ports)} ports")
+            self.logger.info("Serial adapter %s started with %s/%s ports", self.name, success_count, len(self.serial_ports))
             return True
         else:
-            self.logger.error(f"Failed to start any serial ports in adapter {self.name}")
+            self.logger.error("Failed to start any serial ports in adapter %s", self.name)
             return False
 
     async def stop(self) -> None:
@@ -972,17 +972,17 @@ class SerialAdapter(BaseGenericAdapter):
         if not self.is_running:
             return
 
-        self.logger.info(f"Stopping serial adapter {self.name}")
+        self.logger.info("Stopping serial adapter %s", self.name)
 
         for port_name in list(self.serial_ports.keys()):
             try:
                 await self.destroy_port(port_name)
-                self.logger.info(f"Stopped serial port {port_name}")
+                self.logger.info("Stopped serial port %s", port_name)
             except Exception as e:
-                self.logger.error(f"Error stopping serial port {port_name}: {e}", exc_info=True)
+                self.logger.error("Error stopping serial port %s: %s", port_name, e, exc_info=True)
 
         self.is_running = False
-        self.logger.info(f"Serial adapter {self.name} stopped")
+        self.logger.info("Serial adapter %s stopped", self.name)
 
     async def run(self) -> None:
         """Legacy compatibility shim (no-op: data now flows via data_callback)."""
@@ -1012,7 +1012,7 @@ class SerialAdapter(BaseGenericAdapter):
                 await self.main_port_manager.register_unified_port(wrapper.name, wrapper, self)
             return wrapper
         except Exception as e:
-            self.logger.error(f"Failed to create serial port {port_name}: {e}", exc_info=True)
+            self.logger.error("Failed to create serial port %s: %s", port_name, e, exc_info=True)
             return None
 
     async def destroy_port(self, port_name: str) -> None:
@@ -1023,7 +1023,7 @@ class SerialAdapter(BaseGenericAdapter):
                 try:
                     await self.main_port_manager.unregister_unified_port(port_name)
                 except Exception:
-                    self.logger.warning(f"Failed to unregister unified port {port_name}")
+                    self.logger.warning("Failed to unregister unified port %s", port_name)
             await port_wrapper.stop()
             del self.serial_ports[port_name]
             # One port per unix device (issue #57): the freed device may make a
@@ -1061,12 +1061,12 @@ class SerialAdapter(BaseGenericAdapter):
             Number of bytes written (0 if port missing, not connected, or write failed).
         """
         if port_name not in self.serial_ports:
-            self.logger.warning(f"Port {port_name} not found in serial ports")
+            self.logger.warning("Port %s not found in serial ports", port_name)
             return 0
 
         port_wrapper = self.serial_ports[port_name]
         if not port_wrapper.is_connected:
-            self.logger.warning(f"Port {port_name} is not connected")
+            self.logger.warning("Port %s is not connected", port_name)
             return 0
 
         try:
@@ -1074,10 +1074,10 @@ class SerialAdapter(BaseGenericAdapter):
                 f"Writing {len(data)} bytes to serial port {port_name}: {data.decode('utf-8', errors='replace')}"
             )
             bytes_written = await port_wrapper.write_data(data)
-            self.logger.debug(f"Successfully wrote {bytes_written} bytes to serial port {port_name}")
+            self.logger.debug("Successfully wrote %s bytes to serial port %s", bytes_written, port_name)
             return bytes_written
         except Exception as e:
-            self.logger.error(f"Failed to write to serial port {port_name}: {e}", exc_info=True)
+            self.logger.error("Failed to write to serial port %s: %s", port_name, e, exc_info=True)
             return 0
 
     def get_status_info(self) -> Dict[str, Any]:
@@ -1240,7 +1240,7 @@ class SerialAdapter(BaseGenericAdapter):
             try:
                 await self.destroy_port(name)
             except Exception as e:
-                self.logger.error(f"Failed to destroy serial port {name}: {e}", exc_info=True)
+                self.logger.error("Failed to destroy serial port %s: %s", name, e, exc_info=True)
 
         # Apply additions and re-creations
         for name in added + updated:
@@ -1250,7 +1250,7 @@ class SerialAdapter(BaseGenericAdapter):
             try:
                 await self.create_port(name, cfg)
             except Exception as e:
-                self.logger.error(f"Failed to create serial port {name}: {e}", exc_info=True)
+                self.logger.error("Failed to create serial port %s: %s", name, e, exc_info=True)
 
         # Update adapter's config snapshot to reflect new state (canonical
         # 'serial_ports' key, the same shape __init__ consumed).
@@ -1268,6 +1268,11 @@ class SerialAdapter(BaseGenericAdapter):
             "unchanged": unchanged,
         }
         self.logger.info(
-            f"Serial adapter {self.name} reconcile summary: +{len(added)} ~{len(updated)} -{len(removed)} =unchanged {len(unchanged)}"
+            "Serial adapter %s reconcile summary: +%s ~%s -%s =unchanged %s",
+            self.name,
+            len(added),
+            len(updated),
+            len(removed),
+            len(unchanged),
         )
         return summary

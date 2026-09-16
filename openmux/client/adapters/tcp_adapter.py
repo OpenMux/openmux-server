@@ -82,7 +82,7 @@ class TcpClientAdapter(BaseClientAdapter):
             return True
 
         try:
-            self.logger.debug(f"Connecting to {self.host}:{self.port}")
+            self.logger.debug("Connecting to %s:%s", self.host, self.port)
 
             # Use SSL if encryption is enabled
             if self.use_tls:
@@ -105,7 +105,7 @@ class TcpClientAdapter(BaseClientAdapter):
             return True
 
         except Exception as e:
-            self.logger.debug(f"Socket connect failed to {self.host}:{self.port}: {e}", exc_info=True)
+            self.logger.debug("Socket connect failed to %s:%s: %s", self.host, self.port, e, exc_info=True)
             return False
 
     async def authenticate_with_password(self, username: str, password: str) -> bool:
@@ -137,7 +137,7 @@ class TcpClientAdapter(BaseClientAdapter):
             return ok
 
         except Exception as e:
-            self.logger.debug(f"Authentication error: {e}", exc_info=True)
+            self.logger.debug("Authentication error: %s", e, exc_info=True)
             return False
 
     async def authenticate_with_key(self, api_key: str) -> bool:
@@ -162,7 +162,7 @@ class TcpClientAdapter(BaseClientAdapter):
             return ok
 
         except Exception as e:
-            self.logger.debug(f"Authentication error: {e}", exc_info=True)
+            self.logger.debug("Authentication error: %s", e, exc_info=True)
             return False
 
     async def authenticate_with_pubkey(self, username: str, private_key_path: str, key_id: Optional[str] = None) -> bool:
@@ -261,14 +261,14 @@ class TcpClientAdapter(BaseClientAdapter):
                     "key_id": chal_key_id,
                     "private_key_path": private_key_path,
                 }
-                self.logger.debug(f"Authenticated via public key {chal_key_id}")
+                self.logger.debug("Authenticated via public key %s", chal_key_id)
                 return True
             self.logger.error(
                 f"Public key authentication failed: {last_line.decode(errors='ignore').strip() if last_line else 'no response'}"
             )
             return False
         except Exception as e:
-            self.logger.error(f"Public key authentication error: {e}")
+            self.logger.error("Public key authentication error: %s", e)
             return False
 
     async def list_ports(self) -> List[Any]:
@@ -285,7 +285,7 @@ class TcpClientAdapter(BaseClientAdapter):
             return await self._list_ports_standard()
 
         except Exception as e:
-            self.logger.error(f"Failed to list ports: {e}", exc_info=True)
+            self.logger.error("Failed to list ports: %s", e, exc_info=True)
             return []
 
     async def connect_to_port(self, port_name: str) -> bool:
@@ -308,7 +308,7 @@ class TcpClientAdapter(BaseClientAdapter):
             # No traceback: the error message already carries the connect
             # failure detail, and the auto-reconnect loop re-invokes this
             # with the same failure each cycle, so a stack trace adds noise.
-            self.logger.error(f"Failed to connect to port: {e}")
+            self.logger.error("Failed to connect to port: %s", e)
             return False
 
     async def send_data(self, data: Union[str, bytes]) -> bool:
@@ -335,7 +335,7 @@ class TcpClientAdapter(BaseClientAdapter):
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to send data: {e}", exc_info=True)
+            self.logger.error("Failed to send data: %s", e, exc_info=True)
             self.is_connected = False
             return False
 
@@ -356,7 +356,7 @@ class TcpClientAdapter(BaseClientAdapter):
             await self.writer.drain()
             return True
         except Exception as e:
-            self.logger.error(f"Failed to send control frame: {e}", exc_info=True)
+            self.logger.error("Failed to send control frame: %s", e, exc_info=True)
             return False
 
     async def request_read_write(self) -> bool:
@@ -421,7 +421,7 @@ class TcpClientAdapter(BaseClientAdapter):
         except asyncio.TimeoutError:
             return b""
         except Exception as e:
-            self.logger.debug(f"Failed to read data: {e}", exc_info=True)
+            self.logger.debug("Failed to read data: %s", e, exc_info=True)
             self.is_connected = False
             return b""
 
@@ -473,12 +473,12 @@ class TcpClientAdapter(BaseClientAdapter):
                     if hasattr(writer, "wait_closed"):
                         await writer.wait_closed()
                 except Exception as e:
-                    self.logger.error(f"Error during writer operations: {e}", exc_info=True)
+                    self.logger.error("Error during writer operations: %s", e, exc_info=True)
 
             self.logger.debug("Connection closed")
 
         except Exception as e:
-            self.logger.debug(f"Error closing connection: {e}", exc_info=True)
+            self.logger.debug("Error closing connection: %s", e, exc_info=True)
 
         finally:
             self.is_connected = False
@@ -529,7 +529,7 @@ class TcpClientAdapter(BaseClientAdapter):
                         if final.startswith(b"AUTH:SUCCESS"):
                             self.is_authenticated = True
                             self.username = username
-                            self.logger.debug(f"Authenticated (HMAC) as {username}")
+                            self.logger.debug("Authenticated (HMAC) as %s", username)
                             return True
                         # Fall through to legacy if not success
                     except Exception:
@@ -539,7 +539,7 @@ class TcpClientAdapter(BaseClientAdapter):
             self.logger.error("Plaintext password authentication disabled; server requires HMAC or another method")
             return False
         except Exception as e:
-            self.logger.error(f"Authentication error: {e}", exc_info=True)
+            self.logger.error("Authentication error: %s", e, exc_info=True)
             return False
 
     async def _authenticate_standard_key(self, api_key: str) -> bool:
@@ -571,7 +571,7 @@ class TcpClientAdapter(BaseClientAdapter):
             self.logger.debug("Authenticated with API key")
             return True
         except Exception as e:
-            self.logger.error(f"Authentication error: {e}", exc_info=True)
+            self.logger.error("Authentication error: %s", e, exc_info=True)
             return False
 
     async def _list_ports_standard(self) -> List[str]:
@@ -607,7 +607,7 @@ class TcpClientAdapter(BaseClientAdapter):
                 skip_guard += 1
         except Exception as e:
             # Some callers/tests may not provide readline; fall back to legacy format
-            self.logger.debug(f"readline failed, falling back to read(): {e}", exc_info=True)
+            self.logger.debug("readline failed, falling back to read(): %s", e, exc_info=True)
             first_line = b""
 
         # Interpret first line
@@ -639,7 +639,7 @@ class TcpClientAdapter(BaseClientAdapter):
                     pass
                 return list(dedup.keys())
             except Exception as e:
-                self.logger.error(f"Failed to parse JSON LIST payload: {e}: {line_text[:120]}", exc_info=True)
+                self.logger.error("Failed to parse JSON LIST payload: %s: %s", e, line_text[:120], exc_info=True)
                 return []
 
         # Case 2: Expected framed SUCCESS format
@@ -660,7 +660,7 @@ class TcpClientAdapter(BaseClientAdapter):
                 # Justification: legacy LIST blob parsing best-effort; failure falls through
                 # to standard error path with explicit log below.
                 self.logger.debug("Legacy LIST blob parsing failed", exc_info=True)
-            self.logger.error(f"Unexpected LIST response: {line_text if line_text else str(first_line)}")
+            self.logger.error("Unexpected LIST response: %s", line_text if line_text else str(first_line))
             return []
 
         # Read port lines until END:LIST
@@ -675,7 +675,7 @@ class TcpClientAdapter(BaseClientAdapter):
             if line_str == "END:LIST":
                 break
             elif line_str.startswith("ERROR:"):
-                self.logger.error(f"Server error: {line_str}")
+                self.logger.error("Server error: %s", line_str)
                 break
             elif line_str:
                 ports.append(line_str)
@@ -711,16 +711,16 @@ class TcpClientAdapter(BaseClientAdapter):
                 mode = parts[2] if len(parts) > 2 else "READ_ONLY"
                 self.current_port = connected_port
                 self.access_mode = "read-write" if mode == "READ_WRITE" else "read-only"
-                self.logger.debug(f"Connected to port {connected_port} in {mode} mode")
+                self.logger.debug("Connected to port %s in %s mode", connected_port, mode)
                 return True
 
         # Check for error response
         if response.startswith("ERROR:"):
-            self.logger.error(f"Failed to connect to port: {response}")
+            self.logger.error("Failed to connect to port: %s", response)
             return False
 
         # Unexpected response
-        self.logger.error(f"Unexpected response from server: {response}")
+        self.logger.error("Unexpected response from server: %s", response)
         return False
 
     # All management-protocol specific methods removed
@@ -756,7 +756,7 @@ class TcpClientAdapter(BaseClientAdapter):
                 if not await self.authenticate_with_key(self._last_auth.get("api_key", "")):
                     return False
             else:
-                self.logger.error(f"Unsupported auth method for reconnect: {method}")
+                self.logger.error("Unsupported auth method for reconnect: %s", method)
                 return False
 
             # Reattach to previous port if any
@@ -765,5 +765,5 @@ class TcpClientAdapter(BaseClientAdapter):
             return True
 
         except Exception as e:
-            self.logger.debug(f"Reconnect failed: {e}", exc_info=True)
+            self.logger.debug("Reconnect failed: %s", e, exc_info=True)
             return False

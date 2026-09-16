@@ -475,7 +475,12 @@ class SshListenerAdapter(BaseGenericAdapter):
 
         summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
         self.logger.info(
-            f"SSH listener adapter {self.name} reconcile: +{len(added)} ~{len(updated)} -{len(removed)} unchanged={len(unchanged)}"
+            "SSH listener adapter %s reconcile: +%s ~%s -%s unchanged=%s",
+            self.name,
+            len(added),
+            len(updated),
+            len(removed),
+            len(unchanged),
         )
         return summary
 

@@ -483,7 +483,7 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
     adapter._require_permission(request, ("admin",))
     try:
         has_csrf = bool(request.headers.get("X-OMX-CSRF"))
-        adapter.logger.debug(f"[reload-soft:{req_id}] CSRF header present={has_csrf}")
+        adapter.logger.debug("[reload-soft:%s] CSRF header present=%s", req_id, has_csrf)
     except Exception:
         # justification: logging failure must not change the request outcome
         pass
@@ -524,7 +524,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
     # Log presence of CSRF header to aid debugging (not the value)
     try:
         has_csrf = bool(request.headers.get("X-OMX-CSRF"))
-        adapter.logger.debug(f"[reload-full:{req_id}] CSRF header present={has_csrf}")
+        adapter.logger.debug("[reload-full:%s] CSRF header present=%s", req_id, has_csrf)
     except Exception:
         # justification: logging failure must not change the request outcome
         pass
@@ -537,7 +537,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
         adapter.logger.error("[reload-full:%s] Server reload API unavailable (server=%s)", req_id, bool(server))
         return web.json_response({"error": True, "message": "Server reload API unavailable"}, status=500)
     try:
-        adapter.logger.info(f"[reload-full:{req_id}] Invoking server.reload_adapters_full()")
+        adapter.logger.info("[reload-full:%s] Invoking server.reload_adapters_full()", req_id)
         start = time.time()
         ctx = {
             "req_id": req_id,

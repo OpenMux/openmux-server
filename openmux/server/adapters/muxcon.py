@@ -176,7 +176,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self.listeners_conf: List[Dict[str, Any]] = []
         for idx, lst in enumerate(listeners_list):
             if not isinstance(lst, dict):
-                self.logger.warning(f"Ignoring non-dict listener entry at index {idx}: {lst}")
+                self.logger.warning("Ignoring non-dict listener entry at index %s: %s", idx, lst)
                 continue
             self.listeners_conf.append(self._normalize_listener_conf(lst))
         self._refresh_tls_dir_from_listeners()
@@ -186,7 +186,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         for p in effective_config.get("initiators", []) or []:
             peer = self._normalize_peer(p)
             if peer is None:
-                self.logger.warning(f"Invalid initiator config {p}; skipping")
+                self.logger.warning("Invalid initiator config %s; skipping", p)
                 continue
             self.peers.append(peer)
         # Identity & protocol
@@ -231,7 +231,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             if key_id_cfg:
                 self._auth_key_id = str(key_id_cfg)
         except Exception as e:
-            self.logger.warning(f"Failed to load MuxCon auth config: {e}", exc_info=True)
+            self.logger.warning("Failed to load MuxCon auth config: %s", e, exc_info=True)
             self._auth_priv = None
             self._auth_key_id = None
 
@@ -433,7 +433,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 options={k: v for k, v in p.items() if k not in {"host", "port"}},
             )
         except Exception as e:
-            self.logger.warning(f"Invalid initiator config {p}: {e}", exc_info=True)
+            self.logger.warning("Invalid initiator config %s: %s", p, e, exc_info=True)
             return None
 
     def _load_public_keys(self, effective_config: Dict[str, Any]) -> None:
@@ -487,14 +487,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         label = f" for key_id '{key_id}'" if key_id else ""
         try:
             if not key_text or not isinstance(key_text, str):
-                self.logger.warning(f"MuxCon public key{label} is empty or not a string; ignoring")
+                self.logger.warning("MuxCon public key%s is empty or not a string; ignoring", label)
                 return None
             key_text = key_text.strip()
             if key_text.startswith("ssh-ed25519 "):
                 pub = serialization.load_ssh_public_key(key_text.encode("utf-8"))
                 if isinstance(pub, Ed25519PublicKey):
                     return pub
-                self.logger.warning(f"MuxCon public key{label} is a valid SSH key but not Ed25519; ignoring")
+                self.logger.warning("MuxCon public key%s is a valid SSH key but not Ed25519; ignoring", label)
                 return None
             # Accept base64 or base64:<data>
             if key_text.startswith("base64:"):
@@ -508,7 +508,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 return None
             return Ed25519PublicKey.from_public_bytes(raw)
         except Exception as e:
-            self.logger.warning(f"Failed to parse MuxCon public key{label}: {e}", exc_info=True)
+            self.logger.warning("Failed to parse MuxCon public key%s: %s", label, e, exc_info=True)
             return None
 
     def _load_ed25519_private_key(self, path: str) -> Optional[Ed25519PrivateKey]:
@@ -518,7 +518,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             with open(path, "rb") as f:
                 data = f.read()
         except OSError as e:
-            self.logger.warning(f"Failed to read MuxCon auth private key file '{path}': {e}")
+            self.logger.warning("Failed to read MuxCon auth private key file '%s': %s", path, e)
             return None
         try:
             # PEM formats
@@ -535,7 +535,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     except Exception:
                         # justification: key format probe; the next parser is tried
                         pass
-                    self.logger.warning(f"MuxCon auth private key '{path}' is not an Ed25519 key")
+                    self.logger.warning("MuxCon auth private key '%s' is not an Ed25519 key", path)
                     return None
                 except Exception:
                     # Try OpenSSH private key format
@@ -546,7 +546,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     except Exception:
                         # justification: key format probe; the next parser is tried
                         pass
-                    self.logger.warning(f"Failed to parse MuxCon auth private key '{path}' as PEM or OpenSSH")
+                    self.logger.warning("Failed to parse MuxCon auth private key '%s' as PEM or OpenSSH", path)
                     return None
             # Raw/base64 seed in file
             try:
@@ -556,10 +556,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             except Exception:
                 # justification: key format probe; the next parser is tried
                 pass
-            self.logger.warning(f"MuxCon auth private key '{path}' is not PEM, OpenSSH, or a raw 32-byte base64 Ed25519 key")
+            self.logger.warning("MuxCon auth private key '%s' is not PEM, OpenSSH, or a raw 32-byte base64 Ed25519 key", path)
             return None
         except Exception as e:
-            self.logger.warning(f"Failed to load MuxCon auth private key '{path}': {e}", exc_info=True)
+            self.logger.warning("Failed to load MuxCon auth private key '%s': %s", path, e, exc_info=True)
             return None
 
     def _is_conn_authenticated(self, conn_id: str) -> bool:
@@ -613,7 +613,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             await self._broadcast_viewer_presence(port_name, changes.get("viewers") or [])
         except Exception:
-            self.logger.debug(f"Failed to broadcast VIEWERS presence for {port_name}", exc_info=True)
+            self.logger.debug("Failed to broadcast VIEWERS presence for %s", port_name, exc_info=True)
 
     async def _on_port_meta_for_status_relay(self, port_name: str, changes: Optional[Dict[str, Any]]) -> None:
         """PortManager meta listener: push a local port's offline reason to peers.
@@ -642,7 +642,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             await self._broadcast_port_status(port_name, changes.get("status_message") or "")
         except Exception:
-            self.logger.debug(f"Failed to broadcast PORT_STATUS for {port_name}", exc_info=True)
+            self.logger.debug("Failed to broadcast PORT_STATUS for %s", port_name, exc_info=True)
 
     async def _broadcast_port_status(self, port_name: str, status_message: str) -> None:
         """Send a ``PORT_STATUS:<port>`` control update to every active peer.
@@ -680,7 +680,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 frame = self.proto.create_control_frame(0, seq, body)
                 await self._send_protocol_frame(writer, frame)
             except Exception:
-                self.logger.debug(f"[{cid}] Failed to send PORT_STATUS frame for {port_name}", exc_info=True)
+                self.logger.debug("[%s] Failed to send PORT_STATUS frame for %s", cid, port_name, exc_info=True)
 
     @staticmethod
     def _parse_port_status_frame(payload: str) -> Optional[Tuple[str, str, str]]:
@@ -715,13 +715,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             parsed = None
         if parsed is None:
-            self.logger.debug(f"[{conn_id}] Malformed PORT_STATUS frame")
+            self.logger.debug("[%s] Malformed PORT_STATUS frame", conn_id)
             return
         port_name, status_message, readiness = parsed
         peer_key = self._derive_peer_key_from_conn_id(conn_id)
         proxy = (self._peer_proxies.get(peer_key) or {}).get(port_name)
         if proxy is None:
-            self.logger.debug(f"[{conn_id}] PORT_STATUS for unknown remote port '{port_name}'")
+            self.logger.debug("[%s] PORT_STATUS for unknown remote port '%s'", conn_id, port_name)
             return
         try:
             meta = getattr(proxy, "metadata", None)
@@ -792,7 +792,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 frame = self.proto.create_control_frame(0, seq, body)
                 await self._send_protocol_frame(writer, frame)
             except Exception:
-                self.logger.debug(f"[{cid}] Failed to send VIEWERS frame for {port_name}", exc_info=True)
+                self.logger.debug("[%s] Failed to send VIEWERS frame for %s", cid, port_name, exc_info=True)
 
     @staticmethod
     def _parse_viewers_frame(payload: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
@@ -827,7 +827,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             parsed = None
         if parsed is None:
-            self.logger.debug(f"[{conn_id}] Malformed VIEWERS frame")
+            self.logger.debug("[%s] Malformed VIEWERS frame", conn_id)
             return
         port_name, viewers = parsed
 
@@ -903,7 +903,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             ]
             await self._broadcast_viewer_presence(port_name, viewers + local_here, exclude_conn_id=conn_id)
         except Exception:
-            self.logger.debug(f"Failed relaying VIEWERS for {port_name}", exc_info=True)
+            self.logger.debug("Failed relaying VIEWERS for %s", port_name, exc_info=True)
 
     async def _handle_fedrw_request(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
         """Handle an inbound `FEDRW:<port_name>:<stream_id>:<action>` frame.
@@ -923,13 +923,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             _, port_name, sid_str, action = payload.split(":", 3)
             sid = int(sid_str)
         except Exception:
-            self.logger.debug(f"[{conn_id}] Malformed FEDRW frame: {payload[:120]}")
+            self.logger.debug("[%s] Malformed FEDRW frame: %s", conn_id, payload[:120])
             return
         peer_key = self._derive_peer_key_from_conn_id(conn_id)
         # Only arbitrate for a stream this peer actually has open to this exact
         # port - guards against a peer spoofing another port's stream id.
         if self._local_session_map.get(peer_key, {}).get(sid) != port_name:
-            self.logger.warning(f"[{conn_id}] FEDRW {action} for unmapped stream {sid}->{port_name}; ignoring")
+            self.logger.warning("[%s] FEDRW %s for unmapped stream %s->%s; ignoring", conn_id, action, sid, port_name)
             return
         pm = getattr(self, "main_port_manager", None)
         if pm is None:
@@ -946,10 +946,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # whole-holder FORCE. Routes onto the SAME single arbiter: on the
             # one-writer ports that matter the outcome is identical (demote the
             # latest holder, promote the taker); nothing is implemented twice.
-            self.logger.debug(f"[{conn_id}] FEDRW FORCE (legacy) from {peer_key}; routing to takeover (latest)")
+            self.logger.debug("[%s] FEDRW FORCE (legacy) from %s; routing to takeover (latest)", conn_id, peer_key)
             await self._handle_fedrw_take(conn_id, pm, port_name, fed_client_id, "latest")
         else:
-            self.logger.debug(f"[{conn_id}] Unknown FEDRW action {action!r} for {port_name}")
+            self.logger.debug("[%s] Unknown FEDRW action %r for %s", conn_id, action, port_name)
             return
         mode = "read-only"
         try:
@@ -959,13 +959,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     mode = c.get("mode", "read-only")
                     break
         except Exception:
-            self.logger.debug(f"[{conn_id}] Failed to resolve resulting mode for {port_name}", exc_info=True)
+            self.logger.debug("[%s] Failed to resolve resulting mode for %s", conn_id, port_name, exc_info=True)
         try:
             seq = self._next_frame_seq(conn_id)
             frame = self.proto.create_control_frame(0, seq, f"FEDRWACK:{port_name}:{sid}:{mode}")
             await self._send_protocol_frame(writer, frame)
         except Exception:
-            self.logger.debug(f"[{conn_id}] Failed to send FEDRWACK for {port_name}", exc_info=True)
+            self.logger.debug("[%s] Failed to send FEDRWACK for %s", conn_id, port_name, exc_info=True)
 
     def _resolve_fedrw_take_target(self, pm: Any, port_name: str, fed_client_id: str, spec: str) -> Optional[Dict[str, Any]]:
         """Pick the one holder a FEDRW TAKE demotes (issue #59 Part 2, origin side).
@@ -1046,10 +1046,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         f"taker={fed_client_id} time={time.time():.3f}"
                     )
                     return
-                self.logger.warning(f"[{conn_id}] FEDRW TAKE on {port_name}: taker promote into empty slot failed; holding")
+                self.logger.warning("[%s] FEDRW TAKE on %s: taker promote into empty slot failed; holding", conn_id, port_name)
                 return
             self.logger.warning(
-                f"[{conn_id}] FEDRW TAKE on {port_name}: no eligible read-write holder (spec={spec!r}); holding"
+                "[%s] FEDRW TAKE on %s: no eligible read-write holder (spec=%r); holding", conn_id, port_name, spec
             )
             return
         victim_id = victim.get("client_id")
@@ -1061,7 +1061,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 await console_manager.demote_client_to_read_only(victim_id, port_name)
             except Exception:
-                self.logger.debug(f"[{conn_id}] FEDRW TAKE: local demote of {victim_id} failed", exc_info=True)
+                self.logger.debug("[%s] FEDRW TAKE: local demote of %s failed", conn_id, victim_id, exc_info=True)
         else:
             await pm.demote_client(port_name, victim_id)
         # Notify the victim's own console (cross-adapter for local holders,
@@ -1073,12 +1073,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"},
                 )
         except Exception:
-            self.logger.debug(f"[{conn_id}] FEDRW TAKE: victim notice to {victim_id} failed", exc_info=True)
+            self.logger.debug("[%s] FEDRW TAKE: victim notice to %s failed", conn_id, victim_id, exc_info=True)
         promoted = await pm.promote_client(port_name, fed_client_id)
         if not promoted:
             # Restore the victim: the transfer never happened.
             await pm.promote_client(port_name, victim_id)
-            self.logger.warning(f"[{conn_id}] FEDRW TAKE on {port_name}: taker promote failed; victim {victim_id} restored")
+            self.logger.warning(
+                "[%s] FEDRW TAKE on %s: taker promote failed; victim %s restored", conn_id, port_name, victim_id
+            )
             return
         self.logger.info(
             f"WRITE-SLOT TAKEOVER (federation, origin) port={port_name} "
@@ -1099,7 +1101,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             _, _port_name, sid_str, mode = payload.split(":", 3)
             sid = int(sid_str)
         except Exception:
-            self.logger.debug(f"[{conn_id}] Malformed FEDRWACK frame: {payload[:120]}")
+            self.logger.debug("[%s] Malformed FEDRWACK frame: %s", conn_id, payload[:120])
             return
         peer_key = self._derive_peer_key_from_conn_id(conn_id)
         fut = self._fedrw_pending.pop((peer_key, sid), None)
@@ -1139,7 +1141,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             )
         except Exception:
             self.logger.debug(
-                f"Failed to notify local client of federated demotion (peer={peer_key}, sid={sid})", exc_info=True
+                "Failed to notify local client of federated demotion (peer=%s, sid=%s)", peer_key, sid, exc_info=True
             )
 
     async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
@@ -1314,7 +1316,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "advertise_filters": adv or {},
                 "accept_filters": acc or {},
             }
-            self.logger.info(f"Applied per-key muxcon filters for conn={conn_id} key_id={key_id}")
+            self.logger.info("Applied per-key muxcon filters for conn=%s key_id=%s", conn_id, key_id)
         except Exception:
             self.logger.error("muxcon: failed to apply per-connection filters for conn=%s", conn_id, exc_info=True)
 
@@ -1557,7 +1559,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.is_running = True
             return True
         except Exception as e:
-            self.logger.error(f"Failed to start Unified MuxCon adapter: {e}", exc_info=True)
+            self.logger.error("Failed to start Unified MuxCon adapter: %s", e, exc_info=True)
             self.is_running = False
             return False
 
@@ -1580,9 +1582,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 cert_path, key_path = await self._ensure_autogen_cert(lconf)
                 lconf["ssl_cert"], lconf["ssl_key"] = cert_path, key_path
-                self.logger.info(f"MuxCon listener {host}:{port} TLS autogen cert ready at {cert_path}")
+                self.logger.info("MuxCon listener %s:%s TLS autogen cert ready at %s", host, port, cert_path)
             except Exception as e:
-                self.logger.error(f"TLS autogen failed for listener {host}:{port}: {e}", exc_info=True)
+                self.logger.error("TLS autogen failed for listener %s:%s: %s", host, port, e, exc_info=True)
                 raise ValueError(f"TLS autogen failed for listener {host}:{port}; not starting a plaintext listener") from e
         if use_tls and (not lconf.get("ssl_cert") or not lconf.get("ssl_key")):
             raise ValueError(f"Listener {host}:{port} has TLS enabled but no cert/key and tls_autogen is disabled")
@@ -1631,7 +1633,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await server.start_serving()
         except Exception as e:
             self.logger.error(
-                f"Failed to start muxcon listener {host}:{port} (iface={l_iface}, mark={l_fwmark}): {e}",
+                "Failed to start muxcon listener %s:%s (iface=%s, mark=%s): %s",
+                host,
+                port,
+                l_iface,
+                l_fwmark,
+                e,
                 exc_info=True,
             )
             return False
@@ -1662,9 +1669,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             server.close()
             await server.wait_closed()
-            self.logger.info(f"MuxCon listener {host}:{port} stopped")
+            self.logger.info("MuxCon listener %s:%s stopped", host, port)
         except Exception:
-            self.logger.warning(f"Error stopping muxcon listener {host}:{port}", exc_info=True)
+            self.logger.warning("Error stopping muxcon listener %s:%s", host, port, exc_info=True)
 
     def _start_single_initiator(self, peer: "FederationPeer") -> None:
         """Start one initiator's dial loop task, tracked by `(host, port)`."""
@@ -1746,7 +1753,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             "initiators": initiators_summary,
             "public_keys": {"before": keys_before, "after": len(self._auth_pubkeys)},
         }
-        self.logger.info(f"MuxCon adapter {self.name} reconcile: {summary}")
+        self.logger.info("MuxCon adapter %s reconcile: %s", self.name, summary)
         return summary
 
     @staticmethod
@@ -1831,7 +1838,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     try:
                         await self._cleanup_peer_local_sessions(pk)
                     except Exception:
-                        self.logger.debug(f"Shutdown local session cleanup failed for {pk}", exc_info=True)
+                        self.logger.debug("Shutdown local session cleanup failed for %s", pk, exc_info=True)
             except Exception:
                 # justification: shutdown cleanup; per-peer failures are already logged
                 pass
@@ -1876,7 +1883,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.is_running = False
             self.logger.info("Unified MuxCon adapter stopped")
         except Exception as e:
-            self.logger.error(f"Error stopping Unified MuxCon adapter: {e}", exc_info=True)
+            self.logger.error("Error stopping Unified MuxCon adapter: %s", e, exc_info=True)
 
     async def _heartbeat_loop(self):
         """Send periodic heartbeats and detect timeouts.
@@ -1912,7 +1919,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             if st.get("last_req_ts") and (now_ts - st["last_req_ts"]) > (self.heartbeat_interval * 2.5):
                                 st["missed"] = st.get("missed", 0) + 1
                                 if st["missed"] >= 3:
-                                    self.logger.warning(f"Heartbeat timeout (frozen) on {cid}; closing connection")
+                                    self.logger.warning("Heartbeat timeout (frozen) on %s; closing connection", cid)
                                     await self._close_connection(cid)
                             continue
                         # Fault: drop heartbeats
@@ -1958,7 +1965,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                     st["missed"] += 1
                                     # If too many misses, drop connection
                                     if st["missed"] >= 3:
-                                        self.logger.warning(f"Heartbeat timeout on {cid}; closing connection")
+                                        self.logger.warning("Heartbeat timeout on %s; closing connection", cid)
                                         await self._close_connection(cid)
                                         continue
                             except Exception:  # justification: heartbeat state update for frozen connection optional
@@ -1977,7 +1984,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             except Exception:  # justification: hb miss escalation optional; ignore
                                 pass
                         except Exception as e:
-                            self.logger.debug(f"Heartbeat send failed for {cid}: {e}", exc_info=True)
+                            self.logger.debug("Heartbeat send failed for %s: %s", cid, e, exc_info=True)
                     # After processing all connections, recompute proxy live-state for peers
                     try:
                         self._update_peer_proxies_live_state()
@@ -1993,7 +2000,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
-            self.logger.debug(f"Heartbeat loop exited with error: {e}", exc_info=True)
+            self.logger.debug("Heartbeat loop exited with error: %s", e, exc_info=True)
 
     @staticmethod
     def _resolve_verify_mode(peer: "FederationPeer") -> str:
@@ -2040,16 +2047,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         opts = peer.options or {}
         gated = bool(opts.get("tls_pin_fingerprint") or opts.get("tls_tofu", True))
         if mode == "plain":
-            self.logger.warning(f"MuxCon peer {key}: connecting in plaintext (use_tls is false)")
+            self.logger.warning("MuxCon peer %s: connecting in plaintext (use_tls is false)", key)
         elif mode == "off" and not gated:
-            self.logger.warning(f"MuxCon peer {key}: TLS verification disabled and no pin or ToFU gate is active")
+            self.logger.warning("MuxCon peer %s: TLS verification disabled and no pin or ToFU gate is active", key)
         elif mode == "off":
-            self.logger.info(f"MuxCon peer {key}: TLS-level verification disabled; a post-handshake gate protects the link")
+            self.logger.info("MuxCon peer %s: TLS-level verification disabled; a post-handshake gate protects the link", key)
         elif mode == "pin":
-            self.logger.info(f"MuxCon peer {key}: TLS-level check relaxed; a fixed fingerprint pin protects the link")
+            self.logger.info("MuxCon peer %s: TLS-level check relaxed; a fixed fingerprint pin protects the link", key)
         elif mode == "tofou":
             self.logger.info(
-                f"MuxCon peer {key}: TLS-level check relaxed; trust-on-first-use gates the link (first connect is unverified)"
+                "MuxCon peer %s: TLS-level check relaxed; trust-on-first-use gates the link (first connect is unverified)", key
             )
 
     async def _create_server_ssl_context(self, lconf: Dict[str, Any]) -> Optional[ssl.SSLContext]:
@@ -2079,7 +2086,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             ctx.check_hostname = False
             return ctx
         except Exception as e:
-            self.logger.error(f"Failed to create server SSL context: {e}", exc_info=True)
+            self.logger.error("Failed to create server SSL context: %s", e, exc_info=True)
             return None
 
     async def _create_client_ssl_context(self, peer: FederationPeer) -> Optional[ssl.SSLContext]:
@@ -2111,18 +2118,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     ctx.load_verify_locations(cafile=opts.get("ssl_ca_cert"))
                 except Exception as e:
-                    self.logger.warning(f"Failed to load CA cert for {peer.host}:{peer.port}: {e}", exc_info=True)
+                    self.logger.warning("Failed to load CA cert for %s:%s: %s", peer.host, peer.port, e, exc_info=True)
             cert_file = opts.get("ssl_cert")
             key_file = opts.get("ssl_key")
             if cert_file and key_file:
                 try:
                     ctx.load_cert_chain(str(cert_file), str(key_file))
                 except Exception as e:
-                    self.logger.warning(f"Failed to load client cert/key for {peer.host}:{peer.port}: {e}", exc_info=True)
+                    self.logger.warning("Failed to load client cert/key for %s:%s: %s", peer.host, peer.port, e, exc_info=True)
             self._announce_verify_mode(peer, mode)
             return ctx
         except Exception as e:
-            self.logger.error(f"Failed to create client SSL context: {e}", exc_info=True)
+            self.logger.error("Failed to create client SSL context: %s", e, exc_info=True)
             return None
 
     # --- TLS autogen & TOFU helpers ---
@@ -2265,7 +2272,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(mapping, f, indent=2)
         except Exception as e:
-            self.logger.warning(f"Failed to save known_peers: {e}", exc_info=True)
+            self.logger.warning("Failed to save known_peers: %s", e, exc_info=True)
 
     async def _verify_peer_fingerprint(self, peer: FederationPeer, writer: asyncio.StreamWriter) -> None:
         """Verify peer certificate via pin or TOFU policy.
@@ -2321,12 +2328,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         Returns:
             None: Not implemented in the MVP phase.
         """
-        self.logger.debug(f"create_port called for {port_name} (noop in MVP)")
+        self.logger.debug("create_port called for %s (noop in MVP)", port_name)
         return None
 
     async def destroy_port(self, port_name: str) -> None:
         """Destroy a federated port (not implemented)."""
-        self.logger.debug(f"destroy_port called for {port_name} (noop in MVP)")
+        self.logger.debug("destroy_port called for %s (noop in MVP)", port_name)
 
     def get_port_configurations(self) -> Dict[str, Dict[str, Any]]:
         """Return configured port mappings.
@@ -2368,7 +2375,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 pass
         conn_id = f"in:{peer[0]}:{peer[1]}:{int(time.time())}" if peer else f"in:unknown:{int(time.time())}"
         self.logger.info(
-            f"Incoming MuxCon connection from {peer} -> {conn_id} local={sockname} path_pref={path_pref} path_group={path_group}"
+            "Incoming MuxCon connection from %s -> %s local=%s path_pref=%s path_group=%s",
+            peer,
+            conn_id,
+            sockname,
+            path_pref,
+            path_group,
         )
         try:
             await self._perform_server_handshake(reader, writer, conn_id)
@@ -2403,12 +2415,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if self._is_conn_authenticated(conn_id):
                     await self._request_remote_ports(conn_id)
             except Exception as e:
-                self.logger.warning(f"Failed to request remote ports from inbound peer {conn_id}: {e}", exc_info=True)
+                self.logger.warning("Failed to request remote ports from inbound peer %s: %s", conn_id, e, exc_info=True)
             # Start reader loop
             task = asyncio.create_task(self._read_loop(conn_id))
             self._tasks.append(task)
         except Exception as e:
-            self.logger.error(f"Handshake failed for {conn_id}: {e}", exc_info=True)
+            self.logger.error("Handshake failed for %s: %s", conn_id, e, exc_info=True)
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -2437,7 +2449,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         backoff = base_backoff
         while not self._stop_event.is_set():
             try:
-                self.logger.info(f"Connecting to MuxCon peer {peer.host}:{peer.port}")
+                self.logger.info("Connecting to MuxCon peer %s:%s", peer.host, peer.port)
                 # Build client SSL context if requested
                 # Default-safe: enable TLS for initiators unless explicitly disabled
                 use_tls = bool(peer.options.get("use_tls", True))
@@ -2507,7 +2519,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         await self._verify_peer_fingerprint(peer, writer)
                     except Exception as e:
                         self.logger.warning(
-                            f"Peer fingerprint verification failed for {peer.host}:{peer.port}: {e}", exc_info=True
+                            "Peer fingerprint verification failed for %s:%s: %s", peer.host, peer.port, e, exc_info=True
                         )
                         try:
                             writer.close()
@@ -2537,23 +2549,23 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             except asyncio.CancelledError:
                 break
             except ConnectionRefusedError:
-                self.logger.warning(f"MuxCon initiator connection refused by {peer.host}:{peer.port}")
+                self.logger.warning("MuxCon initiator connection refused by %s:%s", peer.host, peer.port)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
             except ConnectionResetError:
-                self.logger.warning(f"MuxCon initiator connection reset by peer {peer.host}:{peer.port}")
+                self.logger.warning("MuxCon initiator connection reset by peer %s:%s", peer.host, peer.port)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
             except TimeoutError:
-                self.logger.warning(f"MuxCon initiator connection timeout to {peer.host}:{peer.port}")
+                self.logger.warning("MuxCon initiator connection timeout to %s:%s", peer.host, peer.port)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
             except OSError as e:
-                self.logger.warning(f"MuxCon initiator connection error to {peer.host}:{peer.port}: {e}")
+                self.logger.warning("MuxCon initiator connection error to %s:%s: %s", peer.host, peer.port, e)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
             except Exception as e:  # justification: retryable failures logged at warning; backoff governs retries
-                self.logger.warning(f"MuxCon initiator connection error to {peer.host}:{peer.port}: {e}", exc_info=True)
+                self.logger.warning("MuxCon initiator connection error to %s:%s: %s", peer.host, peer.port, e, exc_info=True)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
 
@@ -2588,7 +2600,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 try:
                     sock.bind(local_addr)
                 except Exception as e:
-                    self.logger.warning(f"Local bind failed {local_addr}: {e}")
+                    self.logger.warning("Local bind failed %s: %s", local_addr, e)
 
             # Apply platform-specific options before connect
             try:
@@ -2623,7 +2635,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             # justification: optional socket routing hint; the connection works without it
                             pass
             except Exception as e:
-                self.logger.warning(f"Failed to apply interface binding '{interface}': {e}")
+                self.logger.warning("Failed to apply interface binding '%s': %s", interface, e)
 
             try:
                 if fwmark is not None:
@@ -2634,7 +2646,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         # Not supported on this platform; ignore
                         pass
             except Exception as e:
-                self.logger.warning(f"Failed to apply fwmark {fwmark}: {e}")
+                self.logger.warning("Failed to apply fwmark %s: %s", fwmark, e)
 
             sock.setblocking(False)
             await asyncio.get_event_loop().sock_connect(sock, sockaddr)
@@ -2696,7 +2708,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             "send_next": 1,
         }
         self.logger.info(
-            f"Handshake OK (server-side) conn={conn_id} remote_server_id={hs.server_id} remote_instance_id={hs.instance_id} local_server_id={self.server_id} local_instance_id={self.instance_id} caps={caps}"
+            "Handshake OK (server-side) conn=%s remote_server_id=%s remote_instance_id=%s local_server_id=%s local_instance_id=%s caps=%s",
+            conn_id,
+            hs.server_id,
+            hs.instance_id,
+            self.server_id,
+            self.instance_id,
+            caps,
         )
         # Ed25519 authentication challenge if required
         try:
@@ -2803,7 +2821,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             # justification: optional socket routing hint; the connection works without it
                             pass
                 except Exception as e:
-                    self.logger.warning(f"Listener interface bind '{interface}' failed: {e}")
+                    self.logger.warning("Listener interface bind '%s' failed: %s", interface, e)
 
             # Apply routing mark (Linux only)
             if fwmark is not None and sys.platform.startswith("linux"):
@@ -2811,7 +2829,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     SO_MARK = 36
                     s.setsockopt(socket.SOL_SOCKET, SO_MARK, fwmark)
                 except Exception as e:
-                    self.logger.warning(f"Listener fwmark {fwmark} failed: {e}")
+                    self.logger.warning("Listener fwmark %s failed: %s", fwmark, e)
 
             s.bind(sockaddr)
             s.listen()
@@ -2878,7 +2896,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             "send_next": 1,
         }
         self.logger.debug(
-            f"Handshake OK (client-side) conn={conn_id} remote_server_id={ok_server_id} remote_instance_id={ok_instance_id} local_server_id={self.server_id} local_instance_id={self.instance_id} raw='{line}'"
+            "Handshake OK (client-side) conn=%s remote_server_id=%s remote_instance_id=%s local_server_id=%s local_instance_id=%s raw='%s'",
+            conn_id,
+            ok_server_id,
+            ok_instance_id,
+            self.server_id,
+            self.instance_id,
+            line,
         )
         try:
             self._register_mpath_connection(conn_id)
@@ -2945,10 +2969,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     last = self._rx_last_seq.get(conn_id)
                     if last is not None:
                         if rseq <= last and not self._rx_order_warned.get(conn_id):
-                            self.logger.warning(f"[{conn_id}] Out-of-order frame seq={rseq} last={last}")
+                            self.logger.warning("[%s] Out-of-order frame seq=%s last=%s", conn_id, rseq, last)
                             self._rx_order_warned[conn_id] = True
                         elif rseq > last + 1 and not self._rx_order_warned.get(conn_id):
-                            self.logger.warning(f"[{conn_id}] Sequence gap detected seq={rseq} last={last}")
+                            self.logger.warning("[%s] Sequence gap detected seq=%s last=%s", conn_id, rseq, last)
                             self._rx_order_warned[conn_id] = True
                     self._rx_last_seq[conn_id] = rseq
                 except Exception:  # justification: RX diagnostics best-effort; do not disrupt processing
@@ -3049,7 +3073,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         port_name = payload.decode("utf-8", errors="ignore").strip()
                     except Exception:  # justification: decode failure; treat as empty port name and continue
                         port_name = ""
-                    self.logger.info(f"[{conn_id}] OPEN stream {stream_id} -> {port_name}")
+                    self.logger.info("[%s] OPEN stream %s -> %s", conn_id, stream_id, port_name)
                     # Map server-initiated stream to local port (peer-scoped) and start pump back to remote
                     peer_key = self._derive_peer_key_from_conn_id(conn_id)
                     if peer_key not in self._local_session_map:
@@ -3070,7 +3094,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         await self._stop_local_session(peer_key, sid, reason="stream_id_reused")
                     elif existing_port is not None:
                         self.logger.debug(
-                            f"[{conn_id}] Duplicate OPEN for stream {sid} -> {port_name}; keeping existing session"
+                            "[%s] Duplicate OPEN for stream %s -> %s; keeping existing session", conn_id, sid, port_name
                         )
                     self._local_session_map[peer_key][sid] = port_name
                     # Register the federated stream as a real, tracked client on this
@@ -3095,7 +3119,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                     console_manager.register_client_channel(fed_client_id, self)
                             except Exception:
                                 self.logger.debug(
-                                    f"[{conn_id}] Failed to register federated client for {port_name}", exc_info=True
+                                    "[%s] Failed to register federated client for %s", conn_id, port_name, exc_info=True
                                 )
                     # Start background pump to send local port data back to remote stream
                     if port_name:
@@ -3107,7 +3131,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             # reconnect). Keep it: a second pump would drain the
                             # same port data_queue in parallel and roughly half of
                             # every chunk would be lost (issue #54).
-                            self.logger.info(f"[{conn_id}] OPEN stream {sid} -> {port_name}: reusing existing pump for slot")
+                            self.logger.info(
+                                "[%s] OPEN stream %s -> %s: reusing existing pump for slot", conn_id, sid, port_name
+                            )
                         else:
                             if existing_task is not None and not existing_task.done():
                                 existing_task.cancel()
@@ -3143,7 +3169,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     except Exception:  # justification: best-effort telemetry update; safe to ignore
                         pass
                     # Close stream
-                    self.logger.info(f"[{conn_id}] CLOSE stream {stream_id}")
+                    self.logger.info("[%s] CLOSE stream %s", conn_id, stream_id)
                     try:
                         sid = int(stream_id) if stream_id is not None else 0
                     except Exception:  # justification: invalid stream id on CLOSE; default to 0
@@ -3160,7 +3186,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         pass
                 elif ftype == "HB":
                     # Heartbeat command channel; treat as control with HB payload
-                    self.logger.debug(f"[{conn_id}] HEARTBEAT FRAME")
+                    self.logger.debug("[%s] HEARTBEAT FRAME", conn_id)
                     try:
                         if conn_id in self.connections:
                             now_ts = time.time()
@@ -3199,7 +3225,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
-            self.logger.warning(f"Read loop error on {conn_id}: {e}", exc_info=True)
+            self.logger.warning("Read loop error on %s: %s", conn_id, e, exc_info=True)
         finally:
             # Cleanup
             await self._close_connection(conn_id)
@@ -3360,7 +3386,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 hb["last_req_ts"] = hb.get("last_req_ts", 0) - (self.heartbeat_interval * 5)
         except Exception:  # justification: fallback to less stable key if derivation fails
             pass
-        self.logger.warning(f"FaultInject: froze connection {conn_id}")
+        self.logger.warning("FaultInject: froze connection %s", conn_id)
         return True
 
     async def unfreeze_connection(self, conn_id: str) -> bool:  # vulture: ignore
@@ -3387,7 +3413,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     grp["conns"][conn_id]["last_seen"] = now_ts
             except Exception:  # justification: unfreeze last_seen refresh best-effort; promotion logic still works
                 pass
-            self.logger.info(f"FaultInject: unfroze connection {conn_id}")
+            self.logger.info("FaultInject: unfroze connection %s", conn_id)
         return True
 
     async def set_drop_heartbeats(self, conn_id: str, drop: bool) -> bool:  # vulture: ignore
@@ -3404,7 +3430,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             return False
         st = self._fault_state.setdefault(conn_id, {})
         st["drop_heartbeats"] = bool(drop)
-        self.logger.warning(f"FaultInject: {'dropping' if drop else 'restoring'} heartbeats for {conn_id}")
+        self.logger.warning("FaultInject: %s heartbeats for %s", "dropping" if drop else "restoring", conn_id)
         return True
 
     async def force_close_connection(self, conn_id: str, linger: int = 0) -> bool:  # vulture: ignore
@@ -3421,12 +3447,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             return False
         try:
             if linger > 0:
-                self.logger.info(f"FaultInject: closing connection {conn_id} after linger={linger}s")
+                self.logger.info("FaultInject: closing connection %s after linger=%ss", conn_id, linger)
                 await asyncio.sleep(min(linger, 5))  # cap linger to 5s
             await self._close_connection(conn_id)
             return True
         except Exception as e:
-            self.logger.error(f"FaultInject: force_close_connection error for {conn_id}: {e}", exc_info=True)
+            self.logger.error("FaultInject: force_close_connection error for %s: %s", conn_id, e, exc_info=True)
             return False
 
     async def force_reset_connection(self, conn_id: str) -> bool:  # vulture: ignore
@@ -3453,10 +3479,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     pass
             # Ensure internal cleanup
             await self._close_connection(conn_id)
-            self.logger.warning(f"FaultInject: reset connection {conn_id}")
+            self.logger.warning("FaultInject: reset connection %s", conn_id)
             return True
         except Exception as e:
-            self.logger.error(f"FaultInject: force_reset_connection error for {conn_id}: {e}", exc_info=True)
+            self.logger.error("FaultInject: force_reset_connection error for %s: %s", conn_id, e, exc_info=True)
             return False
 
     async def _close_connection(self, conn_id: str):
@@ -3506,7 +3532,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             except Exception:
                 # justification: idempotent state cleanup
                 pass
-            self.logger.info(f"Connection closed: {conn_id}")
+            self.logger.info("Connection closed: %s", conn_id)
             # `_unregister_mpath_connection` above already ran; if the group just
             # became empty this was the peer's last path - drop its session state
             # (pumps, fed: pseudo-clients, local stream map) so no zombie pump keeps
@@ -3514,7 +3540,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 await self._maybe_cleanup_empty_peer(stable_peer_key)
             except Exception:
-                self.logger.debug(f"Empty-peer local session cleanup failed for {stable_peer_key}", exc_info=True)
+                self.logger.debug("Empty-peer local session cleanup failed for %s", stable_peer_key, exc_info=True)
             return
         # Drop wire state
         try:
@@ -3528,7 +3554,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 await writer.wait_closed()
             except Exception:  # justification: writer may already be closed or broken; ignore
                 pass
-        self.logger.info(f"Connection closed: {conn_id}")
+        self.logger.info("Connection closed: %s", conn_id)
         # Mark federated proxies for this peer based on current live-path state
         try:
             # Prefer the stable key determined before popping the connection
@@ -3595,7 +3621,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             # justification: optional notice; the UI badge catches up on the next event
                             pass
                         self.logger.info(
-                            f"Marked federated port '{pname}' disconnected; no active paths remain for {peer_key}"
+                            "Marked federated port '%s' disconnected; no active paths remain for %s", pname, peer_key
                         )
                         # Notify UI/consumers via PortManager meta update (if available)
                         try:
@@ -3606,7 +3632,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             # justification: optional notification; UI event delivery is best-effort
                             pass
                     except Exception as e:
-                        self.logger.debug(f"Error marking proxy {pname} disconnected for peer {peer_key}: {e}", exc_info=True)
+                        self.logger.debug(
+                            "Error marking proxy %s disconnected for peer %s: %s", pname, peer_key, e, exc_info=True
+                        )
                 # Retain proxies in cache; update last_seen and notify meta with last_seen
                 try:
                     now_ts = time.time()
@@ -3664,7 +3692,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             await self._maybe_cleanup_empty_peer(stable_peer_key)
         except Exception:
-            self.logger.debug(f"Empty-peer local session cleanup failed for {stable_peer_key}", exc_info=True)
+            self.logger.debug("Empty-peer local session cleanup failed for %s", stable_peer_key, exc_info=True)
 
     # --- Federation helpers ---
 
@@ -3976,9 +4004,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             seq = self._next_frame_seq(conn_id)
             frame = self.proto.create_port_list_request(seq)
             await self._send_protocol_frame(writer, frame)
-            self.logger.debug(f"[{conn_id}] Requested federated port list (seq={seq})")
+            self.logger.debug("[%s] Requested federated port list (seq=%s)", conn_id, seq)
         except Exception as e:
-            self.logger.info(f"[{conn_id}] Failed to request federated port list: {e}", exc_info=True)
+            self.logger.info("[%s] Failed to request federated port list: %s", conn_id, e, exc_info=True)
 
     async def _send_local_port_list(self, conn_id: str, writer: asyncio.StreamWriter):
         """Send this node's local ports in a PORTS:FEDERATED response.
@@ -4116,9 +4144,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             seq = self._next_frame_seq(conn_id)
             frame = self.proto.create_federated_port_list_response(metas, seq)
             await self._send_protocol_frame(writer, frame)
-            self.logger.info(f"Sent {len(metas)} local ports in PORTS:FEDERATED response")
+            self.logger.info("Sent %s local ports in PORTS:FEDERATED response", len(metas))
         except Exception as e:
-            self.logger.error(f"Error sending local port list: {e}", exc_info=True)
+            self.logger.error("Error sending local port list: %s", e, exc_info=True)
 
     # --- Port filter helpers ---
     def _match_any(self, value: str, patterns: List[str]) -> bool:
@@ -4205,18 +4233,20 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     pat = self._first_match(adapter_type, adapter_exc)
                     if pat:
                         reason = f"adapter excluded by '{pat}'"
-                self.logger.debug(f"[{conn_id}] ADV DROP name='{name}' adapter='{adapter_type}' reason={reason}")
+                self.logger.debug("[%s] ADV DROP name='%s' adapter='%s' reason=%s", conn_id, name, adapter_type, reason)
             return False
         if server_id and self._match_any(server_id, server_exc):
             if self.logger.isEnabledFor(logging.DEBUG):
                 pat = self._first_match(server_id, server_exc)
-                self.logger.debug(f"[{conn_id}] ADV DROP name='{name}' server='{server_id}' reason=server excluded by '{pat}'")
+                self.logger.debug(
+                    "[%s] ADV DROP name='%s' server='%s' reason=server excluded by '%s'", conn_id, name, server_id, pat
+                )
             return False
         # Default-deny (ticket #77): an empty include set matches no port.
         if not (name_inc or adapter_inc or server_inc):
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
-                    f"[{conn_id}] ADV DROP name='{name}' adapter='{adapter_type}' reason=no advertise include configured"
+                    "[%s] ADV DROP name='%s' adapter='%s' reason=no advertise include configured", conn_id, name, adapter_type
                 )
             return False
         inc_name = not name_inc or self._match_any(name, name_inc)
@@ -4275,17 +4305,21 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     pat = self._first_match(atype, adapter_exc)
                     if pat:
                         reason = f"adapter excluded by '{pat}'"
-                self.logger.debug(f"[{conn_id}] ACC DROP name='{name}' adapter='{atype}' reason={reason}")
+                self.logger.debug("[%s] ACC DROP name='%s' adapter='%s' reason=%s", conn_id, name, atype, reason)
             return False
         if sid and self._match_any(sid, server_exc):
             if self.logger.isEnabledFor(logging.DEBUG):
                 pat = self._first_match(sid, server_exc)
-                self.logger.debug(f"[{conn_id}] ACC DROP name='{name}' server='{sid}' reason=server excluded by '{pat}'")
+                self.logger.debug(
+                    "[%s] ACC DROP name='%s' server='%s' reason=server excluded by '%s'", conn_id, name, sid, pat
+                )
             return False
         # Default-deny (ticket #77): an empty include set matches no port.
         if not (name_inc or adapter_inc or server_inc):
             if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(f"[{conn_id}] ACC DROP name='{name}' adapter='{atype}' reason=no accept include configured")
+                self.logger.debug(
+                    "[%s] ACC DROP name='%s' adapter='%s' reason=no accept include configured", conn_id, name, atype
+                )
             return False
         # Include constraints
         inc_name = not name_inc or self._match_any(name, name_inc)
@@ -4315,7 +4349,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         try:
             payload = payload.strip()
-            self.logger.debug(f"[{conn_id}] CONTROL: {payload[:200]}")
+            self.logger.debug("[%s] CONTROL: %s", conn_id, payload[:200])
             # Handle authentication control messages first
             if payload.startswith("AUTH:"):
                 parts = payload.split(":")
@@ -4450,9 +4484,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 "MuxCon auth challenge expired before response. Check clock skew and network latency; reconnect will retry."
                             )
                         else:
-                            self.logger.error(f"MuxCon auth failed with error: {payload}")
+                            self.logger.error("MuxCon auth failed with error: %s", payload)
                     except Exception:
-                        self.logger.error(f"MuxCon auth failed with error: {payload}")
+                        self.logger.error("MuxCon auth failed with error: %s", payload)
                     await self._close_connection(conn_id)
                     return
             # Fast shutdown (no drain). Any BEGIN triggers immediate END + close.
@@ -4580,7 +4614,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 return
             # Other commands can be added here
         except Exception as e:
-            self.logger.error(f"Error processing control command from {conn_id}: {e}", exc_info=True)
+            self.logger.error("Error processing control command from %s: %s", conn_id, e, exc_info=True)
 
     async def initiate_graceful_shutdown(self, conn_id: str, writer: asyncio.StreamWriter, reason: Optional[str] = None):
         """Initiate fast shutdown: send BEGIN then END and close immediately."""
@@ -4598,7 +4632,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             except Exception:  # justification: END send during graceful shutdown is best-effort
                 pass
         except Exception as e:
-            self.logger.debug(f"[{conn_id}] Failed during graceful shutdown control frames: {e}", exc_info=True)
+            self.logger.debug("[%s] Failed during graceful shutdown control frames: %s", conn_id, e, exc_info=True)
         st["state"] = "CLOSED"
         await self._close_connection(conn_id)
 
@@ -4741,7 +4775,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     asyncio.create_task(self._close_connection(old_cid))
                 else:
                     self.logger.info(
-                        f"[MPATH] Retiring old-generation connection {old_cid} (server_id={cur_server_id}) in favor of {conn_id}"
+                        "[MPATH] Retiring old-generation connection %s (server_id=%s) in favor of %s",
+                        old_cid,
+                        cur_server_id,
+                        conn_id,
                     )
                     asyncio.create_task(self._close_connection(old_cid))
         except Exception as e:
@@ -4816,7 +4853,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if new_pref > cur_pref:
                         grp["primary"] = conn_id
                         self.logger.info(
-                            f"[MPATH] Preemptive promote {conn_id} over {current} (pref {new_pref}>{cur_pref}) for {key}"
+                            "[MPATH] Preemptive promote %s over %s (pref %s>%s) for %s",
+                            conn_id,
+                            current,
+                            new_pref,
+                            cur_pref,
+                            key,
                         )
                 except Exception:  # justification: per-iteration evaluation should not abort failover loop
                     pass
@@ -4913,7 +4955,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 # justification: optional mapping rebuild; the previous mapping stays in effect
                 pass
         except Exception as e:
-            self.logger.debug(f"Rekey failed for {conn_id}: {e}", exc_info=True)
+            self.logger.debug("Rekey failed for %s: %s", conn_id, e, exc_info=True)
 
     def _unregister_mpath_connection(self, conn_id: str) -> None:
         """Remove a connection from its multipath group and cleanup.
@@ -4950,7 +4992,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # resets it, and a rekey migrates it (see _rekey_mpath_connection).
         if not grp["conns"]:
             self._mpath_groups.pop(key, None)
-        self.logger.debug(f"Unregistered {conn_id} from multipath group {key}")
+        self.logger.debug("Unregistered %s from multipath group %s", conn_id, key)
         # Refresh mapping after topology change
         try:
             self._refresh_conn_proxies()
@@ -5038,7 +5080,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             prev = grp.get("primary")
             grp["primary"] = new_primary
             if new_primary and new_primary != prev:
-                self.logger.info(f"[MPATH] Promoted {new_primary} as primary for {peer_key}")
+                self.logger.info("[MPATH] Promoted %s as primary for %s", new_primary, peer_key)
             return new_primary
         # If current exists and preemptive enabled, consider higher preference non-stale candidate
         if self.mpath_preemptive_promote and self.mpath_strategy == "best_pref":
@@ -5055,7 +5097,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if new_id != current:
                         grp["primary"] = new_id
                         self.logger.info(
-                            f"[MPATH] Preemptive promote {new_id} over {current} (pref {new_pref}>{cur_pref}) for {peer_key}"
+                            "[MPATH] Preemptive promote %s over %s (pref %s>%s) for %s",
+                            new_id,
+                            current,
+                            new_pref,
+                            cur_pref,
+                            peer_key,
                         )
                         return new_id
             except Exception:  # justification: local session map cleanup is best-effort on pump exit
@@ -5159,7 +5206,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 last_warn = grp.get("_last_stale_log_ts") or 0
                                 if now - last_warn > (self.mpath_failover_check_sec * 3):
                                     self.logger.debug(
-                                        f"[MPATH] Primary {primary} appears stale for {key} but no alternative path available"
+                                        "[MPATH] Primary %s appears stale for %s but no alternative path available",
+                                        primary,
+                                        key,
                                     )
                                     grp["_last_stale_log_ts"] = now
                                 # Do not demote; keep primary until alternative appears
@@ -5169,7 +5218,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 if now - last_change < (self.mpath_failover_check_sec * 1.5):
                                     # Skip rapid churn
                                     continue
-                                self.logger.warning(f"[MPATH] Primary {primary} stale for {key}; attempting promotion")
+                                self.logger.warning("[MPATH] Primary %s stale for %s; attempting promotion", primary, key)
                                 prev = primary
                                 new_primary = self._select_mpath_connection(key)
                                 if new_primary and new_primary != prev:
@@ -5200,7 +5249,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                             grp["primary"] = new_id
                                             grp["last_primary_change"] = now
                                             self.logger.info(
-                                                f"[MPATH] Preemptive promote {new_id} over {primary} (pref {new_pref}>{cur_pref}) for {key}"
+                                                "[MPATH] Preemptive promote %s over %s (pref %s>%s) for %s",
+                                                new_id,
+                                                primary,
+                                                new_pref,
+                                                cur_pref,
+                                                key,
                                             )
                             except Exception:  # justification: preemptive scan is advisory; avoid loop disruption
                                 pass
@@ -5211,7 +5265,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
-            self.logger.debug(f"mpath failover loop exited with error: {e}", exc_info=True)
+            self.logger.debug("mpath failover loop exited with error: %s", e, exc_info=True)
 
     async def _send_control_mpath(self, peer_key: str, payload: str) -> bool:
         """Send a control frame over the currently selected path for a peer.
@@ -5242,7 +5296,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await self._send_protocol_frame(writer, frame)
             return True
         except Exception as e:
-            self.logger.debug(f"Multipath control send failed via {conn_id}: {e}", exc_info=True)
+            self.logger.debug("Multipath control send failed via %s: %s", conn_id, e, exc_info=True)
             return False
 
     async def _send_stream_open_mpath(self, peer_key: str, stream_id: int, port_name: str) -> bool:
@@ -5262,7 +5316,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await self._send_protocol_frame(writer, frame)
             return True
         except Exception as e:
-            self.logger.debug(f"Multipath OPEN send failed via {conn_id}: {e}", exc_info=True)
+            self.logger.debug("Multipath OPEN send failed via %s: %s", conn_id, e, exc_info=True)
             return False
 
     async def _send_stream_close_mpath(self, peer_key: str, stream_id: int, reason: str = "") -> bool:
@@ -5282,7 +5336,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await self._send_protocol_frame(writer, frame)
             return True
         except Exception as e:
-            self.logger.debug(f"Multipath CLOSE send failed via {conn_id}: {e}", exc_info=True)
+            self.logger.debug("Multipath CLOSE send failed via %s: %s", conn_id, e, exc_info=True)
             return False
 
     async def _send_data_mpath(self, peer_key: str, stream_id: int, data: bytes) -> bool:
@@ -5325,7 +5379,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 pass
             return True
         except Exception as e:
-            self.logger.debug(f"Multipath data send failed via {conn_id}: {e}", exc_info=True)
+            self.logger.debug("Multipath data send failed via %s: %s", conn_id, e, exc_info=True)
             return False
 
     def _next_peer_seq(self, peer_key: str) -> int:
@@ -5419,7 +5473,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 self._peer_retx_count.pop(peer_key, None)
             return False
         except Exception as e:
-            self.logger.debug(f"Peer generation resync failed for {peer_key}: {e}", exc_info=True)
+            self.logger.debug("Peer generation resync failed for %s: %s", peer_key, e, exc_info=True)
             return False
 
     def _warn_stale_data_drop(self, peer_key: str, conn_id: str, seq: int, expected: int) -> None:
@@ -5552,7 +5606,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             elif time.time() - gap_since >= self.gap_stuck_sec:
                 await self._flush_stuck_gap(peer_key, conn_id, st, expected)
         except Exception as e:
-            self.logger.debug(f"Inbound order handler error on {conn_id}:{stream_id} seq={seq}: {e}", exc_info=True)
+            self.logger.debug("Inbound order handler error on %s:%s seq=%s: %s", conn_id, stream_id, seq, e, exc_info=True)
 
     async def _retx_loop(self):
         """Background retransmission loop for unacked DATA frames (peer-level).
@@ -5596,7 +5650,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             except Exception:
                                 # justification: optional metrics; the data path is unaffected
                                 pass
-                            self.logger.debug(f"[RETX] Resent seq={seq} sid={stream_id} via {cid} for {peer_key}")
+                            self.logger.debug("[RETX] Resent seq=%s sid=%s via %s for %s", seq, stream_id, cid, peer_key)
                         except Exception:
                             # justification: optional metrics; the data path is unaffected
                             pass
@@ -5617,7 +5671,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
-            self.logger.debug(f"Retransmission loop error: {e}", exc_info=True)
+            self.logger.debug("Retransmission loop error: %s", e, exc_info=True)
 
     async def _handle_ports_federated(self, conn_id: str, payload: str):
         """Handle a PORTS:FEDERATED control payload and register remote ports.
@@ -5661,7 +5715,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 except Exception as e:
                     # Log with traceback; malformed entries should not abort whole batch
                     self.logger.warning(f"Failed to register federated port {pd.get('name')}: {e}", exc_info=True)
-            self.logger.info(f"[{conn_id}] Registered {len(ports)} federated ports")
+            self.logger.info("[%s] Registered %s federated ports", conn_id, len(ports))
 
             # Remove proxies for this peer that are no longer advertised
             try:
@@ -5684,10 +5738,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                         await pm.unregister_federated_port(pname)  # type: ignore[attr-defined]
                                     else:
                                         getattr(pm, "ports", {}).pop(pname, None)
-                                    self.logger.info(f"Unregistered stale federated port: {pname}")
+                                    self.logger.info("Unregistered stale federated port: %s", pname)
                                 except Exception:
                                     getattr(pm, "ports", {}).pop(pname, None)
-                                    self.logger.info(f"Unregistered stale federated port: {pname}")
+                                    self.logger.info("Unregistered stale federated port: %s", pname)
                     except Exception:
                         # justification: best-effort stale unregistration; the remaining ports are untouched
                         pass
@@ -5704,9 +5758,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     # justification: optional mapping rebuild; the previous mapping stays in effect
                     pass
             except Exception as e:
-                self.logger.debug(f"Stale proxy purge failed for {peer_key}: {e}", exc_info=True)
+                self.logger.debug("Stale proxy purge failed for %s: %s", peer_key, e, exc_info=True)
         except Exception as e:
-            self.logger.error(f"Error handling PORTS:FEDERATED: {e}", exc_info=True)
+            self.logger.error("Error handling PORTS:FEDERATED: %s", e, exc_info=True)
 
     async def _route_data_frame(self, conn_id: str, stream_id: int, data: bytes, seq: Optional[int] = None):
         """Route inbound DATA frame payload to a remote proxy or local port.
@@ -5726,7 +5780,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             peer_key = self._derive_peer_key_from_conn_id(conn_id)
             proxy = self._session_map.get(peer_key, {}).get(stream_id)
             if proxy and hasattr(proxy, "trigger_data_received"):
-                self.logger.debug(f"[{conn_id}] ROUTE D->proxy sid={stream_id} bytes={len(data)}")
+                self.logger.debug("[%s] ROUTE D->proxy sid=%s bytes=%s", conn_id, stream_id, len(data))
                 await proxy.trigger_data_received(data)
                 return
             # Check for local session mapping (server-initiated stream targeting local port)
@@ -5736,20 +5790,26 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     # Write to local port via port manager (unified path supports generic writes)
                     if seq is not None:
                         self.logger.debug(
-                            f"[{conn_id}] ROUTE D->local port={port_name} sid={stream_id} bytes={len(data)} seq={seq}"
+                            "[%s] ROUTE D->local port=%s sid=%s bytes=%s seq=%s", conn_id, port_name, stream_id, len(data), seq
                         )
                     else:
-                        self.logger.debug(f"[{conn_id}] ROUTE D->local port={port_name} sid={stream_id} bytes={len(data)}")
+                        self.logger.debug(
+                            "[%s] ROUTE D->local port=%s sid=%s bytes=%s", conn_id, port_name, stream_id, len(data)
+                        )
                     await self.main_port_manager.write_to_port(port_name, data, client_id=f"fed:{peer_key}:{stream_id}")
                 except Exception as e:
                     self.logger.error(
-                        f"Error writing to local port {port_name} from {conn_id}:{stream_id}: {e}",
+                        "Error writing to local port %s from %s:%s: %s",
+                        port_name,
+                        conn_id,
+                        stream_id,
+                        e,
                         exc_info=True,
                     )
             else:
                 self._log_no_mapping_drop(conn_id, peer_key, stream_id, data)
         except Exception as e:
-            self.logger.error(f"Error routing data frame on {conn_id}:{stream_id}: {e}", exc_info=True)
+            self.logger.error("Error routing data frame on %s:%s: %s", conn_id, stream_id, e, exc_info=True)
 
     def _log_no_mapping_drop(self, conn_id: str, peer_key: str, stream_id: int, data: bytes) -> None:
         """Rate-limited WARNING for inbound DATA with no routing mapping.
@@ -5770,7 +5830,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             now_ts = time.time()
             slot = (peer_key, stream_id)
             if now_ts - self._drop_warn_ts.get(slot, 0.0) < 1.0:
-                self.logger.debug(f"[{conn_id}] No mapping for stream {stream_id}; dropping {len(data)} bytes")
+                self.logger.debug("[%s] No mapping for stream %s; dropping %s bytes", conn_id, stream_id, len(data))
                 return
             self._drop_warn_ts[slot] = now_ts
             self.logger.warning(
@@ -5818,8 +5878,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         console_manager.unregister_client_port(fed_client_id)
                         console_manager.unregister_client_channel(fed_client_id)
                 except Exception:
-                    self.logger.debug(f"Failed to remove federated client for {port_name} ({reason})", exc_info=True)
-        self.logger.debug(f"Stopped local session {peer_key}:{stream_id} port={port_name} reason={reason}")
+                    self.logger.debug("Failed to remove federated client for %s (%s)", port_name, reason, exc_info=True)
+        self.logger.debug("Stopped local session %s:%s port=%s reason=%s", peer_key, stream_id, port_name, reason)
 
     async def _cleanup_peer_local_sessions(self, peer_key: str) -> None:
         """Stop every origin-side session a peer owned and drop its stream routing state.
@@ -5846,7 +5906,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 await self._stop_local_session(peer_key, sid, reason="peer_paths_closed")
             except Exception as e:
-                self.logger.debug(f"Failed to stop local session {peer_key}:{sid}: {e}", exc_info=True)
+                self.logger.debug("Failed to stop local session %s:%s: %s", peer_key, sid, e, exc_info=True)
         try:
             self._local_session_map.pop(peer_key, None)
         except Exception:
@@ -5877,10 +5937,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             has_pumps = any(pk == peer_key for (pk, _sid) in self._pump_tasks)
             if not (self._local_session_map.get(peer_key) or self._session_map.get(peer_key) or has_pumps):
                 return
-            self.logger.info(f"Last path closed for peer {peer_key}; stopping its local sessions")
+            self.logger.info("Last path closed for peer %s; stopping its local sessions", peer_key)
             await self._cleanup_peer_local_sessions(peer_key)
         except Exception as e:
-            self.logger.debug(f"Empty-peer local session cleanup failed for {peer_key}: {e}", exc_info=True)
+            self.logger.debug("Empty-peer local session cleanup failed for %s: %s", peer_key, e, exc_info=True)
 
     async def _pump_local_port_to_remote(self, peer_key: str, stream_id: int, port_name: str):
         """Continuously forward data from a local port to the remote stream.
@@ -5915,7 +5975,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 pm.add_federation_buffering_hold(port_name)
                 held = True
         except Exception:
-            self.logger.debug(f"Failed to add federation buffering hold for {port_name}", exc_info=True)
+            self.logger.debug("Failed to add federation buffering hold for %s", port_name, exc_info=True)
         try:
             # Send via currently selected path dynamically; loop until the
             # mapping is removed or the adapter stops.
@@ -5940,20 +6000,20 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         # to avoid a busy loop.
                         await asyncio.sleep(0.05)
                     else:
-                        self.logger.debug(f"[{peer_key}] PUMP local->{port_name} sid={stream_id} bytes={len(data)}")
+                        self.logger.debug("[%s] PUMP local->%s sid=%s bytes=%s", peer_key, port_name, stream_id, len(data))
                         await self._send_data_mpath(peer_key, stream_id, data)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
                     # Log and continue
-                    self.logger.debug(f"Pump error for {port_name} on {peer_key}:{stream_id}: {e}", exc_info=True)
+                    self.logger.debug("Pump error for %s on %s:%s: %s", port_name, peer_key, stream_id, e, exc_info=True)
                     await asyncio.sleep(0.1)
         finally:
             if held and pm is not None:
                 try:
                     pm.remove_federation_buffering_hold(port_name)
                 except Exception:
-                    self.logger.debug(f"Failed to remove federation buffering hold for {port_name}", exc_info=True)
+                    self.logger.debug("Failed to remove federation buffering hold for %s", port_name, exc_info=True)
             # Cleanup mapping on exit, but only if we still own the slot: a
             # replacement pump or an in-flight teardown may own it now, and
             # popping would delete the new session's mapping (issue #54).
@@ -6167,10 +6227,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if getattr(existing, "data_callback", None) is None:
                         try:
                             await self.main_port_manager.register_federated_port(metadata, existing)
-                            self.logger.info(f"Re-registered cached federated port '{name}' with data callback on reconnect")
+                            self.logger.info("Re-registered cached federated port '%s' with data callback on reconnect", name)
                         except Exception as e:
                             self.logger.warning(
-                                f"Failed to re-register data callback for {name} on reconnect: {e}", exc_info=True
+                                "Failed to re-register data callback for %s on reconnect: %s", name, e, exc_info=True
                             )
                     # Clear old client sessions and reopen on new connection
                     try:
@@ -6207,7 +6267,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             if cid and hasattr(existing, "open_stream_for_client"):
                                 await existing.open_stream_for_client(cid)
                     except Exception as e:
-                        self.logger.debug(f"Failed to reopen streams for {name} on reconnect: {e}", exc_info=True)
+                        self.logger.debug("Failed to reopen streams for %s on reconnect: %s", name, e, exc_info=True)
                     # Re-request the origin's read-write grant for the clients that
                     # held it before the outage. The streams above reopened
                     # read-only and nothing else re-sends FEDRW, so without this a
@@ -6236,7 +6296,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         pass
                     reused = True
         except Exception as e:
-            self.logger.debug(f"Proxy reuse check failed for {name} on {conn_id}: {e}", exc_info=True)
+            self.logger.debug("Proxy reuse check failed for %s on %s: %s", name, conn_id, e, exc_info=True)
 
         if reused:
             try:
@@ -6271,7 +6331,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             sid2 = getattr(o2, "server_id", None)
                             if sid2 == origin_id:
                                 self.logger.info(
-                                    f"Duplicate federated port '{name}' from {origin_id}; skipping re-registration"
+                                    "Duplicate federated port '%s' from %s; skipping re-registration", name, origin_id
                                 )
                                 return
                     except Exception:  # justification: existing-port metadata introspection is optional
@@ -6280,7 +6340,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 pass
             registered = await self.main_port_manager.register_federated_port(metadata, proxy)
             if registered:
-                self.logger.info(f"Registered federated port: {registered}")
+                self.logger.info("Registered federated port: %s", registered)
                 try:
                     if peer_key not in self._peer_proxies:
                         self._peer_proxies[peer_key] = {}
@@ -6324,7 +6384,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 await self._send_stream_close_mpath(peer_key, sid, "stale_after_reconnect")
                 self.logger.info(
-                    f"Closed stale remote stream sid={sid} ({key}) for port={proxy.remote_port_name} on reconnect"
+                    "Closed stale remote stream sid=%s (%s) for port=%s on reconnect", sid, key, proxy.remote_port_name
                 )
             except Exception:
                 # justification: best-effort stale-stream close; the local cleanup proceeds
@@ -6400,18 +6460,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     # justification: optional log annotation; the frame is still sent
                     pass
                 if seq_val is not None:
-                    self.logger.debug(f"TX frame: {hdr_preview} seq={seq_val}")
+                    self.logger.debug("TX frame: %s seq=%s", hdr_preview, seq_val)
                 else:
-                    self.logger.debug(f"TX frame: {hdr_preview}")
+                    self.logger.debug("TX frame: %s", hdr_preview)
             else:
                 # Fallback preview if header couldn't be isolated
                 frame_str = frame.decode("utf-8", errors="ignore")
                 hdr_preview = frame_str.split("\n", 1)[0] if "\n" in frame_str else frame_str[:64]
-                self.logger.debug(f"TX frame: {hdr_preview}")
+                self.logger.debug("TX frame: %s", hdr_preview)
             writer.write(frame)
             await writer.drain()
         except Exception as e:
-            self.logger.error(f"Failed to send protocol frame: {e}", exc_info=True)
+            self.logger.error("Failed to send protocol frame: %s", e, exc_info=True)
 
     async def _read_frame(self, reader: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
         """Read one ASCII frame (header + payload + newline) from the stream.
@@ -6458,12 +6518,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "payload": payload,
                 "seq": seq_val,
             }
-            self.logger.debug(f"RX header parsed: sid={stream_id} type={frame_type} len={payload_len}")
+            self.logger.debug("RX header parsed: sid=%s type=%s len=%s", stream_id, frame_type, payload_len)
             return frame_obj
         except asyncio.IncompleteReadError:
             return None
         except Exception as e:
-            self.logger.error(f"Error reading frame: {e}", exc_info=True)
+            self.logger.error("Error reading frame: %s", e, exc_info=True)
             return None
 
     def _map_session(self, peer_key: str, stream_id: int, proxy: Any):
@@ -6696,7 +6756,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     else:
                         self.data_callback(data)
                 except Exception as e:
-                    self.logger.error(f"data_callback error: {e}", exc_info=True)
+                    self.logger.error("data_callback error: %s", e, exc_info=True)
             else:
                 try:
                     self.data_queue.put_nowait(data)
@@ -6719,7 +6779,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             """
             session_id = await self._ensure_session(client_id)
             self.logger.debug(
-                f"REMOTE PROXY WRITE port={self.remote_port_name} sid={session_id} bytes={len(data)} client={client_id}"
+                "REMOTE PROXY WRITE port=%s sid=%s bytes=%s client=%s", self.remote_port_name, session_id, len(data), client_id
             )
             try:
                 self.last_seen = time.time()
@@ -6751,7 +6811,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # per-proxy-only counter would let two different ports both open
             # stream id 1, colliding in the peer's session maps.
             session_id = self.adapter._alloc_local_stream_id(self.connection_id)
-            self.logger.info(f"REMOTE PROXY OPEN stream sid={session_id} port={self.remote_port_name}")
+            self.logger.info("REMOTE PROXY OPEN stream sid=%s port=%s", session_id, self.remote_port_name)
             await self.adapter._send_stream_open_mpath(self.connection_id, session_id, self.remote_port_name)
             self.adapter._map_session(self.connection_id, session_id, self)
             self._client_sessions[key] = session_id
@@ -6769,10 +6829,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             """
             try:
                 sid = await self._ensure_session(client_id)
-                self.logger.info(f"Opened remote stream sid={sid} for client={client_id} on port={self.remote_port_name}")
+                self.logger.info("Opened remote stream sid=%s for client=%s on port=%s", sid, client_id, self.remote_port_name)
                 return sid
             except Exception as e:
-                self.logger.error(f"Failed to open stream for client {client_id}: {e}", exc_info=True)
+                self.logger.error("Failed to open stream for client %s: %s", client_id, e, exc_info=True)
                 return None
 
         async def close_stream_for_client(self, client_id: str) -> bool:
@@ -6803,10 +6863,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     # justification: idempotent session cleanup
                     pass
                 await self.adapter._send_stream_close_mpath(self.connection_id, sid, "client_disconnect")
-                self.logger.info(f"Closed remote stream sid={sid} for client={client_id} on port={self.remote_port_name}")
+                self.logger.info("Closed remote stream sid=%s for client=%s on port=%s", sid, client_id, self.remote_port_name)
                 return True
             except Exception as e:
-                self.logger.error(f"Failed to close stream for client {client_id}: {e}", exc_info=True)
+                self.logger.error("Failed to close stream for client %s: %s", client_id, e, exc_info=True)
                 return False
 
         async def request_read_write_for_client(self, client_id: str, timeout: float = 3.0) -> str:
@@ -6896,11 +6956,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     return "read-only"
                 return await asyncio.wait_for(fut, timeout=timeout)
             except asyncio.TimeoutError:
-                self.logger.warning(f"FEDRW {action} timed out for client={client_id} port={self.remote_port_name}")
+                self.logger.warning("FEDRW %s timed out for client=%s port=%s", action, client_id, self.remote_port_name)
                 return "read-only"
             except Exception as e:
                 self.logger.debug(
-                    f"FEDRW {action} failed for client={client_id} port={self.remote_port_name}: {e}", exc_info=True
+                    "FEDRW %s failed for client=%s port=%s: %s", action, client_id, self.remote_port_name, e, exc_info=True
                 )
                 return "read-only"
             finally:
@@ -6926,7 +6986,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         pass
                 self._client_sessions.clear()
             except Exception as e:
-                self.logger.debug(f"close_all_streams error: {e}", exc_info=True)
+                self.logger.debug("close_all_streams error: %s", e, exc_info=True)
 
         async def connect(self) -> bool:
             """Mark the proxy as connected and active.

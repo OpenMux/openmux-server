@@ -312,7 +312,7 @@ class OpenMuxServer:
             self.web_console = self._find_web_console(self.unified_adapters)
 
             if self.unified_adapters:
-                self.logger.info(f"Created {len(self.unified_adapters)} unified adapters")
+                self.logger.info("Created %s unified adapters", len(self.unified_adapters))
 
                 # Connect unified adapters to the legacy PortManager for integration
                 self.port_manager.set_unified_adapters(self.unified_adapters)
@@ -337,16 +337,16 @@ class OpenMuxServer:
                         success = await adapter.start()
                         if success:
                             adapter_type = adapter.get_adapter_type()
-                            self.logger.info(f"Started unified adapter: {adapter.name} ({adapter_type})")
+                            self.logger.info("Started unified adapter: %s (%s)", adapter.name, adapter_type)
                         else:
-                            self.logger.error(f"Failed to start unified adapter: {adapter.name}")
+                            self.logger.error("Failed to start unified adapter: %s", adapter.name)
                     except Exception as e:
-                        self.logger.error(f"Error starting unified adapter {adapter.name}: {e}", exc_info=True)
+                        self.logger.error("Error starting unified adapter %s: %s", adapter.name, e, exc_info=True)
             else:
                 self.logger.info("No unified adapters configured")
 
         except Exception as e:
-            self.logger.error(f"Error initializing unified adapters: {e}", exc_info=True)
+            self.logger.error("Error initializing unified adapters: %s", e, exc_info=True)
             import traceback
 
             traceback.print_exc()
@@ -450,9 +450,9 @@ class OpenMuxServer:
             # Restrict permissions to owner only
             with contextlib.suppress(Exception):
                 os.chmod(path, 0o600)
-            self.logger.info(f"Control socket listening at {path}")
+            self.logger.info("Control socket listening at %s", path)
         except Exception as e:
-            self.logger.error(f"Failed to start control socket on {path}: {e}", exc_info=True)
+            self.logger.error("Failed to start control socket on %s: %s", path, e, exc_info=True)
             raise
 
     async def _stop_control_socket(self) -> None:
@@ -468,7 +468,7 @@ class OpenMuxServer:
                     os.unlink(self._control_socket_path)
             self._control_socket_path = None
         except Exception as e:
-            self.logger.warning(f"Error stopping control socket: {e}")
+            self.logger.warning("Error stopping control socket: %s", e)
 
     async def _handle_control_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle one control connection: read one JSON line, respond, close."""
@@ -515,7 +515,7 @@ class OpenMuxServer:
         except asyncio.TimeoutError:
             await self._write_control_response(writer, ok=False, error="timeout")
         except Exception as e:
-            self.logger.error(f"Control socket error: {e}", exc_info=True)
+            self.logger.error("Control socket error: %s", e, exc_info=True)
             with contextlib.suppress(Exception):
                 await self._write_control_response(writer, ok=False, error=str(e))
         finally:
@@ -551,7 +551,7 @@ class OpenMuxServer:
                     connection_unified_adapters.append(adapter)
 
         if connection_unified_adapters:
-            self.logger.info(f"Using {len(connection_unified_adapters)} connection endpoints (unified)")
+            self.logger.info("Using %s connection endpoints (unified)", len(connection_unified_adapters))
             # Set up unified adapters for connection handling
             for adapter in connection_unified_adapters:
                 if hasattr(adapter, "set_auth_manager"):
@@ -598,9 +598,9 @@ class OpenMuxServer:
                     )
                     started_count += 1
                 else:
-                    self.logger.error(f"Failed to start {name} adapter")
+                    self.logger.error("Failed to start %s adapter", name)
             except Exception as e:
-                self.logger.error(f"Error starting {name} adapter: {e}", exc_info=True)
+                self.logger.error("Error starting %s adapter: %s", name, e, exc_info=True)
 
         return started_count
 
@@ -616,7 +616,7 @@ class OpenMuxServer:
         started_count = 0
         for name, adapter in adapters.items():
             try:
-                self.logger.info(f"Starting client adapter {name}...")
+                self.logger.info("Starting client adapter %s...", name)
                 if await adapter.start_server():
                     self.logger.info(
                         f"Started {name} adapter ({adapter.__class__.__name__}) "
@@ -625,9 +625,9 @@ class OpenMuxServer:
                     )
                     started_count += 1
                 else:
-                    self.logger.error(f"Failed to start {name} adapter")
+                    self.logger.error("Failed to start %s adapter", name)
             except Exception as e:
-                self.logger.error(f"Error starting {name} adapter: {e}", exc_info=True)
+                self.logger.error("Error starting %s adapter: %s", name, e, exc_info=True)
 
         return started_count
 
@@ -654,19 +654,19 @@ class OpenMuxServer:
 
         # Start unified connection endpoints (if any)
         if connection_unified_adapters:
-            self.logger.info(f"Starting {len(connection_unified_adapters)} connection endpoints...")
+            self.logger.info("Starting %s connection endpoints...", len(connection_unified_adapters))
             for adapter in connection_unified_adapters:
                 try:
                     if adapter.is_running:
-                        self.logger.info(f"Connection endpoint already running: {adapter.name}")
+                        self.logger.info("Connection endpoint already running: %s", adapter.name)
                         total_started += 1
                     elif await adapter.start():
-                        self.logger.info(f"Started connection endpoint: {adapter.name}")
+                        self.logger.info("Started connection endpoint: %s", adapter.name)
                         total_started += 1
                     else:
-                        self.logger.error(f"Failed to start connection endpoint: {adapter.name}")
+                        self.logger.error("Failed to start connection endpoint: %s", adapter.name)
                 except Exception as e:
-                    self.logger.error(f"Error starting connection endpoint {adapter.name}: {e}", exc_info=True)
+                    self.logger.error("Error starting connection endpoint %s: %s", adapter.name, e, exc_info=True)
 
         # Legacy connection adapters removed; nothing else to start here
 
@@ -676,7 +676,7 @@ class OpenMuxServer:
             self.logger.error("No connection endpoints started successfully")
             return 0
 
-        self.logger.info(f"Started {total_started} connection endpoints")
+        self.logger.info("Started %s connection endpoints", total_started)
         return total_started
 
     async def _run_server_loop(self):
@@ -722,7 +722,7 @@ class OpenMuxServer:
             self.logger.info("Server start cancelled during shutdown")
             return True
         except Exception as e:
-            self.logger.error(f"Error starting server: {e}", exc_info=True)
+            self.logger.error("Error starting server: %s", e, exc_info=True)
             await self.shutdown()
             return False
 
@@ -862,7 +862,7 @@ class OpenMuxServer:
             return True
 
         except Exception as e:
-            self.logger.error(f"Error reloading configuration: {e}", exc_info=True)
+            self.logger.error("Error reloading configuration: %s", e, exc_info=True)
             return False
 
     async def reload_ports(self, partial: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:  # noqa: Vulture
@@ -910,11 +910,11 @@ class OpenMuxServer:
                         res = await a.reconcile_ports({"serial_ports": new_list})
                         summary["serial"] = res
                     except Exception as e:
-                        self.logger.error(f"Serial reconcile failed: {e}", exc_info=True)
+                        self.logger.error("Serial reconcile failed: %s", e, exc_info=True)
                         summary["serial"] = {"error": str(e)}
             return summary
         except Exception as e:
-            self.logger.error(f"reload_ports failed: {e}", exc_info=True)
+            self.logger.error("reload_ports failed: %s", e, exc_info=True)
             return {"error": str(e)}
 
     async def reload_adapters_soft(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -940,7 +940,7 @@ class OpenMuxServer:
         # Reload config
         try:
             cfg_path = getattr(self.config_manager, "config_path", None)
-            self.logger.info(f"[reload-soft:{req_id}] Loading config from {cfg_path}")
+            self.logger.info("[reload-soft:%s] Loading config from %s", req_id, cfg_path)
             import time as _t
 
             _t0 = _t.time()
@@ -951,11 +951,12 @@ class OpenMuxServer:
                 self._apply_logging_from_config()
             except Exception:
                 self.logger.error(
-                    f"[reload-soft:{req_id}] Unexpected error re-applying logging config; logs keep the prior setup",
+                    "[reload-soft:%s] Unexpected error re-applying logging config; logs keep the prior setup",
+                    req_id,
                     exc_info=True,
                 )
         except Exception as e:
-            self.logger.error(f"[reload-soft:{req_id}] Config load failed: {e}", exc_info=True)
+            self.logger.error("[reload-soft:%s] Config load failed: %s", req_id, e, exc_info=True)
             return {"error": str(e)}
 
         # Update AuthManager live
@@ -963,9 +964,9 @@ class OpenMuxServer:
             if hasattr(self.auth_manager, "update_config"):
                 await self.auth_manager.update_config(new_cfg.get("authentication", {}))
                 summary["auth_updated"] = True
-                self.logger.info(f"[reload-soft:{req_id}] AuthManager updated")
+                self.logger.info("[reload-soft:%s] AuthManager updated", req_id)
         except Exception as e:
-            self.logger.error(f"[reload-soft:{req_id}] Auth update failed: {e}", exc_info=True)
+            self.logger.error("[reload-soft:%s] Auth update failed: %s", req_id, e, exc_info=True)
 
         # Hot-apply UI-only web_console settings (motd, logged_in_motd).
         # The web console endpoint is NOT restarted by soft reload, but these
@@ -979,7 +980,7 @@ class OpenMuxServer:
                 if changed_only:
                     self.logger.info(f"[reload-soft:{req_id}] web_console UI config updated: {sorted(changed_only.keys())}")
         except Exception as e:
-            self.logger.error(f"[reload-soft:{req_id}] web_console UI update failed: {e}", exc_info=True)
+            self.logger.error("[reload-soft:%s] web_console UI update failed: %s", req_id, e, exc_info=True)
 
         # Reconcile adapters that support in-place updates
         serial_section = new_cfg.get("serial_ports")
@@ -1024,7 +1025,7 @@ class OpenMuxServer:
             try:
                 _plugin = _factory.registry.get_plugin(_sec_key)
                 if not _plugin:
-                    self.logger.warning(f"[reload-soft:{req_id}] No plugin registered for section '{_sec_key}'")
+                    self.logger.warning("[reload-soft:%s] No plugin registered for section '%s'", req_id, _sec_key)
                     continue
                 # Create adapter starting empty; reconcile below populates it
                 _new_insts = _factory._create_adapter_instances(_plugin, [])
@@ -1039,18 +1040,18 @@ class OpenMuxServer:
                         _ok = await _na.start()
                     except Exception as _se:
                         _ok = False
-                        self.logger.error(f"[reload-soft:{req_id}] {_type_key} adapter start error: {_se}", exc_info=True)
+                        self.logger.error("[reload-soft:%s] %s adapter start error: %s", req_id, _type_key, _se, exc_info=True)
                     if _ok:
                         self.unified_adapters.append(_na)
                         self.port_manager.set_unified_adapters(self.unified_adapters)
                         adapters.append(_na)
                         self.logger.info(
-                            f"[reload-soft:{req_id}] Bootstrapped new {_type_key} adapter; reconcile will populate ports"
+                            "[reload-soft:%s] Bootstrapped new %s adapter; reconcile will populate ports", req_id, _type_key
                         )
                     else:
-                        self.logger.error(f"[reload-soft:{req_id}] New {_type_key} adapter failed to start")
+                        self.logger.error("[reload-soft:%s] New %s adapter failed to start", req_id, _type_key)
             except Exception as _e:
-                self.logger.error(f"[reload-soft:{req_id}] Failed to bootstrap {_type_key} adapter: {_e}", exc_info=True)
+                self.logger.error("[reload-soft:%s] Failed to bootstrap %s adapter: %s", req_id, _type_key, _e, exc_info=True)
 
         for a in adapters:
             try:
@@ -1063,7 +1064,7 @@ class OpenMuxServer:
                         res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("serial", res)
                     except Exception as e:
-                        self.logger.error(f"[reload-soft:{req_id}] Serial reconcile error: {e}", exc_info=True)
+                        self.logger.error("[reload-soft:%s] Serial reconcile error: %s", req_id, e, exc_info=True)
                         summary["adapters"]["serial"] = {"error": str(e)}
                 # Loopback
                 if key == "loopback" and hasattr(a, "reconcile_ports"):
@@ -1072,7 +1073,7 @@ class OpenMuxServer:
                         res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("loopback", res)
                     except Exception as e:
-                        self.logger.error(f"[reload-soft:{req_id}] Loopback reconcile error: {e}", exc_info=True)
+                        self.logger.error("[reload-soft:%s] Loopback reconcile error: %s", req_id, e, exc_info=True)
                         summary["adapters"]["loopback"] = {"error": str(e)}
                 # Command
                 if key == "command" and hasattr(a, "reconcile_ports"):
@@ -1081,7 +1082,7 @@ class OpenMuxServer:
                         res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("command", res)
                     except Exception as e:
-                        self.logger.error(f"[reload-soft:{req_id}] Command reconcile error: {e}", exc_info=True)
+                        self.logger.error("[reload-soft:%s] Command reconcile error: %s", req_id, e, exc_info=True)
                         summary["adapters"]["command"] = {"error": str(e)}
                 # TCP initiator
                 if key == "tcp_initiator" and hasattr(a, "reconcile_ports"):
@@ -1090,7 +1091,7 @@ class OpenMuxServer:
                         res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("tcp_initiator", res)
                     except Exception as e:
-                        self.logger.error(f"[reload-soft:{req_id}] TCP initiator reconcile error: {e}", exc_info=True)
+                        self.logger.error("[reload-soft:%s] TCP initiator reconcile error: %s", req_id, e, exc_info=True)
                         summary["adapters"]["tcp_initiator"] = {"error": str(e)}
                 # Telnet listener
                 if key == "telnet_listener" and hasattr(a, "reconcile_ports"):
@@ -1099,7 +1100,7 @@ class OpenMuxServer:
                         res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("telnet_listener", res)
                     except Exception as e:
-                        self.logger.error(f"[reload-soft:{req_id}] Telnet listener reconcile error: {e}", exc_info=True)
+                        self.logger.error("[reload-soft:%s] Telnet listener reconcile error: %s", req_id, e, exc_info=True)
                         summary["adapters"]["telnet_listener"] = {"error": str(e)}
                 # SSH listener
                 if key == "ssh_listener" and hasattr(a, "reconcile_ports"):
@@ -1108,7 +1109,7 @@ class OpenMuxServer:
                         res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("ssh_listener", res)
                     except Exception as e:
-                        self.logger.error(f"[reload-soft:{req_id}] SSH listener reconcile error: {e}", exc_info=True)
+                        self.logger.error("[reload-soft:%s] SSH listener reconcile error: %s", req_id, e, exc_info=True)
                         summary["adapters"]["ssh_listener"] = {"error": str(e)}
                 # MuxCon federation adapter
                 if key == "muxcon" and hasattr(a, "reconcile_ports"):
@@ -1117,7 +1118,7 @@ class OpenMuxServer:
                         res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("muxcon", res)
                     except Exception as e:
-                        self.logger.error(f"[reload-soft:{req_id}] MuxCon reconcile error: {e}", exc_info=True)
+                        self.logger.error("[reload-soft:%s] MuxCon reconcile error: %s", req_id, e, exc_info=True)
                         summary["adapters"]["muxcon"] = {"error": str(e)}
                 # Client listener (single-endpoint TCP console listener)
                 if key == "client_listener" and hasattr(a, "reconcile_ports"):
@@ -1128,7 +1129,7 @@ class OpenMuxServer:
                         res = await a.reconcile_ports(effective)
                         summary["adapters"].setdefault("client_listener", res)
                     except Exception as e:
-                        self.logger.error(f"[reload-soft:{req_id}] Client listener reconcile error: {e}", exc_info=True)
+                        self.logger.error("[reload-soft:%s] Client listener reconcile error: %s", req_id, e, exc_info=True)
                         summary["adapters"]["client_listener"] = {"error": str(e)}
             except Exception:
                 continue
@@ -1150,11 +1151,11 @@ class OpenMuxServer:
         for adapter in self.unified_adapters:
             try:
                 adapter_type = adapter.get_adapter_type()
-                self.logger.info(f"Stopping unified adapter {adapter.name} ({adapter_type})...")
+                self.logger.info("Stopping unified adapter %s (%s)...", adapter.name, adapter_type)
                 await adapter.stop()
-                self.logger.info(f"Stopped unified adapter {adapter.name}")
+                self.logger.info("Stopped unified adapter %s", adapter.name)
             except Exception as e:
-                self.logger.error(f"Error stopping unified adapter {adapter.name}: {e}", exc_info=True)
+                self.logger.error("Error stopping unified adapter %s: %s", adapter.name, e, exc_info=True)
 
         # Legacy port close removed (unified-only)
 
@@ -1207,7 +1208,7 @@ class OpenMuxServer:
                 for a in old:
                     atype = a.get_adapter_type()
                     targets.append(f"{getattr(a, 'name', '?')}({atype})")
-                    self.logger.debug(f"[reload-full:{req_id}] Stop target: {getattr(a, 'name', '?')} ({atype})")
+                    self.logger.debug("[reload-full:%s] Stop target: %s (%s)", req_id, getattr(a, "name", "?"), atype)
                 self.logger.info(
                     f"[reload-full:{req_id}] Initiating STOP phase by {origin} user={user} remote={remote}; targets={len(targets)}: {', '.join(targets)}"
                 )
@@ -1226,12 +1227,14 @@ class OpenMuxServer:
                         and adapter is self.web_console
                     ):
                         self.logger.warning(
-                            f"[reload-full:{req_id}] Deferring stop of self-hosted WebConsole '{aname}' to avoid in-request shutdown"
+                            "[reload-full:%s] Deferring stop of self-hosted WebConsole '%s' to avoid in-request shutdown",
+                            req_id,
+                            aname,
                         )
                         deferred_old_wc = adapter
                         # Do not count as stopped here; will stop later
                         continue
-                    self.logger.info(f"[reload-full:{req_id}] Stopping {aname} ({atype}) ...")
+                    self.logger.info("[reload-full:%s] Stopping %s (%s) ...", req_id, aname, atype)
                     _t0 = _time.monotonic()
                     # Ensure a hung adapter.stop() won't block the reload forever
                     try:
@@ -1256,7 +1259,7 @@ class OpenMuxServer:
                         # justification: optional response detail; the stopped count above is the authoritative tally
                         pass
                 except Exception as e:
-                    self.logger.error(f"Error stopping adapter {adapter.name}: {e}", exc_info=True)
+                    self.logger.error("Error stopping adapter %s: %s", adapter.name, e, exc_info=True)
                     summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "stop_error": str(e)})
             self.logger.info("[reload-full:%s] Stop phase complete: %s adapters processed", req_id, summary["stopped"])
             # Clear adapter list and detach from port manager
@@ -1273,7 +1276,7 @@ class OpenMuxServer:
             # Reload configuration from disk
             try:
                 cfg_path = getattr(self.config_manager, "config_path", None)
-                self.logger.info(f"[reload-full:{req_id}] Loading config from {cfg_path}")
+                self.logger.info("[reload-full:%s] Loading config from %s", req_id, cfg_path)
                 import time as _t
 
                 _t0 = _t.time()
@@ -1284,11 +1287,12 @@ class OpenMuxServer:
                     self._apply_logging_from_config()
                 except Exception:
                     self.logger.error(
-                        f"[reload-full:{req_id}] Unexpected error re-applying logging config; logs keep the prior setup",
+                        "[reload-full:%s] Unexpected error re-applying logging config; logs keep the prior setup",
+                        req_id,
                         exc_info=True,
                     )
             except Exception as e:
-                self.logger.error(f"Full reload: config load failed: {e}")
+                self.logger.error("Full reload: config load failed: %s", e)
                 summary["errors"].append({"phase": "load_config", "error": str(e)})
                 # deferred_old_wc (if set) is still alive; otherwise the old WebConsole
                 # was already stopped above, so there is no current instance to track.
@@ -1303,16 +1307,16 @@ class OpenMuxServer:
                 self.web_console = self._find_web_console(self.unified_adapters)
                 deferred_new_wc = self.web_console
                 try:
-                    self.logger.info(f"[reload-full:{req_id}] Created {len(self.unified_adapters)} unified adapters")
+                    self.logger.info("[reload-full:%s] Created %s unified adapters", req_id, len(self.unified_adapters))
                     for a in self.unified_adapters:
                         atype = a.get_adapter_type()
                         summary["created_adapters"].append({"name": getattr(a, "name", "?"), "type": atype})
-                        self.logger.debug(f"[reload-full:{req_id}] Created: {getattr(a, 'name', '?')} ({atype})")
+                        self.logger.debug("[reload-full:%s] Created: %s (%s)", req_id, getattr(a, "name", "?"), atype)
                 except Exception:
                     # justification: cosmetic response detail; the adapter list itself is already set
                     pass
             except Exception as e:
-                self.logger.error(f"Full reload: adapter creation failed: {e}", exc_info=True)
+                self.logger.error("Full reload: adapter creation failed: %s", e, exc_info=True)
                 summary["errors"].append({"phase": "create_adapters", "error": str(e)})
                 self.unified_adapters = []
                 self.web_console = deferred_old_wc
@@ -1342,14 +1346,14 @@ class OpenMuxServer:
                     try:
                         atype = adapter.get_adapter_type()
                         self.logger.debug(
-                            f"[reload-full:{req_id}] Wired dependencies for {getattr(adapter, 'name', '?')} ({atype})"
+                            "[reload-full:%s] Wired dependencies for %s (%s)", req_id, getattr(adapter, "name", "?"), atype
                         )
                     except Exception:
                         # justification: logging failure must not change the request outcome
                         pass
                 except Exception as e:
                     self.logger.error(
-                        f"Full reload: dependency wiring failed for {getattr(adapter, 'name', '?')}: {e}", exc_info=True
+                        "Full reload: dependency wiring failed for %s: %s", getattr(adapter, "name", "?"), e, exc_info=True
                     )
                     summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "wire_error": str(e)})
 
@@ -1363,10 +1367,10 @@ class OpenMuxServer:
                     if deferred_old_wc is not None and adapter is deferred_new_wc:
                         summary["web_console_restart_deferred"] = True
                         self.logger.warning(
-                            f"[reload-full:{req_id}] Deferring start of new WebConsole '{aname}' until after response"
+                            "[reload-full:%s] Deferring start of new WebConsole '%s' until after response", req_id, aname
                         )
                         continue
-                    self.logger.info(f"[reload-full:{req_id}] Starting {aname} ({atype}) ...")
+                    self.logger.info("[reload-full:%s] Starting %s (%s) ...", req_id, aname, atype)
                     _s0 = _time.monotonic()
                     try:
                         ok = await asyncio.wait_for(adapter.start(), timeout=START_TIMEOUT_S)
@@ -1410,7 +1414,7 @@ class OpenMuxServer:
                             {"adapter": getattr(adapter, "name", "?"), "start_error": "start returned False"}
                         )
                 except Exception as e:
-                    self.logger.error(f"Full reload: start failed for {getattr(adapter, 'name', '?')}: {e}", exc_info=True)
+                    self.logger.error("Full reload: start failed for %s: %s", getattr(adapter, "name", "?"), e, exc_info=True)
                     summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "start_error": str(e)})
 
             self.logger.info(
@@ -1426,13 +1430,13 @@ class OpenMuxServer:
             if summary.get("web_console_restart_deferred") and deferred_old_wc is not None and deferred_new_wc is not None:
                 try:
                     asyncio.create_task(self._deferred_restart_web_console(deferred_old_wc, deferred_new_wc, req_id))
-                    self.logger.info(f"[reload-full:{req_id}] Scheduled deferred WebConsole restart task")
+                    self.logger.info("[reload-full:%s] Scheduled deferred WebConsole restart task", req_id)
                 except Exception as e:
-                    self.logger.error(f"[reload-full:{req_id}] Scheduling deferred WebConsole restart failed: {e}")
+                    self.logger.error("[reload-full:%s] Scheduling deferred WebConsole restart failed: %s", req_id, e)
 
             return summary
         except Exception as e:
-            self.logger.error(f"reload_adapters_full failed: {e}", exc_info=True)
+            self.logger.error("reload_adapters_full failed: %s", e, exc_info=True)
             return {"error": str(e)}
 
     async def _deferred_restart_web_console(self, old_adapter, new_adapter, req_id: str):
@@ -1447,7 +1451,7 @@ class OpenMuxServer:
         an_old = getattr(old_adapter, "name", "?")
         an_new = getattr(new_adapter, "name", "?")
         try:
-            self.logger.info(f"[reload-full:{req_id}] [deferred] Stopping WebConsole '{an_old}' ...")
+            self.logger.info("[reload-full:%s] [deferred] Stopping WebConsole '%s' ...", req_id, an_old)
             _t0 = _time.monotonic()
             try:
                 await asyncio.wait_for(old_adapter.stop(), timeout=STOP_TIMEOUT_S)
@@ -1459,11 +1463,13 @@ class OpenMuxServer:
                     f"[reload-full:{req_id}] [deferred] Timeout stopping WebConsole '{an_old}' after {STOP_TIMEOUT_S:.1f}s"
                 )
         except Exception as e:
-            self.logger.error(f"[reload-full:{req_id}] [deferred] Error stopping WebConsole '{an_old}': {e}", exc_info=True)
+            self.logger.error(
+                "[reload-full:%s] [deferred] Error stopping WebConsole '%s': %s", req_id, an_old, e, exc_info=True
+            )
 
         # Start the new WebConsole
         try:
-            self.logger.info(f"[reload-full:{req_id}] [deferred] Starting WebConsole '{an_new}' ...")
+            self.logger.info("[reload-full:%s] [deferred] Starting WebConsole '%s' ...", req_id, an_new)
             _s0 = _time.monotonic()
             try:
                 ok = await asyncio.wait_for(new_adapter.start(), timeout=START_TIMEOUT_S)
@@ -1477,9 +1483,11 @@ class OpenMuxServer:
                     f"[reload-full:{req_id}] [deferred] Started WebConsole '{an_new}' in {_time.monotonic()-_s0:.3f}s"
                 )
             else:
-                self.logger.error(f"[reload-full:{req_id}] [deferred] Failed to start WebConsole '{an_new}'")
+                self.logger.error("[reload-full:%s] [deferred] Failed to start WebConsole '%s'", req_id, an_new)
         except Exception as e:
-            self.logger.error(f"[reload-full:{req_id}] [deferred] Error starting WebConsole '{an_new}': {e}", exc_info=True)
+            self.logger.error(
+                "[reload-full:%s] [deferred] Error starting WebConsole '%s': %s", req_id, an_new, e, exc_info=True
+            )
 
     def get_server_status(self) -> Dict[str, Any]:
         """Get comprehensive server status.
@@ -1620,7 +1628,7 @@ def _find_config_file(config_path: str) -> str:
     if os.path.exists(config_path):
         return config_path
 
-    logging.error(f"Config file not found: {config_path}")
+    logging.error("Config file not found: %s", config_path)
     if not os.path.exists("/etc/openmux/server.yaml") and not os.path.exists(os.path.join("config-local", "server.yaml")):
         logging.error(
             "No config found. In a repo checkout run `make init-config` (seeds config-local/, "
@@ -1654,7 +1662,7 @@ def _setup_shutdown_handlers(loop, server):
             # Cancel remaining tasks
             tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task() and not t.done()]
             if tasks:
-                logging.info(f"Cancelling {len(tasks)} remaining tasks")
+                logging.info("Cancelling %s remaining tasks", len(tasks))
                 for task in tasks:
                     task.cancel()
 
@@ -1667,7 +1675,7 @@ def _setup_shutdown_handlers(loop, server):
             loop.call_soon_threadsafe(loop.stop)
 
         except Exception as e:
-            logging.error(f"Error during shutdown: {e}", exc_info=True)
+            logging.error("Error during shutdown: %s", e, exc_info=True)
             loop.call_soon_threadsafe(loop.stop)
 
     # Ensure control socket is closed promptly on TERM/INT
@@ -1695,9 +1703,9 @@ def _setup_shutdown_handlers(loop, server):
             # Perform server soft reload
             ctx = {"origin": "signal", "user": "signal", "remote": "local", "req_id": "sighup"}
             res = await server.reload_adapters_soft(context=ctx)
-            logging.info(f"Soft reload completed: {res}")
+            logging.info("Soft reload completed: %s", res)
         except Exception as e:
-            logging.error(f"Soft reload failed: {e}", exc_info=True)
+            logging.error("Soft reload failed: %s", e, exc_info=True)
 
     # Full reload handler (SIGUSR1)
     def handle_full_reload_signal():
@@ -1708,9 +1716,9 @@ def _setup_shutdown_handlers(loop, server):
         try:
             ctx = {"origin": "signal", "user": "signal", "remote": "local", "req_id": "sigusr1"}
             res = await server.reload_adapters_full(context=ctx)
-            logging.info(f"Full reload completed: {res}")
+            logging.info("Full reload completed: %s", res)
         except Exception as e:
-            logging.error(f"Full reload failed: {e}", exc_info=True)
+            logging.error("Full reload failed: %s", e, exc_info=True)
 
     # Register signal handlers
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -2054,9 +2062,9 @@ def main():
                 os.makedirs(parent, exist_ok=True)
             with open(pidfile, "w", encoding="utf-8") as f:
                 f.write(str(os.getpid()))
-            logging.info(f"PID file written: {pidfile}")
+            logging.info("PID file written: %s", pidfile)
         except Exception as e:
-            logging.warning(f"Failed to write PID file: {e}")
+            logging.warning("Failed to write PID file: %s", e)
 
         # Start the server; exit with non-zero if startup failed
         started = loop.run_until_complete(server.start())
@@ -2067,7 +2075,7 @@ def main():
     except KeyboardInterrupt:
         logging.info("Server stopped by user")
     except Exception as e:
-        logging.error(f"Unexpected error: {e}", exc_info=True)
+        logging.error("Unexpected error: %s", e, exc_info=True)
     finally:
         # Clean up
         _cleanup_event_loop(loop)

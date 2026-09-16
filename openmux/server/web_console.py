@@ -501,7 +501,7 @@ async def _render_status_page(
         status_payload["status_path"] = request.rel_url.path or default_status_path
         body = adapter._render_status(status_payload, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
     except Exception as exc:
-        adapter.logger.error(f"Status page render failed: {exc}")
+        adapter.logger.error("Status page render failed: %s", exc)
         raise web.HTTPInternalServerError(text="Failed to render status page.\n")
     return web.Response(body=body, content_type="text/html")
 
@@ -548,7 +548,7 @@ async def handle_console(request: web.Request) -> web.Response:
 
         body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm, embed=embed)  # type: ignore[attr-defined]
     except Exception as exc:
-        adapter.logger.error(f"Console render failed: {exc}")
+        adapter.logger.error("Console render failed: %s", exc)
         raise web.HTTPInternalServerError(text="Failed to render console page.\n")
     return web.Response(body=body, content_type="text/html")
 
@@ -607,7 +607,7 @@ async def handle_logs(request: web.Request) -> web.Response:
                 else:
                     log_error = "No log file found for this port."
             except Exception as exc:
-                adapter.logger.error(f"/logs read error for {port_name}: {exc}", exc_info=True)
+                adapter.logger.error("/logs read error for %s: %s", port_name, exc, exc_info=True)
                 log_error = "Unable to resolve log path for this port."
         else:
             log_error = "Select a port to view logs."
@@ -628,7 +628,7 @@ async def handle_logs(request: web.Request) -> web.Response:
         else:
             raise AttributeError("Adapter missing _render_logs")
     except Exception as re:
-        adapter.logger.error(f"Logs template render failed: {re}")
+        adapter.logger.error("Logs template render failed: %s", re)
         body = b"<html><body><h1>Logs</h1><p>Unable to render logs page.</p></body></html>"
     return web.Response(body=body, content_type="text/html")
 
@@ -663,7 +663,7 @@ async def handle_about(request: web.Request) -> web.Response:
             ports=ports,
         )
     except Exception as exc:
-        adapter.logger.error(f"About page render failed: {exc}")
+        adapter.logger.error("About page render failed: %s", exc)
         raise web.HTTPInternalServerError(text="Failed to render about page.\n")
     return web.Response(body=body, content_type="text/html")
 
@@ -806,7 +806,7 @@ async def handle_api_ports(request: web.Request) -> web.Response:
         payload = json.dumps({"ports": ports}).encode("utf-8")
         return web.Response(body=payload, content_type="application/json")
     except Exception as e:
-        adapter.logger.error(f"/api/ports error: {e}", exc_info=True)
+        adapter.logger.error("/api/ports error: %s", e, exc_info=True)
         return web.json_response({"ports": []})
 
 
@@ -881,7 +881,7 @@ async def handle_api_reload(request: web.Request) -> web.Response:
                 results[kind] = {"error": f"Invalid {key} configuration"}
                 continue
         except Exception as e:
-            adapter.logger.warning(f"{kind} validation error ignored: {e}")
+            adapter.logger.warning("%s validation error ignored: %s", kind, e)
         # Names
         names = [p.get("name") for p in lst if isinstance(p, dict)]
         if any(not isinstance(n, str) or not n.strip() for n in names) or len(set(names)) != len(names):
@@ -894,7 +894,7 @@ async def handle_api_reload(request: web.Request) -> web.Response:
             else:
                 results[kind] = {"error": "Adapter does not support live reconcile"}
         except Exception as e:
-            adapter.logger.error(f"Hot-reload {kind} failed: {e}", exc_info=True)
+            adapter.logger.error("Hot-reload %s failed: %s", kind, e, exc_info=True)
             results[kind] = {"error": "Apply failed"}
 
     # Disconnect clients on affected ports
@@ -922,7 +922,7 @@ async def handle_api_reload(request: web.Request) -> web.Response:
                         "find_adapter: disconnect_client_from_port failed (client=%s port=%s)", cid, pname, exc_info=True
                     )
     except Exception as e:
-        adapter.logger.warning(f"Post-reconcile disconnect failed: {e}")
+        adapter.logger.warning("Post-reconcile disconnect failed: %s", e)
 
     # Update in-memory config snapshot
     try:
@@ -1177,7 +1177,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                 # justification: best-effort meta push; the next event retries
                 pass
     except Exception as e:
-        adapter.logger.error(f"Error connecting web client to port {port_name}: {e}", exc_info=True)
+        adapter.logger.error("Error connecting web client to port %s: %s", port_name, e, exc_info=True)
         try:
             await ws.close(code=1011, message=b"Attach error")
         except Exception:
@@ -1287,7 +1287,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                     resp = {"type": "scrollback_done", "bytes": len(scrollback)}
                                     await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
                                 except Exception:
-                                    adapter.logger.debug(f"scrollback send error for {port_name}", exc_info=True)
+                                    adapter.logger.debug("scrollback send error for %s", port_name, exc_info=True)
                                 continue  # handled control; do not forward
                     except Exception:
                         # justification: best-effort control message; the UI tolerates a miss
@@ -1303,7 +1303,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                 if not meta_only:
                     await adapter.console_manager.port_manager.write_to_port(port_name, data, client_id)
             except Exception as e:
-                adapter.logger.error(f"Write to port error: {e}", exc_info=True)
+                adapter.logger.error("Write to port error: %s", e, exc_info=True)
                 break
     except asyncio.CancelledError:
         # Shutdown path cancels pending receives; exit quietly
@@ -1313,7 +1313,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
             # justification: best-effort close; the socket may already be gone
             pass
     except Exception as e:
-        adapter.logger.error(f"Websocket loop error for {port_name}: {e}", exc_info=True)
+        adapter.logger.error("Websocket loop error for %s: %s", port_name, e, exc_info=True)
     finally:
         adapter.logger.info(
             "Web client %s websocket loop ending for port %s (closed=%s close_code=%s exception=%r)",
@@ -1353,7 +1353,7 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
         except Exception:
             # justification: idempotent metadata cleanup
             pass
-        adapter.logger.info(f"Web client {client_id} disconnected from port {port_name}")
+        adapter.logger.info("Web client %s disconnected from port %s", client_id, port_name)
 
     return ws
 
@@ -1820,7 +1820,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 self._prepare_templates()
                 await self._ensure_assets()
             except Exception as prep_err:
-                self.logger.warning(f"Template/static preparation warning: {prep_err}")
+                self.logger.warning("Template/static preparation warning: %s", prep_err)
 
             app = web.Application(middlewares=[auth_middleware])
             app[ADAPTER_APP_KEY] = self
@@ -1832,7 +1832,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 Path(self.static_dir).mkdir(parents=True, exist_ok=True)
                 app.router.add_static("/static/", self.static_dir, follow_symlinks=True)
             except Exception as e:
-                self.logger.warning(f"Failed to add static route: {e}")
+                self.logger.warning("Failed to add static route: %s", e)
 
             app.router.add_get("/", handle_index)
             if self.enable_ui:
@@ -1861,7 +1861,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             try:
                 self._load_plugins(app)
             except Exception as e:
-                self.logger.error(f"Failed to load web plugins: {e}", exc_info=True)
+                self.logger.error("Failed to load web plugins: %s", e, exc_info=True)
 
             # Optionally mount under a configured base path using a parent app
             parent_app = None
@@ -1879,7 +1879,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 try:
                     ssl_ctx = await self._create_server_ssl_context()
                 except Exception as e:
-                    self.logger.error(f"Failed to initialize TLS context: {e}", exc_info=True)
+                    self.logger.error("Failed to initialize TLS context: %s", e, exc_info=True)
                     return False
 
                 # HTTPS main
@@ -1903,7 +1903,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 self._started_wall = time.time()
                 self.is_running = True
                 self.logger.info(
-                    f"WebConsole HTTPS on https://{self.host}:{self.ssl_port} (primary); HTTP redirect on http://{self.host}:{self.port}"
+                    "WebConsole HTTPS on https://%s:%s (primary); HTTP redirect on http://%s:%s",
+                    self.host,
+                    self.ssl_port,
+                    self.host,
+                    self.port,
                 )
                 return True
             else:
@@ -1915,7 +1919,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     try:
                         ssl_ctx = await self._create_server_ssl_context()
                     except Exception as e:
-                        self.logger.error(f"Failed to initialize TLS context: {e}", exc_info=True)
+                        self.logger.error("Failed to initialize TLS context: %s", e, exc_info=True)
                         await runner.cleanup()
                         return False
                 site = web.TCPSite(runner, self.host, self.port, ssl_context=ssl_ctx)
@@ -1927,10 +1931,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 self._started_wall = time.time()
                 self.is_running = True
                 scheme = "https" if ssl_ctx else "http"
-                self.logger.info(f"WebConsole listening on {scheme}://{self.host}:{self.port}")
+                self.logger.info("WebConsole listening on %s://%s:%s", scheme, self.host, self.port)
                 return True
         except Exception as e:
-            self.logger.error(f"Failed to start WebConsole: {e}", exc_info=True)
+            self.logger.error("Failed to start WebConsole: %s", e, exc_info=True)
             return False
 
     async def stop(self) -> None:
@@ -3329,9 +3333,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     nav = info.get("nav")
                     if isinstance(nav, list):
                         nav_items.extend([n for n in nav if isinstance(n, dict)])
-                self.logger.info(f"Loaded web plugin: {mod_name}")
+                self.logger.info("Loaded web plugin: %s", mod_name)
             except Exception as e:
-                self.logger.error(f"Error loading plugin {entry}: {e}", exc_info=True)
+                self.logger.error("Error loading plugin %s: %s", entry, e, exc_info=True)
         self._plugin_nav = nav_items
 
     def _get_ports_snapshot(self):
@@ -3739,7 +3743,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 await ws.send_str(data.decode("utf-8", errors="ignore"))
             return True
         except (ConnectionResetError, OSError) as e:
-            self.logger.warning(f"WebSocket transport failed for {client_id}: {e}")
+            self.logger.warning("WebSocket transport failed for %s: %s", client_id, e)
             await self._drop_client_channel(client_id, ws, detach_port=False)
             return False
         except RuntimeError as e:

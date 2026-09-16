@@ -140,7 +140,7 @@ class ConsoleUI:
             return True
 
         except Exception as e:
-            self.logger.error(f"Error in console UI: {e}", exc_info=True)
+            self.logger.error("Error in console UI: %s", e, exc_info=True)
             return False
 
         finally:
@@ -306,7 +306,7 @@ class ConsoleUI:
                 # Task was cancelled
                 break
             except Exception as e:
-                self.logger.error(f"Error reading from server: {e}", exc_info=True)
+                self.logger.error("Error reading from server: %s", e, exc_info=True)
                 # In reconnect modes, keep UI alive and retry
                 if self.reconnect_mode in ("auto", "manual"):
                     await asyncio.sleep(0.2)
@@ -327,7 +327,7 @@ class ConsoleUI:
                 try:
                     ok = await getattr(self.connection, "reconnect")()
                 except Exception as e:
-                    self.logger.error(f"Reconnect attempt failed: {e}", exc_info=True)
+                    self.logger.error("Reconnect attempt failed: %s", e, exc_info=True)
                     ok = False
                 if ok:
                     if not self.quiet_mode:
@@ -408,7 +408,7 @@ class ConsoleUI:
                 if payload and should_flush:
                     if not self.read_only_mode and self.connection.is_connected:
                         if self._debug_input:
-                            self.logger.debug(f"send[chunk]: {len(payload)} bytes")
+                            self.logger.debug("send[chunk]: %s bytes", len(payload))
                         await self.connection.send_data(bytes(payload))
                         sent_now = True
                         last_send = now
@@ -424,7 +424,7 @@ class ConsoleUI:
                     continue
 
         except Exception as e:
-            self.logger.error(f"Error handling keyboard input: {e}", exc_info=True)
+            self.logger.error("Error handling keyboard input: %s", e, exc_info=True)
             self.is_running = False
 
     # Pending ESC completion removed
@@ -726,7 +726,7 @@ class ConsoleUI:
                 try:
                     ok = await getattr(self.connection, "reconnect")()
                 except Exception as e:
-                    self.logger.error(f"Reconnect error: {e}", exc_info=True)
+                    self.logger.error("Reconnect error: %s", e, exc_info=True)
                     ok = False
                 if ok:
                     if not self.quiet_mode:
@@ -776,7 +776,7 @@ class ConsoleUI:
                     sys.stdout.flush()
                 except Exception as e:
                     # Real user-facing error; log with traceback for diagnostics.
-                    self.logger.error(f"Failed to change escape sequence: {e}", exc_info=True)
+                    self.logger.error("Failed to change escape sequence: %s", e, exc_info=True)
                     sys.stdout.write("]\r\n[Error changing escape sequence]\r\n")
                     sys.stdout.flush()
 
@@ -833,7 +833,7 @@ class ConsoleUI:
                 sys.stdout.flush()
 
         except Exception as e:
-            self.logger.error(f"Error processing escape command '{command}': {e}", exc_info=True)
+            self.logger.error("Error processing escape command '%s': %s", command, e, exc_info=True)
             sys.stdout.write(f"\r\n[Error processing command: {e}]\r\n")
             sys.stdout.flush()
 

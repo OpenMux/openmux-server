@@ -118,11 +118,11 @@ class LoopbackPort:
             self.state = PortState.CREATING
             self.state = PortState.ACTIVE
             self.is_connected = True
-            self.logger.info(f"Loopback port {self.name} started successfully")
+            self.logger.info("Loopback port %s started successfully", self.name)
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to start loopback port {self.name}: {e}", exc_info=True)
+            self.logger.error("Failed to start loopback port %s: %s", self.name, e, exc_info=True)
             self.state = PortState.DEGRADED  # Use existing state
             return False
 
@@ -132,10 +132,10 @@ class LoopbackPort:
             self.state = PortState.DESTROYING
             self.state = PortState.DESTROYED
             self.is_connected = False
-            self.logger.info(f"Loopback port {self.name} stopped")
+            self.logger.info("Loopback port %s stopped", self.name)
 
         except Exception as e:
-            self.logger.error(f"Error stopping loopback port {self.name}: {e}", exc_info=True)
+            self.logger.error("Error stopping loopback port %s: %s", self.name, e, exc_info=True)
 
     async def write_data(self, data: bytes) -> int:
         """Unified write entrypoint.
@@ -172,7 +172,7 @@ class LoopbackPort:
                 feedback_msg = b"[ENTER]\r\n"
                 await self._emit_data(feedback_msg)
 
-        self.logger.debug(f"Loopback write: {len(data)} bytes")
+        self.logger.debug("Loopback write: %s bytes", len(data))
         return len(data)
 
     def sanitize_data(self, data: bytes) -> bytes:
@@ -459,7 +459,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Return mapping of port names to configuration dicts."""
         port_configs = {}
 
-        self.logger.debug(f"Getting port configurations from config: {self.config}")
+        self.logger.debug("Getting port configurations from config: %s", self.config)
 
         # Get the loopback_ports list from the config
         loopback_ports = self.config.get("loopback_ports", [])
@@ -469,9 +469,9 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                     port_name = port_config.get("name", "")
                     if port_name:
                         port_configs[str(port_name)] = port_config
-                        self.logger.debug(f"Added port config: {port_name} -> {port_config}")
+                        self.logger.debug("Added port config: %s -> %s", port_name, port_config)
 
-        self.logger.debug(f"Final port configurations: {port_configs}")
+        self.logger.debug("Final port configurations: %s", port_configs)
         return port_configs
 
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[LoopbackPort]:
@@ -480,23 +480,23 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             port = LoopbackPort(port_name, config, self)
             if await port.start():
                 self.ports[port_name] = port
-                self.logger.info(f"Created loopback port: {port_name}")
+                self.logger.info("Created loopback port: %s", port_name)
                 # Register with PortManager so unified wrapper and routing are active
                 # (register_unified_port also sets port.data_callback; __init__ already
                 # wired it if main_port_manager was available at construction time)
                 try:
                     if hasattr(self, "main_port_manager") and self.main_port_manager:
                         await self.main_port_manager.register_unified_port(port_name, port, self)
-                        self.logger.info(f"Registered loopback port {port_name} with port manager")
+                        self.logger.info("Registered loopback port %s with port manager", port_name)
                 except Exception:
-                    self.logger.warning(f"Failed to register loopback port {port_name} with port manager", exc_info=True)
+                    self.logger.warning("Failed to register loopback port %s with port manager", port_name, exc_info=True)
                 return port
             else:
-                self.logger.error(f"Failed to start loopback port: {port_name}")
+                self.logger.error("Failed to start loopback port: %s", port_name)
                 return None
 
         except Exception as e:
-            self.logger.error(f"Error creating loopback port {port_name}: {e}", exc_info=True)
+            self.logger.error("Error creating loopback port %s: %s", port_name, e, exc_info=True)
             return None
 
     async def destroy_port(self, port_name: str) -> None:
@@ -508,10 +508,10 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if hasattr(self, "main_port_manager") and self.main_port_manager:
                     await self.main_port_manager.unregister_unified_port(port_name)
             except Exception:
-                self.logger.warning(f"Failed to unregister loopback port {port_name}")
+                self.logger.warning("Failed to unregister loopback port %s", port_name)
             await port.stop()
             del self.ports[port_name]
-            self.logger.info(f"Destroyed loopback port: {port_name}")
+            self.logger.info("Destroyed loopback port: %s", port_name)
 
     async def start(self) -> bool:
         """Create and start configured loopback ports."""
@@ -520,9 +520,9 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         if success:
             port_count = len(self.ports)
-            self.logger.info(f"Loopback adapter {self.name} started with {port_count} ports")
+            self.logger.info("Loopback adapter %s started with %s ports", self.name, port_count)
         else:
-            self.logger.error(f"Failed to start loopback adapter {self.name}")
+            self.logger.error("Failed to start loopback adapter %s", self.name)
 
         self.is_running = success
         return success
@@ -537,7 +537,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             # Get port configurations from adapter-specific config
             port_configs = self.get_port_configurations()
 
-            self.logger.debug(f"Creating {len(port_configs)} loopback ports from config")
+            self.logger.debug("Creating %s loopback ports from config", len(port_configs))
 
             success_count = 0
             for port_name, port_config in port_configs.items():
@@ -545,11 +545,11 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if port:
                     success_count += 1
 
-            self.logger.info(f"Created {success_count}/{len(port_configs)} loopback ports")
+            self.logger.info("Created %s/%s loopback ports", success_count, len(port_configs))
             return success_count > 0 or len(port_configs) == 0
 
         except Exception as e:
-            self.logger.error(f"Error creating loopback ports from config: {e}", exc_info=True)
+            self.logger.error("Error creating loopback ports from config: %s", e, exc_info=True)
             return False
 
     async def stop(self) -> None:
@@ -563,11 +563,11 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 await self.destroy_port(port_name)
             except Exception as e:
-                self.logger.error(f"Error destroying loopback port {port_name}: {e}", exc_info=True)
+                self.logger.error("Error destroying loopback port %s: %s", port_name, e, exc_info=True)
 
         self.ports.clear()
         self.is_running = False
-        self.logger.info(f"Loopback adapter {self.name} stopped")
+        self.logger.info("Loopback adapter %s stopped", self.name)
 
     def get_status_info(self) -> Dict[str, Any]:  # pragma: no cover - simple aggregation
         """Return summary info used by server status logger.
@@ -597,12 +597,12 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         port = self.ports.get(port_name)
         if not port:
-            self.logger.error(f"Loopback port {port_name} not found")
+            self.logger.error("Loopback port %s not found", port_name)
             return 0
         try:
             return await port.write_data(data)
         except Exception as e:
-            self.logger.error(f"Error writing to loopback port {port_name}: {e}", exc_info=True)
+            self.logger.error("Error writing to loopback port %s: %s", port_name, e, exc_info=True)
             return 0
 
     # --- Live configuration reconciliation ---
@@ -702,7 +702,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 await self.destroy_port(n)
             except Exception as e:
-                self.logger.error(f"Failed to destroy loopback port {n}: {e}", exc_info=True)
+                self.logger.error("Failed to destroy loopback port %s: %s", n, e, exc_info=True)
 
         # Apply additions and re-creations
         for n in added + updated:
@@ -712,7 +712,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 await self.create_port(n, cfg)
             except Exception as e:
-                self.logger.error(f"Failed to create loopback port {n}: {e}", exc_info=True)
+                self.logger.error("Failed to create loopback port %s: %s", n, e, exc_info=True)
 
         # Update internal config snapshot
         try:
@@ -723,6 +723,11 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
         self.logger.info(
-            f"Loopback adapter {self.name} reconcile: +{len(added)} ~{len(updated)} -{len(removed)} unchanged={len(unchanged)}"
+            "Loopback adapter %s reconcile: +%s ~%s -%s unchanged=%s",
+            self.name,
+            len(added),
+            len(updated),
+            len(removed),
+            len(unchanged),
         )
         return summary

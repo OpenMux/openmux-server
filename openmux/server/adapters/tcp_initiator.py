@@ -171,14 +171,14 @@ class TcpInitiatorPort:
     async def start(self) -> bool:
         """Start the TCP initiator port (non-blocking)."""
         if not self.enabled:
-            self.logger.info(f"TCP initiator port {self.name} is disabled, skipping connection")
+            self.logger.info("TCP initiator port %s is disabled, skipping connection", self.name)
             self.state = PortState.ACTIVE
             return True
         if self.connect_on_demand:
-            self.logger.info(f"TCP initiator port {self.name} is connect-on-demand, waiting for users")
+            self.logger.info("TCP initiator port %s is connect-on-demand, waiting for users", self.name)
             self.state = PortState.ACTIVE
             return True
-        self.logger.info(f"Starting TCP initiator port {self.name} (will connect in background)")
+        self.logger.info("Starting TCP initiator port %s (will connect in background)", self.name)
         self.state = PortState.CREATING
         self.reconnect_task = asyncio.create_task(self._connection_manager())
         self.state = PortState.ACTIVE
@@ -186,7 +186,7 @@ class TcpInitiatorPort:
 
     async def stop(self) -> None:
         """Stop the TCP initiator port and cancel background tasks."""
-        self.logger.info(f"Stopping TCP initiator port {self.name}")
+        self.logger.info("Stopping TCP initiator port %s", self.name)
         if self._idle_disconnect_task and not self._idle_disconnect_task.done():
             self._idle_disconnect_task.cancel()
             try:
@@ -225,7 +225,7 @@ class TcpInitiatorPort:
             )
             self.reader, self.writer = await self._protocol_handler.establish(self.host, self.port, self.config)
             self.is_connected = True
-            self.logger.info(f"Successfully connected to {self.host}:{self.port}")
+            self.logger.info("Successfully connected to %s:%s", self.host, self.port)
             # Reset so the next disconnect logs immediately; also clear the reason
             # so the UI drops the offline badge (issue #62).
             self._last_failed_warn_ts = None
@@ -301,9 +301,9 @@ class TcpInitiatorPort:
                 self.writer.close()
                 if hasattr(self.writer, "wait_closed"):
                     await self.writer.wait_closed()
-            self.logger.info(f"Disconnected from {self.host}:{self.port}")
+            self.logger.info("Disconnected from %s:%s", self.host, self.port)
         except Exception as e:
-            self.logger.error(f"Error disconnecting from {self.host}:{self.port}: {e}", exc_info=True)
+            self.logger.error("Error disconnecting from %s:%s: %s", self.host, self.port, e, exc_info=True)
         finally:
             self.is_connected = False
             self.reader = None
@@ -317,7 +317,7 @@ class TcpInitiatorPort:
                 try:
                     data = await self.reader.read(4096)
                     if not data:
-                        self.logger.info(f"Connection to {self.host}:{self.port} closed by remote")
+                        self.logger.info("Connection to %s:%s closed by remote", self.host, self.port)
                         self.is_connected = False
                         self._set_status_message(f"Connection to {self.host}:{self.port} closed by remote")
                         break
@@ -327,7 +327,7 @@ class TcpInitiatorPort:
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    self.logger.error(f"Error reading from {self.host}:{self.port}: {e}", exc_info=True)
+                    self.logger.error("Error reading from %s:%s: %s", self.host, self.port, e, exc_info=True)
                     self.is_connected = False
                     self._set_status_message(f"Read error on {self.host}:{self.port}: {e}")
                     break
@@ -344,7 +344,7 @@ class TcpInitiatorPort:
                 else:
                     self.data_callback(self.name, data)  # type: ignore[arg-type]
             except Exception as e:
-                self.logger.error(f"Data callback error on {self.name}: {e}", exc_info=True)
+                self.logger.error("Data callback error on %s: %s", self.name, e, exc_info=True)
 
     async def _monitor_connection(self) -> None:
         """Monitor connection and attempt reconnection when disconnected."""
@@ -369,9 +369,9 @@ class TcpInitiatorPort:
             if self.auto_reconnect:
                 await self._monitor_connection()
         except asyncio.CancelledError:
-            self.logger.info(f"Connection manager for {self.name} cancelled")
+            self.logger.info("Connection manager for %s cancelled", self.name)
         except Exception as e:
-            self.logger.error(f"Connection manager error for {self.name}: {e}", exc_info=True)
+            self.logger.error("Connection manager error for %s: %s", self.name, e, exc_info=True)
 
     def on_client_count_changed(self, count: int) -> None:
         """Called by the port manager when the number of connected clients changes.
@@ -392,7 +392,7 @@ class TcpInitiatorPort:
         if count > 0:
             # Trigger connection if not already running
             if not self.is_connected and (self.reconnect_task is None or self.reconnect_task.done()):
-                self.logger.info(f"Port {self.name}: user connected, starting on-demand connection")
+                self.logger.info("Port %s: user connected, starting on-demand connection", self.name)
                 self.reconnect_task = asyncio.create_task(self._connection_manager())
         else:
             # Last user left
@@ -404,7 +404,7 @@ class TcpInitiatorPort:
         try:
             await asyncio.sleep(self.idle_disconnect_delay)
             if self._active_clients == 0:
-                self.logger.info(f"Port {self.name}: disconnecting after {self.idle_disconnect_delay}s idle")
+                self.logger.info("Port %s: disconnecting after %ss idle", self.name, self.idle_disconnect_delay)
                 if self.reconnect_task and not self.reconnect_task.done():
                     self.reconnect_task.cancel()
                     try:
@@ -421,7 +421,7 @@ class TcpInitiatorPort:
     async def write_data(self, data: bytes) -> int:
         """Write data to the remote endpoint (optionally batched)."""
         if not self.is_connected or not self.writer:
-            self.logger.warning(f"Cannot write to {self.name}: not connected")
+            self.logger.warning("Cannot write to %s: not connected", self.name)
             return 0
         if not self._batching_enabled:
             try:
@@ -429,7 +429,7 @@ class TcpInitiatorPort:
                 await self.writer.drain()
                 return len(data)
             except Exception as e:
-                self.logger.error(f"Error writing to {self.name}: {e}", exc_info=True)
+                self.logger.error("Error writing to %s: %s", self.name, e, exc_info=True)
                 self.is_connected = False
                 return 0
         async with self._write_buffer_lock:
@@ -459,7 +459,7 @@ class TcpInitiatorPort:
                 self._write_buffer.clear()
             try:
                 if not self.writer:
-                    self.logger.error(f"Writer is None while flushing batched data to {self.name}")
+                    self.logger.error("Writer is None while flushing batched data to %s", self.name)
                     self.is_connected = False
                     break
                 debug_enabled = self.logger.isEnabledFor(logging.DEBUG)
@@ -478,7 +478,7 @@ class TcpInitiatorPort:
                         self._batch_timeout,
                     )
             except Exception as e:
-                self.logger.error(f"Error flushing batched data to {self.name}: {e}", exc_info=True)
+                self.logger.error("Error flushing batched data to %s: %s", self.name, e, exc_info=True)
                 self.is_connected = False
                 break
             async with self._write_buffer_lock:
@@ -579,15 +579,15 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             self.wire_port_data_callback(tcp_port, self._handle_port_data)
             if await tcp_port.start():
                 self.ports[port_name] = tcp_port
-                self.logger.info(f"TCP initiator port {port_name} created successfully")
+                self.logger.info("TCP initiator port %s created successfully", port_name)
                 if hasattr(self, "main_port_manager") and self.main_port_manager:
                     await self.main_port_manager.register_unified_port(port_name, tcp_port, self)
                 return tcp_port
             else:
-                self.logger.error(f"Failed to start TCP initiator port {port_name}")
+                self.logger.error("Failed to start TCP initiator port %s", port_name)
                 return None
         except Exception as e:
-            self.logger.error(f"Error creating TCP initiator port {port_name}: {e}", exc_info=True)
+            self.logger.error("Error creating TCP initiator port %s: %s", port_name, e, exc_info=True)
             return None
 
     async def destroy_port(self, port_name: str) -> None:
@@ -598,9 +598,9 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                     await self.main_port_manager.unregister_unified_port(port_name)
                 await tcp_port.stop()
                 del self.ports[port_name]
-                self.logger.info(f"TCP initiator port {port_name} destroyed")
+                self.logger.info("TCP initiator port %s destroyed", port_name)
             except Exception as e:
-                self.logger.error(f"Error destroying TCP initiator port {port_name}: {e}", exc_info=True)
+                self.logger.error("Error destroying TCP initiator port %s: %s", port_name, e, exc_info=True)
 
     def get_port_configurations(self) -> Dict[str, Dict[str, Any]]:
         root = self.config
@@ -622,10 +622,10 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         return "tcp_initiator"
 
     async def start(self) -> bool:
-        self.logger.info(f"Starting TCP initiator adapter {self.name}")
+        self.logger.info("Starting TCP initiator adapter %s", self.name)
         ports_config = self.get_port_configurations()
         if not ports_config:
-            self.logger.warning(f"No ports configured for TCP initiator adapter {self.name}")
+            self.logger.warning("No ports configured for TCP initiator adapter %s", self.name)
             return True
         success_count = 0
         for port_name, port_config in ports_config.items():
@@ -633,33 +633,36 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                 tcp_port = await self.create_port(port_name, port_config)
                 if tcp_port:
                     success_count += 1
-                    self.logger.info(f"TCP initiator port {port_name} started (connecting in background)")
+                    self.logger.info("TCP initiator port %s started (connecting in background)", port_name)
                 else:
-                    self.logger.error(f"Failed to start TCP initiator port {port_name}")
+                    self.logger.error("Failed to start TCP initiator port %s", port_name)
             except Exception as e:
-                self.logger.error(f"Error creating TCP initiator port {port_name}: {e}", exc_info=True)
+                self.logger.error("Error creating TCP initiator port %s: %s", port_name, e, exc_info=True)
         self.logger.info(
-            f"TCP initiator adapter {self.name} started with {success_count}/{len(ports_config)} ports (connections in progress)"
+            "TCP initiator adapter %s started with %s/%s ports (connections in progress)",
+            self.name,
+            success_count,
+            len(ports_config),
         )
         if success_count > 0:
             self.is_running = True
         return success_count > 0
 
     async def stop(self) -> None:
-        self.logger.info(f"Stopping TCP initiator adapter {self.name} with {len(self.ports)} ports")
+        self.logger.info("Stopping TCP initiator adapter %s with %s ports", self.name, len(self.ports))
         for port_name in list(self.ports.keys()):
             try:
-                self.logger.info(f"Stopping TCP initiator port {port_name}")
+                self.logger.info("Stopping TCP initiator port %s", port_name)
                 await self.destroy_port(port_name)
             except Exception as e:
-                self.logger.error(f"Error stopping TCP initiator port {port_name}: {e}", exc_info=True)
+                self.logger.error("Error stopping TCP initiator port %s: %s", port_name, e, exc_info=True)
         self.is_running = False
-        self.logger.info(f"TCP initiator adapter {self.name} stopped")
+        self.logger.info("TCP initiator adapter %s stopped", self.name)
 
     async def write_to_port(self, port_name: str, data: bytes) -> int:
         tcp_port = self.ports.get(port_name)
         if not tcp_port:
-            self.logger.error(f"TCP initiator port {port_name} not found")
+            self.logger.error("TCP initiator port %s not found", port_name)
             return 0
         success = await tcp_port.write_data(data)
         return len(data) if success else 0
@@ -682,7 +685,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         if hasattr(self, "main_port_manager") and self.main_port_manager:
             await self.main_port_manager.send_data(port_name, data)
         else:
-            self.logger.debug(f"No main port manager available, dropping {len(data)} bytes from port {port_name}")
+            self.logger.debug("No main port manager available, dropping %s bytes from port %s", len(data), port_name)
 
     # --- Live configuration reconciliation ---
     async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
@@ -811,7 +814,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             try:
                 await self.destroy_port(n)
             except Exception as e:
-                self.logger.error(f"Failed to destroy TCP initiator port {n}: {e}", exc_info=True)
+                self.logger.error("Failed to destroy TCP initiator port %s: %s", n, e, exc_info=True)
 
         for n in added + updated:
             cfg = new_by_name.get(n)
@@ -820,7 +823,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             try:
                 await self.create_port(n, cfg)
             except Exception as e:
-                self.logger.error(f"Failed to create TCP initiator port {n}: {e}", exc_info=True)
+                self.logger.error("Failed to create TCP initiator port %s: %s", n, e, exc_info=True)
 
         # Update config snapshot
         try:

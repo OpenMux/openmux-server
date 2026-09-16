@@ -167,7 +167,7 @@ class OpenMuxClient:
             except Exception:
                 return {}
         except Exception as e:
-            self.logger.error(f"Error reading config file {path}: {e}", exc_info=True)
+            self.logger.error("Error reading config file %s: %s", path, e, exc_info=True)
             return {}
 
     def _load_config(self):
@@ -196,7 +196,7 @@ class OpenMuxClient:
         if self.config_path:
             path = self.config_path if os.path.exists(self.config_path) else None
             if not path:
-                self.logger.error(f"Config path not found: {self.config_path}")
+                self.logger.error("Config path not found: %s", self.config_path)
         # 2) Env / default discovery
         if not path:
             path = self._discover_default_config_path()
@@ -205,7 +205,7 @@ class OpenMuxClient:
             loaded_config = self._read_config_file(path)
             if loaded_config:
                 config.update(loaded_config)
-                self.logger.info(f"Loaded client configuration from {path}")
+                self.logger.info("Loaded client configuration from %s", path)
 
         return config
 
@@ -356,12 +356,12 @@ class OpenMuxClient:
                 config=adapter_config,
             )
         except Exception as e:
-            self.logger.error(f"Failed to create adapter: {e}", exc_info=True)
+            self.logger.error("Failed to create adapter: %s", e, exc_info=True)
             return None
 
         # Connect to server
         if not await connection.connect():
-            self.logger.error(f"Failed to connect to {host}:{port}")
+            self.logger.error("Failed to connect to %s:%s", host, port)
             return None
 
         # Authenticate (priority: api key > pubkey > username/password)

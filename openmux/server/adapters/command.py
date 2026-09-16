@@ -310,7 +310,7 @@ class CommandPort:
                 if ok:
                     return
             except Exception:
-                self.logger.error(f"data_callback failed for {self.name}", exc_info=True)
+                self.logger.error("data_callback failed for %s", self.name, exc_info=True)
         else:
             if not self._queue_fallback_logged:
                 self.logger.error(
@@ -361,7 +361,7 @@ class CommandPort:
         """
         old = self.client_count
         self.client_count = count
-        self.logger.info(f"Client count changed for {self.name}: {old} -> {count}")
+        self.logger.info("Client count changed for %s: %s -> %s", self.name, old, count)
         if old == 0 and count > 0:
             # Cancel any pending idle-stop since a client re-appeared
             try:
@@ -396,7 +396,7 @@ class CommandPort:
                             # If still idle and process is active, stop it
                             if self.client_count == 0 and self.is_running:
                                 self.logger.info(
-                                    f"Idle timeout ({self.idle_timeout_sec}s) reached for {self.name}; stopping process"
+                                    "Idle timeout (%ss) reached for %s; stopping process", self.idle_timeout_sec, self.name
                                 )
                                 try:
                                     await self.stop()
@@ -424,7 +424,7 @@ class CommandPort:
             return True
         try:
             self.state = PortState.CREATING
-            self.logger.info(f"Starting command: {self.command}")
+            self.logger.info("Starting command: %s", self.command)
             ok = await self._spawn_process()
             if not ok:
                 self.state = PortState.DEGRADED
@@ -432,10 +432,10 @@ class CommandPort:
             self.state = PortState.ACTIVE
             self.is_running = True
             self._spawn_monitor_task()
-            self.logger.info(f"Command port {self.name} started successfully")
+            self.logger.info("Command port %s started successfully", self.name)
             return True
         except Exception as e:
-            self.logger.error(f"Failed to start command port {self.name}: {e}", exc_info=True)
+            self.logger.error("Failed to start command port %s: %s", self.name, e, exc_info=True)
             self.state = PortState.DEGRADED
             return False
 
@@ -512,7 +512,7 @@ class CommandPort:
                             attrs[6][termios.VTIME] = 0
                             termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
                     except Exception as e:
-                        self.logger.warning(f"PTY mode configuration warning for {self.name}: {e}", exc_info=True)
+                        self.logger.warning("PTY mode configuration warning for %s: %s", self.name, e, exc_info=True)
                     if self.shell:
                         self.process = await asyncio.create_subprocess_shell(
                             self.command,
@@ -540,7 +540,7 @@ class CommandPort:
                         pass
                     self._pty_master_fd = master_fd
                 except Exception as e:  # justification: PTY allocation may fail on platform; fallback to pipes acceptable
-                    self.logger.error(f"Failed to allocate PTY for {self.name}, falling back to pipes: {e}", exc_info=True)
+                    self.logger.error("Failed to allocate PTY for %s, falling back to pipes: %s", self.name, e, exc_info=True)
                     self.use_pty = False
 
             if not self.use_pty:
@@ -581,7 +581,7 @@ class CommandPort:
                         self._loop.add_reader(self._pty_master_fd, self._on_pty_read_ready)
                         self._pty_reader_added = True
                 except Exception as e:
-                    self.logger.error(f"Failed to register PTY reader for {self.name}: {e}", exc_info=True)
+                    self.logger.error("Failed to register PTY reader for %s: %s", self.name, e, exc_info=True)
             else:
                 self._read_task = asyncio.create_task(self._stdout_reader_task())
 
@@ -602,14 +602,14 @@ class CommandPort:
             self._set_status_message("")
             return True
         except FileNotFoundError as e:
-            self.logger.error(f"Error spawning process for {self.name}: {e}", exc_info=True)
+            self.logger.error("Error spawning process for %s: %s", self.name, e, exc_info=True)
             self._set_status_message(f"Process not found: {e}")
             # A port whose process cannot be (re)started is offline for the
             # UI; the reason above explains why.
             self._set_connected(False)
             return False
         except Exception as e:
-            self.logger.error(f"Error spawning process for {self.name}: {e}", exc_info=True)
+            self.logger.error("Error spawning process for %s: %s", self.name, e, exc_info=True)
             self._set_status_message(f"Process spawn failed: {e}")
             # A port whose process cannot be (re)started is offline for the
             # UI; the reason above explains why.
@@ -702,7 +702,7 @@ class CommandPort:
                         try:
                             asyncio.create_task(self._emit_output_chunk(data))
                         except Exception:
-                            self.logger.error(f"Failed to schedule output forwarding for {self.name}", exc_info=True)
+                            self.logger.error("Failed to schedule output forwarding for %s", self.name, exc_info=True)
         except OSError as e:
             if self._loop and self._pty_reader_added:
                 try:
@@ -710,10 +710,10 @@ class CommandPort:
                 except Exception:  # justification: remove_reader failure during OSError cleanup is non-critical
                     pass
                 self._pty_reader_added = False
-            self.logger.debug(f"PTY reader closed for {self.name}: {e}")
+            self.logger.debug("PTY reader closed for %s: %s", self.name, e)
             self.process_active = False
         except Exception as e:
-            self.logger.error(f"Error in PTY reader callback for {self.name}: {e}", exc_info=True)
+            self.logger.error("Error in PTY reader callback for %s: %s", self.name, e, exc_info=True)
             self.process_active = False
 
     async def _stdout_reader_task(self):
@@ -741,11 +741,11 @@ class CommandPort:
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    self.logger.error(f"Error reading from command stdout {self.name}: {e}", exc_info=True)
+                    self.logger.error("Error reading from command stdout %s: %s", self.name, e, exc_info=True)
                     self.process_active = False
                     break
         except Exception as e:
-            self.logger.error(f"Command stdout reader task error for {self.name}: {e}", exc_info=True)
+            self.logger.error("Command stdout reader task error for %s: %s", self.name, e, exc_info=True)
 
     async def _output_flush_buffer_loop(self):
         """Flush batched output according to size and timing thresholds.
@@ -831,7 +831,7 @@ class CommandPort:
                 if not self.is_running:
                     break
                 if not self.auto_restart:
-                    self.logger.info(f"Process exited for {self.name}; not restarting")
+                    self.logger.info("Process exited for %s; not restarting", self.name)
                     if not clean_exit and not self.status_message:
                         self._set_status_message(f"Process exited (code {exit_code}, auto_restart off)")
                     # The port stays up; the client can press Enter to
@@ -851,7 +851,7 @@ class CommandPort:
                     # regardless of the immediate exit code. A clean code-0
                     # exit after max_restarts failures is still a failure
                     # condition (the process keeps dying).
-                    self.logger.error(f"Max restarts reached for {self.name}; not restarting")
+                    self.logger.error("Max restarts reached for %s; not restarting", self.name)
                     if not self.status_message:
                         self._set_status_message(f"Max restarts reached ({self.max_restarts})")
                     if self.client_count > 0:
@@ -884,17 +884,17 @@ class CommandPort:
                 self._stopped_notice_sent = False
                 await asyncio.sleep(delay)
                 if not await self._spawn_process():
-                    self.logger.error(f"Respawn failed for {self.name}; stopping monitor")
+                    self.logger.error("Respawn failed for %s; stopping monitor", self.name)
                     self.is_running = False
                     self.state = PortState.DEGRADED
                     break
-                self.logger.info(f"Respawned command port process for {self.name}")
+                self.logger.info("Respawned command port process for %s", self.name)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Monitor loop error for {self.name}: {e}", exc_info=True)
+                self.logger.error("Monitor loop error for %s: %s", self.name, e, exc_info=True)
                 break
-        self.logger.info(f"Monitor loop exiting for command port {self.name}")
+        self.logger.info("Monitor loop exiting for command port %s", self.name)
 
     def _exit_notice_detail(self, exit_code: Optional[int]) -> str:
         """Detail text for a terminal PROCESS_EXITED notice."""
@@ -936,7 +936,7 @@ class CommandPort:
             if self._monitor_task is None or self._monitor_task.done():
                 self._monitor_task = asyncio.create_task(self._monitor_loop())
         except Exception:
-            self.logger.error(f"Failed to start monitor task for {self.name}", exc_info=True)
+            self.logger.error("Failed to start monitor task for %s", self.name, exc_info=True)
 
     async def stop(self) -> None:
         """Terminate the running process and cancel I/O tasks.
@@ -949,7 +949,7 @@ class CommandPort:
             return
         try:
             self.state = PortState.DESTROYING
-            self.logger.info(f"Stopping command port {self.name}")
+            self.logger.info("Stopping command port %s", self.name)
             # Cancel any pending idle-stop task first
             try:
                 if self._idle_stop_task and not self._idle_stop_task.done():
@@ -1006,9 +1006,9 @@ class CommandPort:
                             self.process.terminate()
                 except Exception:  # justification: process may already have exited; termination best-effort
                     pass
-            self.logger.info(f"Command port {self.name} stopped")
+            self.logger.info("Command port %s stopped", self.name)
         except Exception as e:
-            self.logger.error(f"Error stopping command port {self.name}: {e}", exc_info=True)
+            self.logger.error("Error stopping command port %s: %s", self.name, e, exc_info=True)
         finally:
             # Lifecycle notice: warn clients still attached that the process
             # was stopped (idle timeout, manual stop, adapter teardown).
@@ -1043,11 +1043,11 @@ class CommandPort:
         try:
             # Case 1: Force restart regardless of state -> full stop/start cycle
             if force and self.is_running:
-                self.logger.info(f"Force restarting command port {self.name}")
+                self.logger.info("Force restarting command port %s", self.name)
                 await self.stop()
             # Case 2: Port previously started but process has exited (is_running true, process_active false)
             if self.is_running and not self.process_active:
-                self.logger.info(f"Respawning exited process for command port {self.name}")
+                self.logger.info("Respawning exited process for command port %s", self.name)
                 ok = await self._spawn_process()
                 if ok:
                     self.state = PortState.ACTIVE
@@ -1055,20 +1055,20 @@ class CommandPort:
                     self.process_active = True
                     self._spawn_monitor_task()
                     return True
-                self.logger.error(f"Respawn failed for command port {self.name}")
+                self.logger.error("Respawn failed for command port %s", self.name)
                 return False
             # Case 3: Port fully stopped (not running)
             if not self.is_running:
-                self.logger.info(f"Manual restart requested for stopped command port {self.name}")
+                self.logger.info("Manual restart requested for stopped command port %s", self.name)
                 started = await self.start()
                 if not started:
-                    self.logger.error(f"Manual restart failed for {self.name}")
+                    self.logger.error("Manual restart failed for %s", self.name)
                 return started
             # Case 4: Already running and active and no force flag
-            self.logger.info(f"Restart skipped; port {self.name} already running and active")
+            self.logger.info("Restart skipped; port %s already running and active", self.name)
             return True
         except Exception as e:
-            self.logger.error(f"Error restarting command port {self.name}: {e}", exc_info=True)
+            self.logger.error("Error restarting command port %s: %s", self.name, e, exc_info=True)
             return False
 
     def _stopped_prefix(self) -> str:
@@ -1265,7 +1265,7 @@ class CommandWriter:
                 try:
                     os.write(self.port._pty_master_fd, data)
                 except Exception as e:
-                    self.logger.error(f"PTY write error for {self.port.name}: {e}", exc_info=True)
+                    self.logger.error("PTY write error for %s: %s", self.port.name, e, exc_info=True)
             else:
                 if self.stdin_stream is not None:
                     self.stdin_stream.write(data)
@@ -1279,7 +1279,7 @@ class CommandWriter:
                 except Exception:  # justification: local echo enqueue failure is advisory; safe to ignore
                     self.logger.debug("Local echo emit failed", exc_info=True)
         except Exception as e:
-            self.logger.error(f"Error writing to command {self.port.name}: {e}", exc_info=True)
+            self.logger.error("Error writing to command %s: %s", self.port.name, e, exc_info=True)
 
     async def _flush_buffer_loop(self):
         """Background loop to flush batched input.
@@ -1377,9 +1377,9 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             Dict[str, Dict[str, Any]]: Keyed by port name with raw config dicts.
         """
         port_configs: Dict[str, Dict[str, Any]] = {}
-        self.logger.debug(f"Getting port configurations from config: {self.config}")
+        self.logger.debug("Getting port configurations from config: %s", self.config)
         command_ports = self.config.get("command_ports", [])
-        self.logger.debug(f"Found {len(command_ports)} command port configurations")
+        self.logger.debug("Found %s command port configurations", len(command_ports))
         for port_config in command_ports:
             port_name = port_config["name"]
             port_configs[port_name] = port_config
@@ -1396,10 +1396,10 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             success = await self.load_configured_ports()
             if success:
                 self.is_running = True
-                self.logger.info(f"Command adapter {self.name} started with {len(self.ports)} ports")
+                self.logger.info("Command adapter %s started with %s ports", self.name, len(self.ports))
             return success
         except Exception as e:
-            self.logger.error(f"Error starting command adapter {self.name}: {e}", exc_info=True)
+            self.logger.error("Error starting command adapter %s: %s", self.name, e, exc_info=True)
             return False
 
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
@@ -1423,8 +1423,8 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if self.main_port_manager:
                         await self.main_port_manager.register_unified_port(port_name, command_port, self)
                 except Exception:
-                    self.logger.warning(f"Failed to register unified command port {port_name}")
-                self.logger.info(f"Created command port (on-demand): {port_name} (will spawn on first client attach)")
+                    self.logger.warning("Failed to register unified command port %s", port_name)
+                self.logger.info("Created command port (on-demand): %s (will spawn on first client attach)", port_name)
                 return command_port
             else:
                 if await command_port.start():
@@ -1434,13 +1434,13 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                         if self.main_port_manager:
                             await self.main_port_manager.register_unified_port(port_name, command_port, self)
                     except Exception:
-                        self.logger.warning(f"Failed to register unified command port {port_name}")
-                    self.logger.info(f"Created command port: {port_name}")
+                        self.logger.warning("Failed to register unified command port %s", port_name)
+                    self.logger.info("Created command port: %s", port_name)
                     return command_port
-                self.logger.error(f"Failed to start command port: {port_name}")
+                self.logger.error("Failed to start command port: %s", port_name)
                 return None
         except Exception as e:
-            self.logger.error(f"Error creating command port {port_name}: {e}", exc_info=True)
+            self.logger.error("Error creating command port %s: %s", port_name, e, exc_info=True)
             return None
 
     async def destroy_port(self, port_name: str) -> None:
@@ -1459,12 +1459,12 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                     if self.main_port_manager:
                         await self.main_port_manager.unregister_unified_port(port_name)
                 except Exception:
-                    self.logger.warning(f"Failed to unregister unified command port {port_name}")
+                    self.logger.warning("Failed to unregister unified command port %s", port_name)
                 await command_port.stop()
                 del self.ports[port_name]
-                self.logger.info(f"Destroyed command port: {port_name}")
+                self.logger.info("Destroyed command port: %s", port_name)
             except Exception as e:
-                self.logger.error(f"Error destroying command port {port_name}: {e}", exc_info=True)
+                self.logger.error("Error destroying command port %s: %s", port_name, e, exc_info=True)
 
     async def stop(self) -> None:
         """Stop all command ports and mark adapter not running.
@@ -1473,20 +1473,20 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         but do not abort remaining stops.
         """
         try:
-            self.logger.info(f"Stopping command adapter {self.name} with {len(self.ports)} ports")
+            self.logger.info("Stopping command adapter %s with %s ports", self.name, len(self.ports))
             for port_name in list(self.ports.keys()):
                 try:
-                    self.logger.debug(f"Stopping command port {port_name}")
+                    self.logger.debug("Stopping command port %s", port_name)
                     await asyncio.wait_for(self.destroy_port(port_name), timeout=2.5)
-                    self.logger.debug(f"Stopped command port {port_name}")
+                    self.logger.debug("Stopped command port %s", port_name)
                 except asyncio.TimeoutError:
-                    self.logger.error(f"Timeout stopping command port {port_name}")
+                    self.logger.error("Timeout stopping command port %s", port_name)
                 except Exception as e:
-                    self.logger.error(f"Error stopping command port {port_name}: {e}", exc_info=True)
+                    self.logger.error("Error stopping command port %s: %s", port_name, e, exc_info=True)
             self.is_running = False
-            self.logger.info(f"Command adapter {self.name} stopped")
+            self.logger.info("Command adapter %s stopped", self.name)
         except Exception as e:
-            self.logger.error(f"Error stopping command adapter {self.name}: {e}", exc_info=True)
+            self.logger.error("Error stopping command adapter %s: %s", self.name, e, exc_info=True)
 
     # --- Live configuration reconciliation ---
     async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
@@ -1618,7 +1618,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 await self.destroy_port(n)
             except Exception as e:
-                self.logger.error(f"Failed to destroy command port {n}: {e}", exc_info=True)
+                self.logger.error("Failed to destroy command port %s: %s", n, e, exc_info=True)
 
         # Create added/updated
         for n in added + updated:
@@ -1628,7 +1628,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             try:
                 await self.create_port(n, cfg)
             except Exception as e:
-                self.logger.error(f"Failed to create command port {n}: {e}", exc_info=True)
+                self.logger.error("Failed to create command port %s: %s", n, e, exc_info=True)
 
         # Update adapter config snapshot
         try:
@@ -1639,7 +1639,12 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
         self.logger.info(
-            f"Command adapter {self.name} reconcile: +{len(added)} ~{len(updated)} -{len(removed)} unchanged={len(unchanged)}"
+            "Command adapter %s reconcile: +%s ~%s -%s unchanged=%s",
+            self.name,
+            len(added),
+            len(updated),
+            len(removed),
+            len(unchanged),
         )
         return summary
 
@@ -1655,12 +1660,12 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         port = self.ports.get(port_name)
         if not port:
-            self.logger.error(f"Command port {port_name} not found")
+            self.logger.error("Command port %s not found", port_name)
             return 0
         try:
             return await port.write_data(data)
         except Exception as e:
-            self.logger.error(f"Error writing to command port {port_name}: {e}", exc_info=True)
+            self.logger.error("Error writing to command port %s: %s", port_name, e, exc_info=True)
             return 0
 
     def get_status_info(self) -> Dict[str, Any]:

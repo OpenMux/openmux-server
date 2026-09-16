@@ -67,7 +67,7 @@ class PluginRegistry:
         Args:
             plugin: Plugin metadata object to add.
         """
-        logger.debug(f"Registering plugin: {plugin}")
+        logger.debug("Registering plugin: %s", plugin)
         self._plugins[plugin.config_section] = plugin
         # Capture adapter_type from class if provided (method or attribute)
         adapter_cls = plugin.adapter_class
@@ -135,7 +135,7 @@ class PluginRegistry:
         active_plugins = []
         for section_name, plugin in self._plugins.items():
             if section_name in config:
-                logger.debug(f"Found active plugin: {plugin}")
+                logger.debug("Found active plugin: %s", plugin)
                 active_plugins.append(plugin)
         return active_plugins
 
@@ -314,7 +314,7 @@ class GenericAdapterFactory:
                                     break
 
                     if not plugin:
-                        logger.warning(f"No plugin found for adapter type: {adapter_type}")
+                        logger.warning("No plugin found for adapter type: %s", adapter_type)
                         continue
 
                     # Validate configuration
@@ -323,7 +323,7 @@ class GenericAdapterFactory:
                     if callable(validate_fn):
                         # For unified format, pass the adapter config directly
                         if not validate_fn(adapter_config):
-                            logger.error(f"Invalid configuration for {adapter_type} adapter")
+                            logger.error("Invalid configuration for %s adapter", adapter_type)
                             continue
 
                     # Security policy enforcement
@@ -338,15 +338,15 @@ class GenericAdapterFactory:
                     # Create adapter instance
                     adapter = adapter_class(adapter_name, adapter_config)
                     adapters.append(adapter)
-                    logger.info(f"Created {adapter_type} adapter '{adapter_name}'")
+                    logger.info("Created %s adapter '%s'", adapter_type, adapter_name)
 
                 except Exception as e:
-                    logger.error(f"Failed to create adapter from config {adapter_config}: {e}", exc_info=True)
+                    logger.error("Failed to create adapter from config %s: %s", adapter_config, e, exc_info=True)
                     continue
         else:
             # Fall back to legacy format
             active_plugins = self.registry.discover_active_plugins(config)
-            logger.info(f"Creating adapters for {len(active_plugins)} active plugins")
+            logger.info("Creating adapters for %s active plugins", len(active_plugins))
             # Emit warnings for config sections that have no registered plugin (likely import failure or typo)
             core_sections = {"adapters", "server", "authentication", "logging", "port_actions"}
             missing_sections: List[str] = []
@@ -371,7 +371,7 @@ class GenericAdapterFactory:
                         # Pass the full config section dict for validation
                         config_to_validate = {plugin.config_section: plugin_config}
                         if not validate_fn(config_to_validate):
-                            logger.error(f"Invalid configuration for {plugin.name}")
+                            logger.error("Invalid configuration for %s", plugin.name)
                             raise ValueError(f"Invalid configuration for {plugin.name}")
 
                     # Security policy enforcement (legacy sections)
@@ -396,10 +396,10 @@ class GenericAdapterFactory:
                     created_adapters = self._create_adapter_instances(plugin, plugin_config)
                     adapters.extend(created_adapters)
 
-                    logger.info(f"Created {len(created_adapters)} adapter instance(s) for {plugin.name}")
+                    logger.info("Created %s adapter instance(s) for %s", len(created_adapters), plugin.name)
 
                 except Exception as e:
-                    logger.error(f"Failed to create adapter for plugin {plugin.name}: {e}", exc_info=True)
+                    logger.error("Failed to create adapter for plugin %s: %s", plugin.name, e, exc_info=True)
                     # Continue with other plugins rather than failing completely
 
         # Fail-fast handling (legacy path only) after attempting creation
@@ -421,7 +421,7 @@ class GenericAdapterFactory:
                         f"Adapter fail-fast: aborting startup due to missing adapters for sections: {', '.join(missing)} | {detail}"
                     )
 
-        logger.info(f"Successfully created {len(adapters)} total adapter instances")
+        logger.info("Successfully created %s total adapter instances", len(adapters))
         return adapters  # Returns List[BaseGenericAdapter]
 
     def set_security_policy(self, policy: Optional[SecurityPolicy]) -> None:
@@ -467,7 +467,7 @@ class GenericAdapterFactory:
         Returns:
             Instantiated adapter with `DynamicPortManager` attached.
         """
-        logger.debug(f"Creating adapter instance: {adapter_name} ({adapter_class.__name__})")
+        logger.debug("Creating adapter instance: %s (%s)", adapter_name, adapter_class.__name__)
 
         # For the unified adapter system, we need to pass the config in the correct format
         # The config should contain the plugin-specific config section
@@ -491,7 +491,7 @@ class GenericAdapterFactory:
         # Create and attach port manager for dynamic lifecycle management
         port_manager = DynamicPortManager(adapter)
 
-        logger.debug(f"Adapter {adapter_name} created with dynamic port management")
+        logger.debug("Adapter %s created with dynamic port management", adapter_name)
         return adapter
 
     def get_registry(self) -> PluginRegistry:
@@ -508,5 +508,5 @@ class GenericAdapterFactory:
         Args:
             plugin: Plugin metadata to register.
         """
-        logger.info(f"Registering external plugin: {plugin}")
+        logger.info("Registering external plugin: %s", plugin)
         self.registry.register_plugin(plugin)

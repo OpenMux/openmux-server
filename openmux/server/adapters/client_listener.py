@@ -261,14 +261,14 @@ class TcpServerAdapter(BaseGenericAdapter):
             self.server = await asyncio.start_server(self.handle_client_connection, self.host, self.port)
 
             self.is_running = True
-            self.logger.info(f"TCP server started on {self.host}:{self.port}")
+            self.logger.info("TCP server started on %s:%s", self.host, self.port)
 
             # Start serving
             await self.server.start_serving()
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to start TCP server on {self.host}:{self.port}: {e}", exc_info=True)
+            self.logger.error("Failed to start TCP server on %s:%s: %s", self.host, self.port, e, exc_info=True)
             return False
 
     async def stop(self) -> None:
@@ -278,10 +278,10 @@ class TcpServerAdapter(BaseGenericAdapter):
         # Proactively notify clients about shutdown before closing connections
         try:
             if self.clients:
-                self.logger.info(f"Broadcasting server shutdown to {len(self.clients)} clients")
+                self.logger.info("Broadcasting server shutdown to %s clients", len(self.clients))
                 await self._broadcast_shutdown_message()
         except Exception as e:
-            self.logger.warning(f"Failed broadcasting shutdown message: {e}", exc_info=True)
+            self.logger.warning("Failed broadcasting shutdown message: %s", e, exc_info=True)
 
         # Disconnect all clients
         for client_id in list(self.clients.keys()):
@@ -380,7 +380,7 @@ class TcpServerAdapter(BaseGenericAdapter):
         client_id = str(uuid.uuid4())
         address = writer.get_extra_info("peername")[0]
 
-        self.logger.info(f"New TCP connection from {address}")
+        self.logger.info("New TCP connection from %s", address)
 
         try:
             # Create client session
@@ -391,7 +391,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             await self.handle_client_protocol(client_session)
 
         except Exception as e:
-            self.logger.error(f"Error handling client {client_id}: {e}", exc_info=True)
+            self.logger.error("Error handling client %s: %s", client_id, e, exc_info=True)
         finally:
             await self.disconnect_client(client_id)
 
@@ -412,7 +412,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             await client.send_line("AUTH:FAILED:Authentication failed")
             return
 
-        self.logger.info(f"Client {client.client_id} authenticated as {client.username}")
+        self.logger.info("Client %s authenticated as %s", client.client_id, client.username)
         await client.send_line(f"AUTH:SUCCESS:Welcome {client.username}")
 
         # Command handling phase (line-based mode)
@@ -446,7 +446,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             if not auth_line:
                 return False
 
-            self.logger.debug(f"Received auth command: {auth_line}")
+            self.logger.debug("Received auth command: %s", auth_line)
 
             # Parse authentication command
             if auth_line.startswith("AUTH:PK:INIT:"):
@@ -547,7 +547,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             return False
 
         except Exception as e:
-            self.logger.error(f"Authentication error: {e}", exc_info=True)
+            self.logger.error("Authentication error: %s", e, exc_info=True)
             return False
 
     async def handle_command_phase(self, client: "ClientSession"):
@@ -569,10 +569,10 @@ class TcpServerAdapter(BaseGenericAdapter):
                 await self.process_client_command(client, command_line.strip())
 
             except asyncio.TimeoutError:
-                self.logger.warning(f"Client {client.client_id} timeout in command phase")
+                self.logger.warning("Client %s timeout in command phase", client.client_id)
                 break
             except Exception as e:
-                self.logger.error(f"Command phase error for client {client.client_id}: {e}", exc_info=True)
+                self.logger.error("Command phase error for client %s: %s", client.client_id, e, exc_info=True)
                 break
 
     async def handle_character_mode(self, client: "ClientSession"):
@@ -584,7 +584,7 @@ class TcpServerAdapter(BaseGenericAdapter):
         Args:
             client: Active client session in character mode.
         """
-        self.logger.info(f"Client {client.client_id} entering character mode for port {client.connected_port}")
+        self.logger.info("Client %s entering character mode for port %s", client.client_id, client.connected_port)
 
         # Use a moderate buffer size to balance latency and throughput
         bufsize = 4096
@@ -598,10 +598,10 @@ class TcpServerAdapter(BaseGenericAdapter):
                 await self.forward_bytes_to_port(client, data)
 
             except asyncio.TimeoutError:
-                self.logger.warning(f"Client {client.client_id} timeout in character mode")
+                self.logger.warning("Client %s timeout in character mode", client.client_id)
                 break
             except Exception as e:
-                self.logger.error(f"Character mode error for client {client.client_id}: {e}", exc_info=True)
+                self.logger.error("Character mode error for client %s: %s", client.client_id, e, exc_info=True)
                 break
 
     async def collect_line_from_chars(self, client: "ClientSession") -> Optional[str]:
@@ -635,7 +635,7 @@ class TcpServerAdapter(BaseGenericAdapter):
 
                 # Prevent buffer overflow
                 if len(line_buffer) > 1024:
-                    self.logger.warning(f"Line buffer overflow for client {client.client_id}")
+                    self.logger.warning("Line buffer overflow for client %s", client.client_id)
                     return None
 
         return None
@@ -656,7 +656,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                 await self.console_manager.port_manager.write_to_port(client.connected_port, char_data, client.client_id)
                 self.logger.debug(f"Forwarded character {char_data.hex()} to port {client.connected_port}")
             except Exception as e:
-                self.logger.error(f"Error writing character to port {client.connected_port}: {e}", exc_info=True)
+                self.logger.error("Error writing character to port %s: %s", client.connected_port, e, exc_info=True)
 
     async def forward_bytes_to_port(self, client: "ClientSession", data: bytes):
         """Forward a raw byte chunk to the attached port (if any)."""
@@ -672,7 +672,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                 if ok:
                     client._write_blocked_notified = False
                     self.logger.debug(
-                        f"Forwarded chunk {len(data)}B to port {client.connected_port} for client {client.client_id}"
+                        "Forwarded chunk %sB to port %s for client %s", len(data), client.connected_port, client.client_id
                     )
                 elif not client._write_blocked_notified:
                     client._write_blocked_notified = True
@@ -688,7 +688,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                         # justification: best-effort notice; the write block already happened
                         pass
             except Exception as e:
-                self.logger.error(f"Error writing chunk to port {client.connected_port}: {e}", exc_info=True)
+                self.logger.error("Error writing chunk to port %s: %s", client.connected_port, e, exc_info=True)
 
     async def _handle_control_frame(self, client: "ClientSession", data: bytes) -> bool:
         """Detect and process an out-of-band access-mode control frame.
@@ -763,7 +763,9 @@ class TcpServerAdapter(BaseGenericAdapter):
             else:
                 return True  # Unknown control type; swallow to avoid leaking to the port
         except Exception as e:
-            self.logger.error(f"Error handling control frame '{req_type}' for client {client.client_id}: {e}", exc_info=True)
+            self.logger.error(
+                "Error handling control frame '%s' for client %s: %s", req_type, client.client_id, e, exc_info=True
+            )
             resp = {"type": "client_mode", "ok": False, "mode": client.mode or "read-only"}
 
         if resp.get("type") == "client_mode":
@@ -851,7 +853,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             client: Client session issuing the command.
             command: Raw command string (without trailing newline).
         """
-        self.logger.debug(f"Processing command from client {client.client_id}: {command}")
+        self.logger.debug("Processing command from client %s: %s", client.client_id, command)
 
         if command.startswith("CONNECT:"):
             # Formats supported:
@@ -912,7 +914,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             client: Client session requesting the connection.
             port_name: Target port name to attach to.
         """
-        self.logger.info(f"Client {client.client_id} requesting connection to port {port_name}")
+        self.logger.info("Client %s requesting connection to port %s", client.client_id, port_name)
 
         try:
             # Use console manager to handle the connection
@@ -951,7 +953,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                         elif effective_mode == "read-only":
                             access_mode = "READ_ONLY"
                     except Exception as e:
-                        self.logger.error(f"Error determining client mode: {e}", exc_info=True)
+                        self.logger.error("Error determining client mode: %s", e, exc_info=True)
 
                     client.mode = "read-write" if access_mode == "READ_WRITE" else "read-only"
                     await client.send_line(f"CONNECTED:{port_name}:{access_mode}")
@@ -968,7 +970,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                     except Exception:
                         # justification: best-effort notice; the connect request proceeds
                         pass
-                    self.logger.info(f"Client {client.client_id} connected to port {port_name} in {access_mode} mode")
+                    self.logger.info("Client %s connected to port %s in %s mode", client.client_id, port_name, access_mode)
                 else:
                     if reason == "denied_by_group_acl":
                         await client.send_line(f"ERROR:CONNECT:Access denied to port {port_name}")
@@ -980,7 +982,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                 await client.send_line("ERROR:CONNECT:Console manager not available")
 
         except Exception as e:
-            self.logger.error(f"Error connecting client to port {port_name}: {e}", exc_info=True)
+            self.logger.error("Error connecting client to port %s: %s", port_name, e, exc_info=True)
             await client.send_line(f"ERROR:CONNECT:Connection error")
 
     async def _resolve_port_by_origin(self, port_name: str, server_id: str) -> Optional[str]:
@@ -1061,7 +1063,7 @@ class TcpServerAdapter(BaseGenericAdapter):
         """
         try:
             start_ts = time.time()
-            self.logger.info(f"LIST: start for client {client.client_id}")
+            self.logger.info("LIST: start for client %s", client.client_id)
             ports = []
             timed_out = False
             if self.console_manager and hasattr(self.console_manager, "port_manager"):
@@ -1092,9 +1094,9 @@ class TcpServerAdapter(BaseGenericAdapter):
                             except Exception:
                                 self.logger.error("LIST: port get_status error", exc_info=True)
                     except Exception as inner_e:
-                        self.logger.error(f"LIST fallback snapshot error: {inner_e}", exc_info=True)
+                        self.logger.error("LIST fallback snapshot error: %s", inner_e, exc_info=True)
                 except Exception as inner_e:
-                    self.logger.error(f"PortManager listing error: {inner_e}", exc_info=True)
+                    self.logger.error("PortManager listing error: %s", inner_e, exc_info=True)
             elapsed_ms = int((time.time() - start_ts) * 1000)
             payload = {
                 "type": "PORT_LIST",
@@ -1105,11 +1107,11 @@ class TcpServerAdapter(BaseGenericAdapter):
                 "timed_out": timed_out,
             }
             self.logger.info(
-                f"LIST: done client={client.client_id} count={len(ports)} elapsed_ms={elapsed_ms} timeout={timed_out}"
+                "LIST: done client=%s count=%s elapsed_ms=%s timeout=%s", client.client_id, len(ports), elapsed_ms, timed_out
             )
             await client.send_line("LIST:" + json.dumps(payload, separators=(",", ":")))
         except Exception as e:
-            self.logger.error(f"Error listing ports: {e}", exc_info=True)
+            self.logger.error("Error listing ports: %s", e, exc_info=True)
             await client.send_line("ERROR:LIST:Failed")
 
     async def handle_port_disconnection_request_text(self, client: "ClientSession"):
@@ -1126,8 +1128,8 @@ class TcpServerAdapter(BaseGenericAdapter):
         if not client.connected_port:
             return
 
-        self.logger.debug(f"Forwarding {len(data)} bytes to port {client.connected_port} from client {client.client_id}")
-        self.logger.debug(f"Data content: {data[:100]}...")  # Log first 100 bytes
+        self.logger.debug("Forwarding %s bytes to port %s from client %s", len(data), client.connected_port, client.client_id)
+        self.logger.debug("Data content: %s...", data[:100])  # Log first 100 bytes
 
         # For loopback ports, provide immediate character-by-character echo
         if "loop" in client.connected_port.lower():
@@ -1140,17 +1142,17 @@ class TcpServerAdapter(BaseGenericAdapter):
                         await client.send_raw_data(char_byte)
                         self.logger.debug(f"Echoed character: {char_byte} (hex: {char_byte.hex()})")
                     except Exception as e:
-                        self.logger.error(f"Failed to send immediate echo: {e}", exc_info=True)
+                        self.logger.error("Failed to send immediate echo: %s", e, exc_info=True)
 
         # Also forward data to port via console manager
         if self.console_manager and hasattr(self.console_manager, "port_manager"):
             try:
                 success = await self.console_manager.port_manager.write_to_port(client.connected_port, data, client.client_id)
-                self.logger.debug(f"write_to_port returned: {success}")
+                self.logger.debug("write_to_port returned: %s", success)
                 if not success:
                     await client.send_line("ERROR:Failed to write to port")
             except Exception as e:
-                self.logger.error(f"Error writing to port {client.connected_port}: {e}", exc_info=True)
+                self.logger.error("Error writing to port %s: %s", client.connected_port, e, exc_info=True)
                 await client.send_line("ERROR:Write error")
 
     async def disconnect_client_from_port(self, client: "ClientSession"):
@@ -1183,7 +1185,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                 pass
 
         client.connected_port = None
-        self.logger.debug(f"Client {client.client_id} disconnected from port {port_name}")
+        self.logger.debug("Client %s disconnected from port %s", client.client_id, port_name)
 
     async def disconnect_client(self, client_id: str):
         """Fully tear down a client session (port detach + socket close).
@@ -1205,7 +1207,7 @@ class TcpServerAdapter(BaseGenericAdapter):
         # Remove from tracking
         del self.clients[client_id]
 
-        self.logger.info(f"Client {client_id} disconnected")
+        self.logger.info("Client %s disconnected", client_id)
 
     async def _broadcast_shutdown_message(self):
         """Best-effort broadcast of impending shutdown to all clients."""
@@ -1231,18 +1233,18 @@ class TcpServerAdapter(BaseGenericAdapter):
             bool: True on success, False if client unknown or write failed.
         """
         if client_id not in self.clients:
-            self.logger.warning(f"Tried to send data to unknown client {client_id}")
+            self.logger.warning("Tried to send data to unknown client %s", client_id)
             return False
 
         client = self.clients[client_id]
-        self.logger.debug(f"Sending {len(data)} bytes to client {client_id}")
-        self.logger.debug(f"Echo data content: {data[:100]}...")  # Log first 100 bytes
+        self.logger.debug("Sending %s bytes to client %s", len(data), client_id)
+        self.logger.debug("Echo data content: %s...", data[:100])  # Log first 100 bytes
         try:
             # Send raw data directly (not as a line)
             await client.send_raw_data(data)
             return True
         except Exception as e:
-            self.logger.error(f"Failed to send data to client {client_id}: {e}", exc_info=True)
+            self.logger.error("Failed to send data to client %s: %s", client_id, e, exc_info=True)
             return False
 
     async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
@@ -1357,7 +1359,7 @@ class ClientSession:
                 return None
             return data
         except Exception as e:
-            self.logger.error(f"Error receiving char from client {self.client_id}: {e}", exc_info=True)
+            self.logger.error("Error receiving char from client %s: %s", self.client_id, e, exc_info=True)
             self.connected = False
             return None
 
@@ -1372,7 +1374,7 @@ class ClientSession:
             self.writer.write(data)
             await self.writer.drain()
         except Exception as e:
-            self.logger.error(f"Failed to send line to client {self.client_id}: {e}", exc_info=True)
+            self.logger.error("Failed to send line to client %s: %s", self.client_id, e, exc_info=True)
             self.connected = False
 
     async def send_raw_data(self, data: bytes):
@@ -1385,7 +1387,7 @@ class ClientSession:
             self.writer.write(data)
             await self.writer.drain()
         except Exception as e:
-            self.logger.error(f"Failed to send raw data to client {self.client_id}: {e}", exc_info=True)
+            self.logger.error("Failed to send raw data to client %s: %s", self.client_id, e, exc_info=True)
             self.connected = False
 
     async def receive_bytes(self, n: int = 4096) -> Optional[bytes]:
@@ -1401,7 +1403,7 @@ class ClientSession:
                 return None
             return data
         except Exception as e:
-            self.logger.error(f"Error receiving bytes from client {self.client_id}: {e}", exc_info=True)
+            self.logger.error("Error receiving bytes from client %s: %s", self.client_id, e, exc_info=True)
             self.connected = False
             return None
 

@@ -139,7 +139,7 @@ class DynamicPortManager:
             True if creation succeeded; False otherwise.
         """
         try:
-            logger.debug(f"Creating port {port_name} for adapter {self.adapter.name}")
+            logger.debug("Creating port %s for adapter %s", port_name, self.adapter.name)
             self.port_states[port_name] = PortState.CREATING
 
             # Use the same port creation function as load-time
@@ -151,19 +151,19 @@ class DynamicPortManager:
                 self.port_configs[port_name] = config
                 self.port_states[port_name] = PortState.ACTIVE
 
-                logger.info(f"Port {port_name} created successfully for adapter {self.adapter.name}")
+                logger.info("Port %s created successfully for adapter %s", port_name, self.adapter.name)
 
                 # Notify clients that new port is available
                 await self._notify_port_created(port_name, port_instance)
                 return True
             else:
                 self.port_states[port_name] = PortState.DESTROYED
-                logger.warning(f"Failed to create port {port_name} for adapter {self.adapter.name}")
+                logger.warning("Failed to create port %s for adapter %s", port_name, self.adapter.name)
                 return False
 
         except Exception as e:
             self.port_states[port_name] = PortState.DESTROYED
-            logger.error(f"Error creating port {port_name} for adapter {self.adapter.name}: {e}", exc_info=True)
+            logger.error("Error creating port %s for adapter %s: %s", port_name, self.adapter.name, e, exc_info=True)
             await self._handle_port_creation_error(port_name, e)
             return False
 
@@ -183,7 +183,7 @@ class DynamicPortManager:
             return True
 
         try:
-            logger.debug(f"Destroying port {port_name} for adapter {self.adapter.name}")
+            logger.debug("Destroying port %s for adapter %s", port_name, self.adapter.name)
             self.port_states[port_name] = PortState.DESTROYING
 
             # Gracefully handle active connections
@@ -196,14 +196,14 @@ class DynamicPortManager:
             del self.active_ports[port_name]
             self.port_states[port_name] = PortState.DESTROYED
 
-            logger.info(f"Port {port_name} destroyed successfully for adapter {self.adapter.name}")
+            logger.info("Port %s destroyed successfully for adapter %s", port_name, self.adapter.name)
 
             # Notify clients that port is no longer available
             await self._notify_port_destroyed(port_name)
             return True
 
         except Exception as e:
-            logger.error(f"Error destroying port {port_name} for adapter {self.adapter.name}: {e}", exc_info=True)
+            logger.error("Error destroying port %s for adapter %s: %s", port_name, self.adapter.name, e, exc_info=True)
             await self._handle_port_destruction_error(port_name, e)
             return False
 
@@ -214,24 +214,24 @@ class DynamicPortManager:
         Placeholder for future event bus / observer integration.
         """
         # TODO: Integrate with existing port notification system
-        logger.debug(f"Port {port_name} is now available")
+        logger.debug("Port %s is now available", port_name)
 
     async def _notify_port_destroyed(self, port_name: str) -> None:
         """Internal hook: port destruction notification."""
         # TODO: Integrate with existing port notification system
-        logger.debug(f"Port {port_name} is no longer available")
+        logger.debug("Port %s is no longer available", port_name)
 
     async def _disconnect_port_clients(self, port_name: str) -> None:
         """Internal hook: gracefully detach any active client sessions."""
         # TODO: Integrate with client manager to disconnect active sessions
-        logger.debug(f"Disconnecting clients from port {port_name}")
+        logger.debug("Disconnecting clients from port %s", port_name)
 
     async def _handle_port_creation_error(self, port_name: str, error: Exception) -> None:
         """Internal error handler for port creation failures."""
-        logger.error(f"Port creation error for {port_name}: {error}", exc_info=True)
+        logger.error("Port creation error for %s: %s", port_name, error, exc_info=True)
         # TODO: Could trigger alerts or retry logic here
 
     async def _handle_port_destruction_error(self, port_name: str, error: Exception) -> None:
         """Internal error handler for port destruction failures."""
-        logger.error(f"Port destruction error for {port_name}: {error}", exc_info=True)
+        logger.error("Port destruction error for %s: %s", port_name, error, exc_info=True)
         # TODO: Could trigger cleanup alerts here

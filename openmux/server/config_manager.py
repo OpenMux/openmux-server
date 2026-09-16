@@ -88,17 +88,17 @@ class ConfigManager:
             yaml.YAMLError: If the file cannot be parsed as valid YAML.
             Exception: For any other unexpected error during load.
         """
-        self.logger.info(f"Loading configuration from {self.config_path}")
+        self.logger.info("Loading configuration from %s", self.config_path)
 
         try:
             if not os.path.exists(self.config_path):
-                self.logger.error(f"Configuration file not found: {self.config_path}")
+                self.logger.error("Configuration file not found: %s", self.config_path)
                 raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
 
             with open(self.config_path, "r") as f:
                 content = f.read()
                 if not content.strip():
-                    self.logger.error(f"Configuration file is empty: {self.config_path}")
+                    self.logger.error("Configuration file is empty: %s", self.config_path)
                     raise ValueError(f"Configuration file is empty: {self.config_path}")
 
                 self.config = yaml.safe_load(content)
@@ -129,13 +129,13 @@ class ConfigManager:
 
             return self.config
         except FileNotFoundError:
-            self.logger.error(f"Configuration file not found: {self.config_path}")
+            self.logger.error("Configuration file not found: %s", self.config_path)
             raise
         except yaml.YAMLError as e:
-            self.logger.error(f"Error parsing YAML configuration: {e}", exc_info=True)
+            self.logger.error("Error parsing YAML configuration: %s", e, exc_info=True)
             raise
         except Exception as e:
-            self.logger.error(f"Error loading configuration: {e}", exc_info=True)
+            self.logger.error("Error loading configuration: %s", e, exc_info=True)
             raise
 
     def _check_config_loaded(self):
@@ -444,7 +444,7 @@ class ConfigManager:
             self.config = combined_payload
             return True
         except Exception as e:
-            self.logger.error(f"Error saving configuration: {e}", exc_info=True)
+            self.logger.error("Error saving configuration: %s", e, exc_info=True)
             return False
 
     def _write_yaml_with_backup(self, path: str, data: Dict[str, Any]) -> None:
@@ -462,7 +462,7 @@ class ConfigManager:
             raise ValueError("Authentication configuration path is undefined")
         if not os.path.exists(path):
             raise ValueError(f"Authentication configuration file not found: {path}")
-        self.logger.info(f"Loading authentication configuration from {path}")
+        self.logger.info("Loading authentication configuration from %s", path)
         with open(path, "r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
         if not isinstance(data, dict):
@@ -477,7 +477,7 @@ class ConfigManager:
             policy_data: Dict[str, Any] = {}
             path = self.security_config_path
             if path and os.path.exists(path):
-                self.logger.info(f"Loading security policy from {path}")
+                self.logger.info("Loading security policy from %s", path)
                 try:
                     with open(path, "r", encoding="utf-8") as fh:
                         policy_data = yaml.safe_load(fh) or {}
