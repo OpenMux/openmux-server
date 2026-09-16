@@ -4,14 +4,17 @@ import hmac
 import json
 import re
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+if TYPE_CHECKING:
+    from openmux.server.web_console import WebConsoleAdapter
+
 from openmux.common.identity import basic_authenticate_header
 
-from . import ADAPTER_APP_KEY
+from . import ADAPTER_APP_KEY, get_web_adapter
 
 # Federated admin proxy plugin (skeleton). Proxies selected admin endpoints to
 # other known nodes via existing federation. For now, provide a read-only list
@@ -19,7 +22,7 @@ from . import ADAPTER_APP_KEY
 
 
 async def _handle_list(request: web.Request) -> web.StreamResponse:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()
@@ -255,9 +258,10 @@ async def _handle_proxy(request: web.Request) -> web.StreamResponse:
     V1 behavior: admin-only, GET-only, returns 501 Not Implemented (WS and HTTP pass-through to be added).
     Computes effective X-Forwarded-Prefix for upstream planning.
     """
-    adapter = request.app.get(ADAPTER_APP_KEY)
-    if adapter is None:
+    _raw = request.app.get(ADAPTER_APP_KEY)
+    if _raw is None:
         raise web.HTTPInternalServerError(text="Adapter not available")
+    adapter: "WebConsoleAdapter" = _raw  # type: ignore[assignment]
     # Admin-only guard
     username = request.get("username")
     if not username:

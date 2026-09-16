@@ -6,7 +6,7 @@ from aiohttp import web
 
 from openmux.server.config_manager import ConfigManager
 
-from . import ADAPTER_APP_KEY
+from . import get_web_adapter
 
 
 def _find_config_manager(adapter) -> Optional[ConfigManager]:
@@ -197,7 +197,8 @@ def _restore_masked_secrets(payload: Dict[str, Any], current: Dict[str, Any]) ->
     rather than persisting the literal mask string.
     """
     current = current or {}
-    auth_cur = current.get("authentication") if isinstance(current.get("authentication"), dict) else {}
+    auth_any = current.get("authentication")
+    auth_cur: Dict[str, Any] = auth_any if isinstance(auth_any, dict) else {}
     auth_new = payload.get("authentication")
     if isinstance(auth_new, dict):
         for user in auth_new.get("users") or []:
@@ -282,7 +283,7 @@ def _enforce_writable_sections(cm: ConfigManager, payload: Dict[str, Any]) -> Se
 
 
 async def _handle_view(request: web.Request) -> web.StreamResponse:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()
@@ -349,7 +350,7 @@ async def _handle_data(request: web.Request) -> web.StreamResponse:
     Secret fields (password hashes, API keys, plaintext initiator passwords)
     are replaced with a mask; the real values never reach the browser.
     """
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()
@@ -357,9 +358,11 @@ async def _handle_data(request: web.Request) -> web.StreamResponse:
     adapter._require_permission(request, ("admin",))
     try:
         cm = _find_config_manager(adapter)
-        config = cm.config if cm and getattr(cm, "config", None) is not None else {}
+        stored_cfg = cm.config if cm else None
+        config = stored_cfg if stored_cfg is not None else {}
         writable_sections, writable_enforced = _get_writable_metadata(cm)
     except Exception:
+        cm = None
         config = {}
         writable_sections, writable_enforced = [], False
     import json
@@ -378,7 +381,7 @@ async def _handle_data(request: web.Request) -> web.StreamResponse:
 
 
 async def _handle_apply(request: web.Request) -> web.StreamResponse:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     try:
         # Enforce admin role and CSRF
         adapter._require_permission(request, ("admin",))
@@ -459,7 +462,7 @@ async def _handle_reload_soft(request: web.Request) -> web.StreamResponse:
     All reload logic (config load, auth update, bootstrap, reconcile) lives in
     the server method so CLI and web paths share a single implementation.
     """
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     req_id = uuid.uuid4().hex[:8]
     username = request.get("username")
     adapter.logger.info("[reload-soft:%s] request from %s user=%s", req_id, request.remote or "?", username or "?")
@@ -499,7 +502,7 @@ async def _handle_reload_full(request: web.Request) -> web.StreamResponse:
     This will interrupt listeners and reconnect paths; clients may be dropped.
     Requires admin + CSRF. Returns a summary of stopped/started adapters and errors.
     """
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     req_id = uuid.uuid4().hex[:8]
     username = request.get("username")
     adapter.logger.info("[reload-full:%s] request from %s user=%s", req_id, request.remote or "?", username or "?")
@@ -605,7 +608,7 @@ def _prepare_payload_for_save(payload: Dict[str, Any], cm: ConfigManager) -> Dic
 
 
 async def _handle_validate(request: web.Request) -> web.StreamResponse:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     # Require admin permission (no CSRF needed as no state change occurs)
     adapter._require_permission(request, ("admin",))
     try:
@@ -647,7 +650,7 @@ async def _handle_schema(request: web.Request) -> web.StreamResponse:
     (schema + ConfigManager) remains the source of truth.
     """
     # Admin-only visibility for the schema endpoint
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     adapter._require_permission(request, ("admin",))
     # The authoritative schema ships inside the package (see
     # openmux/config_schema), so it resolves from the install location, not

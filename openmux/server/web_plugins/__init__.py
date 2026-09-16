@@ -14,10 +14,23 @@ to gate privileged operations and adapter._check_csrf(request) for state-changin
 POST/PUT/PATCH/DELETE requests when session cookies are used.
 """
 
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from aiohttp import web
+
+if TYPE_CHECKING:
+    from openmux.server.web_console import WebConsoleAdapter
 
 from openmux.server.adapters.base_adapter import BaseGenericAdapter
 
 ADAPTER_APP_KEY: Final = web.AppKey("openmux_adapter", BaseGenericAdapter)
+
+
+def get_web_adapter(request: web.Request) -> "WebConsoleAdapter":
+    """Return the WebConsoleAdapter stored under ``ADAPTER_APP_KEY``.
+
+    The AppKey is declared with the base-adapter type because importing
+    ``web_console`` at runtime would be circular; the stored value is
+    always a WebConsoleAdapter (set in ``WebConsoleAdapter.start()``).
+    """
+    return request.app[ADAPTER_APP_KEY]  # type: ignore[return-value]

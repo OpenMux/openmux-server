@@ -50,7 +50,7 @@ from aiohttp import WSMsgType, web
 from openmux.server.actions.errors import ActionValidationError, PortBusyError
 from openmux.server.actions.registry import ActionScript, load_action_from_file
 from openmux.server.actions.runner import ActionRunner
-from openmux.server.web_plugins import ADAPTER_APP_KEY
+from openmux.server.web_plugins import get_web_adapter
 
 logger = logging.getLogger("openmux.server.web_plugins.port_actions")
 
@@ -407,7 +407,7 @@ def _allowed_actions(state: _PortActionsState, port_name: str) -> Dict[str, Acti
 
 
 async def _handle_list_actions(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     state = request.app[STATE_APP_KEY]
     adapter._require_permission(request, ("read-write", "admin"))
     port_name = request.match_info["port_name"]
@@ -430,7 +430,7 @@ async def _handle_action_health(request: web.Request) -> web.Response:
     errors do not depend on the port, so the Config Editor queries this route
     instead of borrowing a port name from the assignments table.
     """
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     state = request.app[STATE_APP_KEY]
     adapter._require_permission(request, ("read-write", "admin"))
     _refresh_catalog(state)
@@ -438,7 +438,7 @@ async def _handle_action_health(request: web.Request) -> web.Response:
 
 
 async def _handle_run_action(request: web.Request) -> web.Response:
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     state = request.app[STATE_APP_KEY]
     username = adapter._require_permission(request, ("read-write", "admin"))
     if not adapter._check_csrf(request):
@@ -471,7 +471,7 @@ async def _handle_run_action(request: web.Request) -> web.Response:
 
 async def _handle_list_runs(request: web.Request) -> web.Response:
     state = request.app[STATE_APP_KEY]
-    adapter = request.app[ADAPTER_APP_KEY]
+    adapter = get_web_adapter(request)
     adapter._require_permission(request, ("read-write", "admin"))
     port_name = request.match_info["port_name"]
     action_id = request.match_info["action_id"]
