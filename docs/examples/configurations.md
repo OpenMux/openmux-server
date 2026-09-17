@@ -339,8 +339,6 @@ command_ports:
     spawn_on_demand: true
     idle_timeout_sec: 60
     max_read_write_users: one
-    clean_env: true
-    output_crlf: true
 ```
 
 Linux (agetty → login recommended):
@@ -354,8 +352,6 @@ command_ports:
     spawn_on_demand: true
     idle_timeout_sec: 60
     max_read_write_users: one
-    clean_env: true
-    output_crlf: true
 ```
 
 Linux (direct login(1), distro-dependent):
@@ -383,34 +379,25 @@ command_ports:
     max_read_write_users: one
 ```
 
-## Low-latency TUI over Command Adapter
+## Interactive TUI over Command Adapter
 
 For interactive shells and editors (bash, vim, neovim) over the command
-adapter, enable PTY and tune batching for low latency:
+adapter, enable a PTY:
 
 ```yaml
 command_ports:
   - name: bash_console
-    description: "Interactive shell with low latency"
+    description: "Interactive shell"
     command: bash
     interactive: true
-    clean_env: true
-    intercept_term_queries: true
-    # Output batching (PTY -> clients)
-    enable_output_batching: true
-    output_batch_size: 2048
-    output_batch_timeout: 0.002
-    output_force_flush_timeout: 1.0
-    # Write batching (clients -> PTY)
-    enable_batching: true
-    batch_size: 1024
-    batch_timeout: 0.002
 ```
 
 Notes:
-- `interactive: true` enables a PTY and configures raw mode to avoid read delays.
-- `clean_env: true` keeps a minimal env and avoids terminal feature probes.
-- `intercept_term_queries: true` responds to XTGETTCAP queries to prevent Vim/Neovim probe timeouts.
+- `interactive: true` allocates a PTY and enables buffering and newline
+  normalization. Output (PTY -> clients) and writes (clients -> PTY) are
+  batched automatically at fixed thresholds (issue #67 removed the tuning
+  keys). The environment is sanitized and XTGETTCAP queries are intercepted
+  automatically, so editor probes do not stall the session.
 
 ## Validity Check
 

@@ -107,23 +107,67 @@ async def test_stopped_prefix_path_like_id_strips_prefix():
 
 
 @pytest.mark.asyncio
-async def test_writer_normalization_and_local_echo():
+async def test_writer_normalization_pipe_input():
+    """issue #67: pipe input normalizes to LF (unconditional with the flag);
+    client-side local echo is gone, so nothing is echoed back."""
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
-    port = CommandPort("cp2", {"command": "echo", "normalize_newlines": True, "local_echo": True}, adapter)
+    port = CommandPort("cp2", {"command": "echo", "normalize_newlines": True}, adapter)
     port.process_active = True
     port.use_pty = False
     writer = CommandWriter(DummyStreamWriter(), port)
-    # Disable batching for direct write
-    writer._batching_enabled = False
-
+    # Batching is unconditional now; wait for the 2 ms flush cycle.
     data = b"A\r\nB\rC\n"
     await writer.write(data)
-    # Pipe mode maps to LF
+    deadline = asyncio.get_event_loop().time() + 0.2
+    while bytes(cast(Any, writer.stdin_stream).buffer) != b"A\nB\nC\n" and asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.002)
     assert bytes(cast(Any, writer.stdin_stream).buffer) == b"A\nB\nC\n"
-    # Local echo enqueued same mapped data
-    echoed = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
-    assert echoed == b"A\nB\nC\n"
+    # No local echo: the client queue must stay empty.
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(pm.output_queue.get(), timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_writer_pty_input_passes_through():
+    """PTY input is never newline-mapped (the terminal driver owns it).
+
+    The port's write path is an os.write on _pty_master_fd, so the test uses
+    a real PTY pair: write on the master side, read what lands on the slave.
+    """
+    import pty as _pty
+    import tty
+
+    adapter: Any = SimpleNamespace()
+    port = CommandPort("cp2b", {"command": "bash", "interactive": True}, adapter)
+    master_fd, slave_fd = _pty.openpty()
+    # Raw mode on the slave: no canonical processing and no CR/LF
+    # translation, so the writer's bytes are observable verbatim.
+    tty.setraw(slave_fd)
+    port.use_pty = True
+    port.process_active = True
+    port._pty_master_fd = master_fd
+    try:
+        writer = CommandWriter(None, port)
+        # 512 bytes per write: each stays under the slave's input-queue cap
+        # (1024 bytes on macOS), and each is drained from the slave before
+        # the next write. A single blocking os.write past the cap would
+        # stall the event loop forever (this is why the old 2048-byte
+        # one-shot version hung).
+        for _ in range(4):
+            await writer.write(b"x\r" * 256)
+            await asyncio.sleep(0.02)
+            os.set_blocking(slave_fd, False)
+            try:
+                raw = os.read(slave_fd, 4096)
+            except BlockingIOError:
+                raw = b""
+            # CR bytes must arrive intact, never remapped to LF.
+            assert raw[:2] == b"x\r"
+            assert b"\n" not in raw
+    finally:
+        os.close(master_fd)
+        os.close(slave_fd)
 
 
 @pytest.mark.asyncio
@@ -159,23 +203,27 @@ def test_xtgettcap_interception():
 
 @pytest.mark.asyncio
 async def test_pty_read_ready_queueing():
+    """PTY read -> xtgettcap intercept -> CRLF mapping -> batched flush."""
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
     port = CommandPort("cp5", {"command": "echo"}, adapter)
     port.is_running = True
+    port.process_active = True
     port.use_pty = True
     port.always_buffer = True
-    port._output_batching_enabled = False
+    port._output_flush_task = asyncio.create_task(port._output_flush_buffer_loop())
     rfd, wfd = os.pipe()
     os.set_blocking(rfd, False)
     port._pty_master_fd = rfd
     try:
         os.write(wfd, b"abc\n")
         port._on_pty_read_ready()
-        got = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
+        got = await asyncio.wait_for(pm.output_queue.get(), timeout=0.5)
         # PTY path maps newlines to CRLF
         assert got == b"abc\r\n"
     finally:
+        port.is_running = False
+        port._output_flush_task.cancel()
         os.close(wfd)
         os.close(rfd)
 
@@ -244,11 +292,7 @@ async def test_adapter_config_status_create_destroy_write(monkeypatch):
 @pytest.mark.asyncio
 async def test_restart_paths(monkeypatch):
     adapter: Any = SimpleNamespace()
-    port = CommandPort(
-        "cp7",
-        {"command": "echo", "auto_restart": True, "restart_delay": 0.0, "restart_backoff": 1.0},
-        adapter,
-    )
+    port = CommandPort("cp7", {"command": "echo"}, adapter)
 
     # Case 3: not running -> start()
     async def fake_start():
@@ -427,27 +471,6 @@ async def test_adapter_create_port_on_demand_does_not_start(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_spawn_mode_shared_on_demand_equivalent(monkeypatch):
-    adapter: Any = SimpleNamespace()
-    port = CommandPort("ond4", {"command": "echo", "spawn_mode": "shared_on_demand"}, adapter)
-    assert port.spawn_on_demand is True
-
-    # Confirm first client attach starts the process
-    started = {"called": 0}
-
-    async def fake_start():
-        started["called"] += 1
-        port.is_running = True
-        port.process_active = True
-        return True
-
-    monkeypatch.setattr(port, "start", fake_start)
-    port.on_client_count_changed(1)
-    await asyncio.sleep(0.01)
-    assert started["called"] == 1
-
-
-@pytest.mark.asyncio
 async def test_adapter_reconcile_ports_unchanged(monkeypatch):
     """Port whose config matches running defaults is not restarted on reconcile."""
     adapter = CommandAdapter("cmd", {"command_ports": [{"name": "a", "command": "echo hi"}]})
@@ -458,7 +481,6 @@ async def test_adapter_reconcile_ports_unchanged(monkeypatch):
         shell = False
         cwd = None
         env = None
-        auto_restart = False
         max_read_write_users = 1
         interactive = False
         always_buffer = False
@@ -496,7 +518,6 @@ async def test_adapter_reconcile_ports_updates_groups_in_place_without_restart(m
         shell = False
         cwd = None
         env = None
-        auto_restart = False
         max_read_write_users = "one"
         interactive = False
         always_buffer = False
@@ -542,7 +563,6 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
         shell = False
         cwd = None
         env = None
-        auto_restart = False
         max_read_write_users = 1
         interactive = False
         always_buffer = False
@@ -553,7 +573,6 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
         shell = False
         cwd = None
         env = None
-        auto_restart = False
         max_read_write_users = 1
         interactive = False
         always_buffer = False
@@ -624,7 +643,6 @@ async def test_on_demand_lifecycle_through_real_client_paths(monkeypatch):
         "shell": False,
         "spawn_on_demand": True,
         "idle_timeout_sec": 0.2,
-        "clean_env": False,
         "max_read_write_users": "multiple",  # two concurrent writers to exercise the 2-client path
     }
     pm = PortManager([])
@@ -702,7 +720,6 @@ async def test_reconcile_updates_lifecycle_flags_in_place_without_recreate(monke
         shell = True
         cwd = None
         env = None
-        auto_restart = False
         max_read_write_users = "one"
         interactive = False
         always_buffer = False
@@ -765,7 +782,7 @@ async def test_is_connected_tracks_process_lifecycle():
     """
     pm = RecordingPM()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
-    port = CommandPort("conn1", {"command": "sleep 30", "shell": False, "clean_env": False}, adapter)
+    port = CommandPort("conn1", {"command": "sleep 30", "shell": False}, adapter)
     # Resting (on-demand, not yet spawned) counts as connected.
     assert port.is_connected is True
     assert await port.start() is True
@@ -804,10 +821,10 @@ async def test_spawn_failure_marks_disconnected_with_reason():
 
 @pytest.mark.asyncio
 async def test_exit_marks_disconnected_and_restart_recovers():
-    """Process exit (auto_restart off) flips to disconnected; respawn recovers."""
+    """Process exit (no auto-restart) flips to disconnected; respawn recovers."""
     pm = RecordingPM()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
-    cfg = {"command": "exit 3", "shell": True, "clean_env": False, "auto_restart": False}
+    cfg = {"command": "exit 3", "shell": True}
     port = CommandPort("conn3", cfg, adapter)
     assert await port.start() is True
     # Wait for the monitor loop to observe the exit (it clears is_running in
@@ -845,7 +862,7 @@ async def test_write_data_respawns_after_stop_pipe():
     """
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
-    cfg = {"command": "sleep 5", "shell": True, "clean_env": False, "auto_restart": False}
+    cfg = {"command": "sleep 5", "shell": True}
     port = CommandPort("wd1", cfg, adapter)
     assert await port.start() is True
     assert port.process_active is True
@@ -869,7 +886,7 @@ async def test_write_data_respawns_after_stop_pty():
     """Same Enter-respawn contract under PTY mode (the LOGIN port shape)."""
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
-    cfg = {"command": "sleep 5", "interactive": True, "clean_env": False, "auto_restart": False}
+    cfg = {"command": "sleep 5", "interactive": True}
     port = CommandPort("wd2", cfg, adapter)
     assert await port.start() is True
     assert port.use_pty is True
@@ -891,7 +908,7 @@ async def test_write_data_non_newline_stopped_emits_notice():
     """
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
-    cfg = {"command": "sleep 5", "shell": True, "clean_env": False, "auto_restart": False}
+    cfg = {"command": "sleep 5", "shell": True}
     port = CommandPort("wd3", cfg, adapter)
     assert await port.start() is True
     await port.stop()
@@ -903,3 +920,116 @@ async def test_write_data_non_newline_stopped_emits_notice():
     # Banner is one-shot until the next attach (flag set by the notice).
     assert port._stopped_notice_sent is True
     assert await port.write_data(b"y") == 0
+
+
+# ---------------------------------------------------------------------------
+# issue #67: removed-keys deprecation shim + schema rejection + Enter-respawn
+# ---------------------------------------------------------------------------
+
+
+def test_removed_command_port_keys_detection_and_absorb(caplog):
+    """Shim detects stale keys, strips them in place, one warning per port."""
+    from openmux.server.adapters.command import (
+        REMOVED_COMMAND_PORT_KEYS,
+        absorb_removed_command_port_keys,
+        removed_command_port_keys,
+    )
+
+    config = {
+        "command_ports": [
+            {"name": "stale", "command": "echo", "auto_restart": True, "output_crlf": True, "use_pty": False},
+            {"name": "clean", "command": "echo", "interactive": True},
+            {"name": "stale2", "command": "echo", "spawn_mode": "shared_on_demand"},
+        ]
+    }
+
+    # Detection is pure: dotted paths, per port and per key.
+    found = removed_command_port_keys(config)
+    assert {"command_ports[0].auto_restart", "command_ports[0].output_crlf", "command_ports[0].use_pty"} <= set(found)
+    assert "command_ports[2].spawn_mode" in found
+    assert not any(p.startswith("command_ports[1]") for p in found)
+
+    # Absorb strips in place and warns once per stale port, naming each key.
+    import logging as _logging
+
+    logger = _logging.getLogger("test.shim")
+    logger.setLevel(_logging.WARNING)
+    with caplog.at_level(_logging.WARNING, logger="test.shim"):
+        removed = absorb_removed_command_port_keys(config, logger=logger)
+    assert removed == found
+    assert config["command_ports"][0] == {"name": "stale", "command": "echo"}
+    assert config["command_ports"][2] == {"name": "stale2", "command": "echo"}
+    stale_warnings = [r for r in caplog.records if r.levelno == _logging.WARNING and "Command port" in r.getMessage()]
+    assert len(stale_warnings) == 2
+    assert any(
+        "'stale'" in r.getMessage() and "auto_restart" in r.getMessage() and "output_crlf" in r.getMessage()
+        for r in stale_warnings
+    )
+    assert any("'stale2'" in r.getMessage() and "spawn_mode" in r.getMessage() for r in stale_warnings)
+
+    # Idempotent: a clean config produces nothing.
+    assert removed_command_port_keys(config) == []
+    assert absorb_removed_command_port_keys(config, logger=logger) == []
+    # The tuple is the single source of truth for the removed surface.
+    assert len(REMOVED_COMMAND_PORT_KEYS) == 19
+
+
+def test_schema_rejects_every_removed_command_port_key():
+    """Strict paths (--check-config, Config Editor) name each removed key."""
+    from openmux.server.adapters.command import REMOVED_COMMAND_PORT_KEYS
+    from openmux.server.config_validation import payload_violations
+
+    for key in REMOVED_COMMAND_PORT_KEYS:
+        payload = {"command_ports": [{"name": "a", "command": "echo", key: 1}]}
+        lines = payload_violations(payload)
+        assert any(f"{key}' was unexpected" in line for line in lines), f"schema must reject {key}: {lines}"
+
+
+async def _wait_for(port, predicate, timeout=2.0) -> bool:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while deadline > asyncio.get_event_loop().time():
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_clean_exit_rests_enter_respawns_nonzero_marks_offline():
+    """User-required flow: clean exit rests, Enter respawns, a later non-zero
+    exit marks the port offline with a reason."""
+    from openmux.server.adapters.lifecycle import PortState
+
+    pm = RecordingPM()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    # One command serves both runs: it exits 0 (clean) unless the test sets
+    # the OM_TEST_FAIL env var before the Enter-respawn; env is merged into
+    # the child environment at spawn time.
+    cfg = {"command": "sh -c 'sleep 0.3; [ -n \"${OM_TEST_FAIL:-}\" ] && exit 4 || exit 0'", "shell": True}
+    port = CommandPort("cr1", cfg, adapter)
+    assert await port.start() is True
+    try:
+        # 1. Clean (code 0) exit: monitor reports it, port rests but stays
+        #    connected (idle readiness), no offline reason.
+        assert await _wait_for(port, lambda: not port.is_running), "process did not exit in time"
+        assert port.process_active is False
+        assert port.is_connected is True
+        assert port.status_message == ""
+        assert port.state is PortState.CONFIGURED
+
+        # 2. Arm the non-zero exit for the next run, then Enter (newline)
+        #    respawns the resting process.
+        port.env = {"OM_TEST_FAIL": "1"}
+        assert await port.write_data(b"\r") == 1
+        assert await _wait_for(port, lambda: port.process_active), "Enter did not respawn"
+        assert port.is_running is True
+
+        # 3. The respawned run exits non-zero: port goes offline with reason.
+        assert await _wait_for(port, lambda: not port.is_running), "second exit not observed"
+        assert port.status_message == "Process exited with code 4"
+        assert port.is_connected is False
+        assert port.state is PortState.DEGRADED
+        # The reason travels in the meta event for the UI.
+        assert [c for (n, c) in pm.meta_events if "status_message" in (c or {})]
+    finally:
+        await port.stop()

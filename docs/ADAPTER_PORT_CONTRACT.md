@@ -122,8 +122,8 @@ value. `PortState` is the lifecycle axis; readiness is the readiness axis.
 - `status_message` is the #62 offline reason.
 - A non-empty `status_message` always wins. A genuinely failing port stays red.
 - An intentional idle rest sets no reason. For example: a command port after a
-  clean code-0 exit with `auto_restart` off, or a TCP-initiator port after an
-  intentional `disconnect_when_idle`. Its readiness is `idle`.
+  clean code-0 exit (no automatic restart; Enter respawns it), or a TCP-initiator
+  port after an intentional `disconnect_when_idle`. Its readiness is `idle`.
 - Federated peers see the origin's derived readiness via the `PORT_STATUS:`
   control channel (see the #62 relay). A down muxcon link overrides the
   origin's last value, because the freshest fact is the link outage.

@@ -63,23 +63,16 @@ Supported options per port:
 - `shell`: Run via shell (default: false)
 - `cwd`: Working directory
 - `env`: Environment variables map
-- `interactive`: Shortcut that presets `use_pty`, `always_buffer`, and `normalize_newlines` at once (default: false). It does not change the `command` string and never adds a shell. Set it for real terminals (shells, editors, TUIs). For scripted or byte-exact ports leave it off and set the individual flags you need.
-- `use_pty`: Allocate a PTY for the process (default: same as `interactive`)
+- `interactive`: Preset that enables a PTY plus `always_buffer` and `normalize_newlines` (default: false). It does not change the `command` string and never adds a shell. Set it for real terminals (shells, editors, TUIs). For scripted or byte-exact ports leave it off and set `always_buffer`/`normalize_newlines` if you need them (the process then runs on plain pipes).
 - `always_buffer`: Buffer output even with no clients (default: `interactive`)
 - `normalize_newlines`: Normalize incoming newlines (default: `interactive`)
-- `local_echo`: Echo written data back to clients (default: false)
-- `output_crlf`: Convert LF to CRLF on output (default: true)
-- `clean_env`: Start with a minimal sanitized environment (default: true). Keeps `PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`; sets `TERM` to `xterm` if missing; strips variables that trigger terminal feature probes (e.g., `TERM_PROGRAM`, `ITERM_SESSION_ID`, kitty/VTE vars). Merge additional values via `env:`.
-- `intercept_term_queries`: Intercept XTGETTCAP-style terminal capability queries and respond with “unsupported” to avoid editor probe timeouts (default: true).
-- `auto_restart`: Restart the process if it exits (default: false)
-- `restart_delay`: Initial delay before restart in seconds (default: 1.0)
-- `max_restarts`: Max restart attempts (0 = unlimited, default: 0)
-- `restart_backoff`: Exponential backoff factor (default: 1.0)
 - `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above)
+- `scrollback_size`: Bytes of recent output to keep for replay (default: 0 = off)
+- `read_write_groups` / `read_only_groups`: Console-group access lists (see above)
 Lifecycle: on-demand spawn and idle teardown:
+
 The process follows the connected-client count. This mirrors the serial adapter's presence-driven `dtr`/`rts` lines, which are driven by the same client-count event (issue #63):
 - `spawn_on_demand`: When true, do not start the process at server startup; spawn only when the first client attaches. The next client after a stop respawns a fresh process. Default: false.
-- `spawn_mode`: Alternative to `spawn_on_demand`. Supported values: `shared_eager` (default) or `shared_on_demand` (equivalent to `spawn_on_demand: true`).
 - `idle_timeout_sec`: When the last client disconnects, stop the process after this many seconds. A client that reconnects inside the window cancels the stop. The process is ready to respawn when the next client attaches. **`0` disables idle shutdown** — with `spawn_on_demand` and `idle_timeout_sec: 0` the process runs until server stop; set a positive value (for example `5`) to get teardown. Default: `0`.
 
 ```yaml
@@ -95,14 +88,12 @@ command_ports:
 Note on shells and interactive flags:
 - The server does not modify your `command` based on the binary name. If you need an interactive shell, include the appropriate flags yourself (e.g., `bash -i`, `zsh -i`, `fish -i`). This avoids making assumptions about which shell you use and keeps behavior explicit and predictable.
 
-Performance and latency tuning:
-- `enable_output_batching`: Batch PTY output before forwarding to clients (default: true).
-- `output_batch_size`: Max batched bytes before an immediate flush (default: 1024).
-- `output_batch_timeout`: Inactivity timeout in seconds to flush partial batches (default: 0.002 = 2ms).
-- `output_force_flush_timeout`: Absolute cap in seconds to force-flush long-running batches (default: 1.0).
-- `enable_batching`: Batch writes to the subprocess stdin (default: true).
-- `batch_size`: Max write buffer size before flush (default: 1024).
-- `batch_timeout`: Inactivity timeout in seconds for write flushes (default: 0.002 = 2ms).
+Behavior that is always on (issue #67 removed the config knobs):
+- Sanitized environment: the process starts from a minimal environment (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`; `TERM` set to `xterm` if missing) with variables that trigger terminal feature probes stripped (e.g. `TERM_PROGRAM`, `ITERM_SESSION_ID`, kitty/VTE vars). Merge additional values via `env:`.
+- Terminal capability queries: XTGETTCAP queries are intercepted and answered as unsupported, so editor probes do not stall the session.
+- Newline normalization: output converts LF to CRLF (on a PTY) or normalizes to LF (on pipes); pipe input normalizes to LF when `normalize_newlines` is on.
+- I/O batching: output flushes at 1024 bytes, 2 ms idle, or a 1.0 s cap; writes flush at 1024 bytes or 2 ms.
+- No automatic restart: the process never restarts itself after it exits. The port shows the exit reason (non-zero exit) or rests (code 0); press Enter in the console to respawn. Supervised daemons belong under systemd; expose their socket on a TCP port instead.
 
 Example:
 ```yaml
@@ -132,20 +123,9 @@ command_ports:
       LC_ALL: en_US.UTF-8
 
   - name: fast_tui
-    description: "Low-latency PTY for editors"
+    description: "PTY for editors"
     command: bash
-    interactive: true        # implies PTY
-    clean_env: true          # minimal env + TERM=xterm
-    intercept_term_queries: true
-    # Output batching (PTY -> clients)
-    enable_output_batching: true
-    output_batch_size: 2048
-    output_batch_timeout: 0.002   # 2ms
-    output_force_flush_timeout: 1.0
-    # Write batching (clients -> PTY)
-    enable_batching: true
-    batch_size: 1024
-    batch_timeout: 0.002
+    interactive: true        # PTY + buffering + newline normalization
 ```
 
 ### Login prompts via Command Adapter
@@ -165,8 +145,6 @@ command_ports:
     spawn_on_demand: true       # start only when a client attaches
     idle_timeout_sec: 60        # stop 60s after last client disconnects
     max_read_write_users: 1     # exclusive session
-    clean_env: true             # TERM=xterm default
-    output_crlf: true
 ```
 
 Linux (agetty → login):
@@ -179,8 +157,6 @@ command_ports:
     spawn_on_demand: true
     idle_timeout_sec: 60
     max_read_write_users: 1
-    clean_env: true
-    output_crlf: true
 ```
 
 Linux (direct login(1)) – distro dependent:

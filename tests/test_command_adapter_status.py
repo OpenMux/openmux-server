@@ -1,9 +1,9 @@
 """Tests for `CommandPort.status_message` lifecycle (issue #62).
 
-Covers the new lifecycle added to the CommandPort class:
+Covers the lifecycle in the CommandPort class:
 - successful spawn clears the reason
 - failure to spawn (FileNotFoundError, generic exception) sets a specific reason
-- process exit with non-zero code or max-restarts / auto_restart-off sets a reason
+- process exit with a non-zero code sets a reason (issue #67: no auto-restart)
 - stop() clears the reason (intentional stop is a resting state)
 - get_status_snapshot() includes the reason only when it is set
 
@@ -80,25 +80,21 @@ async def test_command_monitor_sets_message_on_nonzero_exit(monkeypatch):
     """Monitor loop: non-zero exit leaves the reason set, state DEGRADED."""
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
-    port = CommandPort("cp-4", {"command": "echo", "auto_restart": False}, adapter)
+    port = CommandPort("cp-4", {"command": "echo"}, adapter)
     port.use_pty = False
     port.is_running = True
     port.process = _FakeProc(3)
     port._read_task = None
-    # _monitor_loop reads from `self.process.wait()` and inspects state at each
-    # iteration. Force the loop to exit after the first pass by flipping
-    # is_running inside the monitor's finally path.
+    # One-shot monitor (issue #67): one pass reports the exit and rests.
     port._monitor_task = None
-    # The monitor uses asyncio.sleep only when auto-restarting; we disable it
-    # so the loop exits after one iteration.
     await port._monitor_loop()
     assert "Process exited with code 3" in port.status_message
     assert port.state.value == "degraded"
 
 
 @pytest.mark.asyncio
-async def test_command_monitor_zero_exit_auto_restart_off_resting_online(monkeypatch):
-    """Monitor loop: code 0 + auto_restart off -> resting state, port stays online.
+async def test_command_monitor_zero_exit_resting_online(monkeypatch):
+    """Monitor loop: code 0 -> resting state, port stays online (issue #67).
 
     A clean exit is a normal, expected termination (e.g. a login shell
     closing). The port must not show an offline reason, must stay in a
@@ -106,7 +102,7 @@ async def test_command_monitor_zero_exit_auto_restart_off_resting_online(monkeyp
     """
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
-    port = CommandPort("cp-5", {"command": "echo", "auto_restart": False}, adapter)
+    port = CommandPort("cp-5", {"command": "echo"}, adapter)
     port.use_pty = False
     port.is_running = True
     port.process = _FakeProc(0)
@@ -120,8 +116,8 @@ async def test_command_monitor_zero_exit_auto_restart_off_resting_online(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_command_monitor_nonzero_exit_auto_restart_off_marks_offline(monkeypatch):
-    """Monitor loop: non-zero exit + auto_restart off -> degraded + offline.
+async def test_command_monitor_nonzero_exit_marks_offline(monkeypatch):
+    """Monitor loop: non-zero exit -> degraded + offline (issue #67).
 
     The contrast to the clean-exit case: an unexpected failure sets the
     offline reason and flips the port to disconnected until a client
@@ -129,7 +125,7 @@ async def test_command_monitor_nonzero_exit_auto_restart_off_marks_offline(monke
     """
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
-    port = CommandPort("cp-5b", {"command": "echo", "auto_restart": False}, adapter)
+    port = CommandPort("cp-5b", {"command": "echo"}, adapter)
     port.use_pty = False
     port.is_running = True
     port.process = _FakeProc(2)
@@ -139,51 +135,6 @@ async def test_command_monitor_nonzero_exit_auto_restart_off_marks_offline(monke
     assert port.is_connected is False
     assert port.state is PortState.DEGRADED
     assert port.is_running is False
-
-
-@pytest.mark.asyncio
-async def test_command_monitor_sets_message_on_max_restarts(monkeypatch):
-    """Monitor loop: exit 0 + auto_restart True + max_restarts reached -> max-restarts message."""
-    pm = CapturingPortManager()
-    adapter: Any = SimpleNamespace(main_port_manager=pm)
-    port = CommandPort(
-        "cp-6",
-        {"command": "echo", "auto_restart": True, "max_restarts": 2, "restart_delay": 0.0},
-        adapter,
-    )
-    port.use_pty = False
-    port.is_running = True
-    port.restart_count = 2  # already at the cap, so monitor hits max_restarts
-    port.process = _FakeProc(0)  # code 0 so the "exited with code N" branch skips
-    port._read_task = None
-    await port._monitor_loop()
-    assert "Max restarts reached" in port.status_message
-    assert "2" in port.status_message
-
-
-@pytest.mark.asyncio
-async def test_command_monitor_no_message_on_zero_exit_with_auto_restart(monkeypatch):
-    """Monitor loop: code 0 with auto_restart should not set a message before respawn."""
-    pm = CapturingPortManager()
-    adapter: Any = SimpleNamespace(main_port_manager=pm)
-    port = CommandPort("cp-7", {"command": "echo", "auto_restart": True, "restart_delay": 0.0}, adapter)
-    port.use_pty = False
-    port.is_running = True
-    port.process = _FakeProc(0)
-    port._read_task = None
-
-    # Stub _spawn_process so the loop can respawn without real subprocesses.
-    async def fake_spawn():
-        return False  # stop the loop after one pass
-
-    monkeypatch.setattr(port, "_spawn_process", fake_spawn)
-    await port._monitor_loop()
-    # Auto-restart respawn failed, but the original run completed with code 0,
-    # so only the respawn-failure path logs; the port may have a reason or may
-    # not, depending on how the monitor handles failed respawns. Here the spec
-    # asks: a code-0 run before respawn failure must not leave a stale "exited
-    # with code 0" message.
-    assert "Process exited with code 0" not in port.status_message
 
 
 @pytest.mark.asyncio

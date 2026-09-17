@@ -11,14 +11,106 @@ import pty
 import shlex
 import signal
 import socket
-import termios
-import tty
 from typing import Any, Dict, List, Optional, Set
 
 from ...common.identity import get_server_id
 from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
+
+#
+# issue #67 one-release deprecation shim. These per-port keys were removed
+# from the command_ports schema (the schema now rejects them, so strict paths
+# like --check-config and the Config Editor name each unknown key). At live
+# load, ConfigManager.load_config strips them in place with one warning per
+# port, mirroring the ticket-#74/locations absorb shim: a stale config keeps
+# booting instead of failing, until the next minor release.
+
+REMOVED_COMMAND_PORT_KEYS = (
+    "auto_restart",
+    "restart_delay",
+    "max_restarts",
+    "restart_backoff",
+    "local_echo",
+    "pty_force_raw",
+    "pty_enter_mode",
+    "spawn_mode",
+    "use_pty",
+    "output_crlf",
+    "clean_env",
+    "intercept_term_queries",
+    "enable_output_batching",
+    "output_batch_size",
+    "output_batch_timeout",
+    "output_force_flush_timeout",
+    "enable_batching",
+    "batch_size",
+    "batch_timeout",
+)
+
+
+def removed_command_port_keys(config: Any) -> List[str]:
+    """Dotted paths of removed command port keys still present in ``config``.
+
+    Pure detection (no mutation), used by the deprecation shim
+    (``absorb_removed_command_port_keys``) and by tests.
+
+    Args:
+        config: Parsed config mapping (the full server.yaml dict).
+
+    Returns:
+        List[str]: Dotted keys, e.g.
+        ``["command_ports[1].auto_restart"]``. Empty when the config is
+        clean or has no command ports.
+    """
+    found: List[str] = []
+    if not isinstance(config, dict):
+        return found
+    for index, port in enumerate(config.get("command_ports") or []):
+        if not isinstance(port, dict):
+            continue
+        for key in REMOVED_COMMAND_PORT_KEYS:
+            if key in port:
+                found.append(f"command_ports[{index}].{key}")
+    return found
+
+
+def absorb_removed_command_port_keys(config: Any, logger: Optional[Any] = None) -> List[str]:
+    """Strip removed command port keys from ``config`` (in place) and warn.
+
+    One warning per port, naming every removed key found on it. The schema
+    rejects the keys on strict paths; this shim keeps a live server booting
+    during the one release the keys are deprecated.
+
+    Args:
+        config: Parsed config mapping (mutated in place).
+        logger: Optional logger for the warnings; when omitted the keys are
+            still detected and stripped silently.
+
+    Returns:
+        List[str]: The dotted key paths that were present and removed.
+    """
+    keys = removed_command_port_keys(config)
+    if not keys or not isinstance(config, dict):
+        return keys
+    for index, port in enumerate(config.get("command_ports") or []):
+        if not isinstance(port, dict):
+            continue
+        stale = [key for key in REMOVED_COMMAND_PORT_KEYS if key in port]
+        if not stale:
+            continue
+        for key in stale:
+            del port[key]
+        if logger is not None:
+            name = str(port.get("name", f"index {index}"))
+            logger.warning(
+                "Command port %r: removed config key(s) %s are ignored and were "
+                "stripped; the behavior is now unconditional (issue #67). Remove "
+                "them from your configuration until the next minor release.",
+                name,
+                ", ".join(sorted(stale)),
+            )
+    return keys
 
 
 class CommandPort:
@@ -30,33 +122,36 @@ class CommandPort:
 
     Contract reference: docs/ADAPTER_PORT_CONTRACT.md
 
-    Configuration Keys (selected):
+    Configuration Keys (issue #67 consolidated the surface to these 15):
+        name (str): Logical port name.
+        description (str): Human-readable description.
         command (str): Command string to execute.
         shell (bool): Run under shell via ``create_subprocess_shell``.
         cwd (str): Working directory for the process.
         env (dict): Extra/override environment variables.
-        interactive (bool): Preset for use_pty/always_buffer/normalize_newlines.
+        interactive (bool): Preset that enables PTY + always_buffer +
+            normalize_newlines at once.
         always_buffer (bool): Keep buffering output even with zero clients.
         normalize_newlines (bool): Normalize newline sequences on input.
-        use_pty (bool): Allocate PTY; enables richer terminal behavior.
+        max_read_write_users: Write-slot capacity (one/multiple/none).
+        read_write_groups / read_only_groups: Console-group access control.
+        scrollback_size (int): Bytes of output to keep for replay (0 = off).
         spawn_on_demand (bool): Spawn the process on first client attach.
-        spawn_mode (str): "shared_eager" (default) or "shared_on_demand".
         idle_timeout_sec (float): Stop the process this many seconds after
             the last client leaves; 0 = never auto-stop on idle.
-        local_echo (bool): Echo writes back into the output buffer.
-        output_crlf (bool): Convert outbound newlines to CRLF.
-        clean_env (bool): Start from a minimal sanitized environment.
-        intercept_term_queries (bool): Intercept XTGETTCAP queries.
-        pty_force_raw (bool): Force raw mode on the PTY slave.
-        pty_enter_mode (str): Input newline mapping: none|cr|lf|crlf.
-        output_batch_size (int): Max buffered bytes before flush.
-        output_batch_timeout (float): Idle timeout (s) before flush.
-        output_force_flush_timeout (float): Hard cap flush interval (s).
-        enable_output_batching (bool): Toggle server->client batching.
-        auto_restart (bool): Enable automatic restart after exit.
-        restart_delay (float): Base delay before first restart.
-        max_restarts (int): Max restart attempts (0 = unlimited or until failure policy).
-        restart_backoff (float): Multiplicative backoff factor.
+
+    Behavior that is unconditional (issue #67 removed the config knobs):
+        - The process environment is sanitized (minimal allow-list + probe-
+          variable strip); ``env:`` merges extra values on top.
+        - XTGETTCAP terminal capability queries are intercepted and answered,
+          so editor probes never stall a session.
+        - Newlines are normalized on both directions (pipe input -> LF,
+          output -> CRLF on PTY, LF on pipes).
+        - I/O is batched: output 1024 bytes / 2 ms idle / 1.0 s force flush;
+          writes 1024 bytes / 2 ms.
+        - The process is never restarted automatically after exit. The
+          monitor reports the exit and marks the port offline (non-zero exit)
+          or resting (code 0); press Enter in the console to respawn.
 
     Args:
         name: Logical port name (unique within adapter).
@@ -95,26 +190,24 @@ class CommandPort:
         self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
         self.read_only_groups: List[str] = list(config.get("read_only_groups") or [])
 
-        # Behaviour flags
+        # Behaviour flags. issue #67: interactive is the only config surface
+        # for the terminal preset (PTY + always_buffer + normalize_newlines);
+        # local_echo, use_pty, output_crlf, clean_env, intercept_term_queries
+        # and pty_force_raw/pty_enter_mode config keys are removed. The
+        # behaviors they toggled are now unconditional where the default was
+        # correct (env sanitizing, XTGETTCAP interception, CRLF on output) or
+        # dropped (local echo, forced PTY raw mode, enter-mode mapping).
         self.interactive = config.get("interactive", False)
         self.always_buffer = config.get("always_buffer", self.interactive)
         self.normalize_newlines = config.get("normalize_newlines", self.interactive)
-        self.local_echo = config.get("local_echo", False)
-        self.use_pty = config.get("use_pty", self.interactive)
-        self.output_crlf = config.get("output_crlf", True)
-        self.clean_env = config.get("clean_env", True)
-        self.intercept_term_queries = config.get("intercept_term_queries", True)
-        # Optional: force PTY raw mode (generally not needed; most TUIs set it themselves)
-        self.pty_force_raw = bool(config.get("pty_force_raw", False))
-        # Optional: control how Enter/newlines are mapped for PTY input: none|cr|lf|crlf
-        self.pty_enter_mode = config.get("pty_enter_mode", "none")
+        # Internal only: an interactive port always gets a PTY. The separate
+        # use_pty config key is removed; the pipe path is reached by leaving
+        # interactive off (issue #67).
+        self.use_pty: bool = bool(self.interactive)
         self.scrollback_size = int(config.get("scrollback_size", 0))  # bytes; 0 = disabled
 
         # Process lifecycle policy
-        # spawn_mode may be one of: "shared_eager" (default), "shared_on_demand".
-        # For backward compatibility, also honor boolean flag spawn_on_demand.
-        spawn_mode = str(config.get("spawn_mode", "")).strip().lower()
-        self.spawn_on_demand: bool = bool(config.get("spawn_on_demand", False) or spawn_mode == "shared_on_demand")
+        self.spawn_on_demand: bool = bool(config.get("spawn_on_demand", False))
         # Idle stop: when last client disconnects, stop the process after this many seconds (>0).
         # 0 or missing => never auto-stop on idle.
         try:
@@ -123,11 +216,11 @@ class CommandPort:
             self.idle_timeout_sec = 0.0
         self._idle_stop_task: Optional[asyncio.Task] = None
 
-        # Output batching config (server -> client)
-        self._output_batch_size = config.get("output_batch_size", 1024)
-        self._output_batch_timeout = config.get("output_batch_timeout", 0.002)
-        self._output_force_flush_timeout = config.get("output_force_flush_timeout", 1.0)
-        self._output_batching_enabled = config.get("enable_output_batching", True)
+        # Output batching config (server -> client). issue #67: batching is
+        # unconditional at fixed thresholds; the config keys are removed.
+        self._output_batch_size = 1024
+        self._output_batch_timeout = 0.002
+        self._output_force_flush_timeout = 1.0
         self._output_buffer = bytearray()
         self._output_buffer_lock = asyncio.Lock()
         self._output_flush_task: Optional[asyncio.Task] = None
@@ -161,12 +254,10 @@ class CommandPort:
         self._monitor_task: Optional[asyncio.Task] = None
         self._queue_fallback_logged = False
 
-        # Restart config
-        self.auto_restart = bool(config.get("auto_restart", False))
-        self.restart_delay = float(config.get("restart_delay", 1.0))
-        self.max_restarts = int(config.get("max_restarts", 0))
-        self.restart_backoff = float(config.get("restart_backoff", 1.0))
-        self.restart_count = 0
+        # Automatic restart after exit is not supported (issue #67): the
+        # monitor reports the exit and marks the port resting/offline; press
+        # Enter in the console to respawn. Supervised daemons belong under
+        # systemd (expose their socket on a TCP port instead).
 
         self._stopped_notice_sent = False
         # Human-readable reason the process is not running (issue #62):
@@ -476,16 +567,15 @@ class CommandPort:
                 self._pty_master_fd = None
                 self._pty_reader_added = False
 
-            # Build environment
-            if self.clean_env:
-                env: Dict[str, str] = {}
-                for k in ("PATH", "HOME", "SHELL", "USER", "LANG", "LC_ALL"):
-                    v = os.environ.get(k)
-                    if v:
-                        env[k] = v
-                env.setdefault("TERM", "xterm")
-            else:
-                env = dict(self.env or os.environ)
+            # Build environment. issue #67: sanitizing is unconditional
+            # (security posture); the clean_env key is removed. The env: block
+            # merges extra/override values on top of the minimal allow-list.
+            env: Dict[str, str] = {}
+            for k in ("PATH", "HOME", "SHELL", "USER", "LANG", "LC_ALL"):
+                v = os.environ.get(k)
+                if v:
+                    env[k] = v
+            env.setdefault("TERM", "xterm")
             for bad in (
                 "LC_TERMINAL",
                 "TERM_PROGRAM",
@@ -504,15 +594,6 @@ class CommandPort:
             if self.use_pty:
                 try:
                     master_fd, slave_fd = pty.openpty()
-                    try:
-                        if self.pty_force_raw:
-                            tty.setraw(slave_fd)
-                            attrs = termios.tcgetattr(slave_fd)
-                            attrs[6][termios.VMIN] = 1
-                            attrs[6][termios.VTIME] = 0
-                            termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
-                    except Exception as e:
-                        self.logger.warning("PTY mode configuration warning for %s: %s", self.name, e, exc_info=True)
                     if self.shell:
                         self.process = await asyncio.create_subprocess_shell(
                             self.command,
@@ -595,7 +676,7 @@ class CommandPort:
             # spawn, the Enter-respawn path, and auto-restart respawns --
             # all of them route through here.
             self._set_connected(True)
-            if self.use_pty and self._output_batching_enabled:
+            if self.use_pty:
                 if self._output_flush_task is None or self._output_flush_task.done():
                     self._output_flush_task = asyncio.create_task(self._output_flush_buffer_loop())
             # Process is running again; clear any prior offline reason (issue #62).
@@ -677,32 +758,23 @@ class CommandPort:
                         self._pty_reader_added = False
                     self.process_active = False
                     return
-                if self.intercept_term_queries and data:
-                    try:
-                        data = self._intercept_xtgettcap_queries(data)
-                    except Exception:  # justification: interception is optional; raw data still usable
-                        pass
-                if self.output_crlf and data:
-                    data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-                if self._output_batching_enabled:
+                try:
+                    data = self._intercept_xtgettcap_queries(data)
+                except Exception:  # justification: interception is best-effort; raw data still usable
+                    pass
+                data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
 
-                    async def buffer_data(d: bytes):
-                        async with self._output_buffer_lock:
-                            self._output_buffer += d
-                            self._output_flush_event.clear()
-                            now2 = asyncio.get_event_loop().time()
-                            self._last_data_time = now2
-                            if not hasattr(self, "_first_data_time") or self._first_data_time is None:
-                                self._first_data_time = now2
-                            self._output_flush_event.set()
+                async def buffer_data(d: bytes):
+                    async with self._output_buffer_lock:
+                        self._output_buffer += d
+                        self._output_flush_event.clear()
+                        now2 = asyncio.get_event_loop().time()
+                        self._last_data_time = now2
+                        if not hasattr(self, "_first_data_time") or self._first_data_time is None:
+                            self._first_data_time = now2
+                        self._output_flush_event.set()
 
-                    asyncio.create_task(buffer_data(data))
-                else:
-                    if data:
-                        try:
-                            asyncio.create_task(self._emit_output_chunk(data))
-                        except Exception:
-                            self.logger.error("Failed to schedule output forwarding for %s", self.name, exc_info=True)
+                asyncio.create_task(buffer_data(data))
         except OSError as e:
             if self._loop and self._pty_reader_added:
                 try:
@@ -730,13 +802,11 @@ class CommandPort:
                     if not data:
                         self.process_active = False
                         break
-                    if self.intercept_term_queries:
-                        try:
-                            data = self._intercept_xtgettcap_queries(data)
-                        except Exception:  # justification: optional interception; continuing with raw stdout
-                            pass
-                    if self.output_crlf and data:
-                        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+                    try:
+                        data = self._intercept_xtgettcap_queries(data)
+                    except Exception:  # justification: interception is best-effort; continuing with raw stdout
+                        pass
+                    data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
                     await self._emit_output_chunk(data)
                 except asyncio.CancelledError:
                     break
@@ -752,11 +822,12 @@ class CommandPort:
 
         Implements three flush triggers: batch size reached, idle timeout, or
         force-flush interval exceeded since first buffered byte. Continues
-        while port and process remain active and batching is enabled.
+        while the port and process remain active (batching is unconditional
+        now, issue #67).
         """
         self._last_data_time = asyncio.get_event_loop().time()
         self._first_data_time = None
-        while self.is_running and self.process_active and self._output_batching_enabled:
+        while self.is_running and self.process_active:
             # Wait strategy: if no buffered data, block on event (no tight polling).
             # If there is buffered data, use short timeout to honor batch/force-flush thresholds.
             try:
@@ -794,106 +865,57 @@ class CommandPort:
                 await self._emit_output_chunk(to_send)
 
     async def _monitor_loop(self):
-        """Monitor process exit and perform auto-restart if enabled.
+        """Wait for process exit, report it, and leave the port resting/offline.
 
-        Applies restart limits, delay, and backoff. Updates port state on
-        terminal failure. Exits when adapter/port stops or restart policy
-        disallows further attempts.
+        One-shot by design (issue #67): automatic restart after exit is not
+        supported. Drains the output batcher so clients see the process's
+        final output, then sends the PROCESS_EXITED notice and sets the port
+        state. A clean exit (code 0) is a resting state (CONFIGURED, still
+        online); a non-zero exit marks the port DEGRADED/offline. A
+        successful spawn (Enter respawn, on-demand spawn) starts a fresh
+        monitor for the next exit.
         """
-        while self.is_running:
+        try:
+            if not self.process:
+                return
+            exit_code = await self.process.wait()
+            self.process_active = False
+            # A clean exit (code 0) means the process ran to completion as
+            # expected. A non-zero exit (or signal kill, which produces a
+            # negative code) marks the port degraded/offline until respawn.
+            clean_exit = not exit_code
+            # Wake the output batcher and drain whatever the process emitted
+            # last (e.g. its final line), so clients see the trailing output
+            # before any exit notice below.
             try:
-                if not self.process:
-                    break
-                exit_code = await self.process.wait()
-                self.process_active = False
-                # A clean exit (code 0) means the process ran to completion
-                # as expected. The port stays in a resting/online state so
-                # the status page and banner do not flag it offline.
-                # A non-zero exit (or signal kill, which produces a negative
-                # code) marks the port as degraded/offline until respawn.
-                clean_exit = not exit_code
-                # Wake the output batcher and drain whatever the process
-                # emitted last (e.g. its final line), so clients see the
-                # trailing output before any exit notice below.
-                try:
-                    self._output_flush_event.set()
-                except Exception:  # justification: batcher best-effort; no batcher is fine
-                    pass
-                await self._drain_output_buffer()
-                # Capture the exit reason (issue #62). Code 0 means a normal
-                # shutdown and gets no message; non-zero is reported.
-                if not clean_exit:
-                    self._set_status_message(f"Process exited with code {exit_code}")
-                    # The process is dead and did not exit cleanly; surface it
-                    # so the UI banner shows immediately. The auto_restart
-                    # path below will flip it back up on a successful respawn.
-                    self._set_connected(False)
-                if not self.is_running:
-                    break
-                if not self.auto_restart:
-                    self.logger.info("Process exited for %s; not restarting", self.name)
-                    if not clean_exit and not self.status_message:
-                        self._set_status_message(f"Process exited (code {exit_code}, auto_restart off)")
-                    # The port stays up; the client can press Enter to
-                    # respawn. A clean exit is a resting state (CONFIGURED),
-                    # not a degraded one.
-                    if self.client_count > 0:
-                        self._schedule_lifecycle_notice(
-                            "PROCESS_EXITED",
-                            self._exit_notice_detail(exit_code),
-                        )
-                    self._stopped_notice_sent = False
-                    self.is_running = False
-                    self.state = PortState.CONFIGURED if clean_exit else PortState.DEGRADED
-                    break
-                if self.max_restarts and self.restart_count >= self.max_restarts:
-                    # Exhausted the restart allowance; the port is offline
-                    # regardless of the immediate exit code. A clean code-0
-                    # exit after max_restarts failures is still a failure
-                    # condition (the process keeps dying).
-                    self.logger.error("Max restarts reached for %s; not restarting", self.name)
-                    if not self.status_message:
-                        self._set_status_message(f"Max restarts reached ({self.max_restarts})")
-                    if self.client_count > 0:
-                        self._schedule_lifecycle_notice(
-                            "PROCESS_EXITED",
-                            f"process exited (code {exit_code}, max restarts reached - press Enter to respawn)",
-                        )
-                    self._stopped_notice_sent = False
-                    self.is_running = False
-                    self.state = PortState.DEGRADED
-                    break
-                self.restart_count += 1
-                delay = self.restart_delay * (self.restart_backoff ** (self.restart_count - 1))
-                # Restart gap (issue #68): auto-restart in progress is "stays
-                # red", not a healthy idle rest. Surface the reason the process
-                # is down (with the retry delay) until the respawn succeeds;
-                # _spawn_process clears the message on success. A zero-delay
-                # config still flashes it briefly for state consistency.
-                self._set_status_message(
-                    f"Restarting in {delay:.1f}s (exit code {exit_code})" if delay else f"Restarting (exit code {exit_code})"
+                self._output_flush_event.set()
+            except Exception:  # justification: batcher best-effort; no batcher is fine
+                pass
+            await self._drain_output_buffer()
+            # Capture the exit reason (issue #62). Code 0 means a normal
+            # shutdown and gets no message; non-zero is reported. The process
+            # is dead and did not exit cleanly; surface it so the UI banner
+            # shows immediately. Pressing Enter respawns and clears it.
+            if not clean_exit:
+                self._set_status_message(f"Process exited with code {exit_code}")
+                self._set_connected(False)
+            if not self.is_running:
+                return
+            self.logger.info("Process exited (code %s) for %s; not restarting (press Enter to respawn)", exit_code, self.name)
+            if self.client_count > 0:
+                self._schedule_lifecycle_notice(
+                    "PROCESS_EXITED",
+                    self._exit_notice_detail(exit_code),
                 )
-                if self.client_count > 0:
-                    if clean_exit:
-                        detail = f"finished (code 0)"
-                    else:
-                        detail = f"code {exit_code}"
-                    if delay:
-                        detail += f", restarting in {delay:.1f}s"
-                    self._schedule_lifecycle_notice("PROCESS_EXITED", f"process exited ({detail})")
-                self._stopped_notice_sent = False
-                await asyncio.sleep(delay)
-                if not await self._spawn_process():
-                    self.logger.error("Respawn failed for %s; stopping monitor", self.name)
-                    self.is_running = False
-                    self.state = PortState.DEGRADED
-                    break
-                self.logger.info("Respawned command port process for %s", self.name)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error("Monitor loop error for %s: %s", self.name, e, exc_info=True)
-                break
+            self._stopped_notice_sent = False
+            self.is_running = False
+            self.state = PortState.CONFIGURED if clean_exit else PortState.DEGRADED
+        except asyncio.CancelledError:
+            # justification: monitor cancelled during stop(); nothing to clean up
+            return
+        except Exception as e:
+            self.logger.error("Monitor loop error for %s: %s", self.name, e, exc_info=True)
+            return
         self.logger.info("Monitor loop exiting for command port %s", self.name)
 
     def _exit_notice_detail(self, exit_code: Optional[int]) -> str:
@@ -926,11 +948,12 @@ class CommandPort:
             pass
 
     def _spawn_monitor_task(self) -> None:
-        """Ensure the process monitor runs (exit notices + auto-restart).
+        """Ensure the process monitor runs (exit report + output drain).
 
-        The monitor is started for every spawn, not only under
-        ``auto_restart``: it also reports terminal exits to attached clients
-        and drains the output batcher at process end.
+        The monitor is one-shot (issue #67) and is started for every spawn,
+        including Enter-respawns and on-demand first spawns: it reports the
+        terminal exit to attached clients and drains the output batcher at
+        process end.
         """
         try:
             if self._monitor_task is None or self._monitor_task.done():
@@ -1029,7 +1052,6 @@ class CommandPort:
             self.is_running = False
             self.process_active = False
             self.state = PortState.CONFIGURED
-            self.restart_count = 0
 
     async def restart(self, force: bool = False) -> bool:
         """Manually restart the underlying process.
@@ -1093,11 +1115,9 @@ class CommandPort:
                     if cfg_obj is None:
                         try:
                             cfg_obj = cfg_mgr.load_config()
-                        except (
-                            Exception
-                        ):  # justification: newline mapping write drain best-effort; failures cause disconnect upstream
+                        except Exception:  # justification: prefix derivation is best-effort; fall back to hostname below
                             cfg_obj = None
-            except Exception:  # justification: writer transform pipeline failure; outer caller logs aggregate error
+            except Exception:  # justification: prefix derivation is best-effort; fall back to hostname below
                 cfg_obj = None
             server_id = None
             if isinstance(cfg_obj, dict):
@@ -1105,7 +1125,7 @@ class CommandPort:
             if not server_id:
                 try:
                     server_id = socket.gethostname()
-                except Exception:  # justification: local echo enqueue is advisory; dropping echo is acceptable
+                except Exception:  # justification: prefix derivation is best-effort; port name still renders
                     server_id = ""
             # simplify any path-like id to last segment
             if "/" in server_id:
@@ -1158,13 +1178,13 @@ class CommandPort:
 class CommandWriter:
     """Buffered / batched writer for a command port.
 
-    Handles newline normalization (depending on PTY mode and configured
-    ``pty_enter_mode``) and optional client-side local echo. Supports input
-    batching with size and timeout triggers to reduce write system call
-    frequency for high-chattiness clients. Also implements the convenience
-    behavior that a lone newline sent to a stopped (but previously started)
-    process will attempt a respawn and then deliver the newline to prompt the
-    new shell/program.
+    Normalizes pipe input to LF when ``normalize_newlines`` is set (PTY input
+    passes through unchanged; issue #67 removed the ``pty_enter_mode`` knob
+    and client-side local echo). Input is always batched at fixed thresholds
+    to reduce write system call frequency for high-chattiness clients. Also
+    implements the convenience behavior that a lone newline sent to a stopped
+    (but previously started) process will attempt a respawn and then deliver
+    the newline to prompt the new shell/program.
 
     Args:
         stdin_stream: The process stdin stream (``StreamWriter`` like) when
@@ -1176,11 +1196,11 @@ class CommandWriter:
         self.stdin_stream = stdin_stream
         self.port = port
         self.logger = port.logger
-        # Batching config (from port config or defaults)
-        cfg = getattr(port, "config", {})
-        self._batch_size = cfg.get("batch_size", 1024)
-        self._batch_timeout = cfg.get("batch_timeout", 0.002)  # 2ms default
-        self._batching_enabled = cfg.get("enable_batching", True)
+        # Batching config (server <- client writes). issue #67: unconditional
+        # at fixed thresholds; the enable_batching/batch_size/batch_timeout
+        # keys are removed.
+        self._batch_size = 1024
+        self._batch_timeout = 0.002  # 2ms
         # Buffer and flush state
         self._write_buffer = bytearray()
         self._write_buffer_lock = asyncio.Lock()
@@ -1212,10 +1232,7 @@ class CommandWriter:
                     self.stdin_stream = self.port.process.stdin if self.port.process else None
                 await self._write_direct(data)
             return
-        if not self._batching_enabled:
-            await self._write_direct(data)
-            return
-        # Batching mode
+        # Batching mode (issue #67: unconditional at fixed thresholds)
         async with self._write_buffer_lock:
             self._write_buffer += data
             if len(self._write_buffer) >= self._batch_size:
@@ -1227,40 +1244,25 @@ class CommandWriter:
     async def _write_direct(self, data: bytes) -> None:
         """Perform an immediate write of ``data`` honoring normalization.
 
-        Applies newline translation rules for PTY / pipe modes, writes to the
-        relevant descriptor, optionally echoes locally, and suppresses all
-        exceptions to avoid propagating transient I/O failures upstream.
+        Normalizes pipe input to LF when ``normalize_newlines`` is set (PTY
+        input passes through unchanged); writes to the relevant descriptor and
+        suppresses all exceptions to avoid propagating transient I/O failures
+        upstream.
 
         Args:
             data: Bytes to write.
         """
         try:
-            if getattr(self.port, "normalize_newlines", False) and data:
+            if getattr(self.port, "normalize_newlines", False) and data and not getattr(self.port, "use_pty", False):
+                # For pipe-based processes, normalize to LF. PTY input is left
+                # as-is (issue #67: pty_enter_mode removed) since the terminal
+                # driver handles newline translation for the program.
                 _orig = data
-                if getattr(self.port, "use_pty", False):
-                    mode = getattr(self.port, "pty_enter_mode", "none")
-                    if mode == "cr":
-                        data = data.replace(b"\r\n", b"\r").replace(b"\n", b"\r")
-                    elif mode == "lf":
-                        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-                    elif mode == "crlf":
-                        tmp = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-                        data = tmp.replace(b"\n", b"\r\n")
-                    else:
-                        # none: leave data unchanged for PTY
-                        pass
-                else:
-                    # For pipe-based processes, normalize to LF.
-                    data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+                data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
                 if self.logger.isEnabledFor(logging.DEBUG) and (
                     b"\r" in _orig or b"\n" in _orig or b"\r" in data or b"\n" in data
                 ):
-                    self.logger.debug(
-                        "Writer newline map (pty=%s): in=%r out=%r",
-                        getattr(self.port, "use_pty", False),
-                        _orig,
-                        data,
-                    )
+                    self.logger.debug("Writer newline map (pipe): in=%r out=%r", _orig, data)
             if getattr(self.port, "use_pty", False) and self.port._pty_master_fd is not None:
                 try:
                     os.write(self.port._pty_master_fd, data)
@@ -1273,11 +1275,6 @@ class CommandWriter:
                         await self.stdin_stream.drain()
                     except Exception:  # justification: stdin drain failure non-fatal; writer continues or process will exit
                         pass
-            if getattr(self.port, "local_echo", False):
-                try:
-                    await self.port._emit_output_chunk(data, require_clients=False)
-                except Exception:  # justification: local echo enqueue failure is advisory; safe to ignore
-                    self.logger.debug("Local echo emit failed", exc_info=True)
         except Exception as e:
             self.logger.error("Error writing to command %s: %s", self.port.name, e, exc_info=True)
 
@@ -1312,8 +1309,9 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
 
     Creates and manages multiple command execution "ports" each wrapping a
     spawned process (optionally under a PTY) with buffered asynchronous I/O,
-    restart policies, newline normalization, batching, and terminal query
-    interception.
+    newline normalization, always-on I/O batching, and terminal query
+    interception. Processes are not restarted automatically after exit;
+    press Enter in the console to respawn (issue #67).
     """
 
     def __init__(self, plugin_name: str, config: Dict[str, Any]):
@@ -1529,7 +1527,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "shell": bool(cfg.get("shell", False)),
                 "cwd": cfg.get("cwd"),
                 "env": cfg.get("env"),
-                "auto_restart": bool(cfg.get("auto_restart", False)),
                 "max_read_write_users": mru,
                 "interactive": _interactive,
                 "always_buffer": bool(cfg.get("always_buffer", _interactive)),
@@ -1548,7 +1545,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                         "shell": getattr(port, "shell", None),
                         "cwd": getattr(port, "cwd", None),
                         "env": getattr(port, "env", None),
-                        "auto_restart": getattr(port, "auto_restart", None),
                         "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", None)),
                         "interactive": getattr(port, "interactive", None),
                         "always_buffer": getattr(port, "always_buffer", None),
@@ -1594,9 +1590,8 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                 # the next client transition. Not in _material_cfg deliberately:
                 # they must not force a recreate.
                 try:
-                    if "spawn_on_demand" in new_by_name[n] or "spawn_mode" in new_by_name[n]:
-                        _spawn_mode = str(new_by_name[n].get("spawn_mode", "")).strip().lower()
-                        new_on_demand = bool(new_by_name[n].get("spawn_on_demand", False) or _spawn_mode == "shared_on_demand")
+                    if "spawn_on_demand" in new_by_name[n]:
+                        new_on_demand = bool(new_by_name[n].get("spawn_on_demand", False))
                         if isinstance(getattr(port, "spawn_on_demand", None), bool) and port.spawn_on_demand != new_on_demand:
                             port.spawn_on_demand = new_on_demand
                     if "idle_timeout_sec" in new_by_name[n]:

@@ -64,10 +64,9 @@ async def test_started_notice_suppressed_without_clients():
 
 @pytest.mark.asyncio
 async def test_exited_notice_from_monitor_loop(monkeypatch):
+    """issue #67: the one-shot monitor reports a non-zero exit with the
+    Enter-respawn hint (no restart is attempted)."""
     port, chunks = _make_port()
-    port.auto_restart = True
-    port.restart_delay = 0.1
-    port.max_restarts = 1  # fails after one respawn attempt
     port.is_running = True
     port.client_count = 1
 
@@ -79,31 +78,23 @@ async def test_exited_notice_from_monitor_loop(monkeypatch):
     fake.wait = _wait
     port.process = fake
 
-    async def _failed_spawn() -> bool:
-        return False
-
-    monkeypatch.setattr(port, "_spawn_process", _failed_spawn)
     port._monitor_task = asyncio.create_task(port._monitor_loop())
 
     try:
-        await asyncio.sleep(0.5)
-    finally:
+        await asyncio.wait_for(asyncio.shield(port._monitor_task), timeout=1.0)
+    except (asyncio.CancelledError, Exception):
+        pass
+    except asyncio.TimeoutError:
         port._monitor_task.cancel()
-        try:
-            await port._monitor_task
-        except (asyncio.CancelledError, Exception):
-            pass
 
     joined = b"".join(chunks)
-    assert b"[OpenMux:PROCESS_EXITED srv-9/cp1 process exited (code 3, restarting in 0.1s)]" in joined
+    assert b"[OpenMux:PROCESS_EXITED srv-9/cp1 process exited (code 3) - press Enter to respawn]" in joined
+    assert port.is_running is False
 
 
 @pytest.mark.asyncio
 async def test_exited_notice_suppressed_without_clients(monkeypatch):
     port, chunks = _make_port()
-    port.auto_restart = True
-    port.restart_delay = 0.1
-    port.max_restarts = 1
     port.is_running = True
     port.client_count = 0
 
@@ -115,19 +106,13 @@ async def test_exited_notice_suppressed_without_clients(monkeypatch):
     fake.wait = _wait
     port.process = fake
 
-    async def _failed_spawn() -> bool:
-        return False
-
-    monkeypatch.setattr(port, "_spawn_process", _failed_spawn)
     port._monitor_task = asyncio.create_task(port._monitor_loop())
     try:
-        await asyncio.sleep(0.4)
-    finally:
+        await asyncio.wait_for(asyncio.shield(port._monitor_task), timeout=1.0)
+    except (asyncio.CancelledError, Exception):
+        pass
+    except asyncio.TimeoutError:
         port._monitor_task.cancel()
-        try:
-            await port._monitor_task
-        except (asyncio.CancelledError, Exception):
-            pass
     assert chunks == []
 
 
@@ -152,9 +137,8 @@ async def test_start_failure_does_not_require_clients():
 
 @pytest.mark.asyncio
 async def test_exit_drains_residual_output_before_notice(monkeypatch):
-    """auto_restart off + batching on: buffered tail output beats the exit notice."""
+    """Buffered tail output (always batched now) beats the exit notice."""
     port, chunks = _make_port()
-    port.auto_restart = False
     port.spawn_on_demand = True
     port.is_running = True
     port.process_active = True
@@ -186,9 +170,8 @@ async def test_exit_drains_residual_output_before_notice(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_always_spawns_monitor_even_without_auto_restart():
+async def test_start_always_spawns_monitor():
     port, _chunks = _make_port()
-    port.auto_restart = False
     assert await port.start() is True
     try:
         assert port._monitor_task is not None and not port._monitor_task.done()

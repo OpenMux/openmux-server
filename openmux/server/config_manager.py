@@ -111,6 +111,14 @@ class ConfigManager:
 
             absorb_removed_location_keys(self.config, logger=self.logger)
 
+            # issue #67: strip removed command_ports tuning keys (one warning
+            # per stale port) so a live load keeps working while the schema
+            # rejects them on strict paths.
+            if isinstance(self.config, dict) and self.config.get("command_ports") is not None:
+                from .adapters.command import absorb_removed_command_port_keys
+
+                absorb_removed_command_port_keys(self.config, logger=self.logger)
+
             # Full JSON Schema pass (log-only): each violation is logged as
             # ERROR and load continues, so a currently-working deployment
             # never breaks on a newly caught typo.

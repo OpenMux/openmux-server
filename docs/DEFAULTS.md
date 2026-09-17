@@ -106,31 +106,20 @@ loopback_ports (per-port) (schema + runtime)
 - sanitize_control: true
 - read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior). Loopback ports are enforced like any other port (no legacy "always force read-write" shortcut): under none a loopback attaches read-only for everyone.
 
-command_ports (per-port) (schema defaults)
+command_ports (per-port) (schema defaults; issue #67 consolidated the surface)
 - shell: false
 - max_read_write_users: one
-- cwd, env, interactive, always_buffer: no defaults
+- cwd, env, interactive, always_buffer, normalize_newlines: no defaults
 - spawn_on_demand: false
-- spawn_mode: shared_eager
 - idle_timeout_sec: 0
-- auto_restart: false
-- restart_delay: 1.0
-- max_restarts: 0
-- restart_backoff: 1.0
-- local_echo: false
-- output_crlf: true
-- clean_env: true
-- intercept_term_queries: true
-- pty_force_raw: false
-- pty_enter_mode: none
-- enable_output_batching: true
-- output_batch_size: 1024
-- output_batch_timeout: 0.002
-- output_force_flush_timeout: 1.0
-- enable_batching: true
-- batch_size: 1024
-- batch_timeout: 0.002
+- scrollback_size: 0
 - read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
+Unconditional (no config key; issue #67): sanitized environment (7-var
+allow-list + TERM=xterm, probe vars stripped, env: merges on top), XTGETTCAP
+interception, newline normalization (CRLF output on a PTY, LF on pipes; pipe
+input to LF), output batching 1024 bytes / 0.002 s / 1.0 s force flush,
+write batching 1024 bytes / 0.002 s, and no automatic restart (press Enter in
+the console to respawn).
 
 tcp_initiator_ports (per-port) (schema defaults)
 - use_tls: false

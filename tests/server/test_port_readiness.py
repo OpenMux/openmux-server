@@ -107,7 +107,7 @@ def _cmd_port(
 
 
 def test_wrapper_readiness_idle_for_resting_command_port():
-    # Motivating case: clean code-0 exit, auto_restart off. Not running, no reason.
+    # Motivating case: clean code-0 exit (no auto-restart). Not running, no reason.
     w = _make_wrapper(_cmd_port(process_active=False, is_connected=True, is_running=False))
     assert w.get_status()["readiness"] == READINESS_IDLE
 
@@ -244,8 +244,8 @@ def _make_cmd_port(config: Dict[str, Any]) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_command_clean_exit_zero_auto_restart_off_is_idle():
-    port = _make_cmd_port({"command": "echo", "auto_restart": False})
+async def test_command_clean_exit_zero_is_idle():
+    port = _make_cmd_port({"command": "echo"})
     port.process = _FakeProc(0)
     await port._monitor_loop()
     assert port.status_message == ""
@@ -255,8 +255,8 @@ async def test_command_clean_exit_zero_auto_restart_off_is_idle():
 
 
 @pytest.mark.asyncio
-async def test_command_nonzero_exit_auto_restart_off_is_offline():
-    port = _make_cmd_port({"command": "echo", "auto_restart": False})
+async def test_command_nonzero_exit_is_offline():
+    port = _make_cmd_port({"command": "echo"})
     port.process = _FakeProc(2)
     await port._monitor_loop()
     assert "code 2" in port.status_message
@@ -272,57 +272,6 @@ async def test_command_fresh_on_demand_never_spawned_is_idle():
     assert port.is_connected is True
     assert port.status_message == ""
     assert derive_port_readiness(port_is_alive(port), port.status_message) == READINESS_IDLE
-
-
-@pytest.mark.asyncio
-async def test_command_max_restarts_is_offline():
-    port = _make_cmd_port({"command": "echo", "auto_restart": True, "max_restarts": 2, "restart_delay": 0.0})
-    port.restart_count = 2
-    port.process = _FakeProc(0)
-    await port._monitor_loop()
-    assert "Max restarts reached" in port.status_message
-    assert derive_port_readiness(port_is_alive(port), port.status_message) == READINESS_OFFLINE
-
-
-@pytest.mark.asyncio
-async def test_command_auto_restart_gap_sets_reason_until_respawn(monkeypatch):
-    """The auto-restart gap must be red, not idle (issue #68: stays red).
-
-    A resting-with-reason port derives offline; the gap therefore needs a
-    reason. The respawn path clears it on success (see _spawn_process).
-    """
-    port = _make_cmd_port({"command": "echo", "auto_restart": True, "restart_delay": 5.0})
-    port.process = _FakeProc(0)
-
-    recorded: list = []
-    orig_set_msg = port._set_status_message
-
-    def recording_set_msg(message: str) -> None:
-        recorded.append(message)
-        return orig_set_msg(message)
-
-    port._set_status_message = recording_set_msg  # type: ignore[method-assign]
-
-    calls = {"n": 0}
-
-    async def fake_spawn() -> bool:
-        calls["n"] += 1
-        if calls["n"] >= 2:
-            port.is_running = False  # end the monitor loop after two gaps
-        return True
-
-    port._spawn_process = fake_spawn  # type: ignore[method-assign]
-
-    async def fast_sleep(_delay):
-        await asyncio.sleep(0)
-
-    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
-    await port._monitor_loop()
-
-    # Each gap pass set a red reason before respawning.
-    assert any(m.startswith("Restarting in 5.0s (exit code 0)") for m in recorded)
-    # While the gap reason was set, the port derived offline, not idle.
-    assert derive_port_readiness(port_is_alive(port), "Restarting in 5.0s (exit code 0)") == READINESS_OFFLINE
 
 
 # ---------------------------------------------------------------------------

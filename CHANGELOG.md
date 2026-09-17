@@ -10,6 +10,28 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Config changes to check before upgrading
 
+- **Command adapter ports: 19 per-port keys are removed** (issue #67). The
+  `command_ports` surface is reduced to 15 keys; the removed keys either
+  became unconditional behavior or are dropped features. Remove them from
+  your `server.yaml`:
+  - Became unconditional (the behavior is always on; the key is ignored):
+    `clean_env`, `intercept_term_queries`, `output_crlf`,
+    `enable_output_batching`, `output_batch_size`, `output_batch_timeout`,
+    `output_force_flush_timeout`, `enable_batching`, `batch_size`,
+    `batch_timeout`.
+  - Dropped features (no longer possible at all): `auto_restart`,
+    `restart_delay`, `max_restarts`, `restart_backoff` (a process never
+    restarts itself; press Enter in the console to respawn), `local_echo`,
+    `pty_force_raw`, `pty_enter_mode`, `use_pty` (a PTY is enabled by
+    `interactive: true`), `spawn_mode` (use `spawn_on_demand: true`).
+  For the `use_pty` override case (`interactive: true` plus
+  `use_pty: false`), set `always_buffer: true` and `normalize_newlines: true`
+  on the pipe instead.
+  The schema rejects every removed key (`--check-config` and the Config
+  Editor name each one and refuse the save); at live load the ConfigManager
+  strips the keys with one warning per stale port for this one release, so a
+  running server keeps booting until you clean the config.
+
 - **`server.name`, `server.server_id`, and `muxcon.server_id` are no longer
   identity keys** (ticket #74). `server.id` is now the single identity key:
   the MuxCon federation handshake `ID=`, the MuxCon and web-console autogen
