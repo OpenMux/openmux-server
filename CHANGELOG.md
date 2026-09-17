@@ -4,7 +4,11 @@ All notable changes to OpenMux are documented in this file. Each release section
 Keep entries short. Use the same documentation style as the rest of the repository (short sentences, active voice).
 Update rule: after committing a user-visible change, add one entry to the current version section. At release, rename `Unreleased` to the version number. See `AGENTS.md` for the workflow.
 
-## [Unreleased — 1.0.3]
+## [Unreleased — 1.0.4]
+
+Changes since v1.0.3 (2026-09-17).
+
+## [1.0.3]
 
 Changes since v1.0.2 (2026-08-27).
 
