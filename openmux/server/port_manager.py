@@ -224,8 +224,10 @@ class PortManager:
                 self.client_queues: Dict[str, asyncio.Queue] = {}
                 # Count of chunks evicted by the drop-oldest-on-full policy, surfaced via get_status().
                 self.dropped_chunks = 0
-                # Surface adapter-specific buffering hints so the manager can honor them
-                self.always_buffer = bool(getattr(unified_port, "always_buffer", False))
+                # Active federation relays viewing this port (issue #83). While
+                # greater than zero, the shared queue below is fed even with no
+                # local clients, so the relay sees every byte.
+                self._federation_viewer_count = 0
                 # Scrollback ring buffer: retains the last scrollback_size bytes for replay
                 # on client request.  0 = disabled.
                 self.scrollback_size = int(getattr(unified_port, "scrollback_size", 0))
@@ -328,8 +330,11 @@ class PortManager:
                                 self.name,
                                 exc_info=True,
                             )
-                    # When last client disconnects, clear any remaining buffered data
-                    if len(self.connected_clients) == 0:
+                    # When the last client disconnects, clear any remaining buffered
+                    # data. Skip while a federation relay holds the queue (issue
+                    # #83): those chunks are still owed to the peer and are
+                    # drained when the last hold releases.
+                    if len(self.connected_clients) == 0 and getattr(self, "_federation_viewer_count", 0) == 0:
                         try:
                             while True:
                                 self.data_queue.get_nowait()
@@ -1032,14 +1037,13 @@ class PortManager:
         return False
 
     def add_federation_buffering_hold(self, port_name: str) -> None:
-        """Force a local port to buffer output while a federation peer relays it.
+        """Mark that a federation relay is consuming this port's output.
 
-        Without this, `handle_incoming_port_data` only enqueues into
-        `data_queue` when a *local* client is attached (or `always_buffer` is
-        configured), so `_pump_local_port_to_remote` in muxcon.py silently got
-        nothing to send whenever no local console was also open on the port.
-        Ref-counted so multiple federation streams on the same port don't clobber
-        each other's hold when one of them closes.
+        While the hold count is greater than zero, `handle_incoming_port_data`
+        enqueues into `data_queue` even with no local client attached, so the
+        relay in muxcon.py (`_pump_local_port_to_remote`) receives every byte
+        (issue #83). Ref-counted so multiple federation streams on the same
+        port don't clobber each other's hold when one of them closes.
 
         Args:
             port_name: Local port whose output a federation peer is consuming.
@@ -1049,14 +1053,14 @@ class PortManager:
         port = self.ports.get(port_name)
         if port is None:
             return
-        count = getattr(port, "_federation_viewer_count", 0) + 1
-        port._federation_viewer_count = count
-        if count == 1:
-            port._federation_saved_always_buffer = getattr(port, "always_buffer", False)
-            port.always_buffer = True
+        port._federation_viewer_count = getattr(port, "_federation_viewer_count", 0) + 1
 
     def remove_federation_buffering_hold(self, port_name: str) -> None:
         """Release a hold added by `add_federation_buffering_hold`.
+
+        When the last hold releases, the shared queue is drained: its chunks
+        were owed to the relay that just closed. Recent bytes stay available
+        as history via the scrollback ring (issue #83).
 
         Args:
             port_name: Local port a federation stream has stopped consuming.
@@ -1064,10 +1068,17 @@ class PortManager:
         port = self.ports.get(port_name)
         if port is None:
             return
-        count = max(0, getattr(port, "_federation_viewer_count", 0) - 1)
+        count = max(0, getattr(port, "_federation_viewer_count", 1) - 1)
         port._federation_viewer_count = count
         if count == 0:
-            port.always_buffer = getattr(port, "_federation_saved_always_buffer", False)
+            queue = getattr(port, "data_queue", None)
+            if queue is not None:
+                try:
+                    while True:
+                        queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    # justification: queue drained as intended; emptiness is the exit signal
+                    pass
 
     async def get_port_data(self, port_name: str) -> Optional[bytes]:
         """Read one item of port data without blocking.
@@ -1143,10 +1154,11 @@ class PortManager:
         Args:
             port_name: Logical port name.
             data: Payload bytes to log/forward.
-            require_clients: When True (default) data is enqueued only when at
-                least one client is connected. When False the queue is used even
-                with zero clients. When None, adapter-level hints (e.g.
-                ``always_buffer``) control the behavior.
+            require_clients: When True (default) the shared queue is used only
+                while a client is attached or a federation relay holds the
+                port (``_federation_viewer_count > 0``, issue #83). When False
+                the queue is used regardless of viewers (used for lifecycle
+                notices and drain flushes). When None, the same as True here.
 
         Returns:
             True if accepted/logged; False on queue or unexpected errors.
@@ -1194,18 +1206,17 @@ class PortManager:
                                     exc_info=True,
                                 )
 
-                # Maintain shared queue for muxcon/federation consumers (backward compat)
+                # Maintain the shared queue. Fed while a client is attached,
+                # while a federation relay holds the port (issue #83 replaced
+                # the always_buffer flag with the hold refcount), or when the
+                # sender opts in explicitly (require_clients=False). Console
+                # clients are also served by their per-client queues above;
+                # this queue additionally feeds federation and programmatic
+                # readers (get_port_data).
                 if hasattr(port, "data_queue") and hasattr(port, "connected_clients"):
                     client_list = getattr(port, "connected_clients", []) or []
-                    always_buffer = bool(getattr(port, "always_buffer", False))
-                    require_clients_flag = True if require_clients is None else bool(require_clients)
-                    should_enqueue = False
-                    if not require_clients_flag:
-                        should_enqueue = True
-                    elif len(client_list) > 0:
-                        should_enqueue = True
-                    elif always_buffer:
-                        should_enqueue = True
+                    hold_count = int(getattr(port, "_federation_viewer_count", 0))
+                    should_enqueue = (require_clients is False) or len(client_list) > 0 or hold_count > 0
 
                     if should_enqueue and port.data_queue is not None:
                         try:
@@ -1262,7 +1273,8 @@ class PortManager:
         """Centralized enqueue/log for incoming port data (legacy or unified).
 
         Always records a single port-level outbound log entry, then enqueues
-        for delivery only if there are connected clients.
+        for the per-client delivery queues (clients attached) and for the
+        shared relay queue (federation hold active, or require_clients=False).
 
         Args:
             port_name: Port name.

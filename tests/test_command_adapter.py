@@ -210,7 +210,6 @@ async def test_pty_read_ready_queueing():
     port.is_running = True
     port.process_active = True
     port.use_pty = True
-    port.always_buffer = True
     port._output_flush_task = asyncio.create_task(port._output_flush_buffer_loop())
     rfd, wfd = os.pipe()
     os.set_blocking(rfd, False)
@@ -235,7 +234,6 @@ async def test_stdout_reader_task_queueing():
     port = CommandPort("cp6", {"command": "echo"}, adapter)
     port.is_running = True
     port.use_pty = False
-    port.always_buffer = True
     port.process = cast(Any, FakeProcess([b"foo\r\n", b""]))
     await port._stdout_reader_task()
     got = await asyncio.wait_for(pm.output_queue.get(), timeout=0.1)
@@ -483,7 +481,6 @@ async def test_adapter_reconcile_ports_unchanged(monkeypatch):
         env = None
         max_read_write_users = 1
         interactive = False
-        always_buffer = False
         scrollback_size = 0
 
     adapter.ports["a"] = PortObj()  # type: ignore[assignment]
@@ -520,7 +517,6 @@ async def test_adapter_reconcile_ports_updates_groups_in_place_without_restart(m
         env = None
         max_read_write_users = "one"
         interactive = False
-        always_buffer = False
         scrollback_size = 0
         read_write_groups: list = ["ops"]
         read_only_groups: list = ["viewers"]
@@ -565,7 +561,6 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
         env = None
         max_read_write_users = 1
         interactive = False
-        always_buffer = False
         scrollback_size = 0
 
     class PortB:
@@ -575,7 +570,6 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
         env = None
         max_read_write_users = 1
         interactive = False
-        always_buffer = False
         scrollback_size = 0
 
     adapter.ports["a"] = PortA()  # type: ignore[assignment]
@@ -722,7 +716,6 @@ async def test_reconcile_updates_lifecycle_flags_in_place_without_recreate(monke
         env = None
         max_read_write_users = "one"
         interactive = False
-        always_buffer = False
         scrollback_size = 0
         read_write_groups: list = []
         read_only_groups: list = []
@@ -939,7 +932,7 @@ def test_removed_command_port_keys_detection_and_absorb(caplog):
         "command_ports": [
             {"name": "stale", "command": "echo", "auto_restart": True, "output_crlf": True, "use_pty": False},
             {"name": "clean", "command": "echo", "interactive": True},
-            {"name": "stale2", "command": "echo", "spawn_mode": "shared_on_demand"},
+            {"name": "stale2", "command": "echo", "spawn_mode": "shared_on_demand", "always_buffer": True},
         ]
     }
 
@@ -971,7 +964,7 @@ def test_removed_command_port_keys_detection_and_absorb(caplog):
     assert removed_command_port_keys(config) == []
     assert absorb_removed_command_port_keys(config, logger=logger) == []
     # The tuple is the single source of truth for the removed surface.
-    assert len(REMOVED_COMMAND_PORT_KEYS) == 19
+    assert len(REMOVED_COMMAND_PORT_KEYS) == 20
 
 
 def test_schema_rejects_every_removed_command_port_key():

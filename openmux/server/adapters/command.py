@@ -24,7 +24,9 @@ from .lifecycle import PortState
 # like --check-config and the Config Editor name each unknown key). At live
 # load, ConfigManager.load_config strips them in place with one warning per
 # port, mirroring the ticket-#74/locations absorb shim: a stale config keeps
-# booting instead of failing, until the next minor release.
+# booting instead of failing, until the next minor release. always_buffer
+# (issue #83): relayed output now flows unconditionally; late federation
+# viewers get history from scrollback_size instead.
 
 REMOVED_COMMAND_PORT_KEYS = (
     "auto_restart",
@@ -46,6 +48,7 @@ REMOVED_COMMAND_PORT_KEYS = (
     "enable_batching",
     "batch_size",
     "batch_timeout",
+    "always_buffer",
 )
 
 
@@ -129,9 +132,8 @@ class CommandPort:
         shell (bool): Run under shell via ``create_subprocess_shell``.
         cwd (str): Working directory for the process.
         env (dict): Extra/override environment variables.
-        interactive (bool): Preset that enables PTY + always_buffer +
-            normalize_newlines at once.
-        always_buffer (bool): Keep buffering output even with zero clients.
+        interactive (bool): Preset that enables PTY + normalize_newlines at
+            once.
         normalize_newlines (bool): Normalize newline sequences on input.
         max_read_write_users: Write-slot capacity (one/multiple/none).
         read_write_groups / read_only_groups: Console-group access control.
@@ -191,14 +193,16 @@ class CommandPort:
         self.read_only_groups: List[str] = list(config.get("read_only_groups") or [])
 
         # Behaviour flags. issue #67: interactive is the only config surface
-        # for the terminal preset (PTY + always_buffer + normalize_newlines);
-        # local_echo, use_pty, output_crlf, clean_env, intercept_term_queries
-        # and pty_force_raw/pty_enter_mode config keys are removed. The
-        # behaviors they toggled are now unconditional where the default was
-        # correct (env sanitizing, XTGETTCAP interception, CRLF on output) or
-        # dropped (local echo, forced PTY raw mode, enter-mode mapping).
+        # for the terminal preset (PTY + normalize_newlines); local_echo,
+        # use_pty, output_crlf, clean_env, intercept_term_queries and
+        # pty_force_raw/pty_enter_mode config keys are removed. The behaviors
+        # they toggled are now unconditional where the default was correct
+        # (env sanitizing, XTGETTCAP interception, CRLF on output) or dropped
+        # (local echo, forced PTY raw mode, enter-mode mapping). issue #83:
+        # always_buffer is removed too — port output always feeds the relay
+        # queue (and the scrollback ring) while a federation hold is active;
+        # late remote viewers get history from scrollback_size.
         self.interactive = config.get("interactive", False)
-        self.always_buffer = config.get("always_buffer", self.interactive)
         self.normalize_newlines = config.get("normalize_newlines", self.interactive)
         # Internal only: an interactive port always gets a PTY. The separate
         # use_pty config key is removed; the pipe path is reached by leaving
@@ -389,15 +393,10 @@ class CommandPort:
         """Forward process output through data_callback set by PortManager."""
         if not chunk:
             return
-        require_clients_flag = (not self.always_buffer) if require_clients is None else require_clients
         cb = self.data_callback
         if cb:
             try:
-                ok = await cb(
-                    self.name,
-                    chunk,
-                    require_clients=require_clients_flag,
-                )
+                ok = await cb(self.name, chunk, require_clients=require_clients)
                 if ok:
                     return
             except Exception:
@@ -1529,7 +1528,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "env": cfg.get("env"),
                 "max_read_write_users": mru,
                 "interactive": _interactive,
-                "always_buffer": bool(cfg.get("always_buffer", _interactive)),
                 "scrollback_size": int(cfg.get("scrollback_size", 0)),
             }
 
@@ -1547,7 +1545,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                         "env": getattr(port, "env", None),
                         "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", None)),
                         "interactive": getattr(port, "interactive", None),
-                        "always_buffer": getattr(port, "always_buffer", None),
                         "scrollback_size": getattr(port, "scrollback_size", None),
                     }
                 except Exception:
@@ -1693,7 +1690,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                     "features": {
                         name: {
                             "interactive": getattr(port, "interactive", False),
-                            "always_buffer": getattr(port, "always_buffer", False),
                         }
                         for name, port in self.ports.items()
                     },

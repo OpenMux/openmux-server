@@ -40,7 +40,6 @@ Every port instance **must** expose the following attributes:
 | `state` | `PortState` | Current lifecycle state (see [Lifecycle States](#lifecycle-states)). |
 | `is_connected` | `bool` | `True` when the underlying resource (device, socket, process) is ready for I/O. Ports without a physical resource (e.g. loopback) should be `True` while `ACTIVE`. For command ports it mirrors process liveness: a resting port (on-demand and not yet spawned, or intentionally stopped) counts as connected; the port is disconnected only while the process has exited or a spawn/respawn failed. |
 | `data_callback` | `Callable \| None` | Set by `PortManager.register_unified_port()` to `pm.send_data`. The port must call `await self.data_callback(self.name, data)` for all outbound data. Initialized to `None`; absent PM is an error (see below). |
-| `always_buffer` | `bool` | When `True`, PM enqueues data even when no clients are connected. Defaults to `False`. |
 | `max_read_write_users` | `int` | Maximum number of simultaneous read-write clients. Used by PM for access control. |
 | `read_write_groups` | `List[str]` | Console groups granted read-write access. Empty on both this and `read_only_groups` means the port is open to all authenticated users (today's default behavior). |
 | `read_only_groups` | `List[str]` | Console groups granted read-only access. A user in this group is never promoted to read-write, even if `max_read_write_users` slots are free. |
@@ -146,9 +145,10 @@ else:
 ```
 
 `data_callback` is `pm.send_data`, which applies per-port
-policies (client presence, `always_buffer`, drop-oldest-on-full, DataLogger
-recording) before placing data in the wrapper's internal queue for client
-delivery.
+policies (drop-oldest-on-full, DataLogger recording, federation hold
+refcount — issue #83) before placing data in the wrapper's internal queue
+for client delivery, and appends every chunk to the scrollback ring when
+`scrollback_size` is set.
 
 ### What a port must NOT do
 

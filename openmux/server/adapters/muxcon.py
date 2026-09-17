@@ -5942,6 +5942,43 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception as e:
             self.logger.debug("Empty-peer local session cleanup failed for %s: %s", peer_key, e, exc_info=True)
 
+    async def _seed_federation_stream(self, peer_key: str, stream_id: int, port_name: str, pm: Any) -> None:
+        """Send this port's scrollback snapshot into the stream (issue #83).
+
+        Call this in the same tick the federation hold was added and before
+        the pump loop starts: the snapshot is a synchronous read of the ring,
+        so nothing produced in between is lost. The peer receives the recent
+        output it would have seen had it been attached all along, and its own
+        ring fills from the seed so local viewers on the peer can replay it.
+        The snapshot is split into 16 KiB frames so the retransmission buffer
+        never holds one oversized entry.
+
+        Args:
+            peer_key: Multipath group key the stream is pumped toward.
+            stream_id: Logical stream id carrying the seed and the live tail.
+            port_name: Local port whose history is sent.
+            pm: The port manager that owns the port's scrollback ring.
+        """
+        try:
+            seed = pm.get_scrollback(port_name)
+        except Exception as e:
+            self.logger.debug("Scrollback seed read failed for %s: %s", port_name, e, exc_info=True)
+            return
+        if not seed:
+            return
+        offset = 0
+        while offset < len(seed):
+            if self._stop_event.is_set():
+                return
+            try:
+                ok = await self._send_data_mpath(peer_key, stream_id, seed[offset : offset + 16384])
+            except Exception as e:
+                self.logger.debug("Seed send failed for %s: %s", port_name, e, exc_info=True)
+                return
+            if not ok:
+                return  # no eligible path; the live tail arrives once one does
+            offset += 16384
+
     async def _pump_local_port_to_remote(self, peer_key: str, stream_id: int, port_name: str):
         """Continuously forward data from a local port to the remote stream.
 
@@ -5952,6 +5989,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         mapping for the stream is removed, but only if this task still owns the
         slot - a replacement pump or an in-flight teardown may own it now
         (issue #54).
+
+        Before the loop, the pump seeds the stream with the port's scrollback
+        snapshot (issue #83): the peer's viewer sees recent output from before
+        it attached, mirroring the local web console's scrollback replay. The
+        snapshot is taken in the same tick as the hold (both synchronous, no
+        await between them), so no byte falls in the seam: the first chunks the
+        loop relays follow the seed in order. The seed travels as ordinary
+        data frames; a peer running an older build simply sees extra port
+        output. It is sent after the hold, so bytes produced while the loop
+        is setting up were already captured by the ring.
 
         The queue wait is deliberate: the pump is the wrapper queue's single
         consumer, so a put_nowait wakes it instantly and each chunk is relayed
@@ -5964,16 +6011,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             stream_id: Logical stream id targeting a local port consumer.
             port_name: Name of the local port to read from.
         """
-        # PortManager.handle_incoming_port_data only enqueues into data_queue
-        # (which get_port_data reads below) when a local client is attached, or
-        # always_buffer is set. Without this hold, output was only relayed to
-        # the remote peer while a local console happened to also be open.
+        # handle_incoming_port_data feeds the shared queue (which get_port_data
+        # reads below) while this hold is active, regardless of local clients.
         pm = getattr(self, "main_port_manager", None)
         held = False
         try:
             if pm is not None and hasattr(pm, "add_federation_buffering_hold"):
                 pm.add_federation_buffering_hold(port_name)
                 held = True
+                await self._seed_federation_stream(peer_key, stream_id, port_name, pm)
         except Exception:
             self.logger.debug("Failed to add federation buffering hold for %s", port_name, exc_info=True)
         try:

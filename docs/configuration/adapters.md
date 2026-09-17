@@ -63,11 +63,10 @@ Supported options per port:
 - `shell`: Run via shell (default: false)
 - `cwd`: Working directory
 - `env`: Environment variables map
-- `interactive`: Preset that enables a PTY plus `always_buffer` and `normalize_newlines` (default: false). It does not change the `command` string and never adds a shell. Set it for real terminals (shells, editors, TUIs). For scripted or byte-exact ports leave it off and set `always_buffer`/`normalize_newlines` if you need them (the process then runs on plain pipes).
-- `always_buffer`: Buffer output even with no clients (default: `interactive`)
+- `interactive`: Preset that enables a PTY plus `normalize_newlines` (default: false). It does not change the `command` string and never adds a shell. Set it for real terminals (shells, editors, TUIs). For scripted or byte-exact ports leave it off and set `normalize_newlines` if you need it (the process then runs on plain pipes).
 - `normalize_newlines`: Normalize incoming newlines (default: `interactive`)
 - `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above)
-- `scrollback_size`: Bytes of recent output to keep for replay (default: 0 = off)
+- `scrollback_size`: Bytes of recent output to keep for replay (default: 0 = off). Local viewers replay on attach (`?scrollback=1`); a federation viewer that attaches later gets the same ring sent as the stream seed (issue #83).
 - `read_write_groups` / `read_only_groups`: Console-group access lists (see above)
 Lifecycle: on-demand spawn and idle teardown:
 
@@ -103,7 +102,6 @@ command_ports:
     command: ssh -i /path/to/key user@host
     shell: false
     interactive: true
-    always_buffer: true
 
   - name: shell_on_demand
     description: "Spawn bash only when a client connects; stop after 60s idle"
@@ -125,7 +123,7 @@ command_ports:
   - name: fast_tui
     description: "PTY for editors"
     command: bash
-    interactive: true        # PTY + buffering + newline normalization
+    interactive: true        # PTY + newline normalization
 ```
 
 ### Login prompts via Command Adapter

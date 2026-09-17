@@ -166,14 +166,17 @@ properties:
   # restart_backoff, local_echo, pty_force_raw, pty_enter_mode, spawn_mode,
   # use_pty, output_crlf, clean_env, intercept_term_queries,
   # enable_output_batching, output_batch_size, output_batch_timeout,
-  # output_force_flush_timeout, enable_batching, batch_size, batch_timeout)
-  # are rejected here (additionalProperties: false); the live load path
-  # strips them with a one-time warning per port (see
+  # output_force_flush_timeout, enable_batching, batch_size, batch_timeout);
+  # always_buffer was removed later (issue #83: the relay queue is fed by
+  # the federation hold refcount, and late federation viewers get history
+  # from scrollback_size instead). All removed keys are rejected here
+  # (additionalProperties: false); the live load path strips them with a
+  # one-time warning per port (see
   # ConfigManager.load_config -> absorb_removed_command_port_keys). What
-  # they toggled is now unconditional: sanitized environment, XTGETTCAP
-  # interception, newline normalization (CRLF output, LF pipe input),
-  # fixed I/O batching (1024 bytes / 2 ms), and no automatic restart
-  # (press Enter in the console to respawn).
+  # the first group toggled is now unconditional: sanitized environment,
+  # XTGETTCAP interception, newline normalization (CRLF output, LF pipe
+  # input), fixed I/O batching (1024 bytes / 2 ms), and no automatic
+  # restart (press Enter in the console to respawn).
   command_ports:
     type: array
     items:
@@ -194,10 +197,8 @@ properties:
             - { type: integer, minimum: 0 }
           default: one
         # `interactive` is a shorthand preset that enables PTY plus
-        # always_buffer and normalize_newlines; it never modifies the
-        # command string.
+        # normalize_newlines; it never modifies the command string.
         interactive: { type: boolean }
-        always_buffer: { type: boolean }
         normalize_newlines: { type: boolean }
         # Process lifecycle: on-demand spawn on first client attach, plus
         # optional auto-stop after the last client leaves (0 = never stop).

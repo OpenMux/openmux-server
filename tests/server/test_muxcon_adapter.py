@@ -2028,7 +2028,8 @@ class LocalPortQueue:
         self.connected_clients: List[Dict[str, Any]] = []
         self.client_queues: Dict[str, Any] = {}
         self.max_read_write_users = 1
-        self.always_buffer = False
+        self._federation_viewer_count = 0
+        self._scrollback = bytearray()
 
 
 def _origin_setup(monkeypatch, port_names=("lp1",)):
@@ -2086,6 +2087,8 @@ async def test_close_connection_tears_down_peer_local_sessions(monkeypatch):
     fed: pseudo-client freed and the buffering hold released."""
     a, pm, cm = _origin_setup(monkeypatch)
     port = pm.ports["lp1"]
+    # Give the ring some history: the pump seeds the stream with it (issue #83).
+    port._scrollback.extend(b"banner\n")
     peer_key = "node:peerA"
     w = FakeWriter()
     read_task = _scripted_read_loop(
@@ -2094,23 +2097,32 @@ async def test_close_connection_tears_down_peer_local_sessions(monkeypatch):
 
     try:
         for _ in range(100):
-            if _fed_clients(port):
+            if _fed_clients(port) and a._pump_tasks.get((peer_key, 1)) is not None:
                 break
             await asyncio.sleep(0.02)
         assert len(_fed_clients(port)) == 1
         assert a._local_session_map.get(peer_key, {}).get(1) == "lp1"
         pump_task = a._pump_tasks.get((peer_key, 1))
         assert pump_task is not None and not pump_task.done()
-        assert port.always_buffer is True
-        assert getattr(port, "_federation_viewer_count", 0) == 1
-
-        # While the session is live, port output flows toward the peer.
-        await port.data_queue.put(b"hello")
+        # The pump takes the hold in its first body statement, but the task may
+        # be scheduled and not yet stepped (the fed: client is registered
+        # before the task is created), so poll for the hold.
         for _ in range(100):
-            if b"hello" in w.buffer:
+            if getattr(port, "_federation_viewer_count", 0) >= 1:
                 break
             await asyncio.sleep(0.02)
+        assert getattr(port, "_federation_viewer_count", 0) == 1
+
+        # The stream is seeded with the scrollback snapshot (issue #83), then
+        # live output follows it in order.
+        await port.data_queue.put(b"hello")
+        for _ in range(100):
+            if b"banner\n" in w.buffer and b"hello" in w.buffer:
+                break
+            await asyncio.sleep(0.02)
+        assert b"banner\n" in w.buffer
         assert b"hello" in w.buffer
+        assert w.buffer.index(b"banner\n") < w.buffer.index(b"hello")
     finally:
         # Scripted reader runs out of frames (EOF): the read loop unwinds and
         # closes the connection, which empties the peer group.
@@ -2129,7 +2141,7 @@ async def test_close_connection_tears_down_peer_local_sessions(monkeypatch):
     assert a._session_map.get(peer_key) in (None, {})
     assert not any(pk == peer_key for (pk, _sid) in a._pump_tasks)
     assert _fed_clients(port) == []
-    assert port.always_buffer is False
+    assert port.data_queue.empty()  # the last hold drained the queue (issue #83)
     assert getattr(port, "_federation_viewer_count", 1) == 0
     assert cm.client_port_map.get(f"fed:{peer_key}:1") is None
 

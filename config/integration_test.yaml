@@ -20,10 +20,10 @@ command_ports:
     command: "/bin/cat"
     shell: false
     max_read_write_users: 1
-    # Pipe-based passthrough with interactive defaults: buffer output even
-    # with no clients and normalize newlines, without a PTY (issue #67
-    # removed use_pty; interactive: true would add a PTY).
-    always_buffer: true
+    # Pipe-based passthrough with newline normalization, without a PTY
+    # (issue #67 removed use_pty; interactive: true would add a PTY).
+    # History for late federation viewers comes from scrollback_size
+    # (issue #83 removed always_buffer).
     normalize_newlines: true
 
 # Optional serial: point to /tmp/vserial1 if setup_virtual_serial.sh is running

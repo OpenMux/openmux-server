@@ -80,8 +80,6 @@ class LoopbackPort:
         _pm = getattr(getattr(self, "adapter", None), "main_port_manager", None)
         if _pm and hasattr(_pm, "send_data"):
             self.data_callback = _pm.send_data
-        # Hints for port manager queue policy
-        self.always_buffer = False
         self._queue_fallback_logged = False
         # Scrollback replay buffer size in bytes; 0 = disabled. See docs/ADAPTER_PORT_CONTRACT.md.
         self.scrollback_size: int = int(config.get("scrollback_size", 0))

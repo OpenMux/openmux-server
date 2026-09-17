@@ -618,8 +618,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           cwd: 'Working directory for the command.',
           max_read_write_users: 'How many users may write at once: one = 1 (default), multiple = unlimited, none = no driver (admin included).',
           normalize_newlines: 'Normalize incoming newlines to LF for pipe-based sessions; the process output is normalized to the terminal convention.',
-          interactive: 'Preset that allocates a PTY and enables always_buffer and normalize_newlines. Does not modify the command string and never adds a shell.',
-          always_buffer: 'Buffer output even with zero connected clients.',
+          interactive: 'Preset that allocates a PTY and enables normalize_newlines. Does not modify the command string and never adds a shell.',
           spawn_on_demand: 'Spawn the process only when the first client attaches. The port stays idle until a user connects. Pair with idle_timeout_sec for full spawn/teardown lifecycle.',
           idle_timeout_sec: 'Stop the process this many seconds after the last client leaves. 0 = never auto-stop. A client that reconnects inside the window cancels the stop; the next attach after a stop respawns a fresh process.',
           scrollback_size: 'Bytes of recent output to buffer for scrollback replay (0 = disabled). Clients request replay with ?scrollback=1.',
@@ -945,7 +944,6 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'max_read_write_users', label:'Write slots', type:'enum', enum:['one','multiple','none']},
           {key:'interactive', label:'Interactive', type:'boolean'},
           {key:'normalize_newlines', label:'Normalize newlines', type:'boolean'},
-          {key:'always_buffer', label:'Always buffer', type:'boolean'},
           // Lifecycle: spawn on first client attach, stop on last client leaving.
           // Mirrors the serial adapter's presence-driven dtr/rts policy (issue #63).
           {key:'spawn_on_demand', label:'Spawn on demand', type:'boolean'},

@@ -214,7 +214,6 @@ class SerialPortWrapper:
 
         # Lifecycle state (contract: PortState)
         self.state = PortState.CONFIGURED
-        self.always_buffer: bool = False
 
         # Connection state
         self.reader: Optional[asyncio.StreamReader] = None

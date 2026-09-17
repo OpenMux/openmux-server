@@ -109,7 +109,7 @@ loopback_ports (per-port) (schema + runtime)
 command_ports (per-port) (schema defaults; issue #67 consolidated the surface)
 - shell: false
 - max_read_write_users: one
-- cwd, env, interactive, always_buffer, normalize_newlines: no defaults
+- cwd, env, interactive, normalize_newlines: no defaults
 - spawn_on_demand: false
 - idle_timeout_sec: 0
 - scrollback_size: 0

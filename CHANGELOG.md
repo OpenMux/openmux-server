@@ -10,23 +10,23 @@ Changes since v1.0.2 (2026-08-27).
 
 ### Config changes to check before upgrading
 
-- **Command adapter ports: 19 per-port keys are removed** (issue #67). The
-  `command_ports` surface is reduced to 15 keys; the removed keys either
-  became unconditional behavior or are dropped features. Remove them from
-  your `server.yaml`:
+- **Command adapter ports: 20 per-port keys are removed** (issue #67,
+  completed by #83). The `command_ports` surface is reduced to 14 keys; the
+  removed keys either became unconditional behavior or are dropped features.
+  Remove them from your `server.yaml`:
   - Became unconditional (the behavior is always on; the key is ignored):
     `clean_env`, `intercept_term_queries`, `output_crlf`,
     `enable_output_batching`, `output_batch_size`, `output_batch_timeout`,
     `output_force_flush_timeout`, `enable_batching`, `batch_size`,
-    `batch_timeout`.
+    `batch_timeout`, `always_buffer` (see "Federation streams are seeded from
+    the origin scrollback" below).
   - Dropped features (no longer possible at all): `auto_restart`,
     `restart_delay`, `max_restarts`, `restart_backoff` (a process never
     restarts itself; press Enter in the console to respawn), `local_echo`,
     `pty_force_raw`, `pty_enter_mode`, `use_pty` (a PTY is enabled by
     `interactive: true`), `spawn_mode` (use `spawn_on_demand: true`).
   For the `use_pty` override case (`interactive: true` plus
-  `use_pty: false`), set `always_buffer: true` and `normalize_newlines: true`
-  on the pipe instead.
+  `use_pty: false`), set `normalize_newlines: true` on the pipe instead
   The schema rejects every removed key (`--check-config` and the Config
   Editor name each one and refuse the save); at live load the ConfigManager
   strips the keys with one warning per stale port for this one release, so a
@@ -209,6 +209,8 @@ Changes since v1.0.2 (2026-08-27).
   - Fresh installs are unaffected: they configure federation explicitly, and the default configs carry no `muxcon` filters.
 
 ### Behavior changes (no config change required)
+
+- **Federation streams are seeded from the origin scrollback; the `always_buffer` key is removed** (issue #83). A peer that opens a federated port now first receives the origin port's `scrollback_size` ring (sent as ordinary data frames, so older peers tolerate it), then the live output follows with no gap or duplication. Local console clients are unaffected: they already replay the ring on attach via `?scrollback=1`; the shared relay queue is now fed by the federation hold reference count instead of the removed `always_buffer` config flag. The queue is drained when the last relay closes, and a client leaving can no longer clear in-flight relay bytes (the old drain ignored active relays, which could gap a federated stream). Set `scrollback_size` on a port to give late federation viewers history; with the default 0 a late viewer simply starts from the live tail. No config change is required; removing the key from `server.yaml` is the only action named above, and it follows the same one-release strip-and-warn as the #67 keys.
 
 - **The server no longer silently falls back to a bundled config.** When `-c`/`--config-dir` name a missing file, the server exits with a hint instead of loading `config/server.yaml` from the source tree. Dev workflow: `make init-config` seeds the gitignored `config-local/` from the pristine `config/` defaults; `make run-server` runs `--config-dir config-local`. The bare `openmux-server` also uses `config-local/` when it exists. Packaged installs are unchanged (`/etc/openmux`, `--config-dir`).
 - **Config files are validated against the JSON schemas at startup.** The

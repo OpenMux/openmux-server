@@ -302,13 +302,21 @@ async def test_force_enqueue_and_drop_oldest(monkeypatch):
             self.data_queue = asyncio.Queue(maxsize=2)
             self.connected_clients: List[Dict[str, Any]] = []
             self.max_read_write_users = 1
-            self.always_buffer = False
+            self._federation_viewer_count = 0
 
     port = DummyPort()
     pm.ports["pbuf"] = port
 
-    # Default behavior: no clients -> data only logged
+    # Default behavior: no clients, no federation hold -> data only logged
     assert await pm.send_data("pbuf", b"A") is True
+    assert port.data_queue.empty()
+
+    # A federation hold alone (no clients) feeds the relay queue (issue #83)
+    pm.add_federation_buffering_hold("pbuf")
+    assert await pm.send_data("pbuf", b"H") is True
+    assert port.data_queue.get_nowait() == b"H"
+    pm.remove_federation_buffering_hold("pbuf")
+    # The last hold release drains the queue (relayed bytes are owed no more)
     assert port.data_queue.empty()
 
     # Force enqueue with zero clients

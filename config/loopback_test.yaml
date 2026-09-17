@@ -13,8 +13,7 @@ command_ports:
   max_read_write_users: 1
   name: date_command
   shell: true
-- always_buffer: true
-  command: zsh
+- command: zsh
   description: Bash console.. yea.. not so secure...
   interactive: true
   max_read_write_users: 2
