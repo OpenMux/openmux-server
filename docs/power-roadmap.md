@@ -22,15 +22,20 @@ gets recorded. It does not add new device drivers or federate power.
       Switching an outlet that feeds any console outside the user's groups
       requires `admin`. Apply this on both the web API (`POST
       /api/power/outlets/{ref}`) and the CLI `POWER ... on|off` path.
-- [ ] **Control audit log.** Write one server-log line when an outlet switch
-      SUCCEEDS. The line names the user, the outlet ref, the new state (on/off),
-      and the impact (consoles that lose all power). Log only on success;
-      failures already log.
-- [ ] **Record the notice in the port log.** Append the `[POWER]` /
-      `[POWER WARNING]` notice text to each affected console's port data log so
-      the event is kept even when no client is attached. (v1 sends the notice
-      only to attached sessions via `send_raw_data`; it is not written to the
-      port log or the scrollback.)
+- [x] **Control audit log** — 2026-09-18. `PduAdapter.set_outlet` takes
+      `user`/`client_id` (web passes the authenticated username, CLI passes the
+      session username + client id) and on success logs one human-readable
+      INFO line, e.g.
+      `POWER CONTROL: user rw turned rack1.1 off; losing all power: c1;
+      staying up: c2; client ab12cd34`. Failures are not audit-logged (each
+      logs its own error).
+- [x] **Record the notice in the port log** — 2026-09-18. Each successful
+      switch records a `power_control_notice` meta event on every affected
+      console's port data log (`DataLogger.record_meta`), carrying the
+      `[POWER]` / `[POWER WARNING]` notice wording (single line, the outlet
+      ref in the record's own `outlet=` field), plus the new state, user,
+      and client id. The all-lost warning form is decided per-port (same
+      rule as the session notice).
 - [ ] **Add a CHANGELOG entry.** One entry under "Behavior changes" for the
       access-control change, naming the `power` paths affected.
 

@@ -241,7 +241,7 @@ async def test_power_pages_render_sidebar_with_pdus_and_ports():
 
 
 @pytest.mark.asyncio
-async def test_set_outlet_permission_and_csrf():
+async def test_set_outlet_permission_and_csrf(caplog):
     ctx = await _start(0)
     try:
         _, _, _, pdu, port = ctx
@@ -252,17 +252,21 @@ async def test_set_outlet_permission_and_csrf():
                 f"http://127.0.0.1:{port}/api/power/outlets/rack1.1", headers=_hdr("ro"), json={"on": False}
             ) as resp:
                 assert resp.status == 403
-            # read-write succeeds and the state + impact are returned
-            async with session.post(
-                f"http://127.0.0.1:{port}/api/power/outlets/rack1.1", headers=_hdr("rw"), json={"on": False}
-            ) as resp:
-                assert resp.status == 200
-                data = await resp.json()
-                assert data["ok"] is True
-                assert data["reading"]["on"] is False
-                # p1 keeps rack1.2, so it stays up via the other feed
-                assert data["impact"]["staying_up"][0]["port"] == "p1"
-                assert data["impact"]["losing_power"] == []
+            # read-write succeeds and the state + impact are returned, and the
+            # web switch path writes the control audit line with the user
+            with caplog.at_level("INFO", logger="openmux.adapter.power"):
+                async with session.post(
+                    f"http://127.0.0.1:{port}/api/power/outlets/rack1.1", headers=_hdr("rw"), json={"on": False}
+                ) as resp:
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["ok"] is True
+                    assert data["reading"]["on"] is False
+                    # p1 keeps rack1.2, so it stays up via the other feed
+                    assert data["impact"]["staying_up"][0]["port"] == "p1"
+                    assert data["impact"]["losing_power"] == []
+            audit = [r for r in caplog.records if "POWER CONTROL" in r.getMessage()]
+            assert any("user rw turned rack1.1 off" in r.getMessage() for r in audit)
             # Now p1 only has rack1.2; turning rack1.2 off would lose all power
             async with session.post(
                 f"http://127.0.0.1:{port}/api/power/outlets/rack1.2", headers=_hdr("rw"), json={"on": False}

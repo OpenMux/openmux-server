@@ -540,7 +540,7 @@ Outlet ref = `<pdu_name>.<outlet_id>` (for example `rack1.3`, `phaseA.A1`). This
 
 Console-side mapping: add `power: ["<ref>", ...]` to a port entry in any of the four port sections (`serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`). Multiple entries = A/B dual feed. A ref to an unknown PDU or outlet raises a warning at startup (not fatal). The web status page and the console header show a power dot (green all feeds on, yellow partial, red all off, grey unknown); the console header badge opens a per-outlet on/off menu.
 
-Any power change (web toggle, CLI, or a poll that detects out-of-band drift) sends a message to every attached session of every console the outlet feeds, and updates the web badges live.
+Any power change (web toggle, CLI, or a poll that detects out-of-band drift) sends a message to every attached session of every console the outlet feeds, and updates the web badges live. A successful manual switch also writes two records: one `POWER CONTROL` audit line in the server log (user, outlet ref, new state, consoles that lose all power), and a `power_control_notice` meta event in each affected console's port data log (the `[POWER]` notice wording, so the event stays in the log with no client attached). Polls that detect out-of-band drift update the badges but do not audit-log; only a user's switch is a control event.
 
 CLI (client listener, command phase) syntax:
 ```

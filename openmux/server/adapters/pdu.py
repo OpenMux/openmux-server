@@ -32,6 +32,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
+from ..data_logger import DataLogger
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 
 # Default poll cadence (seconds) when a PDU entry omits `poll_interval`.
@@ -539,13 +540,22 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             raise ValueError(f"invalid outlet ref {ref!r}")
         return pdu_name, outlet_id
 
-    async def set_outlet(self, ref: str, on: bool) -> Dict[str, Any]:
+    async def set_outlet(
+        self, ref: str, on: bool, user: Optional[str] = None, client_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Switch one outlet and broadcast the change to affected consoles.
 
         Returns ``{ok, reading, impact}``; on pre-flight failure (bad ref,
         unknown PDU/outlet, driver error) ``ok`` is False and no event is
         emitted. ``impact`` is computed BEFORE the change so the caller can
         show what will go offline.
+
+        On success the control audit log records one server-log line
+        (``POWER CONTROL``) naming the user, the outlet ref, the new state, and
+        the consoles losing all power; each affected console port's data log
+        gains a ``power_control_notice`` meta event with the ``[POWER]``
+        notice wording (single line, log-appropriate). Failures are not
+        audit-logged (each logs its own error line).
         """
         try:
             pdu_name, outlet_id = self._parse_ref(ref)
@@ -578,11 +588,91 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             state.online = True
         if prev is None or prev.on != reading.on:
             self._emit_outlet_change(pdu_name, outlet_id, prev.on if prev else None, reading.on)
+        self._audit_control(ref, bool(on), user, client_id, impact)
         return {"ok": True, "reading": reading.to_dict(), "impact": impact}
 
     @staticmethod
     def _empty_impact(on: bool) -> Dict[str, Any]:
         return {"change": "on" if on else "off", "losing_power": [], "staying_up": []}
+
+    # --- control audit + port-log notice ------------------------------------
+
+    def _port_obj_for_name(self, port_name: str) -> Any:
+        """Return the port registry entry for one port (used for log paths)."""
+        pm = self.main_port_manager
+        try:
+            if pm is not None:
+                ports = getattr(pm, "ports", {})
+                if isinstance(ports, dict):
+                    return ports.get(port_name)
+        except Exception:
+            pass
+        return None
+
+    def _control_notice_text(self, ref: str, on: Optional[bool]) -> str:
+        """The single-line ``[POWER]`` wording for this change (for the port log).
+
+        Mirrors the wording of the client-listener terminal notice, which is
+        built separately (with its ``\r\n`` framing and, in the all-lost case,
+        the outlet named in parens for the attached clients). The port log
+        keeps only the plain sentence: the outlet ref is already in the
+        record's ``outlet=`` field.
+        """
+        if on is True:
+            return "[POWER] feed " + ref + " is now on"
+        if on is False:
+            return "[POWER] feed " + ref + " is now off"
+        return "[POWER UNKNOWN] feed " + ref + " state unknown"
+
+    def _control_all_lost_notice_text(self) -> str:
+        """The log-appropriate warning for a console that lost its last feed.
+
+        In the port log ``this console`` is the port the file belongs to, and
+        the outlet that just went off sits in the record's ``outlet=`` field,
+        so the parenthetical the terminal notice uses would mislead.
+        """
+        return "[POWER WARNING] all power feeds to this console are now off"
+
+    def _audit_control(
+        self, ref: str, on: bool, user: Optional[str], client_id: Optional[str], impact: Dict[str, Any]
+    ) -> None:
+        """Record one control event: server-log audit line + per-affected-port
+        data-log notice. Runs only on successful switches (the caller logs
+        driver failures itself). Best-effort: a logging fault never changes
+        the switch result.
+        """
+        ref = str(ref)
+        state_txt = "on" if on else "off"
+        losing = [str(e.get("port")) for e in impact.get("losing_power") or [] if isinstance(e, dict) and e.get("port")]
+        staying = [str(e.get("port")) for e in impact.get("staying_up") or [] if isinstance(e, dict) and e.get("port")]
+        meta_text = self._control_notice_text(ref, on)
+        warn_text = self._control_all_lost_notice_text()
+        parts = ["POWER CONTROL: user " + (user or "unknown") + " turned " + ref + " " + state_txt]
+        if losing:
+            parts.append("losing all power: " + ", ".join(losing))
+        if staying:
+            parts.append("staying up: " + ", ".join(staying))
+        if client_id:
+            parts.append("client " + str(client_id))
+        self.logger.info("; ".join(parts))
+        # Port data log: one meta event per affected console port. The text
+        # mirrors the attached-session notice; the all-lost case is computed
+        # port-wise (that port's other feeds all off), same rule as the
+        # per-port fan-out in _emit_outlet_change.
+        for port_name in self._mapped_ports_for_ref(ref):
+            port_obj = self._port_obj_for_name(port_name)
+            other_outlets_on = [r for r in self.port_power_map(port_name) if r != ref and self._outlet_on_state(r) is True]
+            event_text = warn_text if (on is False and not other_outlets_on) else meta_text
+            try:
+                DataLogger.get().record_meta(
+                    port_name=port_name,
+                    event="power_control_notice",
+                    client_id=client_id,
+                    meta={"outlet": ref, "state": "on" if on else "off", "text": event_text, "user": user or "unknown"},
+                    port_obj=port_obj,
+                )
+            except Exception:
+                self.logger.debug("Power control port-log record failed for %s", port_name, exc_info=True)
 
     # --- console-side mapping (live) ----------------------------------------
 

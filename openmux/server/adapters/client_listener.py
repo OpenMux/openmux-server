@@ -958,7 +958,7 @@ class TcpServerAdapter(BaseGenericAdapter):
                         "NOTE:POWER: " + str(staying.get("port")) + " stays up via " + (via or "other feed")
                     )
             try:
-                result = await pdu.set_outlet(arg, on)
+                result = await pdu.set_outlet(arg, on, user=client.username, client_id=getattr(client, "client_id", None))
             except Exception as exc:
                 await client.send_line("ERROR:POWER: " + str(exc))
                 return

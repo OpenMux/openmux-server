@@ -23,6 +23,27 @@ from openmux.server.adapters.pdu import (
     PduState,
     driver_catalog,
 )
+from openmux.server.data_logger import DataLogger
+
+
+class _CapDL:
+    """DataLogger stand-in: captures record_meta calls, keeps nothing on disk."""
+
+    def __init__(self):
+        self.calls = []
+        self.base_dir = None
+
+    def record_meta(self, port_name, event, client_id=None, meta=None, port_obj=None):
+        self.calls.append({"port_name": port_name, "event": event, "client_id": client_id, "meta": meta})
+
+
+@pytest.fixture(autouse=True)
+def _cap_data_logger(monkeypatch):
+    """Route every DataLogger use in this module to a capture stub."""
+    cap = _CapDL()
+    monkeypatch.setattr(DataLogger, "get", classmethod(lambda cls: cap))
+    yield cap
+
 
 POWER_SECTION = {
     "power": {
@@ -568,3 +589,119 @@ def test_parse_ref_ok(ref, expected):
 def test_parse_ref_bad(ref):
     with pytest.raises(ValueError):
         PduAdapter._parse_ref(ref)
+
+
+# --- control audit log + port-log notice ----------------------------------------
+
+
+@asyncio_test
+async def test_set_outlet_audit_line_and_port_log_notice(caplog):
+    """A successful switch writes one audit line and one port-log meta event
+    per affected console port, with the attached-session notice text."""
+    pm = _FakePortManager({"console1": _FakePort("console1", ["rack1.1"])})
+    adapter = await _start(_make_adapter(pm))
+    with caplog.at_level("INFO", logger="openmux.adapter.power"):
+        res = await adapter.set_outlet("rack1.1", False, user="alice", client_id="cid-9")
+    assert res["ok"] is True
+    audit = [r for r in caplog.records if "POWER CONTROL" in r.getMessage()]
+    assert len(audit) == 1
+    msg = audit[0].getMessage()
+    assert "user alice turned rack1.1 off" in msg
+    assert "losing all power: console1" in msg
+    assert "client cid-9" in msg
+    # The port data log gains the SAME text the attached sessions see.
+    dlc = DataLogger.get()
+    assert len(dlc.calls) == 1
+    call = dlc.calls[0]
+    assert call["port_name"] == "console1"
+    assert call["event"] == "power_control_notice"
+    assert call["client_id"] == "cid-9"
+    assert call["meta"]["outlet"] == "rack1.1"
+    assert call["meta"]["state"] == "off"
+    assert call["meta"]["user"] == "alice"
+    assert call["meta"]["text"] == "[POWER WARNING] all power feeds to this console are now off"
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_set_outlet_port_log_distinguishes_dual_feed():
+    """Turning an outlet OFF: a console with ANOTHER live feed gets the plain
+    feed-off line (it stays up); a console whose last feed dies gets the
+    all-power-lost warning. Turning ON always gets the plain feed-on line."""
+    pm = _FakePortManager(
+        {
+            "c_duo": _FakePort("c_duo", ["rack1.1", "rack1.2"]),  # stays up via rack1.2
+            "c_single": _FakePort("c_single", ["rack1.1"]),  # loses all power
+        }
+    )
+    adapter = await _start(_make_adapter(pm))
+    await adapter.set_outlet("rack1.1", False, user="bob")
+    dlc = DataLogger.get()
+    by_port = {c["port_name"]: c for c in dlc.calls}
+    assert set(by_port) == {"c_duo", "c_single"}
+    assert by_port["c_duo"]["meta"]["text"] == "[POWER] feed rack1.1 is now off"
+    assert by_port["c_single"]["meta"]["text"] == "[POWER WARNING] all power feeds to this console are now off"
+    # Back on: plain notice for both consoles.
+    dlc.calls.clear()
+    await adapter.set_outlet("rack1.1", True, user="bob")
+    by_port = {c["port_name"]: c for c in dlc.calls}
+    assert set(by_port) == {"c_duo", "c_single"}
+    assert all(c["meta"]["text"] == "[POWER] feed rack1.1 is now on" for c in by_port.values())
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_set_outlet_failure_writes_no_audit_or_port_log(caplog):
+    """Driver failure: the error line is logged, but no audit line and no
+    port-log notice are written."""
+    pm = _FakePortManager({"console1": _FakePort("console1", ["rack1.1"])})
+    adapter = await _start(_make_adapter(pm))
+    state = adapter.pdus["rack1"]
+    orig = state.driver.set_state
+
+    async def _boom(outlet_id, on):
+        raise RuntimeError("driver exploded")
+
+    state.driver.set_state = _boom
+    try:
+        with caplog.at_level("INFO", logger="openmux.adapter.power"):
+            res = await adapter.set_outlet("rack1.1", False, user="carol")
+    finally:
+        state.driver.set_state = orig
+    assert res["ok"] is False and "driver exploded" in res["error"]
+    assert not [r for r in caplog.records if "POWER CONTROL" in r.getMessage()]
+    assert [r for r in caplog.records if "set_state failed" in r.getMessage()]
+    dlc = DataLogger.get()
+    assert dlc.calls == []
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_set_outlet_audit_without_mapped_ports_is_still_recorded(caplog):
+    """A switch with no console mapped to the outlet still logs the audit line,
+    but writes no port-log notice (no port to write to)."""
+    adapter = await _start(_make_adapter())
+    dlc = DataLogger.get()
+    with caplog.at_level("INFO", logger="openmux.adapter.power"):
+        res = await adapter.set_outlet("rack1.1", True, user="dave")
+    assert res["ok"] is True
+    audit = [r for r in caplog.records if "POWER CONTROL" in r.getMessage()]
+    assert len(audit) == 1
+    assert "user dave turned rack1.1 on" in audit[0].getMessage()
+    assert dlc.calls == []
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_set_outlet_audit_unknown_user_is_recorded_as_unknown(caplog):
+    """Callers that do not pass a user (none in v1 does; defense in depth)
+    still produce an audit line with user=unknown."""
+    adapter = await _start(_make_adapter())
+    with caplog.at_level("INFO", logger="openmux.adapter.power"):
+        res = await adapter.set_outlet("rack1.1", False)
+    assert res["ok"] is True
+    audit = [r for r in caplog.records if "POWER CONTROL" in r.getMessage()]
+    assert len(audit) == 1
+    assert "user unknown turned rack1.1 off" in audit[0].getMessage()
+    assert "client" not in audit[0].getMessage()
+    await adapter.stop()

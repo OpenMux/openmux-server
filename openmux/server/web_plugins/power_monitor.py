@@ -166,7 +166,7 @@ async def _handle_set_outlet(request: web.Request) -> web.StreamResponse:
     if not isinstance(on, bool):
         return web.json_response({"error": True, "message": "`on` must be a boolean"}, status=400)
     try:
-        result = await pdu.set_outlet(ref, on)
+        result = await pdu.set_outlet(ref, on, user=username)
     except Exception as exc:
         return web.json_response({"error": True, "message": str(exc)}, status=500)
     if not result.get("ok"):
