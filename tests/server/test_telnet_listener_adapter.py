@@ -1,6 +1,7 @@
 """Tests for the telnet listener's auth/menu-mode/login-shortcut features."""
 
 import asyncio
+import types
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -465,3 +466,225 @@ async def test_forward_payload_readonly_silent_without_enter():
 
     assert ok is True
     assert session.writer.buffer == b""
+
+
+# ---------------------------------------------------------------------------
+# `p` control-menu command: interactive, per-console power menu (v3)
+
+
+def _byte_chunks(text: str) -> List[bytes]:
+    """Feed each typed character as its own chunk (one read() per byte)."""
+    return [c.encode("latin1") for c in text]
+
+
+class _FakePdu:
+    """Duck-typed PDU adapter: one PDU, two outlets."""
+
+    def __init__(self):
+        self.enabled = True
+        self.set_calls = []
+        self.blocked = {}
+        self.meta_emit = None  # when set: called(ref->port,changes) on switch, like the real fan-out
+
+    def get_adapter_type(self):
+        return "power"
+
+    def port_power_map(self, port_name):
+        # This one console is fed by both outlets of the single PDU.
+        return ["rack1.1", "rack1.2"]
+
+    def _outlet_on_state(self, ref):
+        return True
+
+    def compute_off_impact(self, ref):
+        return {"losing_power": [], "staying_up": []}
+
+    def _power_blocked_ports(self, ref, _username):
+        return self.blocked.get(ref, [])
+
+    async def set_outlet(self, ref, on, user=None, client_id=None):
+        self.set_calls.append((ref, on, user, client_id))
+        if self.meta_emit is not None:
+            self.meta_emit(
+                "loopback1",
+                {"event": "power_outlet_changed", "outlet": ref, "on": on, "all_power_lost": False},
+            )
+        return {"ok": True, "reading": {"on": on}}
+
+    def get_power_snapshot(self):
+        return {
+            "pdus": [
+                {
+                    "name": "rack1",
+                    "driver": "dummy",
+                    "online": True,
+                    "outlets_on": 2,
+                    "outlet_count": 2,
+                    "outlets": [
+                        {"ref": "rack1.1", "on": True, "watts": None, "volts": None, "mapped_ports": []},
+                        {"ref": "rack1.2", "on": True, "watts": None, "volts": None, "mapped_ports": []},
+                    ],
+                }
+            ],
+            "unresolved_refs": [],
+        }
+
+
+class _FakeAuth:
+    def get_user_permissions(self, username):
+        return {"admin": "admin", "rw": "read-write"}.get(username)
+
+
+class _FakePowerPortManager:
+    def __init__(self, pdu):
+        self.unified_adapters = [pdu]
+
+
+def _wire_power(adapter, pdu, port_name="loopback1"):
+    cm = types.SimpleNamespace(port_manager=_FakePowerPortManager(pdu))
+    adapter.console_manager = cm
+    adapter.main_port_manager = cm.port_manager
+    adapter.auth_manager = _FakeAuth()
+    return cm
+
+
+@pytest.mark.asyncio
+async def test_power_switch_on_numbered_entry():
+    adapter = make_adapter(["loopback1"])
+    pdu = _FakePdu()
+    _wire_power(adapter, pdu)
+    session = make_session(read_only=False)
+    session.username = "rw"
+    # The menu renders this console's two feeds; typing "1" toggles the first.
+    session.reader = FakeReader(_byte_chunks("1\n"))
+
+    await adapter._handle_control_command(session, "p")
+
+    assert pdu.set_calls == [("rack1.1", False, "rw", "c1")]
+    out = session.writer.buffer.decode()
+    assert " 1  [on]   rack1.1" in out  # numbered, one per line
+    assert " 2  [on]   rack1.2" in out
+    assert "POWER rack1.1 -> off" in out
+
+
+@pytest.mark.asyncio
+async def test_power_menu_empty_exits():
+    adapter = make_adapter(["loopback1"])
+    pdu = _FakePdu()
+    _wire_power(adapter, pdu)
+    session = make_session(read_only=False)
+    session.username = "rw"
+    session.reader = FakeReader([b"\n"])  # just Enter: exit, no change
+
+    await adapter._handle_control_command(session, "p")
+
+    assert pdu.set_calls == []
+    out = session.writer.buffer.decode()
+    assert " 1  [on]   rack1.1" in out  # feeds listed
+    assert "[EXITING POWER]" in out
+
+
+@pytest.mark.asyncio
+async def test_power_menu_notice_printed_before_prompt():
+    adapter = make_adapter(["loopback1"])
+    pdu = _FakePdu()
+    _wire_power(adapter, pdu)
+    session = make_session(read_only=False)
+    session.username = "rw"
+    adapter.sessions["c1"] = session
+    session.reader = FakeReader(_byte_chunks("1\n\n"))
+
+    # Mimic the real fan-out: pm.notify_meta_updated runs the (sync) meta
+    # listener synchronously, and the listener pushes the [POWER] notice to
+    # the session as a background task (ensure_future).
+    def emit_meta(port_name, changes):
+        adapter._on_port_meta_update(port_name, changes)
+
+    pdu.meta_emit = emit_meta
+
+    await adapter._handle_control_command(session, "p")
+
+    assert pdu.set_calls == [("rack1.1", False, "rw", "c1")]
+    out = session.writer.buffer.decode()
+    notice_i = out.find("[POWER] feed rack1.1 is now off")
+    # The header prints once; the list re-renders without it. Mark the
+    # re-render by the last feed line's second occurrence.
+    feed = " 2  [on]   rack1.2"
+    rerender_i = out.find(feed, out.find("POWER rack1.1 -> off"))
+    assert notice_i != -1 and rerender_i != -1
+    assert notice_i < rerender_i  # the notice must not displace the re-rendered list
+    assert out.rfind(feed) > notice_i  # the loop re-renders the list after the notice
+
+
+@pytest.mark.asyncio
+async def test_power_menu_requires_read_write():
+    adapter = make_adapter(["loopback1"])
+    pdu = _FakePdu()
+    _wire_power(adapter, pdu)
+    session = make_session(read_only=False)
+    session.username = "nobody"  # not in the fake auth map -> no read-write
+    session.reader = FakeReader(_byte_chunks("1\n"))
+
+    await adapter._handle_control_command(session, "p")
+
+    assert pdu.set_calls == []
+    assert "insufficient permission" in session.writer.buffer.decode()
+
+
+@pytest.mark.asyncio
+async def test_power_menu_group_blocked():
+    adapter = make_adapter(["loopback1"])
+    pdu = _FakePdu()
+    pdu.blocked = {"rack1.2": ["c2"]}
+    _wire_power(adapter, pdu)
+    session = make_session(read_only=False)
+    session.username = "rw"
+    session.reader = FakeReader(_byte_chunks("2\n"))  # toggles the 2nd feed
+
+    await adapter._handle_control_command(session, "p")
+
+    assert pdu.set_calls == []
+    out = session.writer.buffer.decode()
+    assert "ERROR:POWER: rack1.2 feeds consoles outside your groups (c2)" in out
+    assert "needs admin" in out
+
+
+@pytest.mark.asyncio
+async def test_power_menu_invalid_entry_keeps_looping():
+    adapter = make_adapter(["loopback1"])
+    pdu = _FakePdu()
+    _wire_power(adapter, pdu)
+    session = make_session(read_only=False)
+    session.username = "rw"
+    # "9" is out of range, then "2" toggles the second feed, then Enter exits.
+    session.reader = FakeReader(_byte_chunks("9\n2\n\n"))
+
+    await adapter._handle_control_command(session, "p")
+
+    assert pdu.set_calls == [("rack1.2", False, "rw", "c1")]
+    out = session.writer.buffer.decode()
+    assert "number out of range (1-2)" in out
+    assert "POWER rack1.2 -> off" in out
+
+
+@pytest.mark.asyncio
+async def test_power_notice_pushed_to_attached_session():
+    adapter = make_adapter(["loopback1"])
+    pdu = _FakePdu()
+    _wire_power(adapter, pdu)
+    session = make_session()
+    adapter.sessions["c1"] = session
+
+    adapter._on_port_meta_update(
+        "loopback1",
+        {"event": "power_outlet_changed", "outlet": "rack1.1", "on": False, "all_power_lost": False},
+    )
+    await asyncio.sleep(0)
+    assert b"[POWER] feed rack1.1 is now off" in session.writer.buffer
+
+    adapter._on_port_meta_update(
+        "loopback1",
+        {"event": "power_outlet_changed", "outlet": "rack1.2", "on": False, "all_power_lost": True},
+    )
+    await asyncio.sleep(0)
+    assert b"[POWER WARNING] all power feeds are now OFF" in session.writer.buffer

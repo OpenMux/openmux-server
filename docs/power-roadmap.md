@@ -66,9 +66,18 @@ can be delivered in any order.
 - [ ] **MuxCon outlet federation.** Make power state and per-port feed mappings
       visible across a federation. Today power is strictly per-node: a server
       only sees its own PDUs and its own local ports' feeds.
-- [ ] **Telnet and SSH POWER support.** Add the `POWER` command and the live
-      power notice to the telnet and SSH listeners. v1 provides them on the
-      client listener and the web console only.
+- [x] **Telnet and SSH POWER support** — 2026-09-18. The live `[POWER]` /
+      `[POWER WARNING]` notice now works on the telnet and SSH listeners, and
+      the escape menu has a `p` command for power. The shared interpreter
+      (`openmux/server/adapters/power_command.py`) serves the client-listener
+      `POWER` command and the telnet/SSH menu, so the wording, permission
+      checks, and the v2 group-scoped access check are identical on all three
+      surfaces. The telnet/SSH `p` command opens an interactive menu of the
+      feeds for the console the user is attached to, numbered one per line
+      with an on/off tag: enter a number to toggle that feed, `a` to toggle
+      all of the console's feeds, or Enter to leave without a change. Both
+      listeners now subscribe to port meta updates so an attached session gets
+      the live notice when a feed changes, exactly like the client listener.
 - [ ] **Typed CLI POWER parsing.** Replace the free-text `command.split()`
       handler with structured parsing for the `POWER` command forms.
 - [ ] **Power metrics history.** Keep watts/amps and on-state over time and

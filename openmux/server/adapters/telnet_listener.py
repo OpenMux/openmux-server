@@ -33,6 +33,7 @@ from .listener_common import (
     render_port_list,
     resolve_server_label,
 )
+from .power_command import format_power_notice, run_power_menu
 from .protocols.plain import TelnetIacStripper
 
 # Sentinel 'target' value that puts a listener into interactive port-menu mode.
@@ -344,10 +345,39 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 console_manager.register_client_manager(self)
         except Exception:
             self.logger.warning("Failed to register telnet adapter as client manager", exc_info=True)
+        # Subscribe to port meta updates so attached telnet sessions get the
+        # live power notice when a feed changes (mirrors the client listener).
+        try:
+            pm = getattr(console_manager, "port_manager", None)
+            if pm and hasattr(pm, "register_meta_listener"):
+                pm.register_meta_listener(self._on_port_meta_update)
+        except Exception:
+            # justification: optional meta subscription; power control still works without the notice
+            pass
 
     def set_auth_manager(self, auth_manager):
         """Wire the shared AuthManager for listeners with require_auth enabled."""
         self.auth_manager = auth_manager
+
+    def _on_port_meta_update(self, port_name: str, changes: Optional[Dict[str, Any]] = None) -> None:
+        """Push the live power notice to telnet sessions attached to this port.
+
+        A feed change (user switch or out-of-band drift) reaches each attached
+        session as the ``[POWER]`` / ``[POWER WARNING]`` line, the same text the
+        client listener writes.
+        """
+        try:
+            if not isinstance(changes, dict) or changes.get("event") != "power_outlet_changed":
+                return
+            if not port_name:
+                return
+            notice = format_power_notice(changes)
+            for session in list(self.sessions.values()):
+                if session.port_name == port_name:
+                    asyncio.ensure_future(self._write_session(session, notice))
+        except Exception:
+            # justification: best-effort notice; power state is unchanged
+            pass
 
     async def send_data_to_client(self, client_id: str, data: bytes) -> bool:
         session = self.sessions.get(client_id)
@@ -526,6 +556,17 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             await self._write_session(session, self._format_session_info(session))
         elif cmd == "v":
             await self._write_session(session, f"\r\n[OpenMux Server v{_OPENMUX_VERSION}]\r\n")
+        elif cmd == "p":
+            await run_power_menu(
+                cm,
+                session.port_name,
+                session.reader,
+                session.writer,
+                lambda line: self._write_session(session, line + "\r\n"),
+                session.username,
+                self.auth_manager,
+                session.client_id,
+            )
         elif cmd == ".":
             await self._write_session(session, "\r\n[Disconnecting...]\r\n")
             return True
