@@ -17,11 +17,15 @@ reconcile, and live notices to attached sessions.
 v2 hardens the v1 control surface. It changes who may switch an outlet and what
 gets recorded. It does not add new device drivers or federate power.
 
-- [ ] **Group-scoped power control.** A `read-write` user may switch an outlet
-      only if every console fed by that outlet is a console the user can open.
-      Switching an outlet that feeds any console outside the user's groups
-      requires `admin`. Apply this on both the web API (`POST
-      /api/power/outlets/{ref}`) and the CLI `POWER ... on|off` path.
+- [x] **Group-scoped power control** — 2026-09-18. `ConsoleManager` gains
+      `blocked_ports_for_user(port_names, username)`, which reuses the
+      attach-time access ladder (`_taker_entitled`) to answer "may this user
+      drive (read-write open) each of these consoles" (admin never blocked).
+      `PduAdapter._power_blocked_ports(ref, username)` maps the outlet's fed
+      consoles through it, and both switch paths enforce it: the web API
+      (`POST /api/power/outlets/{ref}`) returns 403, and the CLI
+      `POWER <pdu>.<outlet> on|off` replies with an `ERROR:POWER` line — both
+      naming the out-of-group consoles and that switching needs admin.
 - [x] **Control audit log** — 2026-09-18. `PduAdapter.set_outlet` takes
       `user`/`client_id` (web passes the authenticated username, CLI passes the
       session username + client id) and on success logs one human-readable
@@ -36,8 +40,9 @@ gets recorded. It does not add new device drivers or federate power.
       ref in the record's own `outlet=` field), plus the new state, user,
       and client id. The all-lost warning form is decided per-port (same
       rule as the session notice).
-- [ ] **Add a CHANGELOG entry.** One entry under "Behavior changes" for the
-      access-control change, naming the `power` paths affected.
+- [x] **Add a CHANGELOG entry** — 2026-09-18. One "Behavior changes" entry
+      under Unreleased 1.0.4 for the access-control change, naming both the
+      `POST /api/power/outlets/{ref}` and `POWER <pdu>.<outlet> on|off` paths.
 
 ### Verification when closing v2
 

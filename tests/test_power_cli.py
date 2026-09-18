@@ -32,17 +32,20 @@ POWER_SECTION = {
 
 
 class _FakePort:
-    def __init__(self, name, power=()):
+    def __init__(self, name, power=(), rw_groups=(), ro_groups=()):
         self.name = name
         self.power = list(power)
         self.unified_port = self
+        self.read_write_groups = list(rw_groups)
+        self.read_only_groups = list(ro_groups)
 
 
 class _FakePortManager:
-    def __init__(self, ports):
+    def __init__(self, ports, access_default="allow"):
         self.ports = dict(ports)
         self.unified_adapters = []
         self.meta_events = []
+        self.access_default = access_default
 
     def notify_meta_updated(self, port_name, changes):
         self.meta_events.append((port_name, changes))
@@ -50,18 +53,46 @@ class _FakePortManager:
     def safe_get_port(self, name):
         return None
 
+    def get_port(self, name):
+        return self.ports.get(name)
+
 
 class _FakeConsoleManager:
-    def __init__(self, pm):
+    def __init__(self, pm, auth=None):
         self.port_manager = pm
+        self.auth_manager = auth
+        self.security_policy = None
+
+    def blocked_ports_for_user(self, port_names, username):
+        """Mirror of the real ConsoleManager ladder (group ACL + access_default)."""
+        if self.auth_manager.get_user_permissions(username) == "admin":
+            return []
+        user_groups = self.auth_manager.get_user_groups(username)
+        blocked = []
+        for name in port_names:
+            port = self.port_manager.ports.get(name)
+            rw = set(getattr(port, "read_write_groups", None) or [])
+            ro = set(getattr(port, "read_only_groups", None) or [])
+            if rw or ro:
+                if not (user_groups & rw):
+                    blocked.append(name)
+            elif getattr(self.port_manager, "access_default", "allow") == "deny":
+                blocked.append(name)
+        return blocked
 
 
 class _FakeAuth:
-    def __init__(self, permissions):
+    def __init__(self, permissions, groups=None):
         self._perm = permissions
+        self._groups = groups or {}
 
     def get_user_permissions(self, username):
         return self._perm.get(username)
+
+    def get_user_groups(self, username):
+        if self._perm.get(username) is None:
+            return set()
+        return {"user"} | set(self._groups.get(username) or [])
 
 
 class _FakeClient:
@@ -84,13 +115,16 @@ class _FakeClient:
 
 def _build():
     pm = _FakePortManager({"c1": _FakePort("c1", ["rack1.1", "rack1.2"])})
+    auth = _FakeAuth({"u1": "read-write", "ro": "read-only"})
     pdu = PduAdapter("power", POWER_SECTION)
     pdu.main_port_manager = pm
+    pdu.set_auth_manager(auth)
     pm.unified_adapters = [pdu]
-    cm = _FakeConsoleManager(pm)
+    cm = _FakeConsoleManager(pm, auth)
+    pdu.set_console_manager(cm)
     adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
     adapter.set_console_manager(cm)
-    adapter.set_auth_manager(_FakeAuth({"u1": "read-write", "ro": "read-only"}))
+    adapter.set_auth_manager(auth)
     return adapter, pdu, pm
 
 
@@ -161,6 +195,68 @@ async def test_power_switch_requires_read_write():
     await adapter.process_client_command(client, "POWER rack1.1 off")
     assert "insufficient permission" in client.lines[0]
     await pdu.stop()
+
+
+def _build_grouped():
+    """Two-group fixture: c2 is ops-RW, c9 is lab-RW; ops/lab users below."""
+    pm = _FakePortManager(
+        {
+            "c1": _FakePort("c1", ["rack1.1"]),
+            "c2": _FakePort("c2", ["rack1.2"], rw_groups=["ops"]),
+            "c9": _FakePort("c9", ["rack1.2"], rw_groups=["lab"]),
+        }
+    )
+    auth = _FakeAuth(
+        {"ops": "read-write", "lab": "read-write", "boss": "admin"},
+        groups={"ops": ["ops"], "lab": ["lab"]},
+    )
+    pdu = PduAdapter("power", POWER_SECTION)
+    pdu.main_port_manager = pm
+    pdu.set_auth_manager(auth)
+    pm.unified_adapters = [pdu]
+    cm = _FakeConsoleManager(pm, auth)
+    pdu.set_console_manager(cm)
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    adapter.set_console_manager(cm)
+    adapter.set_auth_manager(auth)
+    return adapter, pdu, pm
+
+
+async def _started_grouped():
+    adapter, pdu, pm = _build_grouped()
+    assert await pdu.start() is True
+    await asyncio.sleep(0)
+    return adapter, pdu, pm
+
+
+@pytest.mark.asyncio
+async def test_power_switch_blocked_outside_groups():
+    adapter, pdu, pm = await _started_grouped()
+    client = _FakeClient(username="ops")
+    await adapter.process_client_command(client, "POWER rack1.2 off")
+    text = "\n".join(client.lines)
+    assert "outside your groups" in text
+    assert "needs admin" in text
+    assert "c9" in text  # the other group's console is named
+    assert pdu.pdus["rack1"].readings["2"].on is True  # state unchanged
+
+
+@pytest.mark.asyncio
+async def test_power_switch_allowed_when_all_feds_in_groups():
+    adapter, pdu, pm = await _started_grouped()
+    client = _FakeClient(username="ops")
+    await adapter.process_client_command(client, "POWER rack1.1 off")
+    assert client.lines[-1] == "POWER rack1.1 -> off"  # c1 has no group lists: global rw applies
+
+
+@pytest.mark.asyncio
+async def test_power_switch_admin_bypasses_groups():
+    adapter, pdu, pm = await _started_grouped()
+    client = _FakeClient(username="boss")
+    await adapter.process_client_command(client, "POWER rack1.2 off")
+    joined = "\n".join(client.lines)
+    assert "outside your groups" not in joined
+    assert "POWER rack1.2 -> off" in client.lines[-1]
 
 
 @pytest.mark.asyncio

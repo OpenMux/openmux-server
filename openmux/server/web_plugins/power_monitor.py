@@ -165,6 +165,15 @@ async def _handle_set_outlet(request: web.Request) -> web.StreamResponse:
         on = body.get("on")
     if not isinstance(on, bool):
         return web.json_response({"error": True, "message": "`on` must be a boolean"}, status=400)
+    blocked = pdu._power_blocked_ports(ref, username)
+    if blocked:
+        return web.json_response(
+            {
+                "error": True,
+                "message": f"{ref} feeds consoles outside your groups ({', '.join(blocked)}); switching it needs admin",
+            },
+            status=403,
+        )
     try:
         result = await pdu.set_outlet(ref, on, user=username)
     except Exception as exc:

@@ -942,6 +942,12 @@ class TcpServerAdapter(BaseGenericAdapter):
             if not await self._power_user_can_write(client):
                 await client.send_line("ERROR:POWER: insufficient permission (need read-write)")
                 return
+            blocked = pdu._power_blocked_ports(arg, client.username)
+            if blocked:
+                await client.send_line(
+                    f"ERROR:POWER: {arg} feeds consoles outside your groups ({', '.join(blocked)}); switching it needs admin"
+                )
+                return
             on = verb == "on"
             if not on:
                 impact = pdu.compute_off_impact(arg)

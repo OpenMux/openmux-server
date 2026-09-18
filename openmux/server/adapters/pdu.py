@@ -714,6 +714,25 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Return all console port names declaring the given outlet ref."""
         return [name for name, inner in self._port_objects() if self._refs_of(inner) and ref in self._refs_of(inner)]
 
+    def _power_blocked_ports(self, ref: str, username: Optional[str]) -> List[str]:
+        """Return the consoles fed by ``ref`` that ``username`` may not drive.
+
+        Delegates to the console manager's attach-time access ladder, so a
+        read-write user may only switch an outlet whose fed consoles they can
+        all open (read-write). An outlet feeding no console is never blocked.
+        """
+        if not username:
+            return []
+        try:
+            cm = self.console_manager
+            check = getattr(cm, "blocked_ports_for_user", None)
+            if cm is None or not callable(check):
+                return []
+            return check(self._mapped_ports_for_ref(ref), username)
+        except Exception:
+            self.logger.debug("Power group check failed for %s", ref, exc_info=True)
+            return []
+
     @staticmethod
     def _refs_of(port_obj: Any) -> List[str]:
         refs = getattr(port_obj, "power", None)

@@ -29,11 +29,13 @@ USER_PASSWORD = {
     "u": "password",  # admin
     "rw": "rwrite",  # read-write
     "ro": "ronly",  # read-only
+    "grop": "grop",  # read-write, only in the "ops" console group
 }
 USERS = [
     {"username": "u", "password_hash": _sha(USER_PASSWORD["u"]), "permissions": "admin"},
     {"username": "rw", "password_hash": _sha(USER_PASSWORD["rw"]), "permissions": "read-write"},
     {"username": "ro", "password_hash": _sha(USER_PASSWORD["ro"]), "permissions": "read-only"},
+    {"username": "grop", "password_hash": _sha(USER_PASSWORD["grop"]), "permissions": "read-write", "groups": ["ops"]},
 ]
 
 
@@ -61,7 +63,14 @@ POWER_SECTION = {
         ],
     },
 }
-LOOPBACK = {"loopback_ports": [{"name": "p1", "power": ["rack1.1", "rack1.2"]}]}
+# p2 is fed by rack2.1 and is group-restricted (ops only): the fixture for the
+# group-scoped power control check.
+LOOPBACK = {
+    "loopback_ports": [
+        {"name": "p1", "power": ["rack1.1", "rack1.2"]},
+        {"name": "p2", "power": ["rack2.1"], "read_write_groups": ["ops"]},
+    ]
+}
 
 
 async def _start(http_port: int):
@@ -76,6 +85,8 @@ async def _start(http_port: int):
 
     auth = AuthManager({"users": USERS})
     cm = ConsoleManager(pm, auth)
+    pdu.set_console_manager(cm)
+    pdu.set_auth_manager(auth)
 
     config = dict(POWER_SECTION)
     config.update(LOOPBACK)
@@ -281,6 +292,48 @@ async def test_set_outlet_permission_and_csrf(caplog):
             # Missing `on` -> 400
             async with session.post(f"http://127.0.0.1:{port}/api/power/outlets/rack1.2", headers=_hdr("rw"), json={}) as resp:
                 assert resp.status == 400
+    finally:
+        await _stop(ctx)
+
+
+@pytest.mark.asyncio
+async def test_set_outlet_group_scoped():
+    """Switching is scoped to the consoles the user can open.
+
+    p1 has no group lists (a global read-write may switch its feeds); p2 is
+    ops-group-only, so it needs a user in that group or admin.
+    """
+    ctx = await _start(0)
+    try:
+        _, _, _, _, port = ctx
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            # read-write, no groups: p1's feed is allowed
+            async with session.post(
+                f"http://127.0.0.1:{port}/api/power/outlets/rack1.1", headers=_hdr("rw"), json={"on": False}
+            ) as resp:
+                assert resp.status == 200
+            # ... but p2 feeds a console outside their groups -> 403 naming it
+            async with session.post(
+                f"http://127.0.0.1:{port}/api/power/outlets/rack2.1", headers=_hdr("rw"), json={"on": False}
+            ) as resp:
+                assert resp.status == 403
+                data = await resp.json()
+                assert data["error"] is True
+                assert "p2" in data["message"]
+                assert "needs admin" in data["message"]
+            # a read-write in the ops group may switch p2's feed
+            async with session.post(
+                f"http://127.0.0.1:{port}/api/power/outlets/rack2.1", headers=_hdr("grop"), json={"on": False}
+            ) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["ok"] is True
+                assert data["reading"]["on"] is False
+            # admin bypasses the group boundary
+            async with session.post(
+                f"http://127.0.0.1:{port}/api/power/outlets/rack2.1", headers=_hdr("u"), json={"on": True}
+            ) as resp:
+                assert resp.status == 200
     finally:
         await _stop(ctx)
 
