@@ -147,6 +147,7 @@
         <th>Speed</th>
         <th>{{ sort_header('Origin', 'origin') }}</th>
         <th>{{ sort_header('Status', 'status') }}</th>
+        <th>Power</th>
         <th>{{ sort_header('Clients', 'clients') }}</th>
         <th>Actions</th>
       </tr>
@@ -187,6 +188,14 @@
             <span class="tag bad" title="{{ p.status_message }}">offline</span>
           {% endif %}
         </td>
+        {# PDU power feed (PDU feature): green all on, yellow partial, red all off, grey unknown; dash when unmapped. #}
+        <td>
+          {% if p.power is defined and p.power %}
+            {% set pw = p.power %}
+            <span class="power-dot {{ pw.state }}" title="PDU feeds on: {{ pw.feeds_on }}/{{ pw.feeds_total }}{% if pw.all_power_lost %} - ALL POWER LOST{% endif %}"></span>
+            <span class="muted">{% for f in pw.feeds %}{{ f.ref }} ({{ "on" if f.on else ("off" if f.on is false else "?") }}){% if not loop.last %}, {% endif %}{% endfor %}</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
         <td>
           {% set cnt = p.client_count %}
           {% if cnt is none %}
@@ -217,7 +226,7 @@
         </td>
       </tr>
       <tr id="info-{{ pid }}" style="display:none;">
-        <td colspan="9">
+        <td colspan="10">
           <div class="card">{{ info_table(p) }}</div>
         </td>
       </tr>

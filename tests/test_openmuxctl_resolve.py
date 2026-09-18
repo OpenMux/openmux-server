@@ -4,6 +4,7 @@ openmuxctl runs in a user shell (no systemd vars, no server env), so it
 resolves purely from CLI args, the OPENMUX_* variables (shell or the
 defaults file), the packaged run dir probe, and the dev fallback.
 """
+
 import os
 
 import pytest

@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aiohttp import web
 
+from openmux.server.adapters.pdu import driver_catalog
 from openmux.server.config_manager import ConfigManager
 
 from . import get_web_adapter
@@ -321,6 +322,10 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
             cm = _find_config_manager(adapter)
             writable_sections, writable_enforced = _get_writable_metadata(cm)
             access_default = _get_access_default(cm)
+            try:
+                power_drivers = driver_catalog()
+            except Exception:
+                power_drivers = []
             html_text = tmpl.render(
                 realm=adapter.realm,
                 logo_url=adapter._get_logo_url() if hasattr(adapter, "_get_logo_url") else None,
@@ -334,6 +339,7 @@ async def _handle_view(request: web.Request) -> web.StreamResponse:
                 writable_sections=writable_sections,
                 writable_enforced=writable_enforced,
                 access_default=access_default,
+                power_drivers_json=_json.dumps(power_drivers),
                 motd=getattr(adapter, "logged_in_motd", "") or "",
             )
             return web.Response(body=html_text.encode("utf-8"), content_type="text/html")

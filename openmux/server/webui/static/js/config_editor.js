@@ -3,6 +3,11 @@
       const BTN = (id) => document.getElementById(id);
       let csrf = null;
       let current = {};
+      // Whether the stored config already has a power section (and its
+      // effective enabled flag). Undefined = no section stored; the schema
+      // default is enabled: true, so a fresh PDU entry must not write
+      // enabled: false just because the checkbox was unchecked in the UI.
+      let _powerEnabledLoaded = undefined;
       const INITIAL_WRITABLE_SECTIONS = window.OMX_CONFIG_EDITOR_BOOTSTRAP.writableSections;
       const INITIAL_WRITABLE_ENFORCED = window.OMX_CONFIG_EDITOR_BOOTSTRAP.writableEnforced;
       let writableSections = new Set(Array.isArray(INITIAL_WRITABLE_SECTIONS) ? INITIAL_WRITABLE_SECTIONS : []);
@@ -199,6 +204,10 @@
 
       // Merge defaults parsed from docs/DEFAULTS.md
       const DEFAULTS_DOC = (function(){ try { return JSON.parse(window.OMX_CONFIG_EDITOR_BOOTSTRAP.defaultsDocJson); } catch(_e){ return {dot:{}, sections:{}} } })();
+      // PDU power: per-driver metadata from the server. The single source of
+      // truth is openmux/server/adapters/pdu.py (DRIVER_INFO + driver_catalog);
+      // adding a driver there updates this select and the options help here.
+      const POWER_DRIVERS = (function(){ try { const v=window.OMX_CONFIG_EDITOR_BOOTSTRAP.powerDrivers; return (Array.isArray(v)&&v.length>0)?v:[{driver:'dummy',label:'Dummy',description:'',options_keys:null,options_example:null}]; } catch(_e){ return [{driver:'dummy',label:'Dummy',description:'',options_keys:null,options_example:null}]; } })();
       const BASE_PATH = (function(){ const m=document.querySelector('meta[name="omx-base-path"]'); const v=m&&m.getAttribute('content')||''; return v||''; })();
       function withBase(p){
         const bp = BASE_PATH||'';
@@ -330,6 +339,17 @@ async function fetchCSRF(){ try{ const r=await fetch(withBase('/api/csrf')); if(
       function q(id){ return document.getElementById(id); }
       function setVal(id, v){ const el=q(id); if(!el) return; if(el.type==='checkbox'){ el.checked=!!v; } else if(el.tagName==='SELECT'){ el.value = (v==null?'':String(v)); } else { el.value = (v==null?'':String(v)); } }
       function getVal(id){ const el=q(id); if(!el) return undefined; if(el.type==='checkbox') return !!el.checked; if(el.type==='number') return el.value? Number(el.value) : undefined; const val = el.value; return val===''? undefined : val; }
+      // Power (PDU editor): flatten the nested outlets annotations into the
+      // rows the inline sub-list reads, and turn them back into the
+      // [{id, description}] list the config schema expects.
+      function _powerOutletRows(pduRow){
+        const list = pduRow && Array.isArray(pduRow.outlets) ? pduRow.outlets : [];
+        return list.map(r=>({id: r && r.id!=null ? String(r.id) : '', description: r && r.description!=null ? String(r.description) : ''}));
+      }
+      function _powerOutletsFromRows(rows){
+        const out = (rows||[]).filter(r=>r && String(r.id||'').trim().length>0);
+        return out.map(r=>({id: String(r.id).trim(), description: r.description!=null && String(r.description).trim()!=='' ? String(r.description).trim() : undefined}));
+      }
 
       function toDisplay(v){ if(v===undefined||v===null||v==='') return '—'; if(typeof v==='boolean') return v?'true':'false'; return String(v); }
 
@@ -458,7 +478,101 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           editor.appendChild(lg); const getters=[]; const reqChecks=[]; const errBox=document.createElement('div'); editor.appendChild(errBox);
           // Special inline row for serial 8-N-1 when editing serial_ports
           const isSerial = rootId==='serial_ports'; const isTcpInitiator = rootId==='tcp_initiator_ports'; let _protTypeInput = null;
+          // PDU power: driver select + driver-specific options + nested
+          // per-outlet descriptions. The driver set and its options come from
+          // POWER_DRIVERS (sourced from pdu.py), so adding a driver there keeps
+          // this select and the options help current.
+          if(rootId==='power.pdus'){
+            // Driver select
+            const _drvKeys=(POWER_DRIVERS||[]).map(d=>d&&d.driver).filter(Boolean);
+            const drvField=document.createElement('div'); drvField.className='field';
+            const dLab=document.createElement('label'); dLab.textContent='Driver'; const dStar=document.createElement('span'); dStar.className='req'; dStar.textContent=' *'; dLab.appendChild(dStar); dLab.appendChild(makeReloadHint('soft', RELOAD_TIPS.soft));
+            const drv=document.createElement('select'); (POWER_DRIVERS||[]).forEach(d=>{ const o=document.createElement('option'); o.value=d.driver; o.textContent=d.label||d.driver; drv.appendChild(o); });
+            let _selDrv=(row['driver']!=null&&row['driver']!=='')?String(row['driver']):'dummy';
+            if(_drvKeys.indexOf(_selDrv)===-1){ _selDrv = _drvKeys.indexOf('dummy')!==-1 ? 'dummy' : (_drvKeys[0]||''); }
+            if(_selDrv) drv.value=_selDrv;
+            const drvInfo=()=>{ const d=(POWER_DRIVERS||[]).find(x=>x&&x.driver===drv.value); return d||null; };
+            const drvDesc=document.createElement('span'); drvDesc.className='help';
+            function updateDrvDesc(){ const d=drvInfo(); const t=(d&&String(d.description||'').trim())?d.description:''; drvDesc.textContent=t; drvDesc.style.display=t?'':'none'; }
+            drvField.appendChild(dLab); drvField.appendChild(drv); drvField.appendChild(drvDesc);
+            // Driver options (JSON) with driver-specific help
+            const optField=document.createElement('div'); optField.className='field';
+            const optLab=document.createElement('label'); optLab.textContent='Driver options (JSON)'; optLab.appendChild(makeReloadHint('soft', RELOAD_TIPS.soft)); optField.appendChild(optLab);
+            const optInput=document.createElement('textarea'); optInput.rows=3; optInput.className='json-input'; optInput.placeholder='{}';
+            if(row['options']!=null && typeof row['options']==='object' && !Array.isArray(row['options'])){ try{ optInput.value=JSON.stringify(row['options']); }catch(_e){} }
+            const optHelp=document.createElement('span'); optHelp.className='help';
+            function updateOptHint(){
+              const d=drvInfo();
+              if(d && Array.isArray(d.options_keys) && d.options_keys.length>0){
+                const lines=d.options_keys.map(k=>'\u2022 '+k.key+(k.type?' ('+k.type+')':'')+(k.default!==undefined&&k.default!==null&&String(k.default)!==''?' default '+k.default:'')+(k.help?(' \u2014 '+k.help):''));
+                optHelp.textContent='Options for "'+(d.label||d.driver)+'":\n'+lines.join('\n');
+                optInput.placeholder=(d.options_example!==null&&d.options_example!==undefined)?JSON.stringify(d.options_example):'{}';
+              } else if(d && d.options_keys && d.options_keys.length===0){
+                optHelp.textContent='"'+(d.label||d.driver)+'" takes no options. Use {} for none.';
+                optInput.placeholder='{}';
+              } else {
+                optHelp.textContent='';
+                optInput.placeholder='{}';
+              }
+              optHelp.style.whiteSpace=optHelp.textContent.indexOf('\n')!==-1?'pre-line':'normal';
+              optHelp.style.display=optHelp.textContent?'':'none';
+            }
+            optField.appendChild(optInput); optField.appendChild(optHelp);
+            drv.addEventListener('change',()=>{ updateDrvDesc(); updateOptHint(); if(!isPopulating) markDirty(); });
+            updateDrvDesc(); updateOptHint();
+            editor.appendChild(drvField); editor.appendChild(optField);
+            getters.push(()=>['driver', drv.value||undefined]);
+            reqChecks.push(()=>{ if(!drv.value){ errBox.className='err'; errBox.textContent='Choose a driver.'; return {key:'driver', ok:false}; } errBox.textContent=''; return {key:'driver', ok:true}; });
+            getters.push(()=>['options', (function(){ const t=(optInput.value||'').trim(); if(t==='') return undefined; const v=JSON.parse(t); if(typeof v!=='object'||v===null||Array.isArray(v)) throw new Error('Driver options must be a JSON object'); return v; })()]);
+            // Nested per-outlet descriptions, laid out like every other field
+            // in this panel: label (220px), then the value slot (flex:1). The
+            // outlet list starts at the same x-position as every other field's
+            // input (220px label + 8px gap), leaving the label column blank.
+            // The long hint sits under the list (too long for the right-hand
+            // help slot without fighting the list for width).
+            const ofield=document.createElement('div'); ofield.className='field';
+            ofield.style.alignItems='flex-start'; // keep label top-aligned with the (taller) list
+            const olab=document.createElement('label'); olab.textContent='Outlet annotations'; olab.appendChild(makeReloadHint('soft', RELOAD_TIPS.soft));
+            // The hint shares the footer row with the Add outlet button, so
+            // the rows above stay clean and the text never fights the list.
+            const owrap=document.createElement('div'); owrap.style.cssText='flex:1; min-width:280px;';
+            const osub=document.createElement('div');
+            owrap.appendChild(osub);
+            ofield.appendChild(olab); ofield.appendChild(owrap);
+            const olist=_powerOutletRows(row);
+            function renderOList(){
+              osub.innerHTML='';
+              const ohead=document.createElement('div'); ohead.style.cssText='display:flex; gap:8px; align-items:center; margin:2px 0;';
+              const oheadId=document.createElement('span'); oheadId.className='subtle'; oheadId.style.cssText='flex:1; min-width:120px;'; oheadId.textContent='id';
+              const oheadDesc=document.createElement('span'); oheadDesc.className='subtle'; oheadDesc.style.cssText='flex:1; min-width:120px;'; oheadDesc.textContent='description';
+              const oheadAct=document.createElement('span'); oheadAct.style.cssText='width:72px;'; // reserve the Remove-button column
+              ohead.appendChild(oheadId); ohead.appendChild(oheadDesc); ohead.appendChild(oheadAct);
+              osub.appendChild(ohead);
+              olist.forEach((or,i)=>{
+                const lr=document.createElement('div'); lr.style.cssText='display:flex; gap:8px; margin:2px 0; align-items:center;';
+                const iid=document.createElement('input'); iid.type='text'; iid.value=or.id; iid.placeholder='id'; iid.style.cssText='flex:1; min-width:120px; padding:3px; background:var(--input-bg); color:var(--input-text); border:1px solid var(--border-color);';
+                iid.addEventListener('input',()=>{ or.id=iid.value; if(!isPopulating) markDirty(); });
+                const idi=document.createElement('input'); idi.type='text'; idi.value=or.description||''; idi.placeholder='description (optional)'; idi.style.cssText='flex:1; min-width:120px; padding:3px; background:var(--input-bg); color:var(--input-text); border:1px solid var(--border-color);';
+                idi.addEventListener('input',()=>{ or.description=idi.value; if(!isPopulating) markDirty(); });
+                const rb=document.createElement('button'); rb.type='button'; rb.className='mini-btn'; rb.textContent='Remove'; rb.addEventListener('click',()=>{ olist.splice(i,1); renderOList(); markDirty(); });
+                lr.appendChild(iid); lr.appendChild(idi); lr.appendChild(rb); osub.appendChild(lr);
+              });
+              const ofoot=document.createElement('div'); ofoot.style.cssText='display:flex; gap:8px; align-items:center; margin-top:4px;';
+              const ob=document.createElement('button'); ob.type='button'; ob.className='mini-btn'; ob.textContent='Add outlet'; ob.addEventListener('click',()=>{ olist.push({id:'',description:''}); renderOList(); markDirty(); });
+              const ohelp=document.createElement('span'); ohelp.className='help'; ohelp.style.cssText='margin-left:auto; text-align:right;'; ohelp.textContent='Optional description per outlet id. The id must match what the driver reports; the ref is <pdu>.<id>.';
+              ofoot.appendChild(ob); ofoot.appendChild(ohelp);
+              osub.appendChild(ofoot);
+            }
+            renderOList();
+            editor.appendChild(ofield);
+            getters.push(()=>['outlets', _powerOutletsFromRows(olist)]);
+            reqChecks.push(()=>{ const bad=olist.some(r=>/\s/.test(String(r.id||'')) || String(r.id||'').indexOf('.')!==-1); if(bad){ errBox.className='err'; errBox.textContent='An outlet id contains a dot or a space. The outlet ref is <pdu name>.<id>, so both parts must stay dot-free.'; return {key:'outlets', ok:false}; } errBox.textContent=''; return {key:'outlets', ok:true}; });
+          }
           columns.forEach(c=>{
+            // PDU power: driver + options are custom fields driven by
+            // POWER_DRIVERS (rendered above). Keep them only as list columns;
+            // skip the generic input so they are not duplicated in the editor.
+            if(rootId==='power.pdus' && (c.key==='driver' || c.key==='options')) return;
             // Inline group for serial settings
             if(isSerial && (c.key==='baudrate' || c.key==='bytesize' || c.key==='parity' || c.key==='stopbits' || c.key==='dtr' || c.key==='rts' || c.key==='flow_control')){
               // Defer handling to a single grouped row once (on baudrate)
@@ -538,21 +652,21 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
               return; // Skip default handling for grouped fields
             }
             // Default field rendering
-            const lab=document.createElement('label'); lab.textContent=c.label||c.key; if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; lab.appendChild(star); } const _rr=reloadHintFor(rootId, c.key); if(_rr){ lab.appendChild(makeReloadHint(_rr, RELOAD_TIPS[_rr])); } const field=document.createElement('div'); field.className='field'; field.appendChild(lab); let input; if(c.type==='boolean'){ input=document.createElement('input'); input.type='checkbox'; if(row[c.key]!==undefined && row[c.key]!==null){ input.checked=!!row[c.key]; } else if(c.default!==undefined){ input.checked=!!c.default; } else { input.checked=false; } } else if(c.type==='enum'){ input=document.createElement('select'); const _hasDef=c.default!==undefined; if(!_hasDef){ const blank=document.createElement('option'); blank.value=''; blank.textContent=''; input.appendChild(blank); } const _sel=(row[c.key]!==undefined&&row[c.key]!==null)?String(row[c.key]):(_hasDef?String(c.default):''); (c.enum||[]).forEach(v=>{ const o=document.createElement('option'); o.value=String(v); o.textContent=String(v); if(_sel!==''&&_sel===String(v)) o.selected=true; input.appendChild(o); }); } else if(c.type==='number'||c.type==='integer'){ input=document.createElement('input'); input.type='number'; if(c.min!==undefined) input.min=String(c.min); if(c.max!==undefined) input.max=String(c.max); if(c.step!==undefined) input.step=String(c.step); if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } } else if(c.type==='array-string'){ input=document.createElement('input'); input.type='text'; input.placeholder='comma,separated,values'; if(Array.isArray(row[c.key])) input.value=row[c.key].join(','); } else { input=document.createElement('input'); input.type='text'; if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } }
+            const lab=document.createElement('label'); lab.textContent=c.label||c.key; if(c.required){ const star=document.createElement('span'); star.className='req'; star.textContent=' *'; lab.appendChild(star); } const _rr=reloadHintFor(rootId, c.key); if(_rr){ lab.appendChild(makeReloadHint(_rr, RELOAD_TIPS[_rr])); } const field=document.createElement('div'); field.className='field'; field.appendChild(lab); let input; if(c.type==='boolean'){ input=document.createElement('input'); input.type='checkbox'; if(row[c.key]!==undefined && row[c.key]!==null){ input.checked=!!row[c.key]; } else if(c.default!==undefined){ input.checked=!!c.default; } else { input.checked=false; } } else if(c.type==='enum'){ input=document.createElement('select'); const _hasDef=c.default!==undefined; if(!_hasDef){ const blank=document.createElement('option'); blank.value=''; blank.textContent=''; input.appendChild(blank); } const _sel=(row[c.key]!==undefined&&row[c.key]!==null)?String(row[c.key]):(_hasDef?String(c.default):''); (c.enum||[]).forEach(v=>{ const o=document.createElement('option'); o.value=String(v); o.textContent=String(v); if(_sel!==''&&_sel===String(v)) o.selected=true; input.appendChild(o); }); } else if(c.type==='number'||c.type==='integer'){ input=document.createElement('input'); input.type='number'; if(c.min!==undefined) input.min=String(c.min); if(c.max!==undefined) input.max=String(c.max); if(c.step!==undefined) input.step=String(c.step); if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } } else if(c.type==='array-string'){ input=document.createElement('input'); input.type='text'; input.placeholder='comma,separated,values'; if(Array.isArray(row[c.key])) input.value=row[c.key].join(','); } else if(c.type==='json'){ input=document.createElement('textarea'); input.rows=2; input.className='json-input'; input.placeholder='{}'; try{ input.value= row[c.key]!=null ? JSON.stringify(row[c.key]) : ''; }catch(_e){ input.value=''; } } else { input=document.createElement('input'); input.type='text'; if(row[c.key]!==undefined && row[c.key]!==null) input.value=String(row[c.key]); if((row[c.key]===undefined || row[c.key]===null) && c.default!==undefined){ input.placeholder = String(c.default); } }
             if(c.placeholder){ input.placeholder=c.placeholder; }
             field.appendChild(input);
             const needsPasswordHelper = (rootId==='auth.users' && c.key==='password_hash');
             if(needsPasswordHelper){
               try{ attachPasswordHelper(field, input); }catch(_e){ /* non-fatal */ }
             }
-            if(c.help){ const help=document.createElement('span'); help.className='help'; help.textContent=c.help; field.appendChild(help);} if(c.default!==undefined){ const def=document.createElement('span'); def.className='default-hint'; const dval = (typeof c.default==='boolean') ? (c.default? 'true':'false') : String(c.default); def.textContent = `Default: ${dval}`; field.appendChild(def); } if(isTcpInitiator){ const _pg={protocol_telnet_negotiation:['plain'],protocol_console_name:['conserver'],protocol_username:['conserver','openmux'],protocol_password:['conserver','openmux'],protocol_remote_port:['openmux'],protocol_api_key:['openmux']}; if(_pg[c.key]) field.dataset.protocolGroup=_pg[c.key].join(' '); if(c.key==='protocol_type') _protTypeInput=input; } editor.appendChild(field); getters.push(()=>{ let v; if(c.type==='boolean') v=!!input.checked; else if(c.type==='number'||c.type==='integer') v=input.value!==''? Number(input.value):undefined; else if(c.type==='enum') v=input.value||undefined; else if(c.type==='array-string') v=input.value? input.value.split(',').map(s=>s.trim()).filter(s=>s.length>0):[]; else v=input.value||undefined; return [c.key, v]; }); if(c.required){ reqChecks.push(()=>{ const val = (c.type==='boolean')? !!input.checked : (c.type==='number'||c.type==='integer')? (input.value!=='' ? true : false) : (Array.isArray(input.value)? input.value.length>0 : (input.value && input.value.trim().length>0)); return {key:c.key, ok: !!val}; }); }
+            if(c.help){ const help=document.createElement('span'); help.className='help'; help.textContent=c.help; field.appendChild(help);} if(c.default!==undefined){ const def=document.createElement('span'); def.className='default-hint'; const dval = (typeof c.default==='boolean') ? (c.default? 'true':'false') : String(c.default); def.textContent = `Default: ${dval}`; field.appendChild(def); } if(isTcpInitiator){ const _pg={protocol_telnet_negotiation:['plain'],protocol_console_name:['conserver'],protocol_username:['conserver','openmux'],protocol_password:['conserver','openmux'],protocol_remote_port:['openmux'],protocol_api_key:['openmux']}; if(_pg[c.key]) field.dataset.protocolGroup=_pg[c.key].join(' '); if(c.key==='protocol_type') _protTypeInput=input; } editor.appendChild(field); getters.push(()=>{ let v; if(c.type==='boolean') v=!!input.checked; else if(c.type==='number'||c.type==='integer') v=input.value!==''? Number(input.value):undefined; else if(c.type==='enum') v=input.value||undefined; else if(c.type==='array-string') v=input.value? input.value.split(',').map(s=>s.trim()).filter(s=>s.length>0):[]; else if(c.type==='json'){ const t=(input.value||'').trim(); v=t===''?undefined:JSON.parse(t); if(v!==undefined && typeof v!=='object') throw new Error('Must be a JSON object'); } else v=input.value||undefined; return [c.key, v]; }); if(c.required){ reqChecks.push(()=>{ const val = (c.type==='boolean')? !!input.checked : (c.type==='number'||c.type==='integer')? (input.value!=='' ? true : false) : (Array.isArray(input.value)? input.value.length>0 : (input.value && input.value.trim().length>0)); return {key:c.key, ok: !!val}; }); }
           });
           if(isTcpInitiator && _protTypeInput){ const _upd=function(){ const ptype=_protTypeInput.value||'plain'; editor.querySelectorAll('[data-protocol-group]').forEach(function(f){ f.style.display=f.dataset.protocolGroup.split(' ').includes(ptype)?'':'none'; }); }; _protTypeInput.addEventListener('change',_upd); _upd(); }
           const bar=document.createElement('div'); bar.className='row'; const bS=document.createElement('button'); bS.className='btn'; bS.textContent='Save item'; const bC=document.createElement('button'); bC.className='btn'; bC.textContent='Cancel'; bar.appendChild(bS); bar.appendChild(bC); editor.appendChild(bar); editorCell.appendChild(editor); const anchor = tbody.children[idx] || tbody.lastElementChild; if(anchor){ anchor.insertAdjacentElement('afterend', editorRow); } else { tbody.appendChild(editorRow); } try{ editor.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){}
           activeEditorEl = editorRow;
           activeEditorCleanup = (cleanupOpts)=>{ if(editorRow.parentNode) editorRow.parentNode.removeChild(editorRow); if(activeEditorEl===editorRow){ activeEditorEl=null; } activeEditorValidate=null; activeEditorSave=null; editingIndex=null; if(!cleanupOpts || cleanupOpts.render !== false){ renderBody(); } };
           activeEditorValidate = ()=>{ const missing = reqChecks.map(f=>f()).filter(r=>!r.ok).map(r=>r.key); if(missing.length>0){ errBox.className='err'; errBox.textContent = 'Missing required: ' + missing.join(', '); try{ editor.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(_e){} return false; } errBox.textContent=''; return true; };
-          activeEditorSave = ()=>{ if(!activeEditorValidate || activeEditorValidate()){ const obj={}; getters.forEach(g=>{ const [k,v]=g(); if(v!==undefined) obj[k]=v; }); rows[idx]=obj; const cleanup = activeEditorCleanup; activeEditorCleanup=null; if(typeof cleanup==='function'){ cleanup(); } else if(editorRow.parentNode){ editorRow.parentNode.removeChild(editorRow); editingIndex=null; renderBody(); } try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} return true; } return false; };
+          activeEditorSave = ()=>{ if(!activeEditorValidate || activeEditorValidate()){ const obj={}; try{ getters.forEach(g=>{ const [k,v]=g(); if(v!==undefined) obj[k]=v; }); }catch(ge){ errBox.className='err'; errBox.textContent=String(ge && ge.message ? ge.message : ge); return false; } rows[idx]=obj; const cleanup = activeEditorCleanup; activeEditorCleanup=null; if(typeof cleanup==='function'){ cleanup(); } else if(editorRow.parentNode){ editorRow.parentNode.removeChild(editorRow); editingIndex=null; renderBody(); } try{ if(typeof options.onAfterChange==='function') options.onAfterChange(rows); markDirty(); }catch(_e){} return true; } return false; };
           bS.addEventListener('click',()=>{ activeEditorSave && activeEditorSave(); }); bC.addEventListener('click',()=>{ if(typeof activeEditorCleanup==='function'){ activeEditorCleanup(); activeEditorCleanup=null; } else if(editorRow.parentNode){ editorRow.parentNode.removeChild(editorRow); editingIndex=null; renderBody(); } activeEditorValidate=null; activeEditorSave=null; }); }
         renderAddBar();
         wrap._get = ()=> rows;
@@ -804,6 +918,9 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         // section badge for these two fields.
         'web_console.motd': 'soft',
         'web_console.logged_in_motd': 'soft',
+        // PDU power: the adapter reconciles the power section on Soft Reload
+        'power.enabled': 'soft',
+        'power.pdus': 'soft',
       };
       // Tables whose per-row fields are applied by Soft Reload reconcile
       const SOFT_RELOAD_TABLE_ROOTS = new Set([
@@ -858,6 +975,14 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           const enabled = !!getVal('client_listener.enabled');
           const ids = ['client_listener.host','client_listener.port','client_listener.max_connections','client_listener.connection_timeout'];
           ids.forEach(id=>{ const el = q(id); if(el){ el.disabled = !enabled; if(!enabled){ /* keep placeholders visible while disabled */ } } });
+        }
+        // PDU power: dim the PDU table when the power section is disabled
+        function updatePowerUI(){
+          const enabled = getVal('power.enabled');
+          const tbl = tables['power.pdus'];
+          if(tbl && tbl.classList){
+            tbl.classList.toggle('power-disabled', enabled === false);
+          }
         }
         const clEnable = q('client_listener.enabled');
         if(clEnable){
@@ -920,7 +1045,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'max_read_write_users', label:'Write slots', type:'enum', enum:['one','multiple','none']},
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
           {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
-          {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
+          {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true},
+          {key:'power', label:'Power feeds', type:'array-string', hiddenList:true, placeholder:'rack1.3', help:'Outlet refs <pdu>.<id> powering this console; multiple = A/B dual feed'}
         ])), {onAfterChange:()=>{ updateSerialDeviceHealth(); }});
 
         tables['loopback_ports'] = buildTable('loopback_ports', annotateColumnsWithDefaults('loopback_ports', annotateColumnsWithHelp('loopback_ports', [
@@ -932,7 +1058,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'max_read_write_users', label:'Write slots', type:'enum', enum:['one','multiple','none']},
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
           {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
-          {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
+          {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true},
+          {key:'power', label:'Power feeds', type:'array-string', hiddenList:true, placeholder:'rack1.3', help:'Outlet refs <pdu>.<id> powering this console; multiple = A/B dual feed'}
         ])));
 
         tables['command_ports'] = buildTable('command_ports', annotateColumnsWithDefaults('command_ports', annotateColumnsWithHelp('command_ports', [
@@ -950,7 +1077,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'idle_timeout_sec', label:'Idle timeout (s)', type:'number', min:0, step:1},
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
           {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
-          {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
+          {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true},
+          {key:'power', label:'Power feeds', type:'array-string', hiddenList:true, placeholder:'rack1.3', help:'Outlet refs <pdu>.<id> powering this console; multiple = A/B dual feed'}
         ])));
 
         tables['tcp_initiator_ports'] = buildTable('tcp_initiator_ports', annotateColumnsWithDefaults('tcp_initiator_ports', annotateColumnsWithHelp('tcp_initiator_ports', [
@@ -980,7 +1108,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'max_read_write_users', label:'Write slots', type:'enum', enum:['one','multiple','none']},
           {key:'scrollback_size', label:'Scrollback (bytes)', type:'integer', min:0},
           {key:'read_write_groups', label:'RW groups', type:'array-string', hiddenList:true},
-          {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true}
+          {key:'read_only_groups', label:'RO groups', type:'array-string', hiddenList:true},
+          {key:'power', label:'Power feeds', type:'array-string', hiddenList:true, placeholder:'rack1.3', help:'Outlet refs <pdu>.<id> powering this console; multiple = A/B dual feed'}
         ])));
         tables['telnet_listener'] = buildTable('telnet_listener', annotateColumnsWithDefaults('telnet_listener', annotateColumnsWithHelp('telnet_listener', [
           {key:'name', label:'Name', type:'string', required:true},
@@ -1002,6 +1131,17 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
           {key:'enabled', label:'Enabled', type:'boolean'},
           {key:'require_auth', label:'Require auth', type:'boolean'},
           {key:'acl', label:'ACL (IP/CIDR, comma)', type:'array-string'}
+        ])));
+
+        tables['power.pdus'] = buildTable('power.pdus', annotateColumnsWithDefaults('power.pdus', annotateColumnsWithHelp('power.pdus', [
+          {key:'name', label:'Name', type:'string', required:true, placeholder:'rack1', help:'No dots or spaces (part of the outlet ref <name>.<outlet id>), e.g. rack1'},
+          // The edit dialog renders this as a select (POWER_DRIVERS); the list
+          // just shows the chosen key. options is edit-only (hiddenList) so the
+          // free-form driver settings are not shown as a blob in the grid.
+          {key:'driver', label:'Driver', type:'enum', required:true, enum:(POWER_DRIVERS||[]).map(d=>(d&&d.driver)||'')},
+          {key:'poll_interval', label:'Poll (s)', type:'integer', min:0, default:10, help:'0 = on-demand reads only'},
+          {key:'description', label:'Description', type:'string'},
+          {key:'options', label:'Options (JSON)', type:'json', hiddenList:true}
         ])));
 
         tables['muxcon.listeners'] = buildTable('muxcon.listeners', annotateColumnsWithDefaults('muxcon.listeners', annotateColumnsWithHelp('muxcon.listeners', [
@@ -1158,6 +1298,14 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         }));
         tables['telnet_listener']._set(deepGet(current, 'telnet_listener')||[]);
         tables['ssh_listener']._set(deepGet(current, 'ssh_listener')||[]);
+        // PDU power section
+        _powerEnabledLoaded = current && current.power ? (current.power.enabled !== false) : undefined;
+        setVal('power.enabled', _powerEnabledLoaded === false ? false : true);
+        try{
+          const pdus = deepGet(current, 'power.pdus')||[];
+          tables['power.pdus']._set(Array.isArray(pdus)? pdus: []);
+        }catch(_e){}
+        try{ const fn = (typeof updatePowerUI==='function')? updatePowerUI : null; if(fn) fn(); } catch(_e){}
 
         setVal('muxcon.heartbeat_interval', deepGet(current, 'muxcon.heartbeat_interval'));
         setVal('muxcon.mpath_primary_stale_sec', deepGet(current, 'muxcon.mpath_primary_stale_sec'));
@@ -1276,6 +1424,17 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
             maybeSet('client_listener.connection_timeout','client_listener.connection_timeout');
           }
         }
+        // power: PDU power management section. `enabled` is only written when
+        // the user actually flipped it relative to the stored state, so a
+        // save that adds PDUs to a server without a power block keeps the
+        // schema default (enabled: true) instead of writing enabled: false.
+        const power = {};
+        const powerEnabled = getVal('power.enabled');
+        if(_powerEnabledLoaded === false || powerEnabled === false){ power.enabled = !!powerEnabled; }
+        const pduRows = tables['power.pdus'] && tables['power.pdus']._get ? tables['power.pdus']._get() : [];
+        const pdus = (pduRows||[]).map(r=>({name:r.name, driver:r.driver, poll_interval:r.poll_interval, description:r.description, options:r.options, outlets:r.outlets})).filter(r=>r && r.name);
+        if(pdus.length>0) power.pdus = pdus;
+        if(Object.keys(power).length>0) deepSet(out, 'power', power);
         // arrays
         const sps = tables['serial_ports']._get(); if(sps && sps.length>0) deepSet(out,'serial_ports', sps);
         const lps = tables['loopback_ports']._get(); if(lps && lps.length>0) deepSet(out,'loopback_ports', lps);
@@ -1329,6 +1488,39 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
 
 async function loadCurrent(){ try{ isPopulating=true; const r=await fetch(withBase('/config-editor/data')); if(!r.ok){ setStatus(false,'Failed to load current config'); return; } const j=await r.json(); populate(j.config||{}); if('writable_sections' in j || 'writable_enforced' in j){ setWritableMetadata(j.writable_sections||[], j.writable_enforced); } if('access_default' in j){ setAccessDefaultReadonly(j.access_default); } markClean(); setStatus(true,'Loaded current config'); }catch(e){ setStatus(false,String(e)); } finally { isPopulating=false; } }
 async function validateOnly(){ let payload; try{ payload=buildConfig(); }catch(e){ setStatus(false, e.message||'Validation failed'); return; } try{ const r=await fetch(withBase('/config-editor/validate'),{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}); const j=await r.json(); if(r.ok && j.ok){ setStatus(true,'Validation OK'); } else { setStatus(false, (j&&(j.message||j.error)) || 'Validation failed'); } }catch(e){ setStatus(false,String(e)); } }
+// Refresh the sidebar PDU list after a save + soft reload. The /power nav
+// item is server-rendered on page load and stays stale otherwise. Mirrors
+// refreshSidebarPorts(): same 300ms delay for the server to finish
+// reconciling the power section, same keep-the-old-list behavior when the
+// fetch fails (power plugin not loaded or request error).
+async function refreshSidebarPower() {
+  try {
+    // Small delay to let the server finish power reconciliation before querying
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const r = await fetch(withBase('/api/power'), {credentials: 'same-origin'});
+    if (!r.ok) return;
+    const container = document.getElementById('power-pdus');
+    if (!container) return;
+    const j = await r.json();
+    const pdus = (j && Array.isArray(j.pdus)) ? j.pdus : [];
+    container.querySelectorAll('a.nav-sub-item, .nav-sub-empty').forEach(el => el.remove());
+    if (pdus.length > 0) {
+      pdus.forEach(p => {
+        const a = document.createElement('a');
+        a.className = 'nav-sub-item';
+        a.href = `${BASE_PATH}/power/${encodeURIComponent(p.name)}`;
+        a.dataset.pduName = p.name;
+        a.textContent = p.name;
+        container.appendChild(a);
+      });
+    } else {
+      const empty = document.createElement('div');
+      empty.className = 'nav-sub-empty';
+      empty.textContent = 'No PDUs configured';
+      container.appendChild(empty);
+    }
+  } catch (_e) {}
+}
 async function refreshSidebarPorts() {
   try {
     // Small delay to let the server finish port reconciliation before querying
@@ -1465,6 +1657,7 @@ async function saveConfig(){
       // Refresh the sidebar immediately after a successful save — the config is on disk
       // regardless of whether the soft reload completes successfully.
       refreshSidebarPorts();
+      refreshSidebarPower();
       const reloadOutcome = await requestReload('soft');
       setReloadStatus(reloadOutcome.ok, reloadOutcome.payload);
       refreshSerialDeviceHealth();
@@ -1549,7 +1742,8 @@ function updateView() {
     const vActions = document.getElementById('view-actions');
     const vSetup2 = document.getElementById('view-setup-2');
     const vReload = document.getElementById('view-reload');
-    
+      const vPower = document.getElementById('view-power');
+
     const navSetup = document.getElementById('nav-config-setup');
     const navAuth = document.getElementById('nav-config-auth');
     const navPorts = document.getElementById('nav-config-ports');
@@ -1557,9 +1751,11 @@ function updateView() {
     const navMuxcon = document.getElementById('nav-config-muxcon');
     const navActions = document.getElementById('nav-config-actions');
     const navReload = document.getElementById('nav-config-reload');
+      const navPower = document.getElementById('nav-config-power');
     const navParent = document.getElementById('nav-config-parent');
     const pageTitle = document.querySelector('.page');
 
+    if (vPower) vPower.style.display = 'none';
     if (view === 'ports') {
         if(vSetup) vSetup.style.display = 'none';
           if(vAuth) vAuth.style.display = 'none';
@@ -1577,6 +1773,7 @@ function updateView() {
         if(navReload) navReload.classList.remove('active');
         if(navPorts) navPorts.classList.add('active');
         if(navListeners) navListeners.classList.remove('active');
+        if(navPower) navPower.classList.remove('active');
         if(pageTitle) pageTitle.textContent = 'Config Editor - Ports';
       } else if (view === 'listeners') {
         if(vSetup) vSetup.style.display = 'none';
@@ -1595,6 +1792,7 @@ function updateView() {
         if(navActions) navActions.classList.remove('active');
         if(navReload) navReload.classList.remove('active');
         if(navListeners) navListeners.classList.add('active');
+        if(navPower) navPower.classList.remove('active');
         if(pageTitle) pageTitle.textContent = 'Config Editor - Listeners';
         } else if (view === 'auth') {
           if(vSetup) vSetup.style.display = 'none';
@@ -1613,6 +1811,7 @@ function updateView() {
           if(navActions) navActions.classList.remove('active');
           if(navReload) navReload.classList.remove('active');
           if(navAuth) navAuth.classList.add('active');
+          if(navPower) navPower.classList.remove('active');
           if(pageTitle) pageTitle.textContent = 'Config Editor - Authentication';
     } else if (view === 'muxcon') {
         if(vSetup) vSetup.style.display = 'none';
@@ -1631,6 +1830,7 @@ function updateView() {
           if(navAuth) navAuth.classList.remove('active');
         if(navActions) navActions.classList.remove('active');
         if(navMuxcon) navMuxcon.classList.add('active');
+        if(navPower) navPower.classList.remove('active');
         if(pageTitle) pageTitle.textContent = 'Config Editor - Muxcon';
     } else if (view === 'actions') {
         if(vSetup) vSetup.style.display = 'none';
@@ -1649,6 +1849,7 @@ function updateView() {
           if(navAuth) navAuth.classList.remove('active');
         if(navMuxcon) navMuxcon.classList.remove('active');
         if(navActions) navActions.classList.add('active');
+        if(navPower) navPower.classList.remove('active');
         if(pageTitle) pageTitle.textContent = 'Config Editor - Actions';
     } else if (view === 'reload') {
         if(vSetup) vSetup.style.display = 'none';
@@ -1667,7 +1868,28 @@ function updateView() {
           if(navAuth) navAuth.classList.remove('active');
         if(navActions) navActions.classList.remove('active');
         if(navReload) navReload.classList.add('active');
+        if(navPower) navPower.classList.remove('active');
         if(pageTitle) pageTitle.textContent = 'Config Editor - Reload';
+    } else if (view === 'power') {
+        if(vSetup) vSetup.style.display = 'none';
+          if(vAuth) vAuth.style.display = 'none';
+        if(vSetup2) vSetup2.style.display = 'none';
+        if(vPorts) vPorts.style.display = 'none';
+        if(vMuxcon) vMuxcon.style.display = 'none';
+        if(vActions) vActions.style.display = 'none';
+        if(vReload) vReload.style.display = 'none';
+        if(vListeners) vListeners.style.display = 'none';
+        if(vPower) vPower.style.display = 'block';
+
+        if(navSetup) navSetup.classList.remove('active');
+        if(navPorts) navPorts.classList.remove('active');
+        if(navMuxcon) navMuxcon.classList.remove('active');
+        if(navListeners) navListeners.classList.remove('active');
+          if(navAuth) navAuth.classList.remove('active');
+        if(navActions) navActions.classList.remove('active');
+        if(navReload) navReload.classList.remove('active');
+        if(navPower) navPower.classList.add('active');
+        if(pageTitle) pageTitle.textContent = 'Config Editor - Power';
     } else {
         if(vSetup) vSetup.style.display = 'block';
           if(vAuth) vAuth.style.display = 'none';
@@ -1685,6 +1907,7 @@ function updateView() {
         if(navReload) navReload.classList.remove('active');
         if(navListeners) navListeners.classList.remove('active');
           if(navAuth) navAuth.classList.remove('active');
+        if(navPower) navPower.classList.remove('active');
         if(pageTitle) pageTitle.textContent = 'Config Editor - Server';
     }
     // Ensure parent is active

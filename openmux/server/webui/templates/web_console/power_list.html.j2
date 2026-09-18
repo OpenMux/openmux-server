@@ -1,0 +1,129 @@
+{% extends "layout.html.j2" %}
+
+{% set active_page = 'power' %}
+
+{% block page_title %}Power{% endblock %}
+
+{% block content %}
+  {% if not snapshot.enabled %}
+    <div class="card">
+      <span class="tag tiny bad">disabled</span>
+      <span class="muted">Power management is disabled (set <code>power.enabled: true</code>).</span>
+    </div>
+  {% else %}
+    <div class="cards">
+      <div class="card">
+        <div class="muted">PDUs</div>
+        <div class="metric">{{ (snapshot.pdus|default([]))|length }}</div>
+      </div>
+      <div class="card">
+        <div class="muted">Outlets on</div>
+        <div class="metric">{% set ns = namespace(n=0) %}{% for p in snapshot.pdus|default([]) %}{% for o in p.outlets|default([]) %}{% if o.on %}{% set ns.n = ns.n + 1 %}{% endif %}{% endfor %}{% endfor %}{{ ns.n }}</div>
+      </div>
+      <div class="card">
+        <div class="muted">Total load</div>
+        <div class="metric">
+          {% set tw = (snapshot.pdus|default([]))|map(attribute="total_watts")|select()|sum %}
+          {{ "%.0f"|format(tw) ~ " W" if tw else "—" }}
+        </div>
+      </div>
+    </div>
+
+    <h2>Power distribution units</h2>
+    <table class="table-compact" id="pdu-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Description</th>
+          <th>Driver</th>
+          <th>Status</th>
+          <th>Outlets on</th>
+          <th>Load</th>
+        </tr>
+      </thead>
+      <tbody id="pdu-rows">
+        {% for p in snapshot.pdus|default([]) %}
+          <tr>
+            <td><a href="{{ base_path }}/power/{{ p.name }}">{{ p.name }}</a>
+              {% if p.online is false %}<span class="tag tiny bad">offline</span>{% endif %}
+            </td>
+            <td class="muted">{{ p.description or "—" }}</td>
+            <td><span class="tag tiny">{{ p.driver }}</span></td>
+            <td>{% if p.online is false %}<span class="tag tiny bad">offline</span>{% elif p.online is none %}<span class="tag tiny warn">unknown</span>{% else %}<span class="tag tiny ok">online</span>{% endif %}</td>
+            <td>{{ p.outlets_on }}/{{ p.outlet_count }}</td>
+            <td>{% if p.total_watts is not none %}{{ "%.0f"|format(p.total_watts) }} W{% else %}—{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% if (snapshot.unresolved_refs|default([]))|length > 0 %}
+      <h2>Unresolved power feeds</h2>
+      <p class="muted">These console ports declare a feed that no configured PDU outlet provides.
+      Check the <code>power:</code> list on the port and the outlet ids on the PDU.</p>
+      <table class="table-compact">
+        <thead><tr><th>Feed (pdu.outlet)</th></tr></thead>
+        <tbody>
+          {% for ref in snapshot.unresolved_refs %}<tr><td><span class="tag tiny bad">{{ ref }}</span></td></tr>{% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  {% endif %}
+{% endblock %}
+
+{% block scripts %}
+  <script>
+  // Live refresh: the /ws/power socket sends one frame per outlet change.
+  // On each frame we refetch /api/power and re-render the PDU table rows.
+  (function () {
+    var base = "{{ base_path }}" || "";
+    var rowsEl = document.getElementById("pdu-rows");
+    if (!rowsEl) return;
+    var enabled = {{ "true" if snapshot.enabled else "false" }};
+    if (!enabled) return;
+
+    function fmtW(w) { return (w === null || w === undefined) ? "—" : Math.round(w) + " W"; }
+
+    function renderRows(pdus) {
+      var html = "";
+      pdus.forEach(function (p) {
+        var status = (p.online === false) ? '<span class="tag tiny bad">offline</span>'
+          : (p.online === null ? '<span class="tag tiny warn">unknown</span>' : '<span class="tag tiny ok">online</span>');
+        html += "<tr>" +
+          '<td><a href="' + base + "/power/" + encodeURIComponent(p.name) + '">' + p.name + "</a>" +
+          (p.online === false ? ' <span class="tag tiny bad">offline</span>' : "") + "</td>" +
+          '<td class="muted">' + (p.description || "—") + "</td>" +
+          '<td><span class="tag tiny">' + p.driver + "</span></td>" +
+          "<td>" + status + "</td>" +
+          "<td>" + p.outlets_on + "/" + p.outlet_count + "</td>" +
+          "<td>" + (p.total_watts === null || p.total_watts === undefined ? "—" : Math.round(p.total_watts) + " W") + "</td>" +
+          "</tr>";
+      });
+      rowsEl.innerHTML = html;
+    }
+
+    function refresh() {
+      fetch(base + "/api/power", { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (snap) { if (snap && snap.pdus) renderRows(snap.pdus); })
+        .catch(function () { /* transient; next frame retries */ });
+    }
+
+    function connect() {
+      var scheme = location.protocol === "https:" ? "wss" : "ws";
+      var ws = new WebSocket(scheme + "://" + location.host + base + "/ws/power");
+      ws.onmessage = function (ev) {
+        try {
+          var msg = JSON.parse(ev.data);
+          if (msg.event === "power_snapshot" || msg.event === "outlet_changed") {
+            refresh();
+          }
+        } catch (_) { /* ignore malformed frame */ }
+      };
+      ws.onclose = function () { setTimeout(connect, 3000); };
+      ws.onerror = function () { try { ws.close(); } catch (_) {} };
+    }
+    connect();
+  })();
+  </script>
+{% endblock %}

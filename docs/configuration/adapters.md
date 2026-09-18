@@ -515,6 +515,81 @@ web_console:
   ssl_key: /etc/ssl/private/openmux.key
 ```
 
+## PDU Power (`power`)
+
+Manages power distribution unit (PDU) outlets: on/off state plus watts, volts, and amps when the device reports them. The adapter is portless: outlets are not console ports. The console side maps a port to its feeds with the `power:` key on port entries (see below).
+
+Drivers implement a common interface:
+- `list_outlets()` returns the device's own outlet ids. Outlet ids are free strings as reported by the device (for example `1`, or `A1`, `B1`, `C2` on a 3-phase PDU). Config only holds optional per-outlet annotations; a PDU needs no outlet config to be fully listed.
+- `read_states()` returns on/off plus watts/volts/amps per outlet. `on: null` = unknown (PDU down, not yet polled).
+- `set_state(outlet_id, on)` switches one outlet.
+
+The first (and only) driver in v1 is `dummy`, which simulates a device in memory. Real drivers (for example Raritan, APC) register new keys in the same interface with no other changes.
+
+Supported keys:
+- `enabled`: Disable the whole feature when false (default: true)
+- `pdus`: List of PDU entries
+- `pdus[].name`: PDU name. Unique; no dots or whitespace (it prefixes every outlet ref)
+- `pdus[].description`: Free text (default: not set)
+- `pdus[].driver`: Driver registry key. v1 provides `dummy`
+- `pdus[].poll_interval`: PER-PDU refresh in seconds. `0` = no poll task (reads on demand only). Default: 10
+- `pdus[].options`: Free-form object passed to the driver (dummy: `outlets` list and `watts_on`)
+- `pdus[].outlets`: Optional per-outlet annotations; each item is `{id: "<outlet id>", description: "..."}`. `id` must match the device's id exactly (a string). Ids that the device does not report raise a warning at startup
+
+Outlet ref = `<pdu_name>.<outlet_id>` (for example `rack1.3`, `phaseA.A1`). This is the single identity used by the CLI, the web API, the Power page, and the status page.
+
+Console-side mapping: add `power: ["<ref>", ...]` to a port entry in any of the four port sections (`serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`). Multiple entries = A/B dual feed. A ref to an unknown PDU or outlet raises a warning at startup (not fatal). The web status page and the console header show a power dot (green all feeds on, yellow partial, red all off, grey unknown); the console header badge opens a per-outlet on/off menu.
+
+Any power change (web toggle, CLI, or a poll that detects out-of-band drift) sends a message to every attached session of every console the outlet feeds, and updates the web badges live. A successful manual switch also writes two records: one `POWER CONTROL` audit line in the server log (user, outlet ref, new state, consoles that lose all power), and a `power_control_notice` meta event in each affected console's port data log (the `[POWER]` notice wording, so the event stays in the log with no client attached). Polls that detect out-of-band drift update the badges but do not audit-log; only a user's switch is a control event.
+
+CLI (client listener, command phase) syntax:
+```
+POWER                       # list every PDU + outlet
+POWER rack1                 # list one PDU's outlets
+POWER rack1.3               # report one outlet
+POWER rack1.3 off           # switch an outlet (needs read-write)
+```
+Switching an outlet off prints `WARNING:` lines naming the consoles that would lose ALL power, and `NOTE:` lines naming the consoles that stay up on other feeds.
+
+Who may switch is scoped to console groups: switching needs `read-write` or `admin`, plus the entitlement to open every console the outlet feeds (the same console-access rules as attach time: `read_write_groups`/`read_only_groups` and `access_default`). A read-write user whose groups do not cover one of the outlet's consoles sees an `ERROR:POWER` line (CLI) or a 403 (web API) naming that console; switching an outlet that feeds any console outside the user's groups requires `admin`. An outlet that feeds no console stays switchable by any read-write user. The check runs on both the web API (`POST /api/power/outlets/{ref}`) and the CLI `POWER <pdu>.<outlet> on|off` path.
+
+Reload behavior: a soft reload re-applies the `power:` section without a restart. Description or annotation edits apply in place. A material change (driver, `poll_interval`, `options`) re-creates that PDU and re-discovers its outlets. Console-side `power:` mapping is read live from the ports and needs no reload work at all.
+
+Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power`) edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `options` as JSON, and optional per-outlet descriptions). The per-port `power:` feed refs are edited as the "Power feeds" field on the Ports view. Apply, then use **Soft Reload** to reconcile the section.
+
+Example:
+```yaml
+power:
+  enabled: true
+  pdus:
+    - name: "rack1"
+      description: "Rack 1 PDU"
+      driver: dummy
+      poll_interval: 30
+      options:
+        outlets: ["1", "2", "3"]
+      outlets:
+        - id: "3"
+          description: "Switch A"
+    - name: "phaseA"
+      driver: dummy
+      poll_interval: 10
+      options:
+        outlets: ["A1", "B1", "C2"]
+```
+
+Example port mapping:
+```yaml
+serial_ports:
+  - name: console1
+    device: "/dev/ttyS0"
+    power: ["rack1.3", "phaseA.A1"]   # dual feed
+```
+
+Telnet and SSH listeners have no POWER command and no live power notice in v1 (the client listener and the web console cover both surfaces). See [../GLOSSARY.md](../GLOSSARY.md) for the terms PDU, outlet, outlet id, outlet ref, and feed.
+
+Follow-on work beyond v1 (real drivers, cross-node federation, audit logging, more listener surfaces, metrics history) is tracked in [../power-roadmap.md](../power-roadmap.md).
+
 ## Configuration Validation
 
 At startup, each adapter validates its configuration and the server reports clear errors for:

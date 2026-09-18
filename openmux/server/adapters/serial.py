@@ -207,6 +207,10 @@ class SerialPortWrapper:
         self.scrollback_size: int = int(config.get("scrollback_size", SERIAL_PORT_DEFAULTS["scrollback_size"]))
         self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
         self.read_only_groups: List[str] = list(config.get("read_only_groups") or [])
+        # PDU power feeds for this console: outlet refs <pdu>.<id> (may be
+        # several for A/B dual feed). Read live by the power adapter and the
+        # web console; updated in place on soft reload like the group lists.
+        self.power: List[str] = [str(r) for r in (config.get("power") or [])]
 
         self.logger = logger.getChild(f"serial.{self.name or 'unnamed'}")
         # Best-effort callback into PortManager listeners via adapter
@@ -1227,6 +1231,11 @@ class SerialAdapter(BaseGenericAdapter):
                             spw.read_write_groups = new_rw
                         if list(spw.read_only_groups or []) != new_ro:
                             spw.read_only_groups = new_ro
+                        # PDU power feeds (power section refs), same in-place
+                        # treatment: no port recreate, power adapter re-reads.
+                        new_power = [str(r) for r in (new_by_name[name].get("power") or [])]
+                        if list(getattr(spw, "power", None) or []) != new_power:
+                            spw.power = new_power
                     except Exception:
                         # justification: in-place live update; the next reload retries
                         pass

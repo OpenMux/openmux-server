@@ -994,10 +994,12 @@ class TestConnectClientToPortGroupAcl:
                 "read_write_groups": [],
                 "read_only_groups": [],
             },
-            {"users": [
-                {"username": "root", "password_hash": "x", "permissions": "admin"},
-                {"username": "eve", "password_hash": "x"},  # default read-write
-            ]},
+            {
+                "users": [
+                    {"username": "root", "password_hash": "x", "permissions": "admin"},
+                    {"username": "eve", "password_hash": "x"},  # default read-write
+                ]
+            },
         )
         adapter = cm.port_manager.ports["p1"].adapter
         wrapper_id = id(cm.port_manager.ports["p1"])
@@ -1009,19 +1011,24 @@ class TestConnectClientToPortGroupAcl:
 
         destroyed: list = []
         created: list = []
+
         async def counting_destroy(name):
             destroyed.append(name)
+
         async def counting_create(name, cfg):
             created.append(name)
+
         # Patch on the adapter instance (not the class) so we do not leak into
         # the other tests in this suite.
         monkeypatch.setattr(adapter, "destroy_port", counting_destroy)
         monkeypatch.setattr(adapter, "create_port", counting_create)
 
         # Simulate a soft reload: only the group lists change.
-        summary = await adapter.reconcile_ports([
-            {"name": "p1", "max_read_write_users": 5, "read_write_groups": ["ops"]},
-        ])
+        summary = await adapter.reconcile_ports(
+            [
+                {"name": "p1", "max_read_write_users": 5, "read_write_groups": ["ops"]},
+            ]
+        )
         assert summary["unchanged"] == ["p1"], f"groups-only change must not recreate: {summary}"
         assert summary["updated"] == [] and summary["removed"] == [] and summary["added"] == []
         assert destroyed == []  # no port lifecycle event on a groups-only change

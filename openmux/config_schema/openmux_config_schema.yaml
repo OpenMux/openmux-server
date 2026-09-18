@@ -96,6 +96,12 @@ properties:
         name: { type: string }
         description: { type: string }
         device: { type: string }
+        # PDU power feeds for this console: outlet refs <pdu>.<outlet id>.
+        # Multiple = A/B dual feed. Unknown refs warn at startup; the console
+        # shows not-powered (grey) until they resolve.
+        power:
+          type: array
+          items: { type: string }
         baudrate: { type: integer, minimum: 1, default: 9600 }
         bytesize: { type: integer, enum: [5,6,7,8], default: 8 }
         parity: { type: string, enum: [N,E,O,M,S], default: N }
@@ -144,6 +150,10 @@ properties:
         name: { type: string }
         description: { type: string }
         buffer_size: { type: integer, minimum: 1, default: 1024 }
+        # PDU power feeds for this console (see serial_ports.power).
+        power:
+          type: array
+          items: { type: string }
         echo_delay: { type: number, minimum: 0, default: 0.0 }
         sanitize_control: { type: boolean, default: true }
         # Write-slot capacity (issue #59); default is 'one' (consistent with
@@ -187,6 +197,10 @@ properties:
         name: { type: string }
         description: { type: string }
         command: { type: string }
+        # PDU power feeds for this console (see serial_ports.power).
+        power:
+          type: array
+          items: { type: string }
         shell: { type: boolean, default: false }
         cwd: { type: string }
         env: { type: object, additionalProperties: { type: string } }
@@ -222,6 +236,10 @@ properties:
         description: { type: string }
         host: { type: string }
         port: { type: integer, minimum: 1, maximum: 65535 }
+        # PDU power feeds for this console (see serial_ports.power).
+        power:
+          type: array
+          items: { type: string }
         use_tls: { type: boolean, default: false }
         ssl_verify: { type: boolean, default: true }
         timeout: { type: number, minimum: 0, default: 10.0 }
@@ -439,6 +457,43 @@ properties:
         additionalProperties:
           type: array
           items: { type: string }
+  # PDU power management. Outlets are discovered from the device via the
+  # driver; config only carries optional per-outlet annotations. Console
+  # ports declare their own feeds via the per-port `power` key. Outlet ids
+  # are opaque device strings (e.g. "1", "A1" on 3-phase units); refs are
+  # <pdu name>.<outlet id>, so pdu name and id must not contain dots or
+  # whitespace.
+  power:
+    type: object
+    additionalProperties: false
+    properties:
+      enabled: { type: boolean, default: true }
+      pdus:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [name, driver]
+          properties:
+            name: { type: string, pattern: '^[A-Za-z0-9_-]+$' }
+            description: { type: string }
+            # Driver registry key (built-in: "dummy"). Real drivers take
+            # their connection settings in `options` below.
+            driver: { type: string }
+            # Per-PDU poll cadence in seconds; 0 = on-demand reads only.
+            # Default 10 (see pdu.py DEFAULT_POLL_INTERVAL).
+            poll_interval: { type: number, minimum: 0, default: 10 }
+            # Free-form, driver-specific settings.
+            options: { type: object }
+            outlets:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [id]
+                properties:
+                  id: { type: string, pattern: '^[^.\\s]+$' }
+                  description: { type: string }
 
   # Fallback for the fail-fast switch, read only when server.
   # fail_fast_adapters is absent (adapters/factory.py checks top-level as a
@@ -454,6 +509,7 @@ anyOf:
   - required: [muxcon]
   - required: [web_console]
   - required: [web_status]
+  - required: [power]
 $defs:
   # One muxcon filter set, used by a single advertise/accept direction. Each
   # key pair is include/exclude over ONE port attribute; a port passes only

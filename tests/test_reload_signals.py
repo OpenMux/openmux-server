@@ -88,9 +88,7 @@ async def test_soft_reload_hot_applies_web_console_ui_config(monkeypatch, tmp_pa
     # Attach a real (unstarted) web console adapter with known initial values.
     from openmux.server.web_console import WebConsoleAdapter
 
-    wc = WebConsoleAdapter(
-        "web_console", {"motd": "Old login motd", "logged_in_motd": "Old logged-in motd"}
-    )
+    wc = WebConsoleAdapter("web_console", {"motd": "Old login motd", "logged_in_motd": "Old logged-in motd"})
     server.web_console = wc
     assert wc.motd == "Old login motd"
     assert wc.logged_in_motd == "Old logged-in motd"
@@ -99,10 +97,7 @@ async def test_soft_reload_hot_applies_web_console_ui_config(monkeypatch, tmp_pa
     with open(cfg_path) as f:
         cfg_text = f.read()
     cfg_text += (
-        "web_console:\n"
-        "  port: 8081\n"
-        '  motd: "New\\nline one\\nline two"\n'
-        '  logged_in_motd: "New logged-in motd"\n'
+        "web_console:\n" "  port: 8081\n" '  motd: "New\\nline one\\nline two"\n' '  logged_in_motd: "New logged-in motd"\n'
     )
     with open(cfg_path, "w") as f:
         f.write(cfg_text)

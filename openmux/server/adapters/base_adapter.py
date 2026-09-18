@@ -29,6 +29,7 @@ class AdapterCapability(Enum):
     MULTIPLEXED_STREAMS = "multiplexed_streams"  # Multiple sessions per connection
     FEDERATION_AWARE = "federation_aware"  # Supports federation protocols
     AUTHENTICATION = "authentication"  # Handles user authentication
+    MANAGES_POWER = "manages_power"  # Controls PDU outlets (power on/off, readings)
 
 
 class BaseGenericAdapter(ABC):

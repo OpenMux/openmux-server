@@ -50,6 +50,21 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Telnet listener | The adapter that accepts inbound Telnet client connections to a port. | — |
 | Web console | The adapter that gives the HTML5 web interface and its plugins (for example the Config Editor). | web UI, web interface (use "web console") |
 | Web status | The adapter that gives a lightweight HTTP status/API endpoint. | — |
+| PDU adapter | The portless adapter (config section `power`) that manages PDU outlets via a driver interface. It is not a console port adapter. | power adapter (use "PDU adapter") |
+
+## PDU Power
+
+| Term | Meaning | Do not use |
+|---|---|---|
+| PDU | A power distribution unit managed by the `power` adapter. | power supply, power unit (for a managed unit) |
+| PDU adapter | The portless built-in adapter (config section `power`) that manages PDUs and their outlets. | power adapter (when meaning the PDU one), outlet adapter |
+| Outlet | A single switchable circuit on a PDU. Not a console port; never listed in `LIST` output. | breaker slot, socket, plug |
+| Outlet id | The device's own id for an outlet: a free string (for example `1` or `A1`), discovered from the device. Users annotate, not name, outlets. | outlet name (the id is the identity), outlet number (ids are strings) |
+| Outlet ref | `<pdu_name>.<outlet_id>` (for example `rack1.3`, `phaseA.A1`): the single canonical outlet identifier used by the CLI, the web API, and port `power:` keys. | outlet (when the pair is meant), feed ref |
+| Feed | One outlet power source declared on a console port's `power:` list. A port declares one or more feeds (dual feed = A/B). | power feed is fine; avoid "line" or "cable" |
+| Power page | The web console "Power" menu and its PDU list + per-PDU pages (power_monitor plugin). | power monitor UI, power tab |
+| Power badge | The console session header chip showing this port's feed state (green all on, yellow partial, red all off, grey unknown). | power indicator, power dot (that is the status-page cell) |
+| `POWER` command | The client-listener text command that lists or switches outlets. | power command (use the exact form) |
 
 ## MuxCon Federation
 
