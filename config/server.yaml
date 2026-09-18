@@ -31,6 +31,10 @@ loopback_ports:
     # log_file: "logs/ports/loopback.jsonl"
     # To log only outbound data uncomment:
     # log_direction: out
+    # PDU power feeds (optional): `<pdu_name>.<outlet_id>` refs for the outlets
+    # this console is powered by. Multiple entries = A/B dual feed. See the
+    # `power:` section below and docs/configuration/adapters.md.
+    power: ["rack1.3", "phaseA.A1"]
 
 serial_ports:
   - name: "console1"
@@ -60,6 +64,34 @@ client_listener:
   max_connections: 200
   connection_timeout: 30
 
+# PDU power control (optional): manages outlets (on/off + watts/volts/amps)
+# behind a driver interface; the dummy driver simulates the device in memory. Real
+# drivers (e.g. Raritan, APC) plug in via `driver:` with no other changes. Outlet
+# ids are the device's OWN ids (free strings: "1", "A1", "C2", ...). The console
+# side maps a port to its feeds with `power: [refs]` on port entries.
+power:
+  enabled: true
+  pdus:
+    - name: "rack1"            # unique PDU name (no dots/whitespace; prefixes refs)
+      description: "Rack 1 PDU"
+      driver: dummy
+      poll_interval: 30        # PER-PDU seconds; 0 = no poll task (on-demand reads)
+      options:
+        outlets: ["1", "2", "3", "4", "5", "6", "7", "8"]
+      outlets:                 # optional per-outlet annotations, keyed by id
+        - id: "3"
+          description: "Switch A"
+    - name: "phaseA"           # 3-phase-style example: string outlet ids
+      description: "Phase A PDU"
+      driver: dummy
+      poll_interval: 10
+      options:
+        outlets: ["A1", "B1", "C2"]
+        watts_on: 55
+      outlets:
+        - id: "A1"
+          description: "Phase A primary"
+
 # Web console with Config Editor plugin enabled
 web_console:
   enable_probes: true
@@ -70,6 +102,7 @@ web_console:
   host: 127.0.0.1
   plugins:
   - openmux.server.web_plugins.config_editor
+  - openmux.server.web_plugins.power_monitor
   port: 80
   probes_include_details: true
   respect_forwarded_prefix: false

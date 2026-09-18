@@ -209,6 +209,8 @@ class PluginRegistry:
             ("openmux.server.web_console", "WebConsoleAdapter", "Web Console", "web_console"),
             ("muxcon", "UnifiedMuxConAdapter", "MuxCon Federation", "muxcon"),
             ("web_status", "WebStatusAdapter", "Web Status", "web_status"),
+            # PDU power management (outlets are managed, not console ports)
+            ("pdu", "PduAdapter", "PDU Power", "power"),
         ]
 
         for mod, cls, disp, section in built_ins:

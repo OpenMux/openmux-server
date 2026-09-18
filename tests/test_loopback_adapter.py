@@ -266,9 +266,7 @@ async def test_adapter_reconcile_ports_updates_groups_in_place_without_restart(m
     monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
     monkeypatch.setattr(adapter, "create_port", fake_create)
 
-    summary = await adapter.reconcile_ports(
-        [{"name": "a", "read_write_groups": ["oncall"], "read_only_groups": []}]
-    )
+    summary = await adapter.reconcile_ports([{"name": "a", "read_write_groups": ["oncall"], "read_only_groups": []}])
     assert summary["unchanged"] == ["a"], f"groups-only change must not recreate: {summary}"
     assert summary["updated"] == []
     assert summary["removed"] == []

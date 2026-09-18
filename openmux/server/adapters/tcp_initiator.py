@@ -86,6 +86,10 @@ class TcpInitiatorPort:
         # authenticated users (implicit "user" group). See docs/ADAPTER_PORT_CONTRACT.md.
         self.read_write_groups: List[str] = list(config.get("read_write_groups") or [])
         self.read_only_groups: List[str] = list(config.get("read_only_groups") or [])
+        # PDU power feeds for this console: outlet refs <pdu>.<id> (may be
+        # several for A/B dual feed). Read live by the power adapter and the
+        # web console; updated in place on soft reload like the group lists.
+        self.power: List[str] = [str(r) for r in (config.get("power") or [])]
         # Scrollback replay buffer size in bytes; 0 = disabled. See docs/ADAPTER_PORT_CONTRACT.md.
         self.scrollback_size: int = int(config.get("scrollback_size", 0))
 
@@ -802,6 +806,11 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                         setattr(port, "read_write_groups", new_rw)
                     if list(getattr(port, "read_only_groups", None) or []) != new_ro:
                         setattr(port, "read_only_groups", new_ro)
+                    # PDU power feeds (power section refs), same in-place
+                    # treatment: no port recreate, power adapter re-reads.
+                    new_power = [str(r) for r in (new_by_name[n].get("power") or [])]
+                    if list(getattr(port, "power", None) or []) != new_power:
+                        setattr(port, "power", new_power)
                 except Exception:
                     # justification: in-place live update; the next reload retries
                     pass

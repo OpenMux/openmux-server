@@ -4,6 +4,7 @@
 the default comes from OPENMUX_STATE_DIR (or ~/.openmux) and an explicit
 config value still wins.
 """
+
 import importlib
 import os
 
@@ -102,9 +103,7 @@ def test_ssh_listener_host_key_dir_follows_env(clean_state_env, monkeypatch):
 
 def test_ssh_listener_host_key_dir_dev_default(clean_state_env):
     assert ssh_listener_module._HOST_KEY_DIR == locations.ssh_host_key_dir()
-    assert ssh_listener_module._HOST_KEY_PATH == os.path.join(
-        locations.ssh_host_key_dir(), "ssh_host_key"
-    )
+    assert ssh_listener_module._HOST_KEY_PATH == os.path.join(locations.ssh_host_key_dir(), "ssh_host_key")
 
 
 def _web_console(cfg) -> WebConsoleAdapter:

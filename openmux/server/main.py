@@ -19,13 +19,11 @@ import yaml
 from ..common.fsutil import ensure_directory
 from .auth_manager import AuthManager
 from .config_manager import ConfigManager
-from .locations import (
-    control_socket_path as _locations_control_socket,
-    log_dir as _locations_log_dir,
-    pidfile_path as _locations_pidfile,
-)
 from .console_manager import ConsoleManager
 from .data_logger import DataLogger
+from .locations import control_socket_path as _locations_control_socket
+from .locations import log_dir as _locations_log_dir
+from .locations import pidfile_path as _locations_pidfile
 from .port_manager import PortManager
 from .security_policy import SecurityPolicyError
 
@@ -991,6 +989,7 @@ class OpenMuxServer:
         ssh_section = new_cfg.get("ssh_listener")
         muxcon_section = new_cfg.get("muxcon")
         client_listener_section = new_cfg.get("client_listener")
+        power_section = new_cfg.get("power")
 
         adapters = list(getattr(self, "unified_adapters", []) or [])
 
@@ -1006,6 +1005,7 @@ class OpenMuxServer:
             ("ssh_listener", "ssh_listener", ssh_section),
             ("muxcon", "muxcon", muxcon_section),
             ("client_listener", "client_listener", client_listener_section),
+            ("power", "power", power_section),
         ]
         for _type_key, _sec_key, _sec_val in _bootstrap_map:
             if not _sec_val:
@@ -1131,6 +1131,16 @@ class OpenMuxServer:
                     except Exception as e:
                         self.logger.error("[reload-soft:%s] Client listener reconcile error: %s", req_id, e, exc_info=True)
                         summary["adapters"]["client_listener"] = {"error": str(e)}
+                # Power (PDU outlets; no console ports to recreate)
+                if key == "power" and hasattr(a, "reconcile_ports"):
+                    # Absent section means no PDUs (same as a full reload).
+                    effective = power_section if power_section is not None else {}
+                    try:
+                        res = await a.reconcile_ports(effective)
+                        summary["adapters"].setdefault("power", res)
+                    except Exception as e:
+                        self.logger.error("[reload-soft:%s] Power reconcile error: %s", req_id, e, exc_info=True)
+                        summary["adapters"]["power"] = {"error": str(e)}
             except Exception:
                 continue
 

@@ -1,0 +1,84 @@
+# PDU Power Roadmap
+
+This file tracks the PDU power feature work that comes after v1. Use the
+checkboxes to record progress. Keep each item scoped so it can be checked off
+when the work is done and merged. Add a date and a short note beside a box when
+you close it (for example `[x] control audit log — 2026-10-02`).
+
+v1 (shipped) shipped: the power adapter, the `dummy` driver, the web Power
+pages, the `/api/power` API, the Config Editor Power view, per-port `power:`
+feeds and badges, the `POWER` CLI command, off-impact warnings, soft-reload
+reconcile, and live notices to attached sessions.
+
+## v2 — hardening and audit
+
+### Scope note
+
+v2 hardens the v1 control surface. It changes who may switch an outlet and what
+gets recorded. It does not add new device drivers or federate power.
+
+- [ ] **Group-scoped power control.** A `read-write` user may switch an outlet
+      only if every console fed by that outlet is a console the user can open.
+      Switching an outlet that feeds any console outside the user's groups
+      requires `admin`. Apply this on both the web API (`POST
+      /api/power/outlets/{ref}`) and the CLI `POWER ... on|off` path.
+- [ ] **Control audit log.** Write one server-log line when an outlet switch
+      SUCCEEDS. The line names the user, the outlet ref, the new state (on/off),
+      and the impact (consoles that lose all power). Log only on success;
+      failures already log.
+- [ ] **Record the notice in the port log.** Append the `[POWER]` /
+      `[POWER WARNING]` notice text to each affected console's port data log so
+      the event is kept even when no client is attached. (v1 sends the notice
+      only to attached sessions via `send_raw_data`; it is not written to the
+      port log or the scrollback.)
+- [ ] **Add a CHANGELOG entry.** One entry under "Behavior changes" for the
+      access-control change, naming the `power` paths affected.
+
+### Verification when closing v2
+
+- Add tests for the group-scoped check on both the web and CLI switch paths
+      (allowed within groups, blocked across groups, admin allowed).
+- Add a test that a successful switch logs the audit line and that the port log
+      gains the notice.
+- Run `make test`, `make lint`, `make format` and confirm they pass.
+
+## v3 — scope expansion
+
+### Scope note
+
+v3 adds new capabilities beyond a single node. Each item is independent; they
+can be delivered in any order.
+
+- [ ] **Real PDU drivers.** Add at least one real vendor driver (for example
+      Raritan or APC) via the `DRIVERS` and `DRIVER_INFO` registries in
+      `openmux/server/adapters/pdu.py`. The Config Editor driver select and the
+      per-driver options help update automatically from the registry.
+- [ ] **MuxCon outlet federation.** Make power state and per-port feed mappings
+      visible across a federation. Today power is strictly per-node: a server
+      only sees its own PDUs and its own local ports' feeds.
+- [ ] **Telnet and SSH POWER support.** Add the `POWER` command and the live
+      power notice to the telnet and SSH listeners. v1 provides them on the
+      client listener and the web console only.
+- [ ] **Typed CLI POWER parsing.** Replace the free-text `command.split()`
+      handler with structured parsing for the `POWER` command forms.
+- [ ] **Power metrics history.** Keep watts/amps and on-state over time and
+      make it queryable. Show it as a chart on the Power page. (Part of this is
+      the audit log and port-log records from v2; this item adds retention and
+      the view.)
+
+### Verification when closing a v3 item
+
+- Add a test for the item's behavior.
+- Run `make test`, `make lint`, `make format` and confirm they pass.
+- If the item is user-visible, add a CHANGELOG entry that names the config key
+      or surface it touches.
+
+## Related references
+
+- PDU power configuration and CLI: [configuration/adapters.md](configuration/adapters.md)
+  (section "PDU Power (`power`)").
+- Terminology (PDU, outlet, outlet ref, feed): [GLOSSARY.md](GLOSSARY.md).
+- Writable Config Editor sections: `security_policy.py`
+  (`_KNOWN_CONFIG_SECTIONS`). The `power` section is a known writable section.
+- Driver extension points: `DRIVERS` and `DRIVER_INFO` in
+  `openmux/server/adapters/pdu.py`.

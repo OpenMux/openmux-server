@@ -53,6 +53,11 @@ class LoopbackPort:
         else:
             self.description = f"Loopback port {name}"
 
+        # PDU power feeds for this console: outlet refs <pdu>.<id> (may be
+        # several for A/B dual feed). Read live by the power adapter and the
+        # web console; updated in place on soft reload like the group lists.
+        self.power: List[str] = [str(r) for r in (config.get("power") or [])]
+
         # Loopback-specific configuration (backward compatible)
         self.echo_delay = config.get("echo_delay", 0.0)
         self.buffer_size = config.get("buffer_size", 1024)
@@ -688,6 +693,11 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                         setattr(_live_port, "read_write_groups", new_rw)
                     if list(getattr(_live_port, "read_only_groups", None) or []) != new_ro:
                         setattr(_live_port, "read_only_groups", new_ro)
+                    # PDU power feeds (power section refs), same in-place
+                    # treatment: no port recreate, power adapter re-reads.
+                    new_power = [str(r) for r in (new_by_name[n].get("power") or [])]
+                    if list(getattr(_live_port, "power", None) or []) != new_power:
+                        setattr(_live_port, "power", new_power)
                 except Exception:
                     # justification: in-place live update; the next reload retries
                     pass

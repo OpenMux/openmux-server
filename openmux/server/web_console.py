@@ -545,7 +545,6 @@ async def handle_console(request: web.Request) -> web.Response:
         ports = adapter._get_ports_snapshot()
         current_port = request.query.get("port")
         embed = request.query.get("embed", "").lower() in ("1", "true", "yes", "on")
-
         body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm, embed=embed)  # type: ignore[attr-defined]
     except Exception as exc:
         adapter.logger.error("Console render failed: %s", exc)
@@ -1664,10 +1663,28 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 req = n.get("require") if isinstance(n, dict) else None
                 if req and perm != req:
                     continue
-                items.append({"title": n.get("title"), "path": n.get("path"), "require": req})
+                item = {"title": n.get("title"), "path": n.get("path"), "require": req}
+                if item["path"] == "/power":
+                    # Enrich live: PDUs can change on soft reload, so the
+                    # per-PDU sub-links are rebuilt for every page, not cached
+                    # in the startup nav items.
+                    item["links"] = self._power_nav_links()
+                items.append(item)
             except Exception:
                 continue
         return items
+
+    def _power_nav_links(self) -> list:
+        """Sorted PDU names for the Power sidebar sub-links (or an empty list)."""
+        pdu = self._find_power_adapter()
+        states = getattr(pdu, "pdus", None) if pdu is not None else None
+        if not isinstance(states, dict) or not states:
+            return []
+        try:
+            return sorted(str(name) for name in states.keys())
+        except Exception:
+            # justification: decorative sub-links; the section renders without them
+            return []
 
     # --- SSO helpers ---
     def _verify_sso_header(self, header_value: str) -> Optional[Dict[str, Any]]:
@@ -2364,6 +2381,23 @@ class WebConsoleAdapter(BaseGenericAdapter):
             pass
         return None
 
+    def _find_power_adapter(self):
+        """Find the active PDU adapter (adapter_type ``power``), or None."""
+        pm = getattr(self.console_manager, "port_manager", None) if self.console_manager else None
+        try:
+            unified = getattr(pm, "unified_adapters", []) if pm else []
+            for ad in unified or []:
+                try:
+                    atype = ad.get_adapter_type()
+                    if str(atype).lower() == "power":
+                        return ad
+                except Exception:
+                    continue
+        except Exception:
+            # justification: optional lookup; the UI renders without power info
+            pass
+        return None
+
     # --- Event-driven meta push helpers ---
     def _on_port_meta_update(self, port_name: str, changes: Optional[Dict[str, Any]] = None):
         """PortManager meta listener: schedule a meta broadcast to WS subscribers.
@@ -2389,6 +2423,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         "federated_disconnected",
                         "port_registered",
                         "port_unregistered",
+                        "power_outlet_changed",
                     ):
                         immediate = True
             except Exception:
@@ -2539,6 +2574,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
             readiness = info.get("readiness")
             if readiness in (READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE):
                 meta["readiness"] = readiness
+            # PDU power feed state (PDU feature): present only when the port
+            # declares a `power:` feed, so unmapped ports ignore the key.
+            power_info = info.get("power")
+            if isinstance(power_info, dict) and power_info:
+                meta["power"] = power_info
             payload = "OMXCTRL " + json.dumps(meta, separators=(",", ":"))
             for cid in list(subs):
                 try:
@@ -3349,11 +3389,23 @@ class WebConsoleAdapter(BaseGenericAdapter):
         if pm is not None:
             try:
                 raw_ports = getattr(pm, "ports", {}) or {}
+                power_adapter = self._find_power_adapter()
                 for name, port in list(raw_ports.items()):
                     try:
                         info = port.get_status() if hasattr(port, "get_status") else {"name": name}
                         if "name" not in info:
                             info["name"] = name
+                        # PDU power feed state (PDU feature): feeds, derived
+                        # all|some|none|unknown, and all_power_lost. Omitted
+                        # entirely when the port declares no `power:` feed.
+                        if power_adapter is not None:
+                            try:
+                                power_payload = power_adapter.port_power_payload(str(name))
+                                if power_payload is not None:
+                                    info["power"] = power_payload
+                            except Exception:
+                                # justification: optional status detail; the port entry stays complete
+                                pass
                         # Compute a stable composite id: <server_id>::<port_name>
                         comp_id = None
                         try:

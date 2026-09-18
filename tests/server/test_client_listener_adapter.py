@@ -624,9 +624,7 @@ def _make_adapter(port: int = 8023, host: str = "127.0.0.1", enabled: bool = Tru
 async def test_reconcile_ports_noop_when_unchanged():
     """Material and optional fields identical: no rebind, no side effects."""
     adapter = _make_adapter()
-    res = await adapter.reconcile_ports(
-        {"host": "127.0.0.1", "port": 8023, "max_connections": 100, "connection_timeout": 30}
-    )
+    res = await adapter.reconcile_ports({"host": "127.0.0.1", "port": 8023, "max_connections": 100, "connection_timeout": 30})
     assert res["status"] == "unchanged"
     assert res["changed"] == []
     assert res["unchanged"] == ["max_connections", "connection_timeout"]
@@ -638,9 +636,7 @@ async def test_reconcile_ports_noop_when_unchanged():
 async def test_reconcile_ports_updates_non_material_fields_in_place():
     """Only max_connections / connection_timeout change: updated, no rebind."""
     adapter = _make_adapter(max_connections=50, connection_timeout=10)
-    res = await adapter.reconcile_ports(
-        {"host": "127.0.0.1", "port": 8023, "max_connections": 200, "connection_timeout": 30}
-    )
+    res = await adapter.reconcile_ports({"host": "127.0.0.1", "port": 8023, "max_connections": 200, "connection_timeout": 30})
     assert res["status"] == "updated"
     assert res["changed"] == ["max_connections", "connection_timeout"]
     assert res["unchanged"] == []
@@ -750,9 +746,7 @@ async def test_reconcile_ports_enable_binds_server(monkeypatch):
 async def test_reconcile_ports_accepts_full_server_config_shape(monkeypatch):
     """Both the raw section and the full server config (nested under client_listener) work."""
     adapter = _make_adapter()
-    res = await adapter.reconcile_ports(
-        {"server": {}, "client_listener": {"host": "127.0.0.1", "port": 8023}}
-    )
+    res = await adapter.reconcile_ports({"server": {}, "client_listener": {"host": "127.0.0.1", "port": 8023}})
     assert res["status"] in ("unchanged", "updated")
 
     adapter.is_running = True
@@ -765,9 +759,7 @@ async def test_reconcile_ports_accepts_full_server_config_shape(monkeypatch):
 
     monkeypatch.setattr("openmux.server.adapters.client_listener.asyncio.start_server", fake_start_server)
 
-    res = await adapter.reconcile_ports(
-        {"client_listener": {"host": "0.0.0.0", "port": 8023}}
-    )
+    res = await adapter.reconcile_ports({"client_listener": {"host": "0.0.0.0", "port": 8023}})
     assert res["status"] == "restarted"
     assert rebinds == ["0.0.0.0:8023"]
     assert adapter.host == "0.0.0.0"

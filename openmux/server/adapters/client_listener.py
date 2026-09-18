@@ -200,6 +200,23 @@ class TcpServerAdapter(BaseGenericAdapter):
             if not port_name or port_name not in self.port_clients:
                 return
             if isinstance(changes, dict):
+                # PDU power feed change (PDU feature): relay the new feed state as a
+                # visible in-terminal notice to every client attached to this console.
+                if changes.get("event") == "power_outlet_changed":
+                    outlet = changes.get("outlet")
+                    on = changes.get("on")
+                    all_lost = bool(changes.get("all_power_lost"))
+                    if all_lost:
+                        self._emit_notice_to_port_clients(
+                            port_name,
+                            "\r\n[POWER WARNING] all power feeds are now OFF for this console (" + str(outlet) + ")\r\n",
+                        )
+                    else:
+                        state_txt = "on" if on is True else ("off" if on is False else "unknown")
+                        self._emit_notice_to_port_clients(
+                            port_name, "\r\n[POWER] feed " + str(outlet) + " is now " + state_txt + "\r\n"
+                        )
+                    return
                 # Down events: federated proxy disconnects, or any adapter reporting
                 # connected=False (e.g. serial_disconnected/tcp_disconnected).
                 if changes.get("event") in ("federated_disconnected", "federated_cached_offline") or (
@@ -842,6 +859,149 @@ class TcpServerAdapter(BaseGenericAdapter):
             pass
         return None
 
+    def _find_power_adapter(self):
+        """Return the active PDU adapter, or None.
+
+        Scans the port manager's unified adapters for ``adapter_type == "power"``.
+        Called on demand (not cached) so a soft reload of the `power:` section
+        is picked up without restarting the listener.
+        """
+        try:
+            pm = getattr(self.console_manager, "port_manager", None) if self.console_manager else None
+            for a in getattr(pm, "unified_adapters", []) or []:
+                try:
+                    if str(a.get_adapter_type()).lower() == "power":
+                        return a
+                except Exception:
+                    continue
+        except Exception:
+            # justification: optional lookup; POWER replies an error line instead
+            pass
+        return None
+
+    async def _power_user_can_write(self, client: "ClientSession") -> bool:
+        """True when the client may switch outlets (read-write or admin)."""
+        try:
+            if self.auth_manager is None:
+                return False
+            perm = self.auth_manager.get_user_permissions(client.username)
+            return perm in ("read-write", "admin")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _fmt_outlet_line(o: Dict[str, Any]) -> str:
+        """Render one outlet snapshot entry as a single LIST-style line."""
+        on = o.get("on")
+        state = "unknown" if on is None else ("on" if on else "off")
+        watts = o.get("watts")
+        volts = o.get("volts")
+        load = ""
+        if watts is not None:
+            load = " %.0fW" % watts
+            if volts is not None:
+                load += " %.0fV" % volts
+        ports = o.get("mapped_ports") or []
+        feeds = ("  -> " + ", ".join(ports)) if ports else ""
+        err = "  (" + str(o.get("error")) + ")" if o.get("error") else ""
+        return "POWER %s %s%s%s" % (o.get("ref"), state, load, feeds + err)
+
+    async def handle_power_command_text(self, client: "ClientSession", command: str):
+        """Handle the ``POWER`` command (PDU power over the text protocol).
+
+        Forms:
+            POWER                       - list every PDU + outlet with state
+            POWER <pdu>                 - list one PDU's outlets
+            POWER <pdu>.<outlet>        - report one outlet
+            POWER <pdu>.<outlet> on|off - switch an outlet (read-write/admin)
+
+        Unknown syntax (no arg, or an arg with neither a dot nor a matching
+        PDU name) is treated as the listing form when it matches a PDU name,
+        otherwise a usage error. Switching a power feed that would remove ALL
+        power to a console prints a WARNING naming those consoles first.
+        Telnet/SSH listeners intentionally have no POWER support (v1)."""
+        pdu = self._find_power_adapter()
+        if pdu is None or getattr(pdu, "enabled", True) is False:
+            await client.send_line("ERROR:POWER: power management is not configured")
+            return
+        parts = command.split()
+        if len(parts) > 3:
+            await client.send_line("ERROR:POWER: usage: POWER [<pdu>[.<outlet>] [on|off]]")
+            return
+        arg = parts[1] if len(parts) >= 2 else None
+        verb = parts[2].lower() if len(parts) >= 3 else None
+
+        # Switch form: POWER <pdu>.<outlet> on|off
+        if verb is not None:
+            if verb not in ("on", "off"):
+                await client.send_line("ERROR:POWER: target state must be 'on' or 'off'")
+                return
+            if arg is None or "." not in arg:
+                await client.send_line("ERROR:POWER: switching needs a full outlet ref '<pdu>.<outlet>'")
+                return
+            if not await self._power_user_can_write(client):
+                await client.send_line("ERROR:POWER: insufficient permission (need read-write)")
+                return
+            on = verb == "on"
+            if not on:
+                impact = pdu.compute_off_impact(arg)
+                for losing in impact.get("losing_power") or []:
+                    desc = losing.get("description") or ""
+                    await client.send_line(
+                        "WARNING:POWER: removing all power to: "
+                        + str(losing.get("port"))
+                        + (" (" + desc + ")" if desc else "")
+                    )
+                for staying in impact.get("staying_up") or []:
+                    via = ", ".join(staying.get("via") or [])
+                    await client.send_line(
+                        "NOTE:POWER: " + str(staying.get("port")) + " stays up via " + (via or "other feed")
+                    )
+            try:
+                result = await pdu.set_outlet(arg, on)
+            except Exception as exc:
+                await client.send_line("ERROR:POWER: " + str(exc))
+                return
+            if not result.get("ok"):
+                await client.send_line("ERROR:POWER: " + str(result.get("error", "switch failed")))
+                return
+            reading = result.get("reading") or {}
+            await client.send_line("POWER %s -> %s" % (arg, "on" if reading.get("on") else "off"))
+            return
+
+        # Listing / single-outlet form
+        snap = pdu.get_power_snapshot()
+        if arg is None:
+            for p in snap.get("pdus") or []:
+                online = "" if p.get("online") else " [OFFLINE]"
+                await client.send_line(
+                    "PDU %s (%s)%s  %d/%d on"
+                    % (p.get("name"), p.get("driver"), online, p.get("outlets_on"), p.get("outlet_count"))
+                )
+                for o in p.get("outlets") or []:
+                    await client.send_line("  " + self._fmt_outlet_line(o))
+            unresolved = snap.get("unresolved_refs") or []
+            if unresolved:
+                await client.send_line("NOTE:POWER: unresolved feeds: " + ", ".join(unresolved))
+            return
+
+        # Arg is either a PDU name (list its outlets) or a full outlet ref (one line)
+        pdus = {p.get("name"): p for p in snap.get("pdus") or []}
+        if arg in pdus:
+            p = pdus[arg]
+            for o in p.get("outlets") or []:
+                await client.send_line(self._fmt_outlet_line(o))
+            return
+        if "." in arg:
+            for p in snap.get("pdus") or []:
+                for o in p.get("outlets") or []:
+                    if o.get("ref") == arg:
+                        await client.send_line(self._fmt_outlet_line(o))
+                        return
+            await client.send_line("ERROR:POWER: unknown outlet: " + arg)
+            return
+        await client.send_line("ERROR:POWER: unknown PDU: " + arg)
+
     async def process_client_command(self, client: "ClientSession", command: str):
         """Parse and execute a client command.
 
@@ -894,6 +1054,10 @@ class TcpServerAdapter(BaseGenericAdapter):
         elif command == "QUIT":
             # Client wants to disconnect
             client.connected = False
+
+        elif command.startswith("POWER"):
+            # PDU power control: list or switch outlets (PDU feature)
+            await self.handle_power_command_text(client, command)
 
         else:
             # If connected to a port, forward the data

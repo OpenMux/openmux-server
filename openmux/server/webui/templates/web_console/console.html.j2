@@ -38,6 +38,14 @@
       <div id="viewersMenuList" class="ro-menu-info" style="display:none"></div>
     </div>
   </div>
+  <!-- PDU power badge (PDU feature): tinted by feed state (all/some/none/unknown),
+       hidden for ports with no `power:` mapping. Click for per-outlet menu. -->
+  <div id="powerBadgeWrap" style="position:relative; display:none">
+    <button id="powerBadge" class="ro-indicator power-badge" type="button" title="PDU power for this console">⚡ <span id="powerBadgeLabel">—</span></button>
+    <div id="powerMenu" class="ro-menu" style="display:none">
+      <div id="powerMenuList" class="ro-menu-info" style="display:none"></div>
+    </div>
+  </div>
   <div class="toolbar-controls">
     <button class="btn" id="connect">Connect</button>
   </div>
