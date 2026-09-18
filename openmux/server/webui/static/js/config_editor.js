@@ -1339,16 +1339,27 @@ async function refreshSidebarPorts() {
     const ports = j.ports || [];
     const container = document.getElementById('console-ports');
     if (!container) return;
-    // Replace existing port links with the updated list
+    // Replace existing port links with the updated list. Carry over the label
+    // data (data-origin / data-desc) that the server-side template emits:
+    // applyPortLabels() in layout.js needs it to apply the "Show server" /
+    // "Show description" label forms. Without it the labels silently revert
+    // to plain port names after every save + soft reload.
     container.querySelectorAll('a.nav-sub-item, .nav-sub-empty').forEach(el => el.remove());
     if (ports.length > 0) {
       ports.forEach(p => {
         const a = document.createElement('a');
         a.className = 'nav-sub-item';
         a.href = `${BASE_PATH}/console?port=${encodeURIComponent(p.name)}`;
+        a.dataset.origin = p.origin_server_id || 'local';
+        a.dataset.desc = p.description || '';
         a.textContent = p.name;
         container.appendChild(a);
       });
+      // Re-capture the server-rendered order into layout.js's capture and
+      // re-apply the user's label options to the fresh links (same defaults
+      // as the template: local / empty description).
+      if (typeof window.setPortOrder === 'function') window.setPortOrder();
+      if (typeof window.applyPortLabels === 'function') window.applyPortLabels();
     } else {
       const empty = document.createElement('div');
       empty.className = 'nav-sub-empty';

@@ -215,11 +215,21 @@
   // href-based elsewhere - are unaffected.
   // The server renders the list sorted by port name; capture that order once so
   // toggling "show server" off can restore it exactly (a live DOM read would
-  // return the already-sorted order after an earlier "show server" pass).
-  const NATURAL_PORT_ORDER = (() => {
+  // return the already-sorted order after an earlier "show server" pass). The
+  // capture is refreshed via setPortOrder() when the list is rebuilt
+  // (refreshSidebarPorts after a Config Editor save).
+  let NATURAL_PORT_ORDER = (() => {
       const pl = document.getElementById('console-ports');
       return pl ? Array.from(pl.querySelectorAll('a.nav-sub-item[data-origin]')) : [];
   })();
+  // Exposed for the Config Editor: after a save, refreshSidebarPorts in
+  // config_editor.js rebuilds the sidebar links, so the natural order must
+  // be re-captured from the new link elements (the original ones are detached).
+  window.setPortOrder = function(){
+      const pl = document.getElementById('console-ports');
+      NATURAL_PORT_ORDER = pl ? Array.from(pl.querySelectorAll('a.nav-sub-item[data-origin]')) : [];
+      return NATURAL_PORT_ORDER;
+  };
   const PORT_LABELS_SERVER_KEY = 'omx_port_show_server';
   const PORT_LABELS_DESC_KEY = 'omx_port_show_desc';
 
