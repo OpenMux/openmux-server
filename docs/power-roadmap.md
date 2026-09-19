@@ -94,10 +94,14 @@ can be delivered in any order.
       unimplemented playback `p`/`P` placeholders are removed.
 - [ ] **Typed CLI POWER parsing.** Replace the free-text `command.split()`
       handler with structured parsing for the `POWER` command forms.
-- [ ] **Power metrics history.** Keep watts/amps and on-state over time and
-      make it queryable. Show it as a chart on the Power page. (Part of this is
-      the audit log and port-log records from v2; this item adds retention and
-      the view.)
+      Merged into [issue #88](https://github.com/OpenMux/openmux-server/issues/88)
+      (client listener command-phase UX), where the structured parsing is one
+      of the work items — close this box when that ticket closes.
+
+Deferred (not scheduled): **Power metrics history** — keeping watts/amps and
+on-state over time as queryable history with a chart on the Power page. It is
+not needed at the moment. If saving statistics becomes wanted, add it back as
+a v3 item (the v2 audit log and port-log records are already a partial basis).
 
 ### Verification when closing a v3 item
 
