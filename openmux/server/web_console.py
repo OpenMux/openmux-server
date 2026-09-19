@@ -1278,6 +1278,38 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                     # justification: best-effort control message; the UI tolerates a miss
                                     pass
                                 continue  # handled control; do not forward
+                            if isinstance(req, dict) and req.get("type") in ("power_query", "power_switch"):
+                                # PDU power control from the console CLI (console.py
+                                # `p` menu): feed list for the attached port or one
+                                # switch. `username` is the Basic-Auth identity; the
+                                # live [POWER] notice rides the meta fan-out.
+                                pdu = adapter._find_power_adapter()
+                                if pdu is None:
+                                    if req.get("type") == "power_query":
+                                        resp = {
+                                            "type": "power_feeds",
+                                            "ok": False,
+                                            "error": "power management is not configured",
+                                            "feeds": [],
+                                        }
+                                    else:
+                                        resp = {
+                                            "type": "power_switch",
+                                            "ok": False,
+                                            "error": "power management is not configured",
+                                        }
+                                else:
+                                    resp = await pdu.handle_power_frame(port_name, req, username, client_id=client_id) or {
+                                        "type": "power_switch",
+                                        "ok": False,
+                                        "error": "power management is not configured",
+                                    }
+                                try:
+                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+                                except Exception:
+                                    # justification: best-effort control message; the UI tolerates a miss
+                                    pass
+                                continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "request_scrollback":
                                 try:
                                     scrollback = adapter.console_manager.port_manager.get_scrollback(port_name)
@@ -2381,6 +2413,33 @@ class WebConsoleAdapter(BaseGenericAdapter):
             pass
         return None
 
+    def _push_power_notice(self, port_name: str, changes: Dict[str, Any]) -> None:
+        """Fire-and-forget the in-terminal power notice to a port's WS clients.
+
+        Best-effort: a closed socket is pruned by the meta-subscriber cleanup,
+        so a send failure here is not surfaced.
+        """
+        try:
+            outlet = changes.get("outlet")
+            if changes.get("all_power_lost"):
+                notice = "\r\n[POWER WARNING] all power feeds are now OFF for this console (" + str(outlet) + ")\r\n"
+            else:
+                on = changes.get("on")
+                state_txt = "on" if on is True else ("off" if on is False else "unknown")
+                notice = "\r\n[POWER] feed " + str(outlet) + " is now " + state_txt + "\r\n"
+            for cid in list(self._meta_subscribers.get(port_name) or []):
+                ws = self._clients.get(cid)
+                if ws is None:
+                    continue
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    break
+                loop.create_task(ws.send_str(notice))
+        except Exception:
+            # justification: best-effort notice; the meta frame still arrives
+            pass
+
     def _find_power_adapter(self):
         """Find the active PDU adapter (adapter_type ``power``), or None."""
         pm = getattr(self.console_manager, "port_manager", None) if self.console_manager else None
@@ -2407,7 +2466,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
         immediately to keep the UI responsive (e.g., unplug/replug scenarios).
         """
         try:
-            subs = self._meta_subscribers.get(port_name)
+            subs = self._meta_subscribers.get(port_name) or set()
+            # PDU power feed change (PDU feature): the /ws/<port> socket is a
+            # raw console stream, so push the in-terminal [POWER] notice as
+            # plain text (mirrors the client listener's raw-tcp notice and the
+            # telnet/SSH live notice). The web badge still updates its own
+            # state from the `power` block the meta frame carries below.
+            if isinstance(changes, dict) and changes.get("event") == "power_outlet_changed" and subs:
+                self._push_power_notice(port_name, changes)
             if not subs:
                 return
             # Check if we should bypass debounce for connection state changes

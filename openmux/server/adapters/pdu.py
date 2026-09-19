@@ -402,6 +402,86 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Inject optional auth manager dependency."""
         self.auth_manager = auth_manager
 
+    # --- OMXCTRL power control frames (CLI over TCP / WebSocket) ------------
+
+    async def handle_power_frame(
+        self,
+        port_name: str,
+        req: Dict[str, Any],
+        username: Optional[str],
+        client_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Serve one ``power_query`` / ``power_switch`` OMXCTRL control frame.
+
+        Shared by the client-listener (raw TCP, NUL-prefixed frames) and the
+        web console (``OMXCTRL `` text frames); the console CLI's ``p`` power
+        menu drives it. Returns the response payload (sent back as an
+        ``OMXCTRL`` frame) or None when the type is not a power type (the
+        caller swallows it). Switches enforce the same read-write plus
+        console-group rules as the web POST path. ``client_id`` is the server-
+        side id of the requesting session (for the audit line); it is NOT read
+        from the frame.
+        """
+        rtype = req.get("type")
+        if rtype not in ("power_query", "power_switch"):
+            return None
+        if rtype == "power_query":
+            feeds = []
+            ppl = None
+            if hasattr(self, "port_power_payload"):
+                try:
+                    ppl = self.port_power_payload(port_name)
+                except Exception:
+                    ppl = None
+            if isinstance(ppl, dict) and isinstance(ppl.get("feeds"), list):
+                feeds = [
+                    {"ref": str(f.get("ref")), "on": f.get("on"), "watts": f.get("watts")} for f in ppl.get("feeds") or []
+                ]
+            return {
+                "type": "power_feeds",
+                "feeds": feeds,
+                "feeds_total": len(feeds),
+                "state": (ppl or {}).get("state", "unknown"),
+            }
+        # read-write / admin required to switch, same as the web POST path
+        try:
+            perm = self.auth_manager.get_user_permissions(username) if (self.auth_manager and username) else None
+        except Exception:
+            perm = None
+        if perm not in ("read-write", "admin"):
+            return {"type": "power_switch", "ok": False, "error": "insufficient permission (need read-write)"}
+        ref = req.get("ref")
+        on = req.get("on")
+        if not isinstance(ref, str) or not ref or not isinstance(on, bool):
+            return {"type": "power_switch", "ok": False, "error": "invalid power switch request"}
+        blocked = self._power_blocked_ports(ref, username)
+        if blocked:
+            return {
+                "type": "power_switch",
+                "ok": False,
+                "error": f"{ref} feeds consoles outside your groups ({', '.join(blocked)}); switching it needs admin",
+            }
+        try:
+            result = await self.set_outlet(ref, on, user=username, client_id=client_id)
+        except Exception as exc:
+            return {"type": "power_switch", "ok": False, "error": str(exc)}
+        if not result.get("ok"):
+            return {"type": "power_switch", "ok": False, "error": str(result.get("error", "switch failed"))}
+        reading = result.get("reading") or {}
+        state_txt = "unknown"
+        if reading.get("on") is True:
+            state_txt = "on"
+        elif reading.get("on") is False:
+            state_txt = "off"
+        return {
+            "type": "power_switch",
+            "ok": True,
+            "ref": ref,
+            "on": bool(on),
+            "state": state_txt,
+            "impact": result.get("impact"),
+        }
+
     # --- lifecycle ---------------------------------------------------------
 
     async def start(self) -> bool:

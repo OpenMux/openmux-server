@@ -774,3 +774,96 @@ async def test_reconcile_ports_accepts_list_input_as_no_config():
     assert adapter.max_connections == 55
     assert adapter.host == "127.0.0.1"
     assert adapter.port == 8023
+
+
+class _PowerFrameClient:
+    """Client stand-in: records raw writes, carries a username + client_id."""
+
+    def __init__(self, username="u1", client_id="cid-1", connected_port="c1"):
+        self.username = username
+        self.client_id = client_id
+        self.connected_port = connected_port
+        self.mode = None
+        self.raw: List[bytes] = []
+
+    async def send_line(self, text: str) -> None:
+        pass
+
+    async def send_raw_data(self, data: bytes) -> None:
+        self.raw.append(data)
+
+    @property
+    def buffer(self) -> bytes:
+        return b"".join(self.raw)
+
+
+class _PowerQueryCm:
+    """Console manager whose port manager owns one started dummy PDU."""
+
+    def __init__(self):
+        self.port_manager = _PowerQueryPm()
+        self.client_to_manager: Any = {}
+
+
+class _PowerQueryPm:
+    def __init__(self) -> None:
+        from openmux.server.adapters.pdu import PduAdapter
+
+        port = type("P", (), {"power": ["rack1.1", "rack1.2"], "name": "c1"})()
+        self.ports = {"c1": port}
+        self._pdu = PduAdapter("power", {"power": {"pdus": [{"name": "rack1", "driver": "dummy", "poll_interval": 0}]}})
+        self._pdu.main_port_manager = self
+        self.unified_adapters = [self._pdu]
+
+    async def start(self) -> bool:
+        return await self._pdu.start()
+
+    async def stop(self) -> None:
+        await self._pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_power_query_frame_replies_feeds_when_configured():
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    cm = _PowerQueryCm()
+    assert await cm.port_manager.start() is True
+    adapter.set_console_manager(cm)
+    client = _PowerFrameClient()
+
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "power_query"}))
+
+    assert handled is True
+    resp = _last_ctrl_json(client)
+    assert resp["type"] == "power_feeds"
+    assert resp["feeds_total"] == 2
+    await cm.port_manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_power_frames_not_configured_reply_types():
+    # No PDU adapter attached: the reply uses the matching power reply type
+    # so the console menu's read path (which filters on these) can surface it.
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+
+    class _Cm:
+        class Pm:
+            ports = {}
+            unified_adapters = []
+
+        port_manager = Pm()
+
+    adapter.set_console_manager(_Cm())
+    query_client = _PowerFrameClient()
+    await adapter._handle_control_frame(query_client, _ctrl_frame({"type": "power_query"}))
+    q_resp = _last_ctrl_json(query_client)
+    assert q_resp["type"] == "power_feeds"
+    assert q_resp["ok"] is False
+    assert "not configured" in q_resp["error"]
+    assert q_resp["feeds"] == []
+
+    switch_client = _PowerFrameClient(client_id="cid-2")
+    await adapter._handle_control_frame(switch_client, _ctrl_frame({"type": "power_switch", "ref": "r.1", "on": False}))
+    s_resp = _last_ctrl_json(switch_client)
+    assert s_resp["type"] == "power_switch"
+    assert s_resp["ok"] is False
+    assert "not configured" in s_resp["error"]

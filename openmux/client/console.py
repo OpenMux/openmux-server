@@ -24,7 +24,7 @@ import os
 import sys
 import termios
 import tty
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from .adapters import BaseClientAdapter
 
@@ -82,7 +82,19 @@ class ConsoleUI:
         self.read_only_mode = False
         # Sentinel: access mode not yet confirmed by the adapter
         self._last_synced_access_mode = None
-        self.playback_lines = 60
+        # True while an interactive escape submenu (the `p` power menu) is
+        # open. The background read loop keeps reading and rendering server
+        # data (the console is frozen, but stream data is never dropped) and
+        # keyboard forwarding pauses so the menu owns stdin. The menu itself
+        # never reads the stream - the background loop stays the sole reader
+        # of the connection - it only waits for the reply the adapter
+        # captures plus a brief settle of the stream. Cleared on exit.
+        self._stream_exclusive = False
+        # Payload chunks delivered by the background read loop since start.
+        # The power menu compares this in _wait_stream_quiet so a live
+        # [POWER] notice rendered just before a reply lands BEFORE the menu
+        # re-renders the feed list.
+        self._stream_activity = 0
         self.replay_lines = 20
         # Reconnect settings
         self.reconnect_mode = reconnect_mode  # 'off' | 'manual' | 'auto'
@@ -214,6 +226,20 @@ class ConsoleUI:
         """
         while self.is_running:
             try:
+                # While an interactive escape submenu is open (e.g. the `p`
+                # power menu), keep reading and rendering server data so the
+                # frozen console still receives everything. This loop remains
+                # the SOLE reader of the connection for the whole session: a
+                # second concurrent reader would desynchronize the transport
+                # (an asyncio stream reader allows only one pending read).
+                if self._stream_exclusive and not self.connection.is_connected:
+                    # Hand back to the menu, which shows the close on its next
+                    # poll; engage reconnect handling if configured.
+                    if self.reconnect_mode == "auto" and not self._auto_reconnect_task:
+                        self._auto_reconnect_task = asyncio.create_task(self._auto_reconnect_loop())
+                    elif self.reconnect_mode == "off":
+                        self.is_running = False
+                    break
                 # If disconnected, ensure auto/manual handling is engaged and yield briefly
                 if not self.connection.is_connected:
                     if self.reconnect_mode == "auto" and not self._auto_reconnect_task:
@@ -267,6 +293,11 @@ class ConsoleUI:
                 if data == b"" or data == "":
                     continue
 
+                # Record stream activity so the power menu can wait for the
+                # stream to settle (a live [POWER] notice is payload that
+                # renders here) before it re-renders the feed list.
+                self._stream_activity += 1
+
                 # Reflect any access-mode change the adapter learned while
                 # decoding a control-frame response (e.g. after a promote/demote).
                 self._sync_access_mode()
@@ -279,8 +310,11 @@ class ConsoleUI:
                         sys.stdout.flush()
                         self.is_running = False
                         break
-                    # Convert \n to \r\n for proper terminal display
-                    normalized_data = data.replace("\n", "\r\n")
+                    # Normalize \r\n/\n to exactly one \r\n per line end
+                    # (some payloads, e.g. the live [POWER] notice, are
+                    # already \r\n-terminated - a bare \n replacement would
+                    # double the CR).
+                    normalized_data = data.replace("\r\n", "\n").replace("\n", "\r\n")
                     sys.stdout.write(normalized_data)
                     sys.stdout.flush()
                     if normalized_data:
@@ -295,8 +329,10 @@ class ConsoleUI:
                         sys.stdout.flush()
                         self.is_running = False
                         break
-                    # Convert \n to \r\n for proper terminal display
-                    normalized_data = data.replace(b"\n", b"\r\n")
+                    # Normalize \r\n/\n to exactly one \r\n per line end
+                    # (payloads that are already \r\n-terminated would
+                    # otherwise show a doubled CR).
+                    normalized_data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
                     sys.stdout.buffer.write(normalized_data)
                     sys.stdout.buffer.flush()
                     if normalized_data:
@@ -363,6 +399,12 @@ class ConsoleUI:
             max_chunk = 4096
             while self.is_running:
                 await asyncio.sleep(0.005)
+
+                # While an interactive escape submenu (the `p` power menu)
+                # owns stdin, pause forwarding so the two loops never read
+                # the same keyboard buffer at once.
+                if self._stream_exclusive:
+                    continue
 
                 sent_now = False
                 if self._is_data_available():
@@ -551,6 +593,212 @@ class ConsoleUI:
             sys.stdout.write(ch)
             sys.stdout.flush()
 
+    async def _power_menu(self):
+        """Interactive per-console power (PDU) menu.
+
+        Mirrors the telnet/SSH listeners' `p` item: it lists ONLY this console's
+        power feeds numbered one per line with an on/off tag; a number toggles
+        that feed, `a` toggles every feed, and Enter leaves (printing
+        `[EXITING POWER]`). Switches are a server round-trip via OMXCTRL power
+        frames (the server authorizes + switches). While the menu is open the
+        console is frozen (keyboard forwarding pauses) but the background read
+        loop keeps delivering server data; the menu waits for the reply the
+        adapter captures and for the stream to settle, so the live `[POWER]`
+        notice renders before the list re-renders.
+        """
+        conn = self.connection
+        if not (hasattr(conn, "request_power_feeds") and hasattr(conn, "switch_power_outlet")):
+            sys.stdout.write("\r\n[Power control is not supported by this connection]\r\n")
+            sys.stdout.flush()
+            return
+        port_name = getattr(conn, "current_port", None) or getattr(conn, "port_name", None)
+        if not port_name:
+            sys.stdout.write("\r\n[Power needs an attached console (CONNECT first)]\r\n")
+            sys.stdout.flush()
+            return
+
+        self._stream_exclusive = True
+        try:
+            if not await conn.request_power_feeds():
+                sys.stdout.write("\r\n[POWER: could not send the feed request]\r\n")
+                sys.stdout.flush()
+                return
+            reply = await self._await_power_reply()
+            if not reply:
+                if not conn.is_connected:
+                    sys.stdout.write("\r\n[POWER: server closed the connection]\r\n")
+                else:
+                    sys.stdout.write("\r\n[POWER: power management is not configured]\r\n")
+                sys.stdout.flush()
+                return
+            if reply.get("type") != "power_feeds" or not reply.get("ok", True):
+                sys.stdout.write("\r\n[POWER: " + str(reply.get("error") or "power management is not configured") + "]\r\n")
+                sys.stdout.flush()
+                return
+            feeds = reply.get("feeds") or []
+            if not feeds:
+                sys.stdout.write(f"\r\n[POWER: {port_name} has no power feeds]\r\n")
+                sys.stdout.flush()
+                await self._read_power_line("> ")
+                sys.stdout.write("\r\n[EXITING POWER]\r\n")
+                sys.stdout.flush()
+                return
+
+            sys.stdout.write(f"\r\nPOWER: feeds for {port_name}  (a number = toggle, a = all, Enter = exit)\r\n")
+            sys.stdout.flush()
+            while True:
+                for i, f in enumerate(feeds, 1):
+                    sys.stdout.write("%2d  %s\r\n" % (i, self._power_menu_line(f.get("ref"), f.get("on"))))
+                sys.stdout.flush()
+                entry = await self._read_power_line("> ")
+                if entry == "":
+                    sys.stdout.write("\r\n[EXITING POWER]\r\n")
+                    sys.stdout.flush()
+                    return
+                if entry in ("a", "all"):
+                    first = feeds[0].get("on")
+                    target = not bool(first)
+                    for f in feeds:
+                        await self._switch_power(feed=f, target=target, ref_after=f)
+                    continue
+                if entry.isdigit():
+                    idx = int(entry)
+                    if 1 <= idx <= len(feeds):
+                        f = feeds[idx - 1]
+                        await self._switch_power(feed=f, target=not bool(f.get("on")), ref_after=f)
+                    else:
+                        sys.stdout.write(f"\r\nPOWER: number out of range (1-{len(feeds)})\r\n")
+                        sys.stdout.flush()
+                    continue
+                sys.stdout.write("\r\nPOWER: enter a feed number, 'a' for all, or Enter to exit\r\n")
+                sys.stdout.flush()
+        finally:
+            self._stream_exclusive = False
+
+    async def _switch_power(self, feed: Dict[str, Any], target: bool, ref_after: Optional[Dict[str, Any]] = None) -> None:
+        """Toggle one console feed to `target`; show the reply's state.
+
+        Sends a `power_switch` frame and waits for the reply the background
+        read loop captures (plain bytes such as the server's live `[POWER]`
+        notice keep rendering in the meantime), then prints the
+        `POWER <ref> -> <state>` confirmation. On a denial the reply's
+        `error` line is shown and the feed state is left unchanged.
+        """
+        ref = feed.get("ref")
+        since = self._stream_activity
+        if not ref or not await self.connection.switch_power_outlet(ref, bool(target)):
+            sys.stdout.write("\r\nPOWER: could not send the switch request\r\n")
+            sys.stdout.flush()
+            return
+        reply = await self._await_power_reply(since=since)
+        if not reply or reply.get("type") != "power_switch":
+            sys.stdout.write(f"\r\nPOWER: no reply for {ref}\r\n")
+            sys.stdout.flush()
+            return
+        if not reply.get("ok"):
+            sys.stdout.write(f"\r\nERROR:POWER: {reply.get('error', 'switch failed')}\r\n")
+            sys.stdout.flush()
+            return
+        state = "on" if reply.get("on") else "off"
+        if ref_after is not None:
+            ref_after["on"] = reply.get("on")
+        sys.stdout.write(f"\r\nPOWER {ref} -> {state}\r\n")
+        sys.stdout.flush()
+
+    def _power_menu_line(self, ref: Any, on: Any) -> str:
+        """Render one numbered feed row's state tag + ref (the number is the prefix)."""
+        if on is True:
+            return "[on]   " + str(ref)
+        if on is False:
+            return "[off]  " + str(ref)
+        return "[unknown] " + str(ref)
+
+    async def _await_power_reply(self, timeout: float = 6.0, since: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Wait for the next power OMXCTRL reply captured by the connection.
+
+        The background read loop stays the sole reader of the stream, so this
+        never reads the connection itself. It polls the reply object the
+        adapter stores when it decodes a `power_feeds` / `power_switch` frame;
+        plain bytes (such as the live `[POWER]` notice) keep flowing to the
+        terminal through the background loop meanwhile. After the reply, the
+        stream gets one short beat so a live notice sent next to it has
+        rendered before the menu re-renders.
+
+        Args:
+            timeout: Maximum seconds to wait for the reply.
+            since: ``_stream_activity`` value captured just before the
+                matching request went out; a payload already rendered after
+                it means the notice landed (and is on screen) already.
+
+        Returns:
+            The reply dict, or None if ``is_running`` stops, the connection
+            drops, or the timeout elapses.
+        """
+        conn = self.connection
+        conn.last_power_reply = None
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while self.is_running:
+            reply = conn.last_power_reply
+            if reply is not None:
+                conn.last_power_reply = None
+                await self._wait_stream_settle(since if since is not None else self._stream_activity)
+                return reply
+            if not conn.is_connected:
+                return None
+            if loop.time() > deadline:
+                return None
+            await asyncio.sleep(0.02)
+        return None
+
+    async def _wait_stream_settle(self, since: int) -> None:
+        """Give the stream one short beat after a power reply.
+
+        If the background render loop already delivered a payload since
+        ``since`` (typically the live `[POWER]` notice the server sends next
+        to the reply), it is on screen and we return at once. Otherwise wait
+        up to ~0.35s for one to arrive. A chatty console that never goes
+        quiet simply waits the beat and moves on.
+        """
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 0.35
+        while self.is_running:
+            if self._stream_activity > since:
+                return
+            if loop.time() > deadline:
+                return
+            await asyncio.sleep(0.02)
+
+    async def _read_power_line(self, prompt: str) -> str:
+        """Prompt for one power-menu entry, echoing typed input (like telnet/SSH)."""
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        line = ""
+        while True:
+            await asyncio.sleep(0.01)
+            if not self._is_data_available():
+                continue
+            if self._stdin_fd is not None:
+                import os as _os
+
+                ch = _os.read(self._stdin_fd, 1).decode("latin1", errors="ignore")
+            else:
+                ch = sys.stdin.read(1)
+            if ch in ("\r", "\n"):
+                sys.stdout.write("\r\n")
+                sys.stdout.flush()
+                return line
+            if ch in ("\x7f", "\b"):
+                if line:
+                    line = line[:-1]
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+                continue
+            line += ch
+            if line:
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+
     async def _force_access_mode(self, target: Optional[str] = None):
         """Send a write-slot takeover request and report send failures.
 
@@ -639,42 +887,11 @@ class ConsoleUI:
                 sys.stdout.flush()
 
             elif command == "p":
-                # Playback lines
-                sys.stdout.write(f"\r\n[Playback last {self.playback_lines} lines - not implemented]\r\n")
-                sys.stdout.flush()
-
-            elif command == "P":
-                # Set playback lines
-                sys.stdout.write("\r\n[Set playback lines: ")
-                sys.stdout.flush()
-                # Read number (simplified implementation)
-                try:
-                    num_str = ""
-                    while True:
-                        await asyncio.sleep(0.01)
-                        if self._is_data_available():
-                            if self._stdin_fd is not None:
-                                import os as _os
-
-                                ch = _os.read(self._stdin_fd, 1).decode("latin1", errors="ignore")
-                            else:
-                                ch = sys.stdin.read(1)
-                            if ch == "\r" or ch == "\n":
-                                break
-                            elif ch.isdigit():
-                                num_str += ch
-                                sys.stdout.write(ch)
-                                sys.stdout.flush()
-
-                    if num_str:
-                        self.playback_lines = int(num_str)
-                        sys.stdout.write(f"]\r\n[Playback lines set to {self.playback_lines}]\r\n")
-                    else:
-                        sys.stdout.write("]\r\n[Cancelled]\r\n")
-                    sys.stdout.flush()
-                except ValueError:
-                    sys.stdout.write("]\r\n[Invalid number]\r\n")
-                    sys.stdout.flush()
+                # PDU power control: interactive per-console feed menu. Same
+                # behavior and wording as the telnet/SSH listeners' `p`
+                # escape item (number = toggle, a = all, Enter = exit). The
+                # old playback placeholders (p/P) are removed.
+                await self._power_menu()
 
             elif command == "r":
                 # Replay lines
@@ -848,8 +1065,7 @@ class ConsoleUI:
             + "i         information dump\r\n"
             + "w         show who holds read-write access on this port\r\n"
             + "v         show version\r\n"
-            + "p         playback last N lines [not implemented]\r\n"
-            + "P         set number of playback lines\r\n"
+            + "p         power (this console's feeds: number = toggle, a = all)\r\n"
             + "r         replay last N lines [not implemented]\r\n"
             + "R         set number of replay lines\r\n"
             + "l         list break sequences [not implemented]\r\n"

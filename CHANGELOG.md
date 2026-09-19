@@ -37,6 +37,16 @@ Changes since v1.0.3 (2026-09-17).
   (`POWER`, `POWER <pdu>`, `POWER <ref>`, `POWER <ref> on|off`). No config
   change is required.
 
+- **POWER control on the OpenMux CLI client.** The CLI client
+  (`openmux client`) now has the same `p` power menu in its escape menu, and
+  it works over both the TCP client protocol and the WebSocket protocol. Press
+  `p` after attaching: the numbered feed list (a number toggles a feed, `a`
+  toggles all, Enter leaves with an `[EXITING POWER]` marker) behaves exactly
+  like the telnet/SSH menu, including the live `[POWER]` / `[POWER WARNING]`
+  notice. Switching enforces the same `read-write`/console-group access rules
+  on the server. The CLI client's old unimplemented playback `p`/`P` escape
+  commands are removed. No config change is required.
+
 ## [1.0.3]
 
 Changes since v1.0.2 (2026-08-27).

@@ -377,7 +377,7 @@ The client uses a two‑character escape sequence to issue local commands.
   - `i`: Show connection info
   - `w`: Who is using this console [not implemented]
   - `v`: Show version
-  - `p` / `P`: Playback last N lines [not implemented] / Set playback lines
+  - `p`: Power menu for this console's feeds (a number = toggle a feed, `a` = toggle all, Enter = exit)
   - `r` / `R`: Replay last N lines [not implemented] / Set replay lines
   - `l`: List break sequences [not implemented]
   - `o`: Reconnect to session (manual reconnect)

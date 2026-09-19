@@ -705,3 +705,163 @@ async def test_set_outlet_audit_unknown_user_is_recorded_as_unknown(caplog):
     assert "user unknown turned rack1.1 off" in audit[0].getMessage()
     assert "client" not in audit[0].getMessage()
     await adapter.stop()
+
+
+# --- OMXCTRL power frames (console CLI `p` menu, TCP + WebSocket) -----------
+
+
+class _FrameAuth:
+    def __init__(self, perms, groups=None):
+        self._perm = perms
+        self._groups = groups or {}
+
+    def get_user_permissions(self, username):
+        return self._perm.get(username)
+
+    def get_user_groups(self, username):
+        if self._perm.get(username) is None:
+            return set()
+        return {"user"} | set(self._groups.get(username) or [])
+
+
+class _FrameCm:
+    """Console-manager stand-in mirroring the attach-time group ACL ladder."""
+
+    def __init__(self, pm, auth):
+        self.port_manager = pm
+        self.auth_manager = auth
+
+    def blocked_ports_for_user(self, port_names, username):
+        if self.auth_manager.get_user_permissions(username) == "admin":
+            return []
+        user_groups = self.auth_manager.get_user_groups(username)
+        blocked = []
+        for name in port_names:
+            port = self.port_manager.ports.get(name)
+            rw = set(getattr(port, "read_write_groups", None) or [])
+            ro = set(getattr(port, "read_only_groups", None) or [])
+            if rw or ro:
+                if not (user_groups & rw):
+                    blocked.append(name)
+        return blocked
+
+
+async def _frame_adapter():
+    pm = _FakePortManager({"c1": _FramePort("c1", ["rack1.1", "rack1.2"])})
+    auth = _FrameAuth({"u1": "read-write"})
+    adapter = await _start(_make_adapter(pm))
+    adapter.set_auth_manager(auth)
+    adapter.set_console_manager(_FrameCm(pm, auth))
+    return adapter
+
+
+class _FramePort:
+    def __init__(self, name, power=(), rw_groups=(), ro_groups=()):
+        self.name = name
+        self.power = list(power)
+        self.unified_port = self
+        self.read_write_groups = list(rw_groups)
+        self.read_only_groups = list(ro_groups)
+
+
+@asyncio_test
+async def test_handle_power_frame_ignores_other_types():
+    adapter = await _frame_adapter()
+    assert await adapter.handle_power_frame("c1", {"type": "request_rw"}, "u1") is None
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_handle_power_frame_query_feed_shape():
+    adapter = await _frame_adapter()
+    res = await adapter.handle_power_frame("c1", {"type": "power_query"}, "u1")
+    assert res["type"] == "power_feeds"
+    assert [f["ref"] for f in res["feeds"]] == ["rack1.1", "rack1.2"]
+    assert all(f["on"] is True for f in res["feeds"])
+    assert res["feeds_total"] == 2
+    assert res["state"] == "all"
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_handle_power_frame_query_unknown_port_is_empty():
+    adapter = await _frame_adapter()
+    res = await adapter.handle_power_frame("ghost", {"type": "power_query"}, "u1")
+    assert res["type"] == "power_feeds"
+    assert res["feeds"] == []
+    assert res["state"] == "unknown"
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_handle_power_frame_switch_requires_read_write():
+    adapter = await _frame_adapter()
+    auth_ro = _FrameAuth({"ro": "read-only"})
+    adapter.set_auth_manager(auth_ro)
+    res = await adapter.handle_power_frame("c1", {"type": "power_switch", "ref": "rack1.1", "on": False}, "ro")
+    assert res == {"type": "power_switch", "ok": False, "error": "insufficient permission (need read-write)"}
+    assert adapter.pdus["rack1"].readings["1"].on is True
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_handle_power_frame_switch_validates_shape():
+    adapter = await _frame_adapter()
+    bad_ref = await adapter.handle_power_frame("c1", {"type": "power_switch", "ref": 7, "on": False}, "u1")
+    assert bad_ref == {"type": "power_switch", "ok": False, "error": "invalid power switch request"}
+    bad_on = await adapter.handle_power_frame("c1", {"type": "power_switch", "ref": "rack1.1", "on": "off"}, "u1")
+    assert bad_on == {"type": "power_switch", "ok": False, "error": "invalid power switch request"}
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_handle_power_frame_switch_ok_reports_state_and_impact():
+    adapter = await _frame_adapter()
+    res = await adapter.handle_power_frame("c1", {"type": "power_switch", "ref": "rack1.1", "on": False}, "u1")
+    assert res["ok"] is True and res["ref"] == "rack1.1" and res["on"] is False and res["state"] == "off"
+    assert res["impact"]["change"] == "off"
+    # c1 keeps rack1.2, so it is NOT in the losing-power list
+    assert adapter.pdus["rack1"].readings["1"].on is False
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_handle_power_frame_switch_unknown_ref_fails_cleanly():
+    adapter = await _frame_adapter()
+    res = await adapter.handle_power_frame("c1", {"type": "power_switch", "ref": "ghost.9", "on": False}, "u1")
+    assert res["ok"] is False
+    assert "not configured" in res["error"]
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_handle_power_frame_switch_blocked_outside_groups():
+    pm = _FakePortManager(
+        {
+            "c2": _FramePort("c2", ["rack1.2"], rw_groups=["ops"]),
+            "c9": _FramePort("c9", ["rack1.2"], rw_groups=["lab"]),
+        }
+    )
+    auth = _FrameAuth({"ops": "read-write"}, groups={"ops": ["ops"]})
+    adapter = await _start(_make_adapter(pm))
+    adapter.set_auth_manager(auth)
+    adapter.set_console_manager(_FrameCm(pm, auth))
+    res = await adapter.handle_power_frame("c9", {"type": "power_switch", "ref": "rack1.2", "on": False}, "ops")
+    assert res["ok"] is False
+    assert "outside your groups" in res["error"]
+    assert "c9" in res["error"]
+    assert "needs admin" in res["error"]
+    assert adapter.pdus["rack1"].readings["2"].on is True
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_handle_power_frame_switch_admin_bypasses_groups():
+    pm = _FakePortManager({"c9": _FramePort("c9", ["rack1.2"], rw_groups=["lab"])})
+    auth = _FrameAuth({"boss": "admin"})
+    adapter = await _start(_make_adapter(pm))
+    adapter.set_auth_manager(auth)
+    adapter.set_console_manager(_FrameCm(pm, auth))
+    res = await adapter.handle_power_frame("c9", {"type": "power_switch", "ref": "rack1.2", "on": False}, "boss")
+    assert res["ok"] is True and res["state"] == "off"
+    await adapter.stop()

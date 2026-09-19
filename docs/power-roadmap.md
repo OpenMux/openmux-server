@@ -78,6 +78,20 @@ can be delivered in any order.
       all of the console's feeds, or Enter to leave without a change. Both
       listeners now subscribe to port meta updates so an attached session gets
       the live notice when a feed changes, exactly like the client listener.
+- [x] **CLI client POWER support** — 2026-09-18. The OpenMux CLI client
+      (`openmux/client/`) gets the same `p` power menu on its escape menu,
+      working over both the TCP client protocol and the WebSocket protocol.
+      The adapters send `power_query` / `power_switch` OMXCTRL frames and
+      store the server's `power_feeds` / `power_switch` reply on
+      `last_power_reply`; the console `p` menu renders the numbered feed list
+      (number = toggle, `a` = all, Enter = exit, ending with `[EXITING POWER]`)
+      and waits for that reply while the background read loop keeps delivering
+      stream data, so the live `[POWER]` notice renders before the list
+      re-renders — the same order as the telnet/SSH menu.
+      The server-side switch keeps the v2 access rules: read-write/admin plus
+      the console-group check, run by `PduAdapter.handle_power_frame` on both
+      listener wirings (client listener and web console). The client's old
+      unimplemented playback `p`/`P` placeholders are removed.
 - [ ] **Typed CLI POWER parsing.** Replace the free-text `command.split()`
       handler with structured parsing for the `POWER` command forms.
 - [ ] **Power metrics history.** Keep watts/amps and on-state over time and
