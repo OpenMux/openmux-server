@@ -1096,6 +1096,48 @@ async def test_set_outlet_relays_remote_owned_ref_to_origin():
 
 
 @asyncio_test
+async def test_set_outlet_relays_dotted_fqdn_origin_ref():
+    # The dotted-FQDN regression: an origin whose server_id is a hostname
+    # ("openmux.borge.nu") makes the global ref "openmux.borge.nu::rack1.1".
+    # That ref must be recognized as remote (not a malformed local ref) and
+    # relayed with the ORIGIN-LOCAL ref on the wire, and "owned by federated
+    # node <fqdn>" refusals must name the dotted origin.
+    class _FakeMuxcon:
+        def __init__(self, reply):
+            self.reply = reply
+            self.calls = []
+
+        def get_adapter_type(self):
+            return "muxcon"
+
+        async def relay_power_switch(self, port_name, ref, on, claims, client_id=None):
+            self.calls.append((port_name, ref, on, list(claims), client_id))
+            return dict(self.reply)
+
+    origin_id = "openmux.borge.nu"
+    pm = _remote_pm(feeds=("rack1.1",), states={"rack1.1": True}, origin_id=origin_id)
+    pm.ports["remote1"]._client_sessions = {"u1": 3}
+    adapter = await _start(_make_adapter(pm))
+    mx = _FakeMuxcon({"ok": True, "on": False})
+    pm.unified_adapters = [adapter, mx]
+    res = await adapter.set_outlet(f"{origin_id}::rack1.1", False, client_id="u1")
+    assert res["ok"] is True
+    assert res["reading"]["on"] is False
+    # ORIGIN-LOCAL ref on the wire, claims are port names.
+    assert mx.calls == [("remote1", "rack1.1", False, ["remote1"], "u1")]
+    await adapter.stop()
+
+    # No session: the typed refusal names the dotted origin (no "invalid
+    # outlet ref" leak).
+    pm2 = _remote_pm(feeds=("rack1.1",), origin_id=origin_id)
+    adapter2 = await _start(_make_adapter(pm2))
+    res = await adapter2.set_outlet(f"{origin_id}::rack1.1", False)
+    assert res["ok"] is False
+    assert f"owned by federated node {origin_id}" in res["error"]
+    await adapter2.stop()
+
+
+@asyncio_test
 async def test_set_outlet_remote_ref_without_federated_session_refused():
     # No console session anchored: the relay cannot pick a stream, so the
     # typed refusal (naming the origin) is returned. This is the path the
@@ -1144,9 +1186,17 @@ def test_split_remote_ref_round_trip_and_reject_local_refs():
     # Local bare refs are not remote refs.
     assert split_remote_ref("rack1.1") is None
     assert split_remote_ref("rack1.2") is None
-    # A dot before the separator is not a well-formed origin (server ids are
-    # dot-free; this keeps "a.b::ref" from double-parsing as local).
-    assert split_remote_ref("a.b::rack1.1") is None
+    # Server ids are often dotted FQDNs; a dotted origin is a valid origin
+    # (the first "::" is the separator, the local half must still be
+    # "<pdu>.<id>").
+    assert split_remote_ref("a.b::rack1.1") == ("a.b", "rack1.1")
+    assert remote_ref("openmux.borge.nu", "rack1.1") == "openmux.borge.nu::rack1.1"
+    assert split_remote_ref("openmux.borge.nu::rack1.1") == ("openmux.borge.nu", "rack1.1")
+    # The local half must still be a well-formed "<pdu>.<id>": extra/missing
+    # dots, dot-free tokens, or a nested "::" in the origin are rejected.
+    assert split_remote_ref("openmux.borge.nu::rack1.1.9") is None
+    assert split_remote_ref("openmux.borge.nu::nodots") is None
+    assert split_remote_ref("a::b::rack1.1") is None
     # Empty origin / malformed pdu part are rejected too.
     assert split_remote_ref("::rack1.1") is None
     assert split_remote_ref("peerO::nodots") is None

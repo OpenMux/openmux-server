@@ -35,7 +35,10 @@ Changes since v1.0.3 (2026-09-17).
   origin convention as the federation display strings, in the badge and
   menu, `/api/ports`, the `p` menu, and the `POWER` command); a bare ref
   always means this node's own outlet, so two nodes with a same-named
-  outlet coexist. Live outlet changes travel in a new `POWER:STATE:<port>`
+  outlet coexist. The origin segment accepts a dotted FQDN (a server id
+  such as `openmux.example.com`): the first `::` is the separator and only
+  the local `<pdu>.<outlet>` half must be single-dotted. Live outlet
+  changes travel in a new `POWER:STATE:<port>`
   MuxCon control frame (one JSON line per change, per outlet ref) and are
   applied sender-scoped, so one origin's update never touches another
   origin's same-named ref. MuxCon peers from before this release do not

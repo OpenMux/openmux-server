@@ -1079,3 +1079,112 @@ async def test_origin_power_switch_dispatch_requires_auth():
     finally:
         _close_pair(server, s_writer, c_writer)
         c_writer.close()
+
+
+# --- dotted-FQDN origin (outlet federation regression) -------------------------
+# Server ids are often dotted FQDNs (e.g. "openmux.borge.nu"). The "origin::"
+# separator must still split origin from local ref unambiguously: the local
+# part "<pdu>.<id>" has exactly one dot and no "::", so the FIRST "::" is the
+# separator. These pin that a dotted origin never double-qualifies its own
+# refs (the source of the "openmux.borge.nu::openmux.borge.nu::rack1.1" bug)
+# and that POWER:STATE keeps working end to end.
+
+
+def _fqdn_origin(name="openmux.borge.nu"):
+    return {"server_id": name, "hostname": name, "port": 0, "server_type": "leaf", "description": ""}
+
+
+@pytest.mark.asyncio
+async def test_register_dotted_fqdn_origin_ref_not_doubled():
+    # The origin's own server id has dots. Its advertised feed refs are
+    # already globally qualified with that id ("<fqdn>::<ref>"); the peer must
+    # NOT add a second prefix.
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = PortManager([])
+    pm.set_unified_adapters([ad])
+    pd = {
+        "name": "r1",
+        "origin_server": _fqdn_origin(),
+        "status": "connected",
+        "power": [{"ref": "openmux.borge.nu::rack1.1", "on": True}],  # already qualified
+    }
+    await ad._register_remote_port_from_dict("in:127.0.0.1:1:1", pd)
+    proxy = pm.ports["r1"]
+    assert proxy.power == ["openmux.borge.nu::rack1.1"]  # no double prefix
+    assert proxy._feed_states == {"openmux.borge.nu::rack1.1": True}
+    assert proxy.metadata.power == [{"ref": "openmux.borge.nu::rack1.1", "on": True}]
+
+
+@pytest.mark.asyncio
+async def test_register_bare_ref_dotted_fqdn_origin_qualifies_once():
+    # A bare local ref from a dotted origin is qualified exactly once.
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = PortManager([])
+    pm.set_unified_adapters([ad])
+    pd = {
+        "name": "r1",
+        "origin_server": _fqdn_origin(),
+        "status": "connected",
+        "power": [{"ref": "rack1.1", "on": True}],
+    }
+    await ad._register_remote_port_from_dict("in:127.0.0.1:2:1", pd)
+    proxy = pm.ports["r1"]
+    assert proxy.power == ["openmux.borge.nu::rack1.1"]
+
+
+@pytest.mark.asyncio
+async def test_readvertise_dotted_fqdn_origin_not_doubled():
+    # The reuse/refresh path replaces metadata.power wholesale. An
+    # already-prefixed dotted-FQDN ref must survive the refresh verbatim:
+    # the "no double-prefix" guard must accept dotted origins (this is where
+    # the doubled ref leaked in).
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = PortManager([])
+    pm.set_unified_adapters([ad])
+    pd = {
+        "name": "r1",
+        "origin_server": _fqdn_origin(),
+        "status": "connected",
+        "power": [{"ref": "openmux.borge.nu::rack1.1", "on": True}],
+    }
+    await ad._register_remote_port_from_dict("in:127.0.0.1:3:1", pd)
+    proxy = pm.ports["r1"]
+    meta = _origin_meta("r1")
+    meta.origin_server = ServerInfo(
+        server_id="openmux.borge.nu",
+        hostname="openmux.borge.nu",
+        port=0,
+        server_type=ServerType.LEAF,
+        description="",
+    )
+    meta.power = [{"ref": "openmux.borge.nu::rack1.1", "on": False}]
+    proxy.metadata = meta  # mirror the reuse path: fresh metadata first
+    await ad._apply_power_meta_to_proxy(proxy, meta)
+    assert proxy.power == ["openmux.borge.nu::rack1.1"]  # not doubled
+    assert proxy._feed_states == {"openmux.borge.nu::rack1.1": False}
+
+
+@pytest.mark.asyncio
+async def test_power_state_dotted_fqdn_origin_applies_once():
+    # A peer's proxy fed by a dotted-FQDN origin: an inbound POWER:STATE that
+    # names the ORIGIN-LOCAL ref must update under the global "fqdn::<ref>"
+    # key (single qualification) and emit exactly one meta event.
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = PortManager([])
+    pm.set_unified_adapters([ad])
+    events = []
+    pm.register_meta_listener(lambda p, c: events.append((p, c or {})))
+    ad.connections["in:127.0.0.1:5:1"] = {"server_id": "openmux.borge.nu"}
+    pd = {
+        "name": "r1",
+        "origin_server": _fqdn_origin(),
+        "status": "connected",
+        "power": [{"ref": "rack1.1", "on": True}],
+    }
+    await ad._register_remote_port_from_dict("in:127.0.0.1:5:1", pd)
+    ad.connections["in:anyone:1"] = {"server_id": "openmux.borge.nu"}
+    await ad._handle_power_state_frame("in:anyone:1", 'POWER:STATE:r1\n{"ref":"rack1.1","on":false}')
+    assert pm.ports["r1"]._feed_states == {"openmux.borge.nu::rack1.1": False}
+    power_events = [c for p, c in events if p == "r1" and c.get("event") == "power_outlet_changed"]
+    assert len(power_events) == 1
+    assert power_events[0]["outlet"] == "openmux.borge.nu::rack1.1"

@@ -299,9 +299,10 @@ def _valid_ref_token(text: str) -> bool:
 # (federated-node-owned) outlet ref: "<origin_server_id>::<pdu_name>.<outlet_id>".
 # The same double-colon convention the federation layer already uses for
 # origin-qualified names (e.g. remote port display strings) keeps one mental
-# model. Outlet refs only ever contain a single dot (pdu name / outlet id
-# tokens may not), so the first dot still splits pdu from outlet after the
-# origin prefix is stripped.
+# model. The local part "<pdu>.<id>" always has exactly one dot (the pdu name /
+# outlet id tokens may not contain dots) and can never contain "::", so the
+# FIRST "::" is always the separator - the origin may itself be a dotted FQDN
+# (server_ids often are), and the pdu/id split is taken from the local part.
 REMOTE_REF_SEPARATOR = "::"
 
 
@@ -309,22 +310,29 @@ def split_remote_ref(ref: Any) -> Optional[Tuple[str, str]]:
     """Split a remote outlet ref into (origin_server_id, local_outlet_ref).
 
     Returns None when the ref is not a remote ref (no well-formed "origin::"-
-    prefixed part). Fed consoles carry their feeds globally unique this way, so
-    an origin and a peer can both have an outlet named "rack1.1" without the
-    names colliding (outlet federation).
+    prefixed part whose local half is exactly "<pdu>.<id>"). A well-formed
+    remote ref carries the separator "::" EXACTLY once (neither an origin
+    server_id nor a "<pdu>.<id>" local ref ever contains "::"), which fixes the
+    split point. The origin is validated only as a non-empty, whitespace-free
+    token so dotted FQDN server_ids round-trip; the local half must be a
+    well-formed local ref (exactly one dot, dot-free tokens). Fed consoles
+    carry their feeds globally unique this way, so an origin and a peer can
+    both have an outlet named "rack1.1" without the names colliding (outlet
+    federation).
     """
     if not isinstance(ref, str):
         return None
-    idx = ref.find(REMOTE_REF_SEPARATOR)
-    if idx <= 0:
+    if ref.count(REMOTE_REF_SEPARATOR) != 1:
         return None
-    pdu_part = ref[idx + len(REMOTE_REF_SEPARATOR) :]
-    if "." not in pdu_part or "." in ref[:idx]:
+    origin, local = ref.split(REMOTE_REF_SEPARATOR, 1)
+    if not origin or any(ch.isspace() for ch in origin):
         return None
-    origin = ref[:idx]
-    if not origin or "." in origin or any(ch.isspace() for ch in origin):
+    if local.count(".") != 1:
         return None
-    return origin, pdu_part
+    pdu_name, outlet_id = local.split(".", 1)
+    if not _valid_ref_token(pdu_name) or not _valid_ref_token(outlet_id):
+        return None
+    return origin, local
 
 
 def remote_ref(origin: Any, ref: str) -> str:
