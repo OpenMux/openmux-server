@@ -538,7 +538,7 @@ Supported keys:
 
 Outlet ref = `<pdu_name>.<outlet_id>` (for example `rack1.3`, `phaseA.A1`). This is the single identity used by the CLI, the web API, the Power page, and the status page.
 
-Console-side mapping: add `power: ["<ref>", ...]` to a port entry in any of the four port sections (`serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`). Multiple entries = A/B dual feed. A ref to an unknown PDU or outlet raises a warning at startup (not fatal). The web status page and the console header show a power dot (green all feeds on, yellow partial, red all off, grey unknown); the console header badge opens a per-outlet on/off menu.
+Console-side mapping: add `power: ["<ref>", ...]` to a port entry in any of the four port sections (`serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`). Multiple entries = A/B dual feed. A ref to an unknown PDU or outlet raises a warning at startup (not fatal). The web status page and the console header show a power dot (green all feeds on, yellow partial, red all off, grey unknown); the console header badge opens a per-outlet on/off menu (its switches travel as OMXCTRL power frames on the console WebSocket, the same core path as the `p` menu — not the power plugin's REST route).
 
 Any power change (web toggle, CLI, or a poll that detects out-of-band drift) sends a message to every attached session of every console the outlet feeds, and updates the web badges live. A successful manual switch also writes two records: one `POWER CONTROL` audit line in the server log (user, outlet ref, new state, consoles that lose all power), and a `power_control_notice` meta event in each affected console's port data log (the `[POWER]` notice wording, so the event stays in the log with no client attached). Polls that detect out-of-band drift update the badges but do not audit-log; only a user's switch is a control event.
 
@@ -555,7 +555,7 @@ Who may switch is scoped to console groups: switching needs `read-write` or `adm
 
 Reload behavior: a soft reload re-applies the `power:` section without a restart. Description or annotation edits apply in place. A material change (driver, `poll_interval`, `options`) re-creates that PDU and re-discovers its outlets. Console-side `power:` mapping is read live from the ports and needs no reload work at all.
 
-Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power`) edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `options` as JSON, and optional per-outlet descriptions). The per-port `power:` feed refs are edited as the "Power feeds" field on the Ports view. Apply, then use **Soft Reload** to reconcile the section.
+Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power`) edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `options` as JSON, and optional per-outlet descriptions). The per-port `power:` feed refs are edited as the "Power feeds" field on the Ports view. Apply, then use **Soft Reload** to reconcile the section. The web Power page plugin (`power_monitor`) that serves the standalone `/power` page and its REST endpoints autoloades as long as a PDU adapter is enabled; to keep it off, add `enabled: false` for the module under `web_console.plugins`. The in-session badge and power menu never depend on the plugin.
 
 Example:
 ```yaml

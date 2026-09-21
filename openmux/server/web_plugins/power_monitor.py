@@ -8,15 +8,19 @@ plus:
 - `POST /api/power/outlets/{outlet_ref}`  - switch one outlet (read-write or admin, CSRF)
 - `GET /ws/power`             - live outlet-change frames (snapshot first)
 
-Enable in `web_console.plugins`:
+Loaded automatically as long as a `power:` section is enabled (the core web
+console autoloads it) - no `web_console.plugins` entry is required. To keep
+the standalone /power page off on a node that runs PDUs, disable it:
 
     web_console:
       plugins:
         - module: openmux.server.web_plugins.power_monitor
-          enabled: true
+          enabled: false
 
 The plugin returns no nav entry when the PDU adapter is absent or disabled,
 so servers without a `power:` section show no Power menu item.
+Note: the in-session console power badge/menu does NOT depend on this
+plugin; it is served by the core web console (OMXCTRL power frames).
 """
 
 import asyncio

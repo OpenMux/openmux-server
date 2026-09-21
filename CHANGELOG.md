@@ -10,6 +10,10 @@ Changes since v1.0.3 (2026-09-17).
 
 ### Behavior changes (no config change required)
 
+- **The web in-session power menu no longer uses the power plugin's REST route.** Switching from the console header badge menu now sends the OMXCTRL `power_switch` control frame over the console WebSocket (the same core path as the `p` power menu). The badge and menu therefore work even when the `power_monitor` web plugin is not enabled (previously the menu button got a 404), and they can switch a federated outlet from an open session (the REST route had no session to anchor the relay on). The standalone web Power page (`/power` and `POST /api/power/outlets/{ref}`) is unchanged; it stays read-only for federated outlets.
+
+- **The web Power page plugin autoloads when a PDU adapter is enabled.** The `power_monitor` web plugin no longer needs an entry in `web_console.plugins`: the web console loads it automatically while a `power:` section is enabled, so the standalone `/power` page works on configs that predate the plugins list. To keep it off on a node that runs PDUs, disable it explicitly: `plugins: [{module: openmux.server.web_plugins.power_monitor, enabled: false}]`. No config change is required for an existing entry.
+
 - **Power outlet switching is scoped to console groups.** A `read-write` user
   may now switch an outlet only if the user can open every console the outlet
   feeds, using the same console-access rules as attach time

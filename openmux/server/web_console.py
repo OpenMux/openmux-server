@@ -3398,21 +3398,72 @@ class WebConsoleAdapter(BaseGenericAdapter):
         return None
 
     # --- Plugin loader ---
+    # Web plugin autoloading: a plugin whose backing feature is active (a
+    # `power:` section) is loaded without a web_console.plugins entry, so
+    # the standalone /power page keeps working on configs that predate the
+    # plugins list. A manual entry with enabled: false opts out. The power
+    # badge, the in-session menu, and the live [POWER] notices live in core
+    # and do not depend on the plugin at all.
+    def _autoload_plugin_modules(self) -> Dict[str, str]:
+        """Module names autoloaded now: {module: reason}. Empty when none.
+
+        A module listed here is loaded as long as a manual config entry does
+        not disable it (``enabled: false``).
+        """
+        found: Dict[str, str] = {}
+        if self._power_adapter_present():
+            found["openmux.server.web_plugins.power_monitor"] = "a PDU adapter is active"
+        return found
+
+    def _power_adapter_present(self) -> bool:
+        """True when an enabled power adapter is registered (autoload gate)."""
+        pdu = self._find_power_adapter()
+        return pdu is not None and getattr(pdu, "enabled", True) is not False
+
     def _load_plugins(self, app: web.Application) -> None:
-        """Load and initialize web plugins as configured.
+        """Load and initialize web plugins as configured, plus autoloading.
 
         Config schema examples under web_console.plugins:
           - ["openmux.server.web_plugins.config_editor"]
           - [{"module": "openmux.server.web_plugins.os_customizer", "enabled": true}]
         Each module may expose register_plugin(app, adapter) -> Optional[dict]
         The returned mapping may include a "nav" list for UI integration.
+
+        Modules from ``_autoload_plugin_modules`` are loaded (reason in the
+        log) unless a manual config entry disables them, so a feature whose
+        core UI is on (a ``power:`` section) does not depend on the operator
+        remembering a plugins entry.
         """
-        cfg = self.plugins_cfg or []
-        if not isinstance(cfg, list) or not cfg:
+        cfg = self.plugins_cfg if isinstance(self.plugins_cfg, list) else []
+        seen_modules: set[str] = set()
+        disabled_modules: set[str] = set()
+        for e in cfg:
+            if isinstance(e, dict) and e.get("module"):
+                seen_modules.add(str(e["module"]))
+                if e.get("enabled") is False:
+                    disabled_modules.add(str(e["module"]))
+        # Autoload: load plugins whose backing feature is active even when
+        # the config has no entry for them (a manual `enabled: false` opts
+        # out; a manual explicit entry is left untouched).
+        entries: list = list(cfg)
+        autoloaded: list[str] = []
+        for name, reason in self._autoload_plugin_modules().items():
+            if name in seen_modules:
+                if name not in disabled_modules:
+                    self.logger.info("Autoload skipped (already configured): %s - %s", name, reason)
+                continue
+            entries.append({"module": name, "enabled": True})
+            autoloaded.append(name)
+            self.logger.info(
+                "Autoloading web plugin: %s - %s (set enabled: false in web_console.plugins to opt out)", name, reason
+            )
+        if not entries:
             return
         nav_items: list[Dict[str, Any]] = []
-        for entry in cfg:
+        for entry in entries:
             try:
+                # Config entries (str or dict, as before) plus synthesized
+                # autoload entries (dicts with module/enabled only).
                 if isinstance(entry, str):
                     mod_name = entry
                     enabled = True
@@ -3439,7 +3490,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     nav = info.get("nav")
                     if isinstance(nav, list):
                         nav_items.extend([n for n in nav if isinstance(n, dict)])
-                self.logger.info("Loaded web plugin: %s", mod_name)
+                label = mod_name + (" (autoloaded)" if mod_name in autoloaded else "")
+                self.logger.info("Loaded web plugin: %s", label)
             except Exception as e:
                 self.logger.error("Error loading plugin %s: %s", entry, e, exc_info=True)
         self._plugin_nav = nav_items
