@@ -22,6 +22,8 @@ from openmux.server.adapters.pdu import (
     PduAdapter,
     PduState,
     driver_catalog,
+    remote_ref,
+    split_remote_ref,
 )
 from openmux.server.data_logger import DataLogger
 
@@ -831,6 +833,11 @@ async def test_handle_power_frame_switch_unknown_ref_fails_cleanly():
     res = await adapter.handle_power_frame("c1", {"type": "power_switch", "ref": "ghost.9", "on": False}, "u1")
     assert res["ok"] is False
     assert "not configured" in res["error"]
+    # The refusal carries the off-impact preview (parity with the web
+    # POST /api/power/outlets path the in-session power menu used), even
+    # though nothing changes.
+    assert isinstance(res.get("impact"), dict)
+    assert res["impact"]["losing_power"] is not None
     await adapter.stop()
 
 
@@ -882,13 +889,19 @@ class _FakeRemoteMeta:
 
 
 class _FakeRemotePort:
-    """Stands in for a muxcon RemotePortProxy (the port objects it never is)."""
+    """Stands in for a muxcon RemotePortProxy (the port objects it never is).
+
+    ``feeds`` are the ORIGIN-LOCAL refs (as the muxcon registration layer
+    receives them on the wire); the proxy stores them GLOBALLY qualified as
+    "<origin>::<ref>" (outlet federation), mirroring `RemotePortProxy`.
+    ``states`` is keyed by the same global form.
+    """
 
     def __init__(self, name, feeds=(), states=None, origin_id="peerO", sessions=None):
         self.name = name
         self.remote_port_name = name
-        self.power = list(feeds)
-        self._feed_states = dict(states or {})
+        self.power = [remote_ref(origin_id, r) for r in feeds]
+        self._feed_states = {remote_ref(origin_id, k): v for k, v in (states or {}).items()}
         self.metadata = _FakeRemoteMeta(origin_id)
         self.description = f"Remote {name}"
         self._client_sessions = dict(sessions or {})  # open federated sessions (relay anchor)
@@ -904,12 +917,17 @@ def _remote_pm(feeds=("rack9.1", "rack9.2"), states=None, origin_id="peerO", loc
 async def test_feed_states_remote_uses_cached_states():
     pm = _remote_pm(feeds=("rack9.1", "rack9.2"), states={"rack9.1": True, "rack9.2": None})
     adapter = await _start(_make_adapter(pm))
-    assert adapter.feed_states("remote1") == {"rack9.1": True, "rack9.2": None}
+    # Both the declared feeds and the cached POWER:STATE are keyed by the
+    # GLOBAL "origin::<ref>" form, so the read is a plain passthrough
+    # (outlet federation).
+    assert adapter.feed_states("remote1") == {"peerO::rack9.1": True, "peerO::rack9.2": None}
     # A local port still reads the live local readings.
     pm.ports["c1"] = _FakePort("c1", ["rack1.1", "rack1.2"])
     assert adapter.feed_states("c1") == {"rack1.1": True, "rack1.2": True}
     # A remote port with no cached state for a feed: unknown.
-    assert adapter.feed_states("remote1")["rack9.2"] is None
+    assert adapter.feed_states("remote1")["peerO::rack9.2"] is None
+    # The raw origin-LOCAL form is not a feed here (only the global form is).
+    assert "rack9.1" not in adapter.feed_states("remote1")
     await adapter.stop()
 
 
@@ -924,7 +942,8 @@ async def test_feed_states_unknown_port_empty():
 async def test_port_power_map_works_for_remote_port():
     pm = _remote_pm(feeds=("rack9.1", "rack9.2"))
     adapter = await _start(_make_adapter(pm))
-    assert adapter.port_power_map("remote1") == ["rack9.1", "rack9.2"]
+    # The mapping returns the GLOBALLY qualified refs (outlet federation).
+    assert adapter.port_power_map("remote1") == ["peerO::rack9.1", "peerO::rack9.2"]
     await adapter.stop()
 
 
@@ -936,19 +955,21 @@ async def test_port_power_payload_remote_states():
     assert payload["state"] == "all"
     assert payload["feeds_on"] == 2
     assert payload["all_power_lost"] is False
-    # Remote feeds never carry local watts.
+    # Remote feeds carry the global ref and never local watts.
     assert all(f["watts"] is None for f in payload["feeds"])
-    # Simulate the origin turning one feed off (POWER:STATE applied on the peer).
-    pm.ports["remote1"]._feed_states["rack9.2"] = False
+    assert {f["ref"] for f in payload["feeds"]} == {"peerO::rack9.1", "peerO::rack9.2"}
+    # Simulate the origin turning one feed off (POWER:STATE applied on the
+    # peer, which caches by the global ref).
+    pm.ports["remote1"]._feed_states["peerO::rack9.2"] = False
     payload = adapter.port_power_payload("remote1")
     assert payload["state"] == "some"
     assert payload["feeds_on"] == 1
-    pm.ports["remote1"]._feed_states["rack9.1"] = False
+    pm.ports["remote1"]._feed_states["peerO::rack9.1"] = False
     payload = adapter.port_power_payload("remote1")
     assert payload["state"] == "none"
     assert payload["all_power_lost"] is True
     # All states unknown -> "unknown".
-    pm.ports["remote1"]._feed_states = {"rack9.1": None, "rack9.2": None}
+    pm.ports["remote1"]._feed_states = {"peerO::rack9.1": None, "peerO::rack9.2": None}
     payload = adapter.port_power_payload("remote1")
     assert payload["state"] == "unknown"
     await adapter.stop()
@@ -958,25 +979,78 @@ async def test_port_power_payload_remote_states():
 async def test_remote_origin_classification():
     pm = _remote_pm(feeds=("rack9.1", "rack9.2"), origin_id="peerO")
     adapter = await _start(_make_adapter(pm))
-    # A ref only on the federated port -> owned by that origin.
+    # A globally qualified fed ref -> owned by that origin (direct, no scan).
+    assert adapter._remote_origin_for_ref("peerO::rack9.1") == "peerO"
+    # A bare ref only on the federated port (defensive: unprefixed feed) ->
+    # owned by that origin via the registry scan.
+    pm.ports["remote1"].power = ["rack9.1"]
+    pm.ports["remote1"]._feed_states = {"rack9.1": True}
     assert adapter._remote_origin_for_ref("rack9.1") == "peerO"
     # A local PDU's ref -> never "remote" (local wins).
     assert adapter._remote_origin_for_ref("rack1.1") is None
     # A ref on no port -> unknown (None), which set_outlet turns into its own
     # "not configured" error path.
     assert adapter._remote_origin_for_ref("ghost.9") is None
+    # A foreign origin's qualified ref resolves to its CLAIMED origin; the
+    # relay then refuses ("unreachable") when this node has no link to it.
+    assert adapter._remote_origin_for_ref("other::rack9.1") == "other"
     await adapter.stop()
 
 
 @asyncio_test
 async def test_remote_origin_local_wins_when_local_port_declares_ref():
-    # A local port declaring the same ref as a federated port: the ref is
-    # local, so no origin is reported (no false "federated" refusal).
+    # A local port declaring the same BARE ref as a federated port: the ref
+    # is local, so no origin is reported (no false "federated" refusal).
     pm = _remote_pm(feeds=("rack1.3",), local_ports={"c1": _FakePort("c1", ["rack1.3"])})
     adapter = await _start(_make_adapter(pm))
     assert adapter._remote_origin_for_ref("rack1.3") is None
     res = await adapter.set_outlet("rack1.3", False)
     assert res["ok"] is True  # switched locally, not refused
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_set_outlet_remote_named_like_local_relays_not_local():
+    # The collision regression: the local node AND the origin both have an
+    # outlet named rack1.1. The port declares the fed outlet as the global
+    # "peerO::rack1.1" ref, so switching THAT relays to the origin; the bare
+    # "rack1.1" ref is the local outlet. The same name on both nodes never
+    # shadows (outlet federation).
+
+    class _FakeMuxcon:
+        def __init__(self, reply):
+            self.reply = reply
+            self.calls = []
+
+        def get_adapter_type(self):
+            return "muxcon"
+
+        async def relay_power_switch(self, port_name, ref, on, claims, client_id=None):
+            self.calls.append((port_name, ref, on, list(claims), client_id))
+            return dict(self.reply)
+
+    pm = _remote_pm(
+        feeds=("rack1.1",),
+        states={"rack1.1": True},
+        origin_id="peerO",
+        local_ports={"c1": _FakePort("c1", ["rack1.1"])},
+        sessions={"u1": 3},
+    )
+    adapter = await _start(_make_adapter(pm))
+    mx = _FakeMuxcon({"ok": True, "on": False})
+    pm.unified_adapters = [adapter, mx]
+    # The GLOBAL ref relays to the origin (the local PDU is NOT touched)...
+    res = await adapter.set_outlet("peerO::rack1.1", False, client_id="u1")
+    assert res["ok"] is True
+    # ...with the ORIGIN-LOCAL ref on the wire; claims are port names.
+    assert mx.calls == [("remote1", "rack1.1", False, ["remote1"], "u1")]
+    # ...and the local PDU still reports on.
+    assert adapter.pdus["rack1"].readings["1"].on is True
+    # The BARE ref is the local outlet: it switches locally, no relay.
+    res = await adapter.set_outlet("rack1.1", False, client_id="u1")
+    assert res["ok"] is True
+    assert adapter.pdus["rack1"].readings["1"].on is False
+    assert mx.calls == [("remote1", "rack1.1", False, ["remote1"], "u1")]
     await adapter.stop()
 
 
@@ -1000,7 +1074,9 @@ async def test_set_outlet_relays_remote_owned_ref_to_origin():
     adapter = await _start(_make_adapter(pm))
     mx = _FakeMuxcon({"ok": True, "on": False})
     pm.unified_adapters = [adapter, mx]
-    res = await adapter.set_outlet("rack9.1", False, client_id="u1")
+    # The caller passes the GLOBAL ref; the wire carries the origin-local one,
+    # and claims are the PLAIN port names this node declares the ref on.
+    res = await adapter.set_outlet("peerO::rack9.1", False, client_id="u1")
     assert res["ok"] is True
     assert res["reading"]["on"] is False
     assert mx.calls == [("remote1", "rack9.1", False, ["remote1"], "u1")]
@@ -1012,7 +1088,7 @@ async def test_set_outlet_relays_remote_owned_ref_to_origin():
     adapter2 = await _start(_make_adapter(pm2))
     mx2 = _FakeMuxcon({"ok": False, "error": "console session is not read-write; switch it from a read-write session"})
     pm2.unified_adapters = [adapter2, mx2]
-    res = await adapter2.set_outlet("rack9.1", True, client_id="u1")
+    res = await adapter2.set_outlet("peerO::rack9.1", True, client_id="u1")
     assert res["ok"] is False
     assert "not read-write" in res["error"]
     assert res["impact"] == {"change": "on", "losing_power": [], "staying_up": []}
@@ -1027,7 +1103,7 @@ async def test_set_outlet_remote_ref_without_federated_session_refused():
     pm = _remote_pm(feeds=("rack9.1",), origin_id="peerO")
     adapter = await _start(_make_adapter(pm))
     for direction in (False, True):
-        res = await adapter.set_outlet("rack9.1", direction)
+        res = await adapter.set_outlet("peerO::rack9.1", direction)
         assert res["ok"] is False
         assert "owned by federated node peerO" in res["error"]
     await adapter.stop()
@@ -1039,7 +1115,7 @@ async def test_set_outlet_remote_ref_without_muxcon_relays_nothing():
     # Give the anchor a live stream so the only missing piece is the muxcon
     # adapter itself.
     adapter.main_port_manager.ports["remote1"]._client_sessions = {"u1": 7}
-    res = await adapter.set_outlet("rack9.1", False, client_id="u1")
+    res = await adapter.set_outlet("peerO::rack9.1", False, client_id="u1")
     assert res["ok"] is False
     assert "no active federation link" in res["error"]
     await adapter.stop()
@@ -1047,12 +1123,32 @@ async def test_set_outlet_remote_ref_without_muxcon_relays_nothing():
 
 @asyncio_test
 async def test_snapshot_skips_remote_refs_in_unresolved():
-    # The remote port declares refs to the ORIGIN's PDUs; locally they resolve
-    # to nothing, but they are not "unresolved" noise (the origin answers for
-    # them). A genuinely broken LOCAL ref is still surfaced.
+    # The remote port declares refs to the ORIGIN's PDUs (globally
+    # qualified); locally they resolve to nothing, but they are not
+    # "unresolved" noise (the origin answers for them). A genuinely broken
+    # LOCAL ref is still surfaced.
     pm = _remote_pm(feeds=("rack9.1",), local_ports={"c1": _FakePort("c1", ["ghost.7"])})
     adapter = await _start(_make_adapter(pm))
     snap = adapter.get_power_snapshot()
-    assert "rack9.1" not in snap["unresolved_refs"]
+    assert "peerO::rack9.1" not in snap["unresolved_refs"]
     assert snap["unresolved_refs"] == ["ghost.7"]
     await adapter.stop()
+
+
+# --- global ref helpers (outlet federation) -----------------------------------
+
+
+def test_split_remote_ref_round_trip_and_reject_local_refs():
+    assert remote_ref("peerO", "rack1.1") == "peerO::rack1.1"
+    assert split_remote_ref("peerO::rack1.1") == ("peerO", "rack1.1")
+    # Local bare refs are not remote refs.
+    assert split_remote_ref("rack1.1") is None
+    assert split_remote_ref("rack1.2") is None
+    # A dot before the separator is not a well-formed origin (server ids are
+    # dot-free; this keeps "a.b::ref" from double-parsing as local).
+    assert split_remote_ref("a.b::rack1.1") is None
+    # Empty origin / malformed pdu part are rejected too.
+    assert split_remote_ref("::rack1.1") is None
+    assert split_remote_ref("peerO::nodots") is None
+    assert split_remote_ref(None) is None
+    assert split_remote_ref(42) is None

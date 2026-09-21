@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from ..data_logger import DataLogger
 from .base_adapter import AdapterCapability, BaseGenericAdapter
@@ -295,6 +295,43 @@ def _valid_ref_token(text: str) -> bool:
     return bool(text) and "." not in text and not any(ch.isspace() for ch in text)
 
 
+# Separator between the origin server id and the local outlet ref in a remote
+# (federated-node-owned) outlet ref: "<origin_server_id>::<pdu_name>.<outlet_id>".
+# The same double-colon convention the federation layer already uses for
+# origin-qualified names (e.g. remote port display strings) keeps one mental
+# model. Outlet refs only ever contain a single dot (pdu name / outlet id
+# tokens may not), so the first dot still splits pdu from outlet after the
+# origin prefix is stripped.
+REMOTE_REF_SEPARATOR = "::"
+
+
+def split_remote_ref(ref: Any) -> Optional[Tuple[str, str]]:
+    """Split a remote outlet ref into (origin_server_id, local_outlet_ref).
+
+    Returns None when the ref is not a remote ref (no well-formed "origin::"-
+    prefixed part). Fed consoles carry their feeds globally unique this way, so
+    an origin and a peer can both have an outlet named "rack1.1" without the
+    names colliding (outlet federation).
+    """
+    if not isinstance(ref, str):
+        return None
+    idx = ref.find(REMOTE_REF_SEPARATOR)
+    if idx <= 0:
+        return None
+    pdu_part = ref[idx + len(REMOTE_REF_SEPARATOR) :]
+    if "." not in pdu_part or "." in ref[:idx]:
+        return None
+    origin = ref[:idx]
+    if not origin or "." in origin or any(ch.isspace() for ch in origin):
+        return None
+    return origin, pdu_part
+
+
+def remote_ref(origin: Any, ref: str) -> str:
+    """Qualify a local outlet ref with the origin server id (outlet federation)."""
+    return f"{origin}{REMOTE_REF_SEPARATOR}{ref}"
+
+
 class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
     """Adapter managing PDU outlets (power on/off + readings).
 
@@ -466,7 +503,16 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception as exc:
             return {"type": "power_switch", "ok": False, "error": str(exc)}
         if not result.get("ok"):
-            return {"type": "power_switch", "ok": False, "error": str(result.get("error", "switch failed"))}
+            # The refusal carries the same off-impact preview the web POST
+            # path returns, so the in-session menu can name the consoles
+            # that would lose all power (the switch is refused, so nothing
+            # changes).
+            return {
+                "type": "power_switch",
+                "ok": False,
+                "error": str(result.get("error", "switch failed")),
+                "impact": result.get("impact"),
+            }
         reading = result.get("reading") or {}
         state_txt = "unknown"
         if reading.get("on") is True:
@@ -612,7 +658,14 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
 
     @staticmethod
     def _parse_ref(ref: str) -> tuple:
-        """Split an outlet ref ``<pdu>.<id>``; raise ValueError when malformed."""
+        """Split a LOCAL outlet ref ``<pdu>.<id>``; raise ValueError when malformed.
+
+        Remote (federated-node-owned) refs carry an "origin::" prefix and must
+        not arrive here: callers relay them (``_remote_origin_for_ref``) or
+        strip the prefix first (``split_remote_ref``).
+        """
+        if split_remote_ref(ref) is not None:
+            raise ValueError(f"invalid local outlet ref {ref!r}; the origin prefix belongs to a remote ref")
         if not isinstance(ref, str) or ref.count(".") != 1:
             raise ValueError(f"invalid outlet ref {ref!r}; expected <pdu>.<id>")
         pdu_name, outlet_id = ref.split(".", 1)
@@ -637,6 +690,18 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         notice wording (single line, log-appropriate). Failures are not
         audit-logged (each logs its own error line).
         """
+        # Outlet federation: a ref owned by a remote node is switched on the
+        # origin. The ref arrives prefixed with the origin's server id
+        # ("origin::<pdu>.<id>" - the same "::" convention as the federation
+        # display strings), so it resolves unambiguously even when this node
+        # has an outlet of the same name. The peer pre-checks what it can see
+        # (read-write above, the group check for visible fed ports done by the
+        # surface that owns username) and relays the switch anchored on a
+        # federated session on a port the ref powers; the origin re-verifies
+        # the anchor and the coverage of its FULL fed set, then runs this same
+        # method locally.
+        if split_remote_ref(ref) is not None:
+            return await self._relay_power_switch(ref, bool(on), client_id=client_id)
         try:
             pdu_name, outlet_id = self._parse_ref(ref)
         except ValueError as exc:
@@ -647,12 +712,8 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             }
         if self.enabled is False:
             return {"ok": False, "error": "power management is disabled", "impact": self._empty_impact(on)}
-        # Outlet federation: a ref owned by a remote node is switched on the
-        # origin. The peer pre-checks what it can see (read-write above, the
-        # group check for visible fed ports done by the surface that owns
-        # username) and relays the switch anchored on a federated session on
-        # a port the ref powers; the origin re-verifies the anchor and the
-        # coverage of its FULL fed set, then runs this same method locally.
+        # Bare-ref fallback: a fed port advertising unprefixed feeds (an older
+        # origin, or a stray config) is still classified by the declaring port.
         origin_id = self._remote_origin_for_ref(ref)
         if origin_id:
             return await self._relay_power_switch(ref, bool(on), client_id=client_id)
@@ -661,7 +722,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             return {"ok": False, "error": f"PDU {pdu_name} is not configured", "impact": self._empty_impact(on)}
         impact = self._empty_impact(on)
         if not on:
-            impact = self.compute_off_impact(ref)
+            impact = self.compute_off_impact(ref, local_ref=True)
         try:
             reading = await state.driver.set_state(outlet_id, bool(on))
         except Exception as exc:
@@ -709,20 +770,25 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         ports = getattr(pm, "ports", None) if pm is not None else None
         if not isinstance(ports, dict):
             return {"ok": False, "error": "no console registry available for the relay", "impact": self._empty_impact(on)}
+        origin_split = split_remote_ref(ref)
+        origin = origin_split[0] if origin_split else self._remote_origin_for_ref(ref)
+        origin_local_ref = origin_split[1] if origin_split else ref
         if not client_id:
-            sid = self._remote_origin_for_ref(ref)
             return {
                 "ok": False,
-                "error": f"{ref} is owned by federated node {sid}; switch it from a session attached to a port it powers",
+                "error": f"{ref} is owned by federated node {origin}; switch it from a session attached to a port it powers",
                 "impact": self._empty_impact(on),
             }
         anchor = None
-        claims: List[str] = []
+        # Claims (the ports this node declares for the ref) use the prefixed
+        # form the origin understands when it re-checks coverage of its full
+        # fed set.
+        claims: List[str] = [
+            name for name, obj in list(ports.items()) if ref in self._refs_of(getattr(obj, "unified_port", obj))
+        ]
         for name, obj in list(ports.items()):
-            refs = self._refs_of(getattr(obj, "unified_port", obj))
-            if ref not in refs:
+            if ref not in self._refs_of(getattr(obj, "unified_port", obj)):
                 continue
-            claims.append(name)
             if (
                 anchor is None
                 and getattr(obj, "remote_port_name", None) is not None
@@ -731,16 +797,19 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             ):
                 anchor = obj
         if anchor is None:
-            sid = self._remote_origin_for_ref(ref)
             return {
                 "ok": False,
-                "error": f"{ref} is owned by federated node {sid}; switch it from a session attached to a port it powers",
+                "error": f"{ref} is owned by federated node {origin}; switch it from a session attached to a port it powers",
                 "impact": self._empty_impact(on),
             }
         muxcon = self._find_muxcon_adapter()
         if muxcon is None or not hasattr(muxcon, "relay_power_switch"):
             return {"ok": False, "error": "no active federation link to the origin node", "impact": self._empty_impact(on)}
-        result = await muxcon.relay_power_switch(anchor.name, ref, on, claims, client_id=client_id)
+        # The wire carries the ORIGIN-LOCAL ref: the origin strips this node's
+        # "origin::" prefix and checks/executes the ref on its own PDUs, naming
+        # its own local ports in any coverage refusal. The prefixed form stays
+        # in the audit trail and every refusal shown to the requester.
+        result = await muxcon.relay_power_switch(anchor.name, origin_local_ref, on, claims, client_id=client_id)
         if isinstance(result, dict) and result.get("ok"):
             reading = {"on": bool(result.get("on")), "watts": None, "amps": None, "volts": None, "error": ""}
             return {"ok": True, "reading": reading, "impact": self._empty_impact(on)}
@@ -750,11 +819,15 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Origin node id when ref is declared only on federated ports (outlet
         federation).
 
-        Scans the port registry for a remote proxy (RemotePortProxy) whose
-        power feed list contains ref and returns its origin server id.
-        Local ports that declare the ref (a real local PDU here) take
-        precedence, so this returns None for locally owned refs.
+        Fed ports carry their feeds with the "origin::" prefix, so a prefixed
+        ref is unambiguous and resolves to its origin without a registry scan.
+        A bare ref falls back to scanning remote proxies (defensive: a
+        malformed advertisement could carry an un-prefixed feed) and to local
+        ports taking precedence, so this returns None for locally owned refs.
         """
+        split = split_remote_ref(ref)
+        if split is not None:
+            return split[0]
         pm = self.main_port_manager
         ports = getattr(pm, "ports", None) if pm is not None else None
         if not isinstance(ports, dict):
@@ -920,6 +993,12 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Outlet state for a federated port's feeds, as last reported by the
         origin node over the muxcon POWER:STATE channel ({} when the port is
         not a remote proxy or carries no state).
+
+        The proxy caches states under the GLOBALLY qualified ref
+        (``origin::<ref>``) - registration and the POWER:STATE apply path both
+        store the prefixed form - which is exactly the same form the port's
+        feed list (``power``) and the switch path use, so this is a plain
+        passthrough (outlet federation).
         """
         try:
             obj = self._port_obj_for_name(port_name)
@@ -980,15 +1059,29 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         return []
 
     def _port_description(self, port_name: str) -> str:
+        """A short label for one port in user-facing text (off-impact preview).
+
+        A federated port is labeled origin-qualified ("origin::name"), the same
+        double-colon origin convention the federation display strings use, so
+        the preview points at the right console on the right node. Local ports
+        keep their plain description (or an empty label).
+        """
         pm = self.main_port_manager
         try:
-            if pm is not None:
-                ports = getattr(pm, "ports", {})
-                obj = ports.get(port_name) if isinstance(ports, dict) else None
-                if obj is not None:
-                    desc = getattr(obj, "description", None)
-                    if isinstance(desc, str) and desc:
-                        return desc
+            if pm is None:
+                return ""
+            ports = getattr(pm, "ports", {})
+            obj = ports.get(port_name) if isinstance(ports, dict) else None
+            if obj is None:
+                return ""
+            origin = getattr(getattr(obj, "metadata", None), "origin_server", None)
+            origin_id = getattr(origin, "server_id", None)
+            if hasattr(obj, "remote_port_name") and isinstance(origin_id, str) and origin_id:
+                name = getattr(obj, "remote_port_name", None) or port_name
+                return f"{origin_id}::{name}"
+            desc = getattr(obj, "description", None)
+            if isinstance(desc, str) and desc:
+                return desc
         except Exception:
             pass
         return ""
@@ -1005,20 +1098,29 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         reading = state.readings.get(outlet_id)
         return reading.on if reading is not None else None
 
-    def compute_off_impact(self, ref: str) -> Dict[str, Any]:
+    def compute_off_impact(self, ref: str, local_ref: bool = False) -> Dict[str, Any]:
         """Pure set logic: who loses ALL power if this outlet goes off.
 
         A console loses all power when, after the hypothetical change, no
         feed in its ``power`` list reads on (unknown/unresolvable feeds do
         not count as on). Consoles with at least one other live feed are
         reported separately (dual-feed A/B awareness).
+
+        ``local_ref=True`` compares the ref against the port's LOCAL feed
+        entries (``<pdu>.<id>``): only the set_outlet local switch path passes
+        it, and a port fed by an outlet of the same name on ANOTHER node
+        (``origin::rack1.1``) is not affected by this node's local ref
+        (outlet federation).
         """
         losing: List[Dict[str, str]] = []
         staying: List[Dict[str, Any]] = []
         for name, inner in self._port_objects():
-            refs = [r for r in self._refs_of(inner) if r != ref]
-            if ref not in self._refs_of(inner):
+            declared = self._refs_of(inner)
+            if local_ref:
+                declared = [r for r in declared if split_remote_ref(r) is None]
+            if ref not in declared:
                 continue
+            refs = [r for r in declared if r != ref]
             live = [r for r in refs if self._outlet_on_state(r) is True]
             entry: Dict[str, Any] = {"port": name, "description": self._port_description(name)}
             if live:
@@ -1143,6 +1245,8 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             if hasattr(inner, "remote_port_name"):
                 continue
             for ref in self._refs_of(inner):
+                if split_remote_ref(ref) is not None:
+                    continue  # origin-owned feed (outlet federation); not local here
                 if ref not in resolved_refs and ref not in unresolved:
                     unresolved.append(ref)
         pdus_out.sort(key=lambda p: p["name"])

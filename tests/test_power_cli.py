@@ -326,13 +326,20 @@ async def test_meta_change_pushes_notice_to_attached_clients():
 
 
 class _FakeRemote:
-    """Stands in for a muxcon RemotePortProxy declaring the origin's feeds."""
+    """Stands in for a muxcon RemotePortProxy declaring the origin's feeds.
+
+    ``feeds`` are the ORIGIN-LOCAL refs (as the muxcon registration layer
+    receives them on the wire); the proxy stores them GLOBALLY qualified as
+    "<origin>::<ref>" (outlet federation), mirroring
+    `RemotePortProxy`/`_register_remote_port_from_dict`. ``states`` is keyed
+    by the same global form.
+    """
 
     def __init__(self, name, feeds=(), states=None, origin_id="peerO", sessions=None):
         self.name = name
         self.remote_port_name = name
-        self.power = list(feeds)
-        self._feed_states = dict(states or {})
+        self.power = [f"{origin_id}::{r}" for r in feeds]
+        self._feed_states = {f"{origin_id}::{k}": v for k, v in (states or {}).items()}
         self.metadata = type("M", (), {"origin_server": type("O", (), {"server_id": origin_id})})
         self._client_sessions = dict(sessions or {})
         self.is_connected = True
@@ -354,6 +361,8 @@ class _FakeFeedMuxcon:
 
 
 async def _started_federated(states=None, origin_id="peerO", mux_reply=None, feed_port_sessions=None, blocked_feed_port=None):
+    # Fed-port feeds are ORIGIN-LOCAL at the call site; the proxy qualifies
+    # them globally ("<origin>::<ref>") at registration.
     pm = _FakePortManager(
         {
             "c1": _FakePort("c1", ["rack1.1", "rack1.2"]),
@@ -391,16 +400,62 @@ async def test_switch_remote_owned_ref_relayed_to_origin():
     muxcon = pm.unified_adapters[1]
     client = _FakeClient()
     client.connected_port = "r1"
-    await adapter.process_client_command(client, "POWER rack9.1 off")
+    await adapter.process_client_command(client, "POWER peerO::rack9.1 off")
     # Last line is the switch confirmation; the (visible) off-impact preview
     # may precede it, as for local refs.
-    assert client.lines[-1] == "POWER rack9.1 -> off"
-    # The frame was anchored on the acting client's own session on the fed
-    # port and carried the visible fed set.
+    assert client.lines[-1] == "POWER peerO::rack9.1 -> off"
+    # The frame is anchored on the acting client's own session on the fed
+    # port, carries the visible fed ports (claims are port names, shared by
+    # both sides), and the ref it SENDS is origin-local (the origin checks
+    # and executes its own local ref).
     assert muxcon.calls == [{"port": "r1", "ref": "rack9.1", "on": False, "claims": ["r1"], "client_id": "cid-1"}]
     # The local dummy PDU was not touched (no local outlet named rack9.*).
     assert "rack9" not in pdu.pdus
     await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_switch_remote_ref_same_name_as_local_outlet_goes_to_origin():
+    # The collision regression: BOTH the local node and the origin have an
+    # outlet named rack1.1. The fed port's ref is the globally qualified
+    # "peerO::rack1.1", so switching it relays to the origin; switching the
+    # bare "rack1.1" hits the local PDU. Neither name shadows the other.
+    mux_reply = {"ok": True, "on": False}
+    adapter, pdu, pm = await _started_federated(states={"rack1.1": True}, mux_reply=mux_reply, feed_port_sessions={"cid-1": 3})
+    pm.ports["r1"].power = ["peerO::rack1.1"]
+    pm.ports["r1"]._feed_states = {"peerO::rack1.1": True}
+    muxcon = pm.unified_adapters[1]
+    client = _FakeClient()
+    client.connected_port = "r1"
+    # The GLOBAL ref ("peerO::rack1.1") goes to the origin (not the local PDU).
+    await adapter.process_client_command(client, "POWER peerO::rack1.1 off")
+    assert client.lines[-1] == "POWER peerO::rack1.1 -> off"
+    assert muxcon.calls == [{"port": "r1", "ref": "rack1.1", "on": False, "claims": ["r1"], "client_id": "cid-1"}]
+    assert pdu.pdus["rack1"].readings["1"].on is True  # local outlet untouched
+    # The BARE ref still means the local outlet (local path, no relay).
+    client2 = _FakeClient()
+    await adapter.process_client_command(client2, "POWER rack1.1 off")
+    assert client2.lines[-1] == "POWER rack1.1 -> off"
+    assert pdu.pdus["rack1"].readings["1"].on is False
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_off_impact_local_ref_does_not_count_remote_port_same_name():
+    # Removing the local rack1.1 powers down c1; r1 also feeds a rack1.1 but
+    # on ANOTHER node, so it is NOT "staying up via" the local outlet (the
+    # impact preview must not name it).
+    _adapter, pdu, pm = await _started_federated(states={"rack1.1": True})
+    pm.ports["r1"].power = ["peerO::rack1.1"]
+    pm.ports["r1"]._feed_states = {"peerO::rack1.1": True}
+    # The preview reads LIVE local readings: with rack1.2 still on, c1 stays
+    # up via that feed. Drop it first so the off of rack1.1 leaves c1 off.
+    pdu.pdus["rack1"].readings["2"].on = False
+    impact = pdu.compute_off_impact("rack1.1", local_ref=True)
+    losing = {e["port"] for e in impact["losing_power"]}
+    staying = {e["port"] for e in impact["staying_up"]}
+    assert losing == {"c1"}
+    assert "r1" not in staying
 
 
 @pytest.mark.asyncio
@@ -411,8 +466,8 @@ async def test_switch_remote_ref_relayed_for_admin_too():
     )
     client = _FakeClient(username="boss")
     client.connected_port = "r1"
-    await adapter.process_client_command(client, "POWER rack9.1 on")
-    assert client.lines[-1] == "POWER rack9.1 -> on"
+    await adapter.process_client_command(client, "POWER peerO::rack9.1 on")
+    assert client.lines[-1] == "POWER peerO::rack9.1 -> on"
     await pdu.stop()
 
 
@@ -424,14 +479,14 @@ async def test_switch_remote_ref_without_federated_session_refused():
     adapter, pdu, pm = await _started_federated(states={"rack9.1": True})
     client = _FakeClient()
     client.connected_port = "c1"  # attached, but not to a fed port
-    await adapter.process_client_command(client, "POWER rack9.1 off")
+    await adapter.process_client_command(client, "POWER peerO::rack9.1 off")
     # The (visible) off-impact preview may precede the refusal, as for local
     # refs; the refusal line ends the exchange.
-    assert client.lines[-1].startswith("ERROR:POWER: rack9.1 is owned by federated node peerO")
+    assert client.lines[-1].startswith("ERROR:POWER: peerO::rack9.1 is owned by federated node peerO")
     client_admin = _FakeClient(username="boss")
     client_admin.connected_port = "c1"
-    await adapter.process_client_command(client_admin, "POWER rack9.1 off")
-    assert client_admin.lines[-1].startswith("ERROR:POWER: rack9.1 is owned by federated node peerO")
+    await adapter.process_client_command(client_admin, "POWER peerO::rack9.1 off")
+    assert client_admin.lines[-1].startswith("ERROR:POWER: peerO::rack9.1 is owned by federated node peerO")
     await pdu.stop()
 
 
@@ -446,11 +501,11 @@ async def test_switch_remote_ref_origin_coverage_error_propagates():
     adapter, pdu, pm = await _started_federated(states={"rack9.1": True}, mux_reply=mux_reply, feed_port_sessions={"cid-1": 9})
     client = _FakeClient()
     client.connected_port = "r1"
-    await adapter.process_client_command(client, "POWER rack9.1 off")
+    await adapter.process_client_command(client, "POWER peerO::rack9.1 off")
     assert any(
         l.startswith("ERROR:POWER: rack9.1 also feeds consoles not known to the requesting node (c7)") for l in client.lines
     )
-    assert pm.ports["r1"]._feed_states == {"rack9.1": True}  # unchanged
+    assert pm.ports["r1"]._feed_states == {"peerO::rack9.1": True}  # unchanged
     await pdu.stop()
 
 
@@ -465,7 +520,7 @@ async def test_switch_remote_ref_group_blocked_on_peer_refused_before_relay():
     muxcon = pm.unified_adapters[1]
     client = _FakeClient()
     client.connected_port = "r1"
-    await adapter.process_client_command(client, "POWER rack9.1 off")
+    await adapter.process_client_command(client, "POWER peerO::rack9.1 off")
     assert any("outside your groups" in l and "r2" in l for l in client.lines)
     assert muxcon.calls == []  # refused before any relay
     await pdu.stop()
@@ -517,14 +572,17 @@ async def test_power_menu_relayed_toggle_for_remote_feed():
     writer = _FakeWriter()
     await run_power_menu(cm, "r1", reader, writer, lines.send_line, "u1", adapter.auth_manager, "cid-1")
     text = "\n".join(lines.lines)
-    # Feed rows render from the origin's last-reported (cached) states.
-    assert "[on]   rack9.1" in text
-    assert "[unknown] rack9.2" in text
+    # Feed rows render the globally qualified ref from the origin's
+    # last-reported (cached) state.
+    assert "[on]   peerO::rack9.1" in text
+    assert "[unknown] peerO::rack9.2" in text
     # The toggle is relayed (the menu is a console session) and succeeds,
-    # anchored on the acting session's own federated stream.
+    # anchored on the acting session's own federated stream; the frame
+    # carries the origin-local ref.
     assert muxcon.calls and muxcon.calls[0]["port"] == "r1"
+    assert muxcon.calls[0]["ref"] == "rack9.1"
     assert muxcon.calls[0]["client_id"] == "cid-1"
-    assert "POWER rack9.1 -> off" in lines.lines
+    assert "POWER peerO::rack9.1 -> off" in lines.lines
     assert "[EXITING POWER]" in lines.lines
     # The cached state is only updated by the origin's POWER:STATE (not here).
     await pdu.stop()

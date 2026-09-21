@@ -119,6 +119,7 @@ from ...common.federation_types import (
 from ..muxcon_protocol import MuxConProtocolHandler
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortLifecycleEvent, PortState, derive_port_readiness
+from .pdu import remote_ref, split_remote_ref
 
 
 @dataclass
@@ -802,6 +803,28 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             self.logger.debug("Failed to broadcast POWER:STATE for %s", port_name, exc_info=True)
 
+    def _local_power_ref(self, port_name: str, outlet: str) -> str:
+        """The LOCAL outlet ref a POWER:STATE frame must carry for one port.
+
+        For a local port the outlet is local and returned as-is. For a
+        re-published federated proxy (multi-hop chain) the event arrived via
+        an inbound frame in the ORIGIN's local form; the frame onward must
+        carry THIS node's global form ("this_node::<ref>") so a downstream
+        peer can match its own proxy (outlet federation).
+        """
+        try:
+            pm = getattr(self, "main_port_manager", None)
+            port = pm.get_port(port_name) if pm is not None and hasattr(pm, "get_port") else None
+        except Exception:
+            port = None
+        if port is None or not hasattr(port, "remote_port_name"):
+            return outlet
+        origin = getattr(getattr(port, "metadata", None), "origin_server", None)
+        origin_id = getattr(origin, "server_id", None)
+        if not isinstance(origin_id, str) or not origin_id:
+            return outlet
+        return remote_ref(origin_id, outlet)
+
     async def _broadcast_power_state(self, port_name: str, outlet: str, on: Any) -> None:
         """Send a ``POWER:STATE:<port>`` control update to every active peer.
 
@@ -810,8 +833,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         peer can apply it to every fed proxy it holds, regardless of whether
         it accepted this port. Echo loop avoided like PORT_STATUS: only the
         origin relays its local change; receivers never re-broadcast.
+
+        The ref is sent in its LOCAL form (``<pdu>.<id>``): the receiver
+        matches proxies whose origin is this node, where this outlet has that
+        local name (outlet federation).
         """
-        body = f"POWER:STATE:{port_name}\n{json.dumps({'ref': str(outlet), 'on': on}, separators=(',', ':'))}"
+        body = f"POWER:STATE:{port_name}\n{json.dumps({'ref': self._local_power_ref(port_name, str(outlet)), 'on': on}, separators=(',', ':'))}"
         for cid, conn in list(self.connections.items()):
             if not self._is_conn_authenticated(cid):
                 continue
@@ -829,8 +856,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
     def _parse_power_state_frame(payload: str) -> Optional[Tuple[str, str, Optional[bool]]]:
         """Parse an inbound ``POWER:STATE:<port>`` control frame body.
 
-        Returns (port_name, ref, on) or None on malformed input. ``on`` is
-        True/False/None (JSON null or missing = unknown).
+        Returns (port_name, ref, on) or None on malformed input. ``ref`` is
+        the SENDER's local outlet ref (``<pdu>.<id>``); the receiver qualifies
+        it with its own server id when matching proxies (outlet federation).
+        ``on`` is True/False/None (JSON null or missing = unknown).
         """
         lines = payload.split("\n")
         if not lines or not lines[0].startswith("POWER:STATE:"):
@@ -854,13 +883,20 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Handle an inbound ``POWER:STATE:`` control frame from a peer.
 
         The frame names the port that changed on the sender plus the outlet
-        ref (absolute: <pdu>.<id>). Applies the new state to EVERY remote
-        proxy in this node's registry whose power feed list contains the ref,
-        updating the proxy's feed cache and metadata, then re-emits the
-        power_outlet_changed port meta event so the web badge, the p power
-        menu, and the live [POWER] notices update with unchanged listener
-        code. Refs matching no proxy are ignored (the peer may feed a port
-        this node did not accept).
+        ref in the sender's LOCAL form (<pdu>.<id>). Applies the new state to
+        the remote proxies this node registered from THAT sender (the peer
+        group the frame arrived on - same multipath group key as proxy
+        registration) whose feed list the ref feeds (matched on the local
+        form), updating the proxy's state cache + metadata under the global
+        "sender::<ref>" form, then re-emits the power_outlet_changed port
+        meta event (with the global ref) so the web badge, the p power menu,
+        and the live [POWER] notices update with unchanged listener code.
+
+        The sender scoping is what keeps same-named outlets apart: an
+        origin's update never applies to ANOTHER origin's proxy holding a
+        local ref of the same name, nor to a local port (outlet federation).
+        Refs matching no proxy of the sender are ignored (the sender may
+        feed a port this node did not accept).
         """
         try:
             parsed = self._parse_power_state_frame(payload)
@@ -870,52 +906,104 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.debug("[%s] Malformed POWER:STATE frame", conn_id)
             return
         port_name, ref, on = parsed
+        sender_key = self._derive_peer_key_from_conn_id(conn_id)
+        proxies = (self._peer_proxies or {}).get(sender_key)
+        if proxies is None:
+            self.logger.debug("[%s] POWER:STATE from unknown peer group %s; dropping", conn_id, sender_key)
+            return
         notified: List[str] = []
-        for proxies in (self._peer_proxies or {}).values():
-            for pname, proxy in (proxies or {}).items():
-                # Fan out to every proxy whose feeds include the ref (the
-                # port named in the frame on the origin is one of them).
-                refs = self._proxy_power_refs(proxy)
-                if ref not in refs:
-                    continue
-                try:
-                    states = getattr(proxy, "_feed_states", None)
-                    if not isinstance(states, dict):
-                        states = {}
-                        proxy._feed_states = states
-                    states[ref] = on
-                    self._update_proxy_power_meta(proxy, ref, on)
-                except Exception:
-                    # justification: optional state detail; the port stays functional
-                    continue
-                other_on = [r for r in refs if r != ref and states.get(r) is True]
-                notified.append(pname)
-                try:
-                    pm = getattr(self, "main_port_manager", None)
-                    if pm and hasattr(pm, "notify_meta_updated"):
-                        pm.notify_meta_updated(
-                            pname,
-                            {
-                                "event": "power_outlet_changed",
-                                "outlet": ref,
-                                "on": on,
-                                "all_power_lost": (on is not True) and not other_on,
-                                "other_outlets_on": other_on,
-                            },
-                        )
-                except Exception:
-                    # justification: optional notification; UI event delivery is best-effort
-                    pass
+        for pname, proxy in proxies.items():
+            if ref not in self._proxy_local_refs(proxy):
+                continue
+            refs = self._proxy_power_refs(proxy)
+            # The proxy caches states under the GLOBAL ref ("sender::<ref>");
+            # pick the entry whose local form is the frame's ref (one per
+            # proxy; a malformed duplicate cannot hold two states).
+            global_ref = ref
+            for r in refs:
+                split = split_remote_ref(r)
+                if (split[1] if split is not None else r) == ref:
+                    global_ref = r
+                    break
+            try:
+                states = getattr(proxy, "_feed_states", None)
+                if not isinstance(states, dict):
+                    states = {}
+                    proxy._feed_states = states
+                states[global_ref] = on
+                self._update_proxy_power_meta(proxy, global_ref, on)
+            except Exception:
+                # justification: optional state detail; the port stays functional
+                continue
+            other_on = [r for r in refs if r != global_ref and states.get(r) is True]
+            notified.append(pname)
+            try:
+                pm = getattr(self, "main_port_manager", None)
+                if pm and hasattr(pm, "notify_meta_updated"):
+                    pm.notify_meta_updated(
+                        pname,
+                        {
+                            "event": "power_outlet_changed",
+                            "outlet": global_ref,
+                            "on": on,
+                            "all_power_lost": (on is not True) and not other_on,
+                            "other_outlets_on": other_on,
+                        },
+                    )
+            except Exception:
+                # justification: optional notification; UI event delivery is best-effort
+                pass
         if notified:
             self.logger.debug("[%s] POWER:STATE %s=%s applied to %s: %s", conn_id, ref, on, len(notified), notified)
 
     @staticmethod
     def _proxy_power_refs(proxy: Any) -> List[str]:
-        """The declared feed refs cached on one RemotePortProxy ([] when none)."""
+        """The global feed refs declared on one RemotePortProxy ([] when none).
+
+        Entries are "origin::<pdu>.<id>" (the origin node's own local ref,
+        qualified with that node's server id), which keeps refs unambiguous
+        when two nodes have an outlet of the same name (outlet federation).
+        """
         refs = getattr(proxy, "power", None)
         if isinstance(refs, (list, tuple)):
             return [str(r) for r in refs]
         return []
+
+    @staticmethod
+    def _proxy_local_refs(proxy: Any) -> List[str]:
+        """The ORIGIN-LOCAL feed refs of one proxy ("<pdu>.<id>", prefix off).
+
+        This is the form the origin's POWER:STATE frames carry, and the form
+        a POWER:SWITCH request from this node must send onward.
+        """
+        out: List[str] = []
+        for r in UnifiedMuxConAdapter._proxy_power_refs(proxy):
+            split = split_remote_ref(r)
+            out.append(split[1] if split is not None else r)
+        return out
+
+    @classmethod
+    def _declared_local_ref_forms(cls, pdu_adapter: Any, port_obj: Any) -> List[str]:
+        """Origin-local forms of a port's declared feed refs.
+
+        A real local origin port declares local refs as-is; a re-published
+        federated proxy declares global ("origin::<ref>") refs, which are
+        reduced to their local form here. Both forms then compare uniformly
+        against the ORIGIN-LOCAL ref a POWER:SWITCH frame carries (for local
+        refs the reduction is the identity). Used by the origin-side switch
+        handler so multi-hop relay validates on re-published proxies too
+        (outlet federation).
+        """
+        try:
+            declared = pdu_adapter._refs_of(port_obj)
+        except Exception:
+            declared = []
+        forms: List[str] = []
+        for r in declared if declared else []:
+            r = str(r)
+            split = split_remote_ref(r)
+            forms.append(split[1] if split is not None else r)
+        return forms
 
     @staticmethod
     def _update_proxy_power_meta(proxy: Any, ref: str, on: Any) -> None:
@@ -953,6 +1041,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         feeds = getattr(metadata, "power", None)
         if not isinstance(feeds, list):
             return
+        origin = getattr(metadata, "origin_server", None)
+        origin_id = getattr(origin, "server_id", None)
         refs: List[str] = []
         states: Dict[str, Optional[bool]] = {}
         for f in feeds:
@@ -964,6 +1054,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             on = f.get("on")
             if on is not True and on is not False:
                 on = None
+            # A fresh advertisement carries local refs ("<pdu>.<id>"); qualify
+            # them with the origin's server id ("origin::<ref>"). An
+            # already-prefixed entry (defensive: a future origin advertising
+            # in the global form, or a stale re-advertise) is kept as-is so
+            # the refresh never double-prefixes (outlet federation).
+            if split_remote_ref(r) is None and isinstance(origin_id, str) and origin_id:
+                r = remote_ref(origin_id, r)
             refs.append(r)
             states[r] = on
         if not refs:
@@ -975,11 +1072,19 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             proxy._feed_states = dict(states)
         except Exception:
             return
+        try:
+            # The metadata feed list PERSISTS (federated cache), so replace
+            # it wholesale with the global entries: a feed removed on the
+            # origin disappears, and no raw local entry can linger for the
+            # UI or a re-application (outlet federation).
+            metadata.power = [{"ref": r, "on": states.get(r)} for r in refs]
+        except Exception:
+            # justification: cosmetic metadata; proxy.power is already updated
+            pass
         for ref in refs:
             old = old_states.get(ref, None)
             if old == states.get(ref):
                 continue
-            self._update_proxy_power_meta(proxy, ref, states.get(ref))
             other_on = [r for r in refs if r != ref and states.get(r) is True]
             try:
                 pm = getattr(self, "main_port_manager", None)
@@ -1035,7 +1140,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             proxy = None
         if proxy is None or not hasattr(proxy, "remote_port_name"):
             return {"ok": False, "error": "no federated session for this console"}
-        if ref not in (getattr(proxy, "power", None) or []):
+        proxy_refs = [str(r) for r in (getattr(proxy, "power", None) or [])]
+        local_refs = self._proxy_local_refs(proxy)
+        # The frame carries the ORIGIN-LOCAL ref ("<pdu>.<id>"): the origin
+        # checks and executes it on its own PDUs, naming ITS local ports in
+        # any coverage refusal. The caller's ref arrives globally qualified
+        # ("origin::<ref>") from the port's feed list; the bare form is
+        # tolerated (defensive) (outlet federation).
+        wire_ref = ref
+        split = split_remote_ref(ref)
+        if split is not None:
+            wire_ref = split[1]
+        if ref not in proxy_refs and wire_ref not in local_refs:
             return {"ok": False, "error": f"{port_name} is not fed by {ref}"}
         # The proxy's connection_id is its peer GROUP key (derived from the
         # registration-time connection), same as FEDRW passes to sends.
@@ -1065,7 +1181,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             + ":"
             + str(sid)
             + "\n"
-            + json.dumps({"ref": str(ref), "on": bool(on), "claims": claims}, separators=(",", ":"))
+            + json.dumps({"ref": str(wire_ref), "on": bool(on), "claims": claims}, separators=(",", ":"))
         )
         try:
             ok = await self._send_control_mpath(peer_key, frame)
@@ -1140,12 +1256,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         if pdu_adapter is None:
             _refuse("power management is not configured")
             return
-        if ref not in pdu_adapter._refs_of(port_obj):
+        # The frame carries the ORIGIN-LOCAL ref; the named port's declared
+        # refs may be global (a re-published proxy) or local (a real origin
+        # port), so validate in the local form (identical for local refs).
+        if ref not in self._declared_local_ref_forms(pdu_adapter, port_obj):
             _refuse(f"{port_name} is not fed by {ref}")
             return
         claims = body.get("claims")
         claims = {str(c) for c in claims if isinstance(c, str) and c} if isinstance(claims, list) else set()
-        covered = {n for n, inner in pdu_adapter._port_objects() if ref in pdu_adapter._refs_of(inner)}
+        covered = {n for n, inner in pdu_adapter._port_objects() if ref in self._declared_local_ref_forms(pdu_adapter, inner)}
         missing = sorted(n for n in covered if n != port_name and n not in claims)
         if missing:
             _refuse(
@@ -4560,7 +4679,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     states = power_adapter.feed_states(port_name) or {}
                     if not states:
                         return None
-                    return [{"ref": str(r), "on": states.get(str(r))} for r in states]
+                    # Refs are advertised GLOBALLY qualified ("<server_id>::<ref>")
+                    # so a peer can tell this node's outlet <ref> from an
+                    # identically named outlet on its own or another node
+                    # (outlet federation). states is keyed by the port's local
+                    # feed entries; the prefix is this node's server id.
+                    return [{"ref": remote_ref(self.server_id, str(r)), "on": states.get(str(r))} for r in states]
                 except Exception:
                     # justification: optional power metadata; the port advertises without it
                     return None
@@ -6752,6 +6876,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     continue
                 if on is not True and on is not False:
                     on = None
+                # Qualify the origin's local ref with the origin's server id
+                # ("origin::<ref>") so it is globally unique even when two
+                # nodes have an outlet of the same name. An already-prefixed
+                # entry (defensive) is kept as-is (outlet federation).
+                if split_remote_ref(r) is None:
+                    r = remote_ref(server_info.server_id, r)
                 power_feeds.append({"ref": r, "on": on})
             power_feeds = power_feeds or None
 

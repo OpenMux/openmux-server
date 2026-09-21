@@ -139,10 +139,11 @@ Each entry is a `PortMetadata.to_federation_dict()` object. In addition to
 config, description, groups, capacity and line status, the origin's current
 offline reason (`status_message`, set when the port is not healthy; empty
 otherwise) is included in the payload (issue #62). A local console port's
-PDU power feeds (`power`, the list of `{"ref": ...}` each feed backs and
-the origin's last-reported on/off/unknown state for each) ride the same
-entry when the origin runs a `power:` adapter (section 4.5). Mixed-version
-peers simply ignore unknown keys.
+PDU power feeds (`power`, the list of `{"ref": ..., "on": ...}` each feed
+backs and the origin's last-reported on/off/unknown state for each, with the
+refs GLOBALLY qualified as `<origin_server_id>::<ref>`) ride the same entry
+when the origin runs a `power:` adapter (section 4.5). Mixed-version peers
+simply ignore unknown keys.
 
 On receipt, `_handle_ports_federated` applies `accept_filters` per entry,
 then creates or reuses one `_RemotePortProxy` per accepted port
@@ -314,12 +315,19 @@ origin node that owns the PDUs.
 
 The body is a single JSON line; `on` is `true`/`false` or JSON `null`
 (unknown: the origin could not determine the state, for example a PDU
-that is not currently reachable). The
-frame is **per-ref, not per-port**: the origin names the port that changed
-only so the receiver has context, and the receiver applies the new state
-to *every* `RemotePortProxy` it holds whose declared feed list contains that
-ref (a peer may have accepted the port, or may have dropped it). Refs that
-match no local proxy are ignored.
+that is not currently reachable). `ref` is the **sender's local ref**
+(`<pdu>.<outlet>`, no prefix). The frame is **per-ref, not per-port**: the
+origin names the port that changed only so the receiver has context.
+
+The receiver is **sender-scoped**. It applies the state only to the proxies
+it registered from the SENDER's peer group (derived from the connection's
+server id as `node:<server_id>`, the same key registration uses), and only
+where the ref appears in the local form of that proxy's declared feed list.
+It caches the state under the **global ref** `<sender_server_id>::<ref>` —
+the same form the proxy's feed list holds. This is what keeps same-named
+outlets apart: a `rack1.1` change on node A never applies to node B's proxy
+which also declares a local `rack1.1`. A frame from a peer group this node
+holds no proxies for is dropped (debug log).
 
 Only the origin of a port pushes `POWER:STATE` for that port. A mid-chain
 node re-emits `power_outlet_changed` port meta events locally (so its
@@ -339,22 +347,33 @@ intentional for now — extending it to multi-hop is a known, documented gap
 in `docs/power-roadmap.md`.
 
 The initial declared feed list (the `power` key in `PORTS:FEDERATED`) and
-its states are re-sent on every advertise/re-advertise. On reconnect, the
-origin's fresh `PORTS:FEDERATED` advertisement **replaces** the states a
-peer cached from `POWER:STATE` frames, and the peer re-emits a
-`power_outlet_changed` meta event for each ref whose state actually changed
-(see `_apply_power_meta_to_proxy`). A `POWER:STATE`-cached feed that the
-origin removed is dropped silently (the badge and menu re-render from the
-refreshed list; no removal event is sent). The declared feed list and last
-reported states also survive a full process restart of the peer through the
+its states are re-sent on every advertise/re-advertise. The origin always
+advertises its feeds **globally qualified**: `<origin_server_id>::<ref>` —
+its own local refs, qualified with its own server id. A peer stores the
+global ref directly in the proxy's feed list and state cache, so the badge,
+the `/api/ports` power block, the `p` menu, and the `POWER` command use the
+same refs everywhere (section 4.2). On reconnect, the origin's fresh
+`PORTS:FEDERATED` advertisement **replaces** both the proxy's feed list and
+the states a peer cached from `POWER:STATE` frames (replaced wholesale, so
+no stale entry lingers), and the peer re-emits a `power_outlet_changed` meta
+event for each ref whose state actually changed (see
+`_apply_power_meta_to_proxy`). A `POWER:STATE`-cached feed that the origin
+removed is dropped silently (the badge and menu re-render from the refreshed
+list; no removal event is sent). The declared feed list and last reported
+states also survive a full process restart of the peer through the
 federated cache (section 4.2).
 
-On the PDU side, a ref declared only on a federated proxy (and on no local
-port) is **owned by the origin**. A ref also declared on a local port is
-local wins: it switches normally on this node. A peer with an open read-write
-console session on a fed port that declares the ref **relays** the switch to
-the origin (section 4.6). Without such a session, every switch surface
-replies with one typed error that names the origin node ("`<ref>` is owned by
+On the PDU side, ref resolution is unambiguous by construction: a bare ref
+(`<pdu>.<outlet>`, no prefix) that is declared on a local port **always
+resolves to the local port** — even when a federated proxy also declares a
+same-named outlet on another node, because the local form and the global
+form (`<server_id>::<ref>`) are different strings. A bare ref declared only
+on a federated proxy (whose feeds it reaches in local form) and on no local
+port is **owned by the origin**. A global ref always means the origin node
+named in its prefix. For an origin-owned ref, a peer with an open read-write
+console session on a fed port that declares it **relays** the switch to the
+origin (section 4.6). Without such a session, every switch surface replies
+with one typed error that names the origin node ("`<ref>` is owned by
 federated node `<server_id>`; switch it from a session attached to a port it
 powers").
 
@@ -373,24 +392,31 @@ OMXCTRL `power_switch` (the browser `/ws/<port>` path), the client-listener
 Power page (REST `POST /api/power/outlets/{ref}`) has no console session to
 anchor on, so it keeps the typed refusal for such refs.
 
-**Request side (the peer).** The peer uses the acting user's OWN read-write
-session on a fed port that declares the ref as the anchor (stream id `sid`).
-The anchor is looked up strictly by the acting `client_id` - there is no
-fallback to another open session on the port (anchoring a different user's
-stream would mis-attribute the switch's audit and permission checks on the
-origin). Without a matching open session the peer refuses. It claims every
-port on this node that declares the ref. It sends one `POWER:SWITCH` frame to
-the origin, waits for the `POWER:RESULT` reply, and surfaces it:
+**Request side (the peer).** The user names the ref in the GLOBAL form
+(`<origin_server_id>::<pdu>.<outlet>`; the bare form is accepted only when
+no local port declares it). The peer resolves the owning origin (the
+prefix, or the local-form scan of its proxies for a bare ref), then uses the
+acting user's OWN read-write session on a fed port that declares the ref as
+the anchor (stream id `sid`). The anchor is looked up strictly by the acting
+`client_id` - there is no fallback to another open session on the port
+(anchoring a different user's stream would mis-attribute the switch's audit
+and permission checks on the origin). Without a matching open session the
+peer refuses. It claims every port on this node that declares the ref, **as
+plain port names** (the remote port keeps its origin name on both nodes, so
+the plain name is unambiguous on both ends). It sends one `POWER:SWITCH`
+frame to the origin, waits for the `POWER:RESULT` reply, and surfaces it:
 
 ```
 #0:C:<len>:<seq>:POWER:SWITCH:<port_name>:<sid>\n{"ref":"<pdu>.<outlet>","on":false,"claims":["<port>",...]}
 ```
 
-`<port_name>` is the anchored fed port; `claims` lists the fed ports on the
-requesting node that declare the ref. The peer waits for the origin's reply
-up to `muxcon.power_switch_timeout_sec` (default 5.0; `0` disables the
-timeout). The timeout value is read from the effective muxcon config at
-adapter construction.
+`<port_name>` is the anchored fed port; the frame's `ref` is the ORIGIN's
+**local** form — the peer strips its own prefix before sending, because the
+origin checks and executes the ref on its own PDUs; `claims` lists the port
+names the requesting node holds that declare the ref. The peer waits for the
+origin's reply up to `muxcon.power_switch_timeout_sec` (default 5.0; `0`
+disables the timeout). The timeout value is read from the effective muxcon
+config at adapter construction.
 
 **Origin side (verification).** The origin verifies, in order:
 
@@ -399,7 +425,10 @@ adapter construction.
    FEDRW verification uses). An unmapped stream is refused.
 2. **Read-write mode.** The session (its `fed:<peer>:<sid>` mirror)
    is `read-write`. A read-only mirror is refused.
-3. **Local port + ref.** The port exists and declares the ref.
+3. **Local port + ref.** The port exists and declares the ref (compared in
+   the local form: a real local origin port declares local refs, a
+   re-published federated proxy declares global refs that reduce to their
+   local form — so a multi-hop chain validates at every hop).
 4. **Coverage.** The full set of consoles this origin knows is fed by the ref
    (its true local fed set). A console that is fed by the ref, is not the
    anchored port, and is not in the claim list is refused. The refused reply

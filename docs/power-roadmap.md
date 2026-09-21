@@ -76,6 +76,14 @@ can be delivered in any order.
       is mostly about the console ports): a peer never sees the origin's PDU
       list, telemetry, or watts.
 
+      Refs are globally qualified (`<origin_server_id>::<pdu>.<outlet>`,
+      added 2026-09-20) so two nodes with an outlet of the same name stay
+      unambiguous: a bare ref always means the local node's own outlet.
+      `POWER:STATE` frames carry the sender's local ref and are applied
+      sender-scoped (a frame from one origin never touches another origin's
+      same-named ref); `POWER:SWITCH` frames carry the origin's local ref
+      plus plain port-name claims.
+
       Switching an origin-owned outlet is now possible from a peer, bound to
       an already-open console session (added 2026-09-20). A user with an open
       read-write session on a fed port that the ref feeds can switch the

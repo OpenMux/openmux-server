@@ -143,7 +143,13 @@ async def _read_power_state_frame(c_reader):
 
 
 async def _read_ports_federated(c_reader):
-    """Read the leading header line + one line per port until END:PORTS."""
+    """Read the leading header line + one line per port until END:PORTS.
+
+    Feed refs are GLOBALLY qualified on the wire ("<server_id>::<ref>"); this
+    strips the local-node prefix so the LOCAL ref form is asserted, which is
+    what registration then re-qualifies with the ORIGIN's id (outlet
+    federation).
+    """
     hline = await asyncio.wait_for(c_reader.readline(), timeout=1)
     assert hline, "no header line received"
     lines = []
@@ -155,7 +161,13 @@ async def _read_ports_federated(c_reader):
         if txt == "END:PORTS" or "END:PORTS" in txt:
             break
         lines.append(txt)
-    return [json.loads(l) for l in lines if l.strip()]
+    entries = [json.loads(l) for l in lines if l.strip()]
+    for e in entries:
+        if isinstance(e.get("power"), list):
+            e["power"] = [
+                {**f, "ref": "::".join(str(f.get("ref")).split("::", 1)[1:])} for f in e["power"] if isinstance(f, dict)
+            ]
+    return entries
 
 
 # --- PortMetadata.power serialization ----------------------------------------
@@ -244,12 +256,15 @@ async def test_register_remote_port_parses_power():
     }
     await ad._register_remote_port_from_dict("in:127.0.0.1:9999:1", pd)
     proxy = pm.ports["r1"]
-    assert proxy.power == ["rack1.1", "rack1.2", "rack1.3"]
-    assert proxy._feed_states == {"rack1.1": True, "rack1.2": False, "rack1.3": None}
+    # The origin's local feed refs are stored GLOBALLY qualified
+    # ("<origin>::<ref>"), so a same-named outlet on another node never
+    # collides (outlet federation).
+    assert proxy.power == ["peerO::rack1.1", "peerO::rack1.2", "peerO::rack1.3"]
+    assert proxy._feed_states == {"peerO::rack1.1": True, "peerO::rack1.2": False, "peerO::rack1.3": None}
     assert proxy.metadata.power == [
-        {"ref": "rack1.1", "on": True},
-        {"ref": "rack1.2", "on": False},
-        {"ref": "rack1.3", "on": None},
+        {"ref": "peerO::rack1.1", "on": True},
+        {"ref": "peerO::rack1.2", "on": False},
+        {"ref": "peerO::rack1.3", "on": None},
     ]
 
 
@@ -266,8 +281,8 @@ async def test_register_remote_port_drops_malformed_power_entries():
     }
     await ad._register_remote_port_from_dict("in:127.0.0.1:9999:2", pd)
     proxy = pm.ports["r2"]
-    assert proxy.power == ["rack1.1", "rack1.2"]
-    assert proxy._feed_states == {"rack1.1": None, "rack1.2": None}
+    assert proxy.power == ["peerO::rack1.1", "peerO::rack1.2"]
+    assert proxy._feed_states == {"peerO::rack1.1": None, "peerO::rack1.2": None}
 
 
 @pytest.mark.asyncio
@@ -357,12 +372,16 @@ async def test_power_relay_skips_unauthenticated_conn():
 # --- POWER:STATE peer apply ----------------------------------------------------
 
 
-async def _peer_with_registered_port():
+async def _peer_with_registered_port(send_sid: str = "peerO"):
     ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
     pm = PortManager([])
     pm.set_unified_adapters([ad])
     events = []
     pm.register_meta_listener(lambda p, c: events.append((p, c or {})))
+    # The conn record gives both the PROXY registration and POWER:STATE sender
+    # scoping a server identity (same origin peer group).
+    ad.connections["in:127.0.0.1:9:1"] = {"server_id": send_sid}
+    ad.connections["in:anyone:1"] = {"server_id": send_sid}
     pd = {
         "name": "r1",
         "origin_server": ORIGIN,
@@ -378,16 +397,17 @@ async def test_power_state_frame_applies_and_fires_meta():
     ad, pm, events = await _peer_with_registered_port()
     await ad._handle_power_state_frame("in:anyone:1", 'POWER:STATE:r1\n{"ref":"rack1.1","on":false}')
     proxy = pm.ports["r1"]
-    assert proxy._feed_states["rack1.1"] is False
-    assert proxy._feed_states["rack1.2"] is True
+    # States are cached under the GLOBAL ref ("peerO::<ref>").
+    assert proxy._feed_states["peerO::rack1.1"] is False
+    assert proxy._feed_states["peerO::rack1.2"] is True
     ev = [c for p, c in events if p == "r1" and c.get("event") == "power_outlet_changed"]
     assert len(ev) == 1
-    assert ev[0]["outlet"] == "rack1.1"
+    assert ev[0]["outlet"] == "peerO::rack1.1"
     assert ev[0]["on"] is False
     assert ev[0]["all_power_lost"] is False
-    assert ev[0]["other_outlets_on"] == ["rack1.2"]
+    assert ev[0]["other_outlets_on"] == ["peerO::rack1.2"]
     on_vals = {f["ref"]: f["on"] for f in proxy.metadata.power}
-    assert on_vals == {"rack1.1": False, "rack1.2": True}
+    assert on_vals == {"peerO::rack1.1": False, "peerO::rack1.2": True}
 
 
 @pytest.mark.asyncio
@@ -395,7 +415,7 @@ async def test_power_state_frame_all_lost_math():
     ad, pm, events = await _peer_with_registered_port()
     await ad._handle_power_state_frame("in:anyone:1", 'POWER:STATE:r1\n{"ref":"rack1.1","on":false}')
     await ad._handle_power_state_frame("in:anyone:1", 'POWER:STATE:r1\n{"ref":"rack1.2","on":false}')
-    assert pm.ports["r1"]._feed_states == {"rack1.1": False, "rack1.2": False}
+    assert pm.ports["r1"]._feed_states == {"peerO::rack1.1": False, "peerO::rack1.2": False}
     lost = [c for p, c in events if c.get("event") == "power_outlet_changed" and c.get("all_power_lost")]
     assert len(lost) == 1  # only after the second feed drops
     await ad._handle_power_state_frame("in:anyone:1", 'POWER:STATE:r1\n{"ref":"rack1.1","on":true}')
@@ -405,25 +425,39 @@ async def test_power_state_frame_all_lost_math():
 
 
 @pytest.mark.asyncio
-async def test_power_state_frame_applies_to_any_feeding_proxy():
-    # Two proxies from different peers share the same outlet ref: the frame is
-    # per-ref, so both proxies get the update + the meta event.
+async def test_power_state_frame_applies_to_all_sending_peers_proxies():
+    # Two proxies from THE SAME peer both fed by the ref: the sender-scoped
+    # frame applies to both of them + the meta event for each port. A proxy
+    # from a DIFFERENT origin holding the same local ref stays untouched.
     ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
     pm = PortManager([])
     pm.set_unified_adapters([ad])
     events = []
     pm.register_meta_listener(lambda p, c: events.append((p, c or {})))
     for name in ("ra", "rb"):
+        ad.connections[f"in:127.0.0.1:{name}:1"] = {"server_id": "peerO"}
         pd = {
             "name": name,
-            "origin_server": dict(ORIGIN, server_id=name),
+            "origin_server": dict(ORIGIN, server_id="peerO"),
             "status": "connected",
             "power": [{"ref": "shared.7", "on": True}],
         }
         await ad._register_remote_port_from_dict(f"in:127.0.0.1:{name}:1", pd)
+    # A foreign origin with its OWN "shared.7" must not see the update.
+    ad.connections["in:127.0.0.1:rz:1"] = {"server_id": "otherZ"}
+    pdz = {
+        "name": "rz",
+        "origin_server": dict(ORIGIN, server_id="otherZ"),
+        "status": "connected",
+        "power": [{"ref": "shared.7", "on": True}],
+    }
+    await ad._register_remote_port_from_dict("in:127.0.0.1:rz:1", pdz)
+    # The frame arrives from the peerO group.
+    ad.connections["in:anyone:1"] = {"server_id": "peerO"}
     await ad._handle_power_state_frame("in:anyone:1", 'POWER:STATE:whatever\n{"ref":"shared.7","on":false}')
-    assert pm.ports["ra"]._feed_states["shared.7"] is False
-    assert pm.ports["rb"]._feed_states["shared.7"] is False
+    assert pm.ports["ra"]._feed_states["peerO::shared.7"] is False
+    assert pm.ports["rb"]._feed_states["peerO::shared.7"] is False
+    assert pm.ports["rz"]._feed_states["otherZ::shared.7"] is True  # untouched
     changed = {p for p, c in events if c.get("event") == "power_outlet_changed"}
     assert changed == {"ra", "rb"}
 
@@ -432,7 +466,7 @@ async def test_power_state_frame_applies_to_any_feeding_proxy():
 async def test_power_state_frame_unknown_ref_ignored():
     ad, pm, events = await _peer_with_registered_port()
     await ad._handle_power_state_frame("in:anyone:1", 'POWER:STATE:r1\n{"ref":"other.9","on":true}')
-    assert pm.ports["r1"]._feed_states == {"rack1.1": True, "rack1.2": True}
+    assert pm.ports["r1"]._feed_states == {"peerO::rack1.1": True, "peerO::rack1.2": True}
     power_events = [c for p, c in events if c.get("event") == "power_outlet_changed"]
     assert power_events == []
 
@@ -441,15 +475,19 @@ async def test_power_state_frame_unknown_ref_ignored():
 async def test_power_state_frame_requires_auth_via_dispatch():
     ad, pm, _events = await _peer_with_registered_port()
     conn_id = "in:127.0.0.1:8:8"
-    ad.connections[conn_id] = {"writer": DummyWriter(), "auth_ok": False}
+    # An authenticated muxcon conn carries the peer's handshake identity
+    # (server id) in its record - that is how the sender's peer group is
+    # derived on the other side.
+    ad.connections[conn_id] = {"writer": DummyWriter(), "auth_ok": False, "server_id": "peerO"}
     ad._wire_state[conn_id] = {"send_next": 1}
     # Unauthenticated conn: the POWER:STATE branch drops the frame.
     await ad._process_control_command(conn_id, DummyWriter(), 'POWER:STATE:r1\n{"ref":"rack1.1","on":false}')
-    assert pm.ports["r1"]._feed_states["rack1.1"] is True  # untouched
+    # States are cached under the GLOBAL ref (outlet federation).
+    assert pm.ports["r1"]._feed_states["peerO::rack1.1"] is True  # untouched
     # Authenticated conn: the same dispatch path now applies it.
     ad.connections[conn_id]["auth_ok"] = True
     await ad._process_control_command(conn_id, DummyWriter(), 'POWER:STATE:r1\n{"ref":"rack1.1","on":false}')
-    assert pm.ports["r1"]._feed_states["rack1.1"] is False
+    assert pm.ports["r1"]._feed_states["peerO::rack1.1"] is False
 
 
 @pytest.mark.asyncio
@@ -462,9 +500,43 @@ async def test_power_state_frame_malformed_ignored():
         'OTHER:cmd\n{"ref":"rack1.1","on":false}',
     ):
         await ad._handle_power_state_frame("in:anyone:9", bad)
-    assert pm.ports["r1"]._feed_states == {"rack1.1": True, "rack1.2": True}
+    assert pm.ports["r1"]._feed_states == {"peerO::rack1.1": True, "peerO::rack1.2": True}
     power_events = [c for p, c in events if c.get("event") == "power_outlet_changed"]
     assert power_events == []
+
+
+@pytest.mark.asyncio
+async def test_power_state_same_ref_different_nodes_isolated():
+    # The collision regression: two peers both have an outlet named rack1.1
+    # and the local node has one too. A frame from one origin must update
+    # ONLY that origin's proxy, never the other proxy or the local port.
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    pm = PortManager([])
+    pm.set_unified_adapters([ad])
+    events = []
+    pm.register_meta_listener(lambda p, c: events.append((p, c or {})))
+    local = type("L", (), {"name": "lp", "power": ["rack1.1"]})()
+    pm.ports["lp"] = local
+    for name in ("ra", "rb"):
+        # Each origin registers over its own conn carrying its server id.
+        ad.connections[f"in:127.0.0.1:{name}:1"] = {"server_id": name}
+        pd = {
+            "name": name,
+            "origin_server": dict(ORIGIN, server_id=name),
+            "status": "connected",
+            "power": [{"ref": "rack1.1", "on": True}],
+        }
+        await ad._register_remote_port_from_dict(f"in:127.0.0.1:{name}:1", pd)
+    # The frame arrives from the "ra" peer group (sender scoping identity).
+    ad.connections["in:anyone:1"] = {"server_id": "ra"}
+    # The "ra" origin turns its rack1.1 off: only the ra proxy changes.
+    await ad._handle_power_state_frame("in:anyone:1", 'POWER:STATE:lp\n{"ref":"rack1.1","on":false}')
+    assert pm.ports["ra"]._feed_states == {"ra::rack1.1": False}
+    assert pm.ports["rb"]._feed_states == {"rb::rack1.1": True}  # untouched
+    power_events = [c for p, c in events if c.get("event") == "power_outlet_changed"]
+    changed = {p for p, c in events if c.get("event") == "power_outlet_changed"}
+    assert changed == {"ra"}
+    assert all(c["outlet"] == "ra::rack1.1" for c in power_events)
 
 
 # --- Federated cache round-trip -------------------------------------------------
@@ -501,7 +573,8 @@ async def test_federated_cache_round_trips_power(tmp_path, monkeypatch):
     for ports in saved["peers"].values():
         if "rx2" in ports:
             power_saved = ports["rx2"]["power"]
-    assert power_saved == [{"ref": "rack1.1", "on": True}, {"ref": "rack1.2", "on": None}]
+    # The cache keeps the GLOBAL (prefixed) form; restore re-derives from it.
+    assert power_saved == [{"ref": "peerO::rack1.1", "on": True}, {"ref": "peerO::rack1.2", "on": None}]
 
     ad2 = UnifiedMuxConAdapter("mx2", {"muxcon": {"federated_cache_enabled": True}})
     pm2 = PortManager([])
@@ -509,8 +582,10 @@ async def test_federated_cache_round_trips_power(tmp_path, monkeypatch):
     ad2.main_port_manager = pm2
     await ad2._load_federated_cache()
     pr2 = pm2.ports["rx2"]
-    assert pr2.power == ["rack1.1", "rack1.2"]
-    assert pr2._feed_states == {"rack1.1": True, "rack1.2": None}
+    assert pr2.power == ["peerO::rack1.1", "peerO::rack1.2"]
+    assert pr2._feed_states == {"peerO::rack1.1": True, "peerO::rack1.2": None}
+    # The restore path must NOT double-prefix an already-global ref.
+    assert all(r.count("::") == 1 for r in pr2.power)
 
 
 # --- Re-advertise refresh ------------------------------------------------------
@@ -538,17 +613,20 @@ async def _peer_ready_for_readvertise():
 @pytest.mark.asyncio
 async def test_readvertise_refreshes_power_states_and_notifies():
     ad, pm, proxy, events = await _peer_ready_for_readvertise()
-    proxy._feed_states["rack1.1"] = False  # a cached POWER:STATE change
+    proxy._feed_states["peerO::rack1.1"] = False  # a cached POWER:STATE change
+    # Fresh metadata carries the origin's LOCAL refs; the refresh re-qualifies
+    # them globally (no double-prefix).
     meta = _origin_meta("r1")
     meta.power = [{"ref": "rack1.1", "on": True}, {"ref": "rack1.2", "on": False}]
     proxy.metadata = meta  # mirror the reuse path: fresh metadata is assigned first
     await ad._apply_power_meta_to_proxy(proxy, meta)
-    assert proxy._feed_states == {"rack1.1": True, "rack1.2": False}
+    assert proxy.power == ["peerO::rack1.1", "peerO::rack1.2"]
+    assert proxy._feed_states == {"peerO::rack1.1": True, "peerO::rack1.2": False}
     on_vals = {f["ref"]: f["on"] for f in proxy.metadata.power}
-    assert on_vals == {"rack1.1": True, "rack1.2": False}
+    assert on_vals == {"peerO::rack1.1": True, "peerO::rack1.2": False}
     changed = [c for p, c in events if p == "r1" and c.get("event") == "power_outlet_changed"]
-    assert {c["outlet"] for c in changed} == {"rack1.1", "rack1.2"}
-    rack12 = [c for c in changed if c["outlet"] == "rack1.2"][0]
+    assert {c["outlet"] for c in changed} == {"peerO::rack1.1", "peerO::rack1.2"}
+    rack12 = [c for c in changed if c["outlet"] == "peerO::rack1.2"][0]
     assert rack12["on"] is False and rack12["all_power_lost"] is False
 
 
@@ -559,10 +637,10 @@ async def test_readvertise_handles_feed_removal():
     meta.power = [{"ref": "rack1.1", "on": True}]  # origin removed rack1.2
     proxy.metadata = meta  # mirror the reuse path: fresh metadata is assigned first
     await ad._apply_power_meta_to_proxy(proxy, meta)
-    assert proxy.power == ["rack1.1"]
-    assert proxy._feed_states == {"rack1.1": True}
+    assert proxy.power == ["peerO::rack1.1"]
+    assert proxy._feed_states == {"peerO::rack1.1": True}
     on_vals = {f["ref"]: f["on"] for f in proxy.metadata.power}
-    assert on_vals == {"rack1.1": True}
+    assert on_vals == {"peerO::rack1.1": True}
     # A pure removal emits no meta event (the badge/menu re-renders from the
     # refreshed list); the surviving feed is unchanged, so no event for it either.
     power_events = [c for p, c in events if c.get("event") == "power_outlet_changed"]
@@ -671,6 +749,8 @@ async def _peer_with_session():
     await ad._register_remote_port_from_dict("in:127.0.0.1:77777:1", pd)
     pm.ports["r1"]._client_sessions = {"cid-1": 3}  # an open console session (anchor)
     assert pm.ports["r1"].connection_id == "node:" + ORIGIN_ID
+    # The proxy stores the global "origin::"-qualified feed ref.
+    assert pm.ports["r1"].power == ["peerO::rack9.1"]
     return ad, pm
 
 
@@ -733,7 +813,11 @@ async def test_relay_power_switch_sends_frame_and_applies_result():
             dispatched.set()
 
         rt = asyncio.create_task(origin_responder())
-        task = asyncio.create_task(ad.relay_power_switch("r1", "rack9.1", False, ["r1"], "cid-1"))
+        # The caller passes the GLOBALLY qualified ref (what the port's feed
+        # list holds); the relay strips the origin prefix for the wire. Claims
+        # are PORT names (the remote port keeps its origin name on both sides,
+        # so they match the origin's coverage set without a prefix).
+        task = asyncio.create_task(ad.relay_power_switch("r1", "peerO::rack9.1", False, ["r1"], "cid-1"))
         # The result round-trips over the same connection; feed it to the
         # result handler exactly as the receive loop would.
         r_hline = await asyncio.wait_for(s_reader.readuntil(b"\n"), timeout=2)
@@ -746,6 +830,9 @@ async def test_relay_power_switch_sends_frame_and_applies_result():
         # The frame: header line + JSON body line (captured from the wire).
         hline, bodyline = wire[0]
         assert _frame_payload(hline).startswith("POWER:SWITCH:r1:3"), hline
+        # The wire carries the ORIGIN-LOCAL ref (prefix stripped); claims carry
+        # the fed port NAMES (shared by both sides, so the origin's coverage
+        # check matches them directly).
         assert json.loads(bodyline.decode("utf-8")) == {"ref": "rack9.1", "on": False, "claims": ["r1"]}
         # The origin executed the switch under the anchored mirror id and the
         # result round-tripped back to the relay.
@@ -758,16 +845,33 @@ async def test_relay_power_switch_sends_frame_and_applies_result():
 
 
 @pytest.mark.asyncio
+async def test_relay_power_switch_sends_origin_local_ref():
+    # Unit view of the prefix rule: the caller passes the global
+    # "peerO::rack9.1" ref (what the port's feed list holds); the relay strips
+    # this node's origin prefix before the frame goes out, and refuses when
+    # the port is not fed by the ref at all (global or bare form).
+    ad, pm = await _peer_with_session()
+    res = await ad.relay_power_switch("r1", "other.1", False, ["r1"], "cid-1")
+    assert res["ok"] is False
+    assert "not fed by" in res["error"]
+    # No path to the peer -> refused AFTER the anchor + ref checks, so the
+    # global ref must have resolved to the port's local feed first.
+    res = await ad.relay_power_switch("r1", "peerO::rack9.1", False, ["r1"], "cid-1")
+    assert res["ok"] is False
+    assert "unreachable" in res["error"]
+
+
+@pytest.mark.asyncio
 async def test_relay_power_switch_missing_session_refused():
     ad, pm = await _peer_with_session()
     pm.ports["r1"]._client_sessions = {}  # no session open: refused before any frame
-    res = await ad.relay_power_switch("r1", "rack9.1", False, ["r1"], "cid-1")
+    res = await ad.relay_power_switch("r1", "peerO::rack9.1", False, ["r1"], "cid-1")
     assert res["ok"] is False
     assert "no read-write console session" in res["error"]
     # A session keyed under a DIFFERENT client is not an anchor for this one
     # (strict: the acting client's own open session only).
     pm.ports["r1"]._client_sessions = {"cid-other": 3}
-    res = await ad.relay_power_switch("r1", "rack9.1", False, ["r1"], "cid-1")
+    res = await ad.relay_power_switch("r1", "peerO::rack9.1", False, ["r1"], "cid-1")
     assert res["ok"] is False
     assert "no read-write console session" in res["error"]
 
@@ -785,7 +889,7 @@ async def test_relay_power_switch_no_path_refused():
     ad, pm = await _peer_with_session()
     # No mpath group for the peer: the frame cannot go out (the session anchor
     # resolves first, so the acting client's own session is needed).
-    res = await ad.relay_power_switch("r1", "rack9.1", False, ["r1"], "cid-1")
+    res = await ad.relay_power_switch("r1", "peerO::rack9.1", False, ["r1"], "cid-1")
     assert res["ok"] is False
     assert "unreachable" in res["error"]
 
@@ -804,7 +908,7 @@ async def test_relay_power_switch_timeout_refused():
             "primary": conn_id,
             "rr_index": 0,
         }
-        res = await ad.relay_power_switch("r1", "rack9.1", False, ["r1"], "cid-1")
+        res = await ad.relay_power_switch("r1", "peerO::rack9.1", False, ["r1"], "cid-1")
         assert res["ok"] is False
         assert "did not confirm" in res["error"]
         assert ad._power_switch_pending == {}

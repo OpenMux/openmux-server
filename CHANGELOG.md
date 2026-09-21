@@ -26,14 +26,21 @@ Changes since v1.0.3 (2026-09-17).
   last-reported outlet state. A peer renders the same feed badge,
   `/api/ports` power block, `p` power menu, and live `[POWER]` /
   `[POWER WARNING]` terminal notices for a federated port as for a local one;
-  the state also survives a peer restart (federated cache). Live outlet
-  changes travel in a new `POWER:STATE:<port>` MuxCon control frame (one JSON
-  line per change, per outlet ref). The origin's PDU catalog, telemetry, and
-  watts are not federated. No config change is required for nodes that
-  already run the `power:` section and MuxCon federation. State flows one
-  hop (origin to direct peers); a deeper chain does not see live state
-  today. See `docs/design/muxcon.md` section 4.5 and
-  `docs/configuration/adapters.md` (PDU Power, "Federation").
+  the state also survives a peer restart (federated cache). Federated feeds
+  are named globally as `<origin_server_id>::<pdu>.<outlet>` (the same `::`
+  origin convention as the federation display strings, in the badge and
+  menu, `/api/ports`, the `p` menu, and the `POWER` command); a bare ref
+  always means this node's own outlet, so two nodes with a same-named
+  outlet coexist. Live outlet changes travel in a new `POWER:STATE:<port>`
+  MuxCon control frame (one JSON line per change, per outlet ref) and are
+  applied sender-scoped, so one origin's update never touches another
+  origin's same-named ref. MuxCon peers from before this release do not
+  exchange federated power state (mixed-version limitation). The origin's
+  PDU catalog, telemetry, and watts are not federated. No config change is
+  required for nodes that already run the `power:` section and MuxCon
+  federation. State flows one hop (origin to direct peers); a deeper chain
+  does not see live state today. See `docs/design/muxcon.md` section 4.5
+  and `docs/configuration/adapters.md` (PDU Power, "Federation").
 
 - **Peers can now switch origin-owned outlets from a session (outlet
   federation, MuxCon only).** A ref declared only on a federated port no
@@ -44,8 +51,11 @@ Changes since v1.0.3 (2026-09-17).
   `p` menu) — the same rule as on a local outlet, extended over the
   federation. The switch is anchored on that already-open console session
   (no username crosses the wire), sent in a new `POWER:SWITCH` control
-  frame, and executed on the origin node under the session's federated
-  mirror client id (audited there). The origin re-checks that the user can
+  frame that carries the origin's local ref and plain port-name claims, and
+  executed on the origin node under the session's federated mirror client
+  id (audited there). From the client listener, switch a federated outlet
+  by its global name (for example `POWER peerO::rack1.1 off`); a bare name
+  switches this node's own outlet. The origin re-checks that the user can
   open every console the outlet feeds *that it knows of* (including
   consoles not federated to the requesting node) and answers with a typed
   `POWER:RESULT` refusal naming any console the requester cannot see. The

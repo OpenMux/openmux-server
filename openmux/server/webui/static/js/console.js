@@ -221,10 +221,13 @@ function renderPowerMenu() {
   powerMenuList.innerHTML = '';
   if (!powerState) { powerMenuList.style.display = 'none'; return; }
   // Outlet federation: a federated (remote) port's feeds show the origin's
-  // last-reported state with the same toggle buttons. The web session is
-  // bound to its console port, so a switch relays over the federation
-  // (POWER:SWITCH); the standalone /power REST page stays read-only for
-  // remote refs (no session to bind).
+  // last-reported state with the same toggle buttons. The switch travels
+  // over the core OMXCTRL power_switch control frame on this console
+  // WebSocket (the same path the p power menu uses): it carries the
+  // session, so a federated feed can relay over the federation
+  // (POWER:SWITCH), and it does not depend on the power_monitor web
+  // plugin. The standalone /power REST page stays read-only for remote
+  // refs (no session to bind).
   powerState.feeds.forEach((f) => {
     const row = document.createElement('div');
     const stateTxt = (f.on === true) ? 'on' : (f.on === false ? 'off' : 'unknown');
@@ -232,7 +235,8 @@ function renderPowerMenu() {
     row.textContent = f.ref + '  ' + stateTxt + watts;
     row.style.marginBottom = '2px';
     if (clientMode === 'read-write') {
-      // Per-outlet On/Off button (PDU web plugin endpoint) for read-write users.
+      // Per-outlet On/Off button for read-write users, sent as an OMXCTRL
+      // power_switch frame (core console path; no REST, no CSRF).
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'ro-menu-item';
@@ -249,40 +253,18 @@ function renderPowerMenu() {
   });
   powerMenuList.style.display = '';
 }
-let powerCsrf = null;
-function powerEnsureCsrf(cb) {
-  if (powerCsrf) { cb(); return; }
-  fetch(getBasePath() + '/api/csrf', { credentials: 'same-origin' })
-    .then((r) => (r.ok ? r.json() : null))
-    .then((d) => { powerCsrf = (d && d.csrf) || null; cb(); })
-    .catch(() => { powerCsrf = null; cb(); });
-}
+// The reply arrives as an OMXCTRL frame handled in the ws.onmessage
+// dispatch below (msg.type === 'power_switch').
 function powerToggleOutlet(ref, on) {
-  powerEnsureCsrf(function () {
-    fetch(getBasePath() + '/api/power/outlets/' + encodeURIComponent(ref), {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', 'X-OMX-CSRF': powerCsrf || '' },
-      body: JSON.stringify({ on: on })
-    })
-      .then((r) => r.json().then((d) => ({ ok: r.ok, d: d })))
-      .then((res) => {
-        if (!res.ok) {
-          const d = res.d || {};
-          let msg = d.message || 'request failed';
-          const impact = d.impact;
-          if (impact && impact.losing_power && impact.losing_power.length) {
-            msg += ' - consoles losing ALL power: ' + impact.losing_power.map((x) => x.port).join(', ');
-          }
-          try { term.write('\r\n[POWER error: ' + msg + ']\r\n'); } catch (_) {}
-          window.alert('Power change failed: ' + msg);
-        } else {
-          // The server broadcasts the new state via the meta WS (powerOutletChanged frame).
-          try { term.write('\r\n[POWER] ' + ref + ' is now ' + (on ? 'on' : 'off') + '\r\n'); } catch (_) {}
-        }
-      })
-      .catch((e) => { window.alert('Power change request failed: ' + e); });
-  });
+  if (!isConnected()) {
+    try { window.alert('Power request not sent: console connection is not open'); } catch (_) {}
+    return;
+  }
+  try {
+    ws.send('OMXCTRL ' + JSON.stringify({ type: 'power_switch', ref: ref, on: on }));
+  } catch (e) {
+    try { window.alert('Power request not sent: ' + e); } catch (_) {}
+  }
 }
 if (powerBadge) powerBadge.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -1535,6 +1517,18 @@ function connectSelected() {
       try {
         const payload = ev.data.slice('OMXCTRL '.length);
         const msg = JSON.parse(payload);
+        if (msg && msg.type === 'power_switch') {
+          if (msg.ok === false) {
+            let m = (msg && msg.error) ? msg.error : 'power switch failed';
+            const im = (msg && msg.impact) ? msg.impact : null;
+            if (im && im.losing_power && im.losing_power.length) {
+              m += ' - consoles losing ALL power: ' + im.losing_power.map(function (x) { return x.port; }).join(', ');
+            }
+            try { term.write('\r\n[POWER error: ' + m + ']\r\n'); } catch (_) {}
+            try { window.alert('Power change failed: ' + m); } catch (_) {}
+          }
+          return;
+        }
         if (msg && msg.type === 'rw_holders') {
           updateRoMenuInfo(msg.holders, msg.max_rw_users);
           return;
