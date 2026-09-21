@@ -65,6 +65,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Power page | The web console "Power" menu and its PDU list + per-PDU pages (power_monitor plugin). | power monitor UI, power tab |
 | Power badge | The console session header chip showing this port's feed state (green all on, yellow partial, red all off, grey unknown). | power indicator, power dot (that is the status-page cell) |
 | `POWER` command | The client-listener text command that lists or switches outlets. | power command (use the exact form) |
+| MuxCon outlet federation | The feature that makes a federated console port's declared power feeds and the origin node's last-reported outlet state visible across a federation. A user with an open read-write console session on a fed port can also switch those outlets; the peer relays the switch, and the origin node runs and audits it. | federated PDU, power federation (say "outlet federation") |
 
 ## MuxCon Federation
 

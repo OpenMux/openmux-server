@@ -865,3 +865,194 @@ async def test_handle_power_frame_switch_admin_bypasses_groups():
     res = await adapter.handle_power_frame("c9", {"type": "power_switch", "ref": "rack1.2", "on": False}, "boss")
     assert res["ok"] is True and res["state"] == "off"
     await adapter.stop()
+
+
+# --- remote awareness (outlet federation) --------------------------------------
+
+
+class _FakeOrigin:
+    def __init__(self, server_id):
+        self.server_id = server_id
+
+
+class _FakeRemoteMeta:
+    def __init__(self, server_id):
+        self.origin_server = _FakeOrigin(server_id)
+        self.power = None
+
+
+class _FakeRemotePort:
+    """Stands in for a muxcon RemotePortProxy (the port objects it never is)."""
+
+    def __init__(self, name, feeds=(), states=None, origin_id="peerO", sessions=None):
+        self.name = name
+        self.remote_port_name = name
+        self.power = list(feeds)
+        self._feed_states = dict(states or {})
+        self.metadata = _FakeRemoteMeta(origin_id)
+        self.description = f"Remote {name}"
+        self._client_sessions = dict(sessions or {})  # open federated sessions (relay anchor)
+
+
+def _remote_pm(feeds=("rack9.1", "rack9.2"), states=None, origin_id="peerO", local_ports=None, sessions=None):
+    ports = dict(local_ports or {})
+    ports["remote1"] = _FakeRemotePort("remote1", feeds, states, origin_id, sessions)
+    return _FakePortManager(ports)
+
+
+@asyncio_test
+async def test_feed_states_remote_uses_cached_states():
+    pm = _remote_pm(feeds=("rack9.1", "rack9.2"), states={"rack9.1": True, "rack9.2": None})
+    adapter = await _start(_make_adapter(pm))
+    assert adapter.feed_states("remote1") == {"rack9.1": True, "rack9.2": None}
+    # A local port still reads the live local readings.
+    pm.ports["c1"] = _FakePort("c1", ["rack1.1", "rack1.2"])
+    assert adapter.feed_states("c1") == {"rack1.1": True, "rack1.2": True}
+    # A remote port with no cached state for a feed: unknown.
+    assert adapter.feed_states("remote1")["rack9.2"] is None
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_feed_states_unknown_port_empty():
+    adapter = await _start(_make_adapter())
+    assert adapter.feed_states("missing") == {}
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_port_power_map_works_for_remote_port():
+    pm = _remote_pm(feeds=("rack9.1", "rack9.2"))
+    adapter = await _start(_make_adapter(pm))
+    assert adapter.port_power_map("remote1") == ["rack9.1", "rack9.2"]
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_port_power_payload_remote_states():
+    pm = _remote_pm(feeds=("rack9.1", "rack9.2"), states={"rack9.1": True, "rack9.2": True})
+    adapter = await _start(_make_adapter(pm))
+    payload = adapter.port_power_payload("remote1")
+    assert payload["state"] == "all"
+    assert payload["feeds_on"] == 2
+    assert payload["all_power_lost"] is False
+    # Remote feeds never carry local watts.
+    assert all(f["watts"] is None for f in payload["feeds"])
+    # Simulate the origin turning one feed off (POWER:STATE applied on the peer).
+    pm.ports["remote1"]._feed_states["rack9.2"] = False
+    payload = adapter.port_power_payload("remote1")
+    assert payload["state"] == "some"
+    assert payload["feeds_on"] == 1
+    pm.ports["remote1"]._feed_states["rack9.1"] = False
+    payload = adapter.port_power_payload("remote1")
+    assert payload["state"] == "none"
+    assert payload["all_power_lost"] is True
+    # All states unknown -> "unknown".
+    pm.ports["remote1"]._feed_states = {"rack9.1": None, "rack9.2": None}
+    payload = adapter.port_power_payload("remote1")
+    assert payload["state"] == "unknown"
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_remote_origin_classification():
+    pm = _remote_pm(feeds=("rack9.1", "rack9.2"), origin_id="peerO")
+    adapter = await _start(_make_adapter(pm))
+    # A ref only on the federated port -> owned by that origin.
+    assert adapter._remote_origin_for_ref("rack9.1") == "peerO"
+    # A local PDU's ref -> never "remote" (local wins).
+    assert adapter._remote_origin_for_ref("rack1.1") is None
+    # A ref on no port -> unknown (None), which set_outlet turns into its own
+    # "not configured" error path.
+    assert adapter._remote_origin_for_ref("ghost.9") is None
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_remote_origin_local_wins_when_local_port_declares_ref():
+    # A local port declaring the same ref as a federated port: the ref is
+    # local, so no origin is reported (no false "federated" refusal).
+    pm = _remote_pm(feeds=("rack1.3",), local_ports={"c1": _FakePort("c1", ["rack1.3"])})
+    adapter = await _start(_make_adapter(pm))
+    assert adapter._remote_origin_for_ref("rack1.3") is None
+    res = await adapter.set_outlet("rack1.3", False)
+    assert res["ok"] is True  # switched locally, not refused
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_set_outlet_relays_remote_owned_ref_to_origin():
+    class _FakeMuxcon:
+        def __init__(self, reply):
+            self.reply = reply
+            self.calls = []
+
+        def get_adapter_type(self):
+            return "muxcon"
+
+        async def relay_power_switch(self, port_name, ref, on, claims, client_id=None):
+            self.calls.append((port_name, ref, on, list(claims), client_id))
+            return dict(self.reply)
+
+    # Success: the origin's reading comes back, watts stay None (no PDU here).
+    pm = _remote_pm(feeds=("rack9.1", "rack9.2"), states={"rack9.1": True}, origin_id="peerO", local_ports=None)
+    pm.ports["remote1"]._client_sessions = {"u1": 3}  # an open federated session (anchor)
+    adapter = await _start(_make_adapter(pm))
+    mx = _FakeMuxcon({"ok": True, "on": False})
+    pm.unified_adapters = [adapter, mx]
+    res = await adapter.set_outlet("rack9.1", False, client_id="u1")
+    assert res["ok"] is True
+    assert res["reading"]["on"] is False
+    assert mx.calls == [("remote1", "rack9.1", False, ["remote1"], "u1")]
+    await adapter.stop()
+
+    # Error propagation: the origin's typed refusal is surfaced verbatim.
+    pm2 = _remote_pm(feeds=("rack9.1",), origin_id="peerO")
+    pm2.ports["remote1"]._client_sessions = {"u1": 4}  # anchor session present (relay reached)
+    adapter2 = await _start(_make_adapter(pm2))
+    mx2 = _FakeMuxcon({"ok": False, "error": "console session is not read-write; switch it from a read-write session"})
+    pm2.unified_adapters = [adapter2, mx2]
+    res = await adapter2.set_outlet("rack9.1", True, client_id="u1")
+    assert res["ok"] is False
+    assert "not read-write" in res["error"]
+    assert res["impact"] == {"change": "on", "losing_power": [], "staying_up": []}
+    await adapter2.stop()
+
+
+@asyncio_test
+async def test_set_outlet_remote_ref_without_federated_session_refused():
+    # No console session anchored: the relay cannot pick a stream, so the
+    # typed refusal (naming the origin) is returned. This is the path the
+    # web REST Power page hits for remote refs (it has no session).
+    pm = _remote_pm(feeds=("rack9.1",), origin_id="peerO")
+    adapter = await _start(_make_adapter(pm))
+    for direction in (False, True):
+        res = await adapter.set_outlet("rack9.1", direction)
+        assert res["ok"] is False
+        assert "owned by federated node peerO" in res["error"]
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_set_outlet_remote_ref_without_muxcon_relays_nothing():
+    adapter = await _start(_make_adapter(_remote_pm(feeds=("rack9.1",), origin_id="peerO")))
+    # Give the anchor a live stream so the only missing piece is the muxcon
+    # adapter itself.
+    adapter.main_port_manager.ports["remote1"]._client_sessions = {"u1": 7}
+    res = await adapter.set_outlet("rack9.1", False, client_id="u1")
+    assert res["ok"] is False
+    assert "no active federation link" in res["error"]
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_snapshot_skips_remote_refs_in_unresolved():
+    # The remote port declares refs to the ORIGIN's PDUs; locally they resolve
+    # to nothing, but they are not "unresolved" noise (the origin answers for
+    # them). A genuinely broken LOCAL ref is still surfaced.
+    pm = _remote_pm(feeds=("rack9.1",), local_ports={"c1": _FakePort("c1", ["ghost.7"])})
+    adapter = await _start(_make_adapter(pm))
+    snap = adapter.get_power_snapshot()
+    assert "rack9.1" not in snap["unresolved_refs"]
+    assert snap["unresolved_refs"] == ["ghost.7"]
+    await adapter.stop()

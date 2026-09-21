@@ -220,14 +220,19 @@ function renderPowerMenu() {
   if (!powerMenuList) return;
   powerMenuList.innerHTML = '';
   if (!powerState) { powerMenuList.style.display = 'none'; return; }
+  // Outlet federation: a federated (remote) port's feeds show the origin's
+  // last-reported state with the same toggle buttons. The web session is
+  // bound to its console port, so a switch relays over the federation
+  // (POWER:SWITCH); the standalone /power REST page stays read-only for
+  // remote refs (no session to bind).
   powerState.feeds.forEach((f) => {
     const row = document.createElement('div');
     const stateTxt = (f.on === true) ? 'on' : (f.on === false ? 'off' : 'unknown');
     const watts = (f.watts !== null && f.watts !== undefined) ? ' - ' + Math.round(f.watts) + ' W' : '';
     row.textContent = f.ref + '  ' + stateTxt + watts;
     row.style.marginBottom = '2px';
-    // Per-outlet On/Off button (PDU web plugin endpoint) for read-write users.
     if (clientMode === 'read-write') {
+      // Per-outlet On/Off button (PDU web plugin endpoint) for read-write users.
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'ro-menu-item';

@@ -21,6 +21,42 @@ Changes since v1.0.3 (2026-09-17).
   config change is required. An outlet that feeds no console stays switchable
   by any read-write user.
 
+- **PDU power state federates across MuxCon (console ports only).** A federated
+  console port now carries the origin node's declared power feeds and its
+  last-reported outlet state. A peer renders the same feed badge,
+  `/api/ports` power block, `p` power menu, and live `[POWER]` /
+  `[POWER WARNING]` terminal notices for a federated port as for a local one;
+  the state also survives a peer restart (federated cache). Live outlet
+  changes travel in a new `POWER:STATE:<port>` MuxCon control frame (one JSON
+  line per change, per outlet ref). The origin's PDU catalog, telemetry, and
+  watts are not federated. No config change is required for nodes that
+  already run the `power:` section and MuxCon federation. State flows one
+  hop (origin to direct peers); a deeper chain does not see live state
+  today. See `docs/design/muxcon.md` section 4.5 and
+  `docs/configuration/adapters.md` (PDU Power, "Federation").
+
+- **Peers can now switch origin-owned outlets from a session (outlet
+  federation, MuxCon only).** A ref declared only on a federated port no
+  longer always refuses on a peer. A user who holds an open read-write
+  console session on a fed port that the outlet feeds can now switch that
+  outlet from every in-session switch surface (web in-session power menu and
+  browser `/ws/<port>`, client-listener `POWER <ref> on|off`, telnet/SSH/CLI
+  `p` menu) — the same rule as on a local outlet, extended over the
+  federation. The switch is anchored on that already-open console session
+  (no username crosses the wire), sent in a new `POWER:SWITCH` control
+  frame, and executed on the origin node under the session's federated
+  mirror client id (audited there). The origin re-checks that the user can
+  open every console the outlet feeds *that it knows of* (including
+  consoles not federated to the requesting node) and answers with a typed
+  `POWER:RESULT` refusal naming any console the requester cannot see. The
+  web Power REST page (`POST /api/power/outlets/{ref}`) has no console
+  session to anchor on, so it stays read-only for such refs (same typed
+  refusal as before). A ref also declared on a local port still switches
+  locally on this node. No config change is required; the peer waits on new
+  optional `muxcon.power_switch_timeout_sec` (default 5.0) for the origin's
+  reply. See `docs/design/muxcon.md` sections 4.5/4.6 and
+  `docs/configuration/adapters.md` (PDU Power, "Federation").
+
 ### Web console and observability
 
 - **New: PDU power control** (a new user-facing feature). Add a `power:` section to `server.yaml` to manage one or more PDUs (v1 ships the `dummy` driver). A "Power" item appears in the web console sidebar (below the Console section, expandable to list every PDU) when the section is present, with a PDU list and per-PDU outlet pages (on/off, watts/volts/amps, and which consoles each outlet feeds). Console ports declare their power feeds with a new optional `power: ["<pdu>.<outlet>", ...]` key (`serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`); the web console header and status page show a power dot per console (green all feeds on, yellow partial, red all off, grey unknown), the console header badge has a per-outlet on/off menu, and any power change messages every attached session of every affected console. A new `POWER` command on the client listener lists or switches outlets (switching needs read-write). The Config Editor gains a "Power" view (`/config-editor?view=power`) that edits the section, and a per-port "Power feeds" field on the Ports view; a Soft Reload reconciles the section. See `docs/configuration/adapters.md` (PDU Power) and `docs/GLOSSARY.md`.

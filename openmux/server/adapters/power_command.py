@@ -78,7 +78,8 @@ async def run_power_command(
     username: Optional[str],
     auth_manager: Any,
     client_id: Optional[str] = None,
-) -> None:
+    port_name: Optional[str] = None,
+) -> bool:
     """Interpret one ``POWER`` command and send its reply lines.
 
     Forms (reply wording is fixed and shared by all text surfaces):
@@ -117,6 +118,11 @@ async def run_power_command(
         if not await _user_can_write(auth_manager, username):
             await send_line("ERROR:POWER: insufficient permission (need read-write)")
             return False
+        # Outlet federation: the group check below already refuses when the
+        # ref feeds a console this user cannot open (same wording as local).
+        # A ref owned by a federated node is not refused here: set_outlet
+        # relays the switch to the origin, where the anchor + coverage
+        # checks run for the consoles only that node can see.
         blocked = pdu._power_blocked_ports(arg, username)
         if blocked:
             await send_line(
@@ -213,6 +219,19 @@ def _console_feeds(pdu: Any, port_name: str) -> List[str]:
         return []
 
 
+def _feed_states(pdu: Any, port_name: str) -> Dict[str, Optional[bool]]:
+    """Return {ref: on|off|None} for the port's feeds (outlet federation).
+
+    Local ports read the live local PDU readings; a federated port's feeds
+    are backed by the origin node, whose last-reported state is cached on
+    the remote proxy. Falls back to {} when the port has no feeds.
+    """
+    try:
+        return dict(pdu.feed_states(port_name) or {})
+    except Exception:
+        return {}
+
+
 def format_power_menu_line(ref: str, on: Optional[bool]) -> str:
     """Render one feed row: the state tag only (the number is in the prefix)."""
     if on is True:
@@ -231,16 +250,19 @@ async def _set_all_feeds_at(
     auth_manager: Any,
     send_line: Callable[[str], Awaitable[None]],
     client_id: Optional[str] = None,
+    port_name: Optional[str] = None,
 ) -> bool:
     """Switch every feed that is not already in the target state.
 
     Goes through ``run_power_command`` per ref so the read-write and group
     permission checks apply exactly as for a single switch. Returns True when
-    at least one feed actually changed.
+    at least one feed actually changed. ``port_name`` scopes the state read to
+    one port (remote-aware via feed_states; outlet federation).
     """
+    states = _feed_states(pdu, port_name) if port_name else {}
     changed = False
     for ref in refs:
-        current = pdu._outlet_on_state(ref)
+        current = states.get(ref) if states else pdu._outlet_on_state(ref)
         if current is not None and bool(current) == on:
             continue
         ok = await run_power_command(
@@ -250,6 +272,7 @@ async def _set_all_feeds_at(
             username,
             auth_manager,
             client_id,
+            port_name,
         )
         if ok:
             changed = True
@@ -300,8 +323,9 @@ async def run_power_menu(
         return
     await send_line(f"POWER: feeds for {port_name}  (a number = toggle, a = all, Enter = exit)")
     while True:
+        states = _feed_states(pdu, port_name)
         for i, ref in enumerate(refs, 1):
-            await send_line(f"{i:>2}  " + format_power_menu_line(ref, pdu._outlet_on_state(ref)))
+            await send_line(f"{i:>2}  " + format_power_menu_line(ref, states.get(ref)))
         text, keep_going = await read_prompt_line(reader, writer, POWER_MENU_PROMPT)
         if not keep_going:
             return  # client disconnected: the caller stops pumping the session
@@ -310,16 +334,18 @@ async def run_power_menu(
             await send_line("[EXITING POWER]")
             return
         if entry in ("a", "all"):
-            first = pdu._outlet_on_state(refs[0])
+            first = states.get(refs[0])
             target = not (bool(first) if first is not None else False)
-            await _set_all_feeds_at(console_manager, pdu, refs, target, username, auth_manager, send_line, client_id)
+            await _set_all_feeds_at(
+                console_manager, pdu, refs, target, username, auth_manager, send_line, client_id, port_name
+            )
             await _flush_pending_notices()
             continue
         if entry.isdigit():
             idx = int(entry)
             if 1 <= idx <= len(refs):
                 ref = refs[idx - 1]
-                state = pdu._outlet_on_state(ref)
+                state = states.get(ref)
                 target = not (bool(state) if state is not None else False)
                 await run_power_command(
                     console_manager,
@@ -328,6 +354,7 @@ async def run_power_menu(
                     username,
                     auth_manager,
                     client_id,
+                    port_name,
                 )
                 await _flush_pending_notices()
             else:

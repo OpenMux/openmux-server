@@ -13,6 +13,7 @@ import json
 import pytest
 from aiohttp import ClientSession, TCPConnector
 
+from openmux.common.federation_types import PortMetadata, ServerInfo, ServerType
 from openmux.server.adapters.loopback import LoopbackAdapter
 from openmux.server.adapters.pdu import PduAdapter
 from openmux.server.auth_manager import AuthManager
@@ -439,3 +440,72 @@ async def test_no_nav_when_no_power_adapter():
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()
+
+
+class _FakeRemotePort:
+    """Stands in for a muxcon RemotePortProxy (outlet federation)."""
+
+    def __init__(self, name, feeds, states, origin_id):
+        self.name = name
+        self.remote_port_name = name
+        self.power = list(feeds)
+        self._feed_states = dict(states)
+        self.is_connected = True
+        self.last_seen = 0
+        si = ServerInfo(server_id=origin_id, hostname=origin_id, port=0, server_type=ServerType.LEAF)
+        meta = PortMetadata(
+            name=name,
+            original_name=name,
+            description=f"Remote {name}",
+            adapter_type="remote_muxcon",
+            origin_server=si,
+            server_chain=[si],
+            status="connected",
+        )
+        meta.power = [{"ref": r, "on": states.get(r)} for r in feeds]
+        self.metadata = meta
+
+    def get_status(self):
+        return {
+            "name": self.name,
+            "description": f"Remote {self.name}",
+            "connected": self.is_connected,
+            "client_count": 0,
+            "connected_clients": 0,
+            "adapter_type": "remote_muxcon",
+            "remote_connection_id": "node:" + self.metadata.origin_server.server_id,
+            "remote_port_name": self.name,
+            "readiness": "active",
+        }
+
+
+@pytest.mark.asyncio
+async def test_api_ports_includes_power_block_for_federated_port():
+    ctx = await _start(0)
+    try:
+        _, pm, _, pdu, port = ctx
+        # A federated port registered the way muxcon registration would: the
+        # proxy holds the origin's declared feeds + last-reported states.
+        proxy = _FakeRemotePort("r1", ["rack7.1", "rack7.2"], {"rack7.1": True, "rack7.2": False}, "peerO")
+        pm.ports["r1"] = proxy
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(f"http://127.0.0.1:{port}/api/ports", headers=_hdr("ro")) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+        by_name = {p["name"]: p for p in data["ports"]}
+        # Local port entries are unchanged: the power block still reflects the
+        # live local PDU readings.
+        assert by_name["p1"]["power"]["state"] == "all"
+        # The federated port carries the power block from the origin's
+        # last-reported states (no local watts visible on the peer side).
+        entry = by_name["r1"]
+        assert entry["origin_server_id"] == "peerO"
+        assert entry["power"]["state"] == "some"
+        assert entry["power"]["feeds"] == [
+            {"ref": "rack7.1", "on": True, "watts": None},
+            {"ref": "rack7.2", "on": False, "watts": None},
+        ]
+        assert entry["power"]["feeds_on"] == 1
+        assert entry["power"]["all_power_lost"] is False
+    finally:
+        await _stop(ctx)

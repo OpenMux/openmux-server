@@ -496,6 +496,10 @@ class _FakePdu:
     def _outlet_on_state(self, ref):
         return True
 
+    def feed_states(self, port_name):
+        # Mirrors the real PduAdapter's local branch (live PDU readings).
+        return {ref: self._outlet_on_state(ref) for ref in self.port_power_map(port_name)}
+
     def compute_off_impact(self, ref):
         return {"losing_power": [], "staying_up": []}
 

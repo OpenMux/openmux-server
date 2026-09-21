@@ -63,9 +63,41 @@ can be delivered in any order.
       Raritan or APC) via the `DRIVERS` and `DRIVER_INFO` registries in
       `openmux/server/adapters/pdu.py`. The Config Editor driver select and the
       per-driver options help update automatically from the registry.
-- [ ] **MuxCon outlet federation.** Make power state and per-port feed mappings
-      visible across a federation. Today power is strictly per-node: a server
-      only sees its own PDUs and its own local ports' feeds.
+- [x] **MuxCon outlet federation** (console ports only) — 2026-09-20. A
+      federated console port carries the origin's declared power feeds and
+      last-reported outlet state across the wire. The feed list and state
+      ride the `PORTS:FEDERATED` advertisement, and live changes travel in a
+      new `POWER:STATE:<port>` control frame (one JSON line
+      `{"ref": ..., "on": true|false|null}`, per-ref not per-port). A peer
+      renders the same feed badge, `/api/ports` power block, `p` power menu,
+      and live `[POWER]` terminal notices for a federated port as for a local
+      one; the state survives a peer restart via the federated cache. The
+      full remote PDU catalog is intentionally NOT federated (the federation
+      is mostly about the console ports): a peer never sees the origin's PDU
+      list, telemetry, or watts.
+
+      Switching an origin-owned outlet is now possible from a peer, bound to
+      an already-open console session (added 2026-09-20). A user with an open
+      read-write session on a fed port that the ref feeds can switch the
+      outlet from every in-session switch surface (web in-session power
+      menu / `/ws/<port>`, `POWER` command, telnet/SSH/CLI `p` menu) — the
+      same rule as a local outlet. The relay is anchored on that session (no
+      username crosses the wire): the peer sends `POWER:SWITCH:<port>:<sid>`
+      with the feed refs of every port on this node that declares the ref
+      ("claims"), and the origin verifies (a) the stream is a real
+      origin-side session for that port, (b) the session mirror
+      (`fed:<peer>:<sid>`) is read-write, and (c) coverage — every console
+      the origin knows is fed by the ref is either the anchored console or
+      claimed. It then runs `set_outlet` itself (audited under the mirror id)
+      and answers with one `POWER:RESULT` frame; its `POWER:STATE` broadcast
+      carries the new state back. If the anchor is missing or read-only, or
+      coverage fails (the refusal names the missing consoles), every switch
+      surface gets that typed error verbatim. The web Power REST page (no
+      console session to anchor on) stays read-only for such refs. A ref also
+      declared on a local port still switches locally. Feeds resolve per-ref
+      and state flows one hop (origin -> direct peers); a deeper multi-hop
+      chain does not see live state today (documented in
+      `docs/design/muxcon.md`, section 4.5). Wire format in section 4.6.
 - [x] **Telnet and SSH POWER support** — 2026-09-18. The live `[POWER]` /
       `[POWER WARNING]` notice now works on the telnet and SSH listeners, and
       the escape menu has a `p` command for power. The shared interpreter

@@ -328,6 +328,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # a FEDRWACK frame arrives. Only ever populated on the requesting
         # (peer) side; the origin side never awaits one of its own.
         self._fedrw_pending: Dict[Tuple[str, int], "asyncio.Future"] = {}
+        # Pending POWER:SWITCH relays (outlet federation): keyed by the
+        # (peer_key, stream_id) anchor -> (client_id, future). The peer side
+        # stores the future here before sending the frame; the origin resolves
+        # it when the corresponding POWER:RESULT arrives. Resolved with a
+        # dict: {"ok": True, "on": bool} or {"ok": False, "error": str}.
+        self._power_switch_pending: Dict[Tuple[str, int], Tuple[str, "asyncio.Future"]] = {}
+        try:
+            self.power_switch_timeout = float(effective_config.get("power_switch_timeout_sec", 5.0))
+        except Exception:  # justification: invalid timeout value; safe default
+            self.power_switch_timeout = 5.0
         # Tasks/shutdown
         self._tasks: List[asyncio.Task] = []
         self._stop_event = asyncio.Event()
@@ -597,6 +607,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 # local tcp/command/serial port's status_message reaches peers
                 # immediately, without a full PORTS:FEDERATED round-trip.
                 pm.register_meta_listener(self._on_port_meta_for_status_relay)
+                # And for PDU outlet changes (outlet federation) so a local
+                # power switch/poll result reaches peers as POWER:STATE frames
+                # without a full PORTS:FEDERATED round-trip.
+                pm.register_meta_listener(self._on_port_meta_for_power_relay)
         except Exception:
             self.logger.debug("Failed to register viewer-presence meta listener", exc_info=True)
 
@@ -750,6 +764,457 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             # justification: optional notification; UI event delivery is best-effort
             pass
+
+    # --- PDU power outlet state relay (outlet federation) -------------------
+    #
+    # The origin node announces a local outlet change (poll read or a
+    # successful switch) once per connection via the POWER:STATE control
+    # frame. Receivers apply it to the RemotePortProxy cache and re-emit the
+    # same power_outlet_changed port meta event the origin's own PDU adapter
+    # emits, so badges, the p power menu, and the live [POWER] notices on
+    # attached sessions work with unchanged listener code.
+
+    async def _on_port_meta_for_power_relay(self, port_name: str, changes: Optional[Dict[str, Any]]) -> None:
+        """PortManager meta listener: relay a local outlet change to peers.
+
+        Triggered by the PDU adapter's _emit_outlet_change (poll + switch
+        paths). Only events carrying an ``outlet`` ref are handled. Only
+        ports this node owns are relayed: re-published remote proxies also
+        fire meta events, and their origin has already sent its own
+        POWER:STATE, so pushing again here would cause an echo loop.
+        """
+        if not isinstance(changes, dict) or changes.get("event") != "power_outlet_changed":
+            return
+        outlet = changes.get("outlet")
+        if not isinstance(outlet, str) or not outlet:
+            return
+        pm = getattr(self, "main_port_manager", None)
+        local = None
+        try:
+            if pm and hasattr(pm, "get_port"):
+                local = pm.get_port(port_name)
+        except Exception:
+            local = None
+        if local is not None and hasattr(local, "remote_port_name"):
+            return
+        try:
+            await self._broadcast_power_state(port_name, outlet, changes.get("on"))
+        except Exception:
+            self.logger.debug("Failed to broadcast POWER:STATE for %s", port_name, exc_info=True)
+
+    async def _broadcast_power_state(self, port_name: str, outlet: str, on: Any) -> None:
+        """Send a ``POWER:STATE:<port>`` control update to every active peer.
+
+        The body is a single JSON line with the outlet ref and its new state
+        (None serializes as JSON null = unknown). Per-ref (not per-port) so a
+        peer can apply it to every fed proxy it holds, regardless of whether
+        it accepted this port. Echo loop avoided like PORT_STATUS: only the
+        origin relays its local change; receivers never re-broadcast.
+        """
+        body = f"POWER:STATE:{port_name}\n{json.dumps({'ref': str(outlet), 'on': on}, separators=(',', ':'))}"
+        for cid, conn in list(self.connections.items()):
+            if not self._is_conn_authenticated(cid):
+                continue
+            writer = conn.get("writer")
+            if not isinstance(writer, asyncio.StreamWriter):
+                continue
+            try:
+                seq = self._next_frame_seq(cid)
+                frame = self.proto.create_control_frame(0, seq, body)
+                await self._send_protocol_frame(writer, frame)
+            except Exception:
+                self.logger.debug("[%s] Failed to send POWER:STATE frame for %s", cid, port_name, exc_info=True)
+
+    @staticmethod
+    def _parse_power_state_frame(payload: str) -> Optional[Tuple[str, str, Optional[bool]]]:
+        """Parse an inbound ``POWER:STATE:<port>`` control frame body.
+
+        Returns (port_name, ref, on) or None on malformed input. ``on`` is
+        True/False/None (JSON null or missing = unknown).
+        """
+        lines = payload.split("\n")
+        if not lines or not lines[0].startswith("POWER:STATE:"):
+            return None
+        port_name = lines[0][len("POWER:STATE:") :]
+        if len(lines) < 2 or not lines[1].strip():
+            return None
+        try:
+            body = json.loads(lines[1])
+            ref = str(body.get("ref") or "")
+        except Exception:
+            return None
+        if not ref:
+            return None
+        on = body.get("on")
+        if on is not True and on is not False:
+            on = None
+        return port_name, ref, on
+
+    async def _handle_power_state_frame(self, conn_id: str, payload: str) -> None:
+        """Handle an inbound ``POWER:STATE:`` control frame from a peer.
+
+        The frame names the port that changed on the sender plus the outlet
+        ref (absolute: <pdu>.<id>). Applies the new state to EVERY remote
+        proxy in this node's registry whose power feed list contains the ref,
+        updating the proxy's feed cache and metadata, then re-emits the
+        power_outlet_changed port meta event so the web badge, the p power
+        menu, and the live [POWER] notices update with unchanged listener
+        code. Refs matching no proxy are ignored (the peer may feed a port
+        this node did not accept).
+        """
+        try:
+            parsed = self._parse_power_state_frame(payload)
+        except Exception:
+            parsed = None
+        if parsed is None:
+            self.logger.debug("[%s] Malformed POWER:STATE frame", conn_id)
+            return
+        port_name, ref, on = parsed
+        notified: List[str] = []
+        for proxies in (self._peer_proxies or {}).values():
+            for pname, proxy in (proxies or {}).items():
+                # Fan out to every proxy whose feeds include the ref (the
+                # port named in the frame on the origin is one of them).
+                refs = self._proxy_power_refs(proxy)
+                if ref not in refs:
+                    continue
+                try:
+                    states = getattr(proxy, "_feed_states", None)
+                    if not isinstance(states, dict):
+                        states = {}
+                        proxy._feed_states = states
+                    states[ref] = on
+                    self._update_proxy_power_meta(proxy, ref, on)
+                except Exception:
+                    # justification: optional state detail; the port stays functional
+                    continue
+                other_on = [r for r in refs if r != ref and states.get(r) is True]
+                notified.append(pname)
+                try:
+                    pm = getattr(self, "main_port_manager", None)
+                    if pm and hasattr(pm, "notify_meta_updated"):
+                        pm.notify_meta_updated(
+                            pname,
+                            {
+                                "event": "power_outlet_changed",
+                                "outlet": ref,
+                                "on": on,
+                                "all_power_lost": (on is not True) and not other_on,
+                                "other_outlets_on": other_on,
+                            },
+                        )
+                except Exception:
+                    # justification: optional notification; UI event delivery is best-effort
+                    pass
+        if notified:
+            self.logger.debug("[%s] POWER:STATE %s=%s applied to %s: %s", conn_id, ref, on, len(notified), notified)
+
+    @staticmethod
+    def _proxy_power_refs(proxy: Any) -> List[str]:
+        """The declared feed refs cached on one RemotePortProxy ([] when none)."""
+        refs = getattr(proxy, "power", None)
+        if isinstance(refs, (list, tuple)):
+            return [str(r) for r in refs]
+        return []
+
+    @staticmethod
+    def _update_proxy_power_meta(proxy: Any, ref: str, on: Any) -> None:
+        """Sync one ref's on-state into the proxy's metadata.power entry."""
+        meta = getattr(proxy, "metadata", None)
+        feeds = getattr(meta, "power", None)
+        if not isinstance(feeds, list):
+            feeds = []
+            try:
+                meta.power = feeds
+            except Exception:
+                return
+        entry = None
+        for f in feeds:
+            if isinstance(f, dict) and f.get("ref") == ref:
+                entry = f
+                break
+        if entry is None:
+            feeds.append({"ref": ref, "on": on})
+        else:
+            entry["on"] = on
+
+    async def _apply_power_meta_to_proxy(self, proxy: Any, metadata: Any) -> None:
+        """Refresh one proxy's power feed list + states from fresh metadata.
+
+        Used on reconnect / re-advertise (outlet federation): the origin
+        re-sends authoritative states, so the declared feed list and its
+        states REPLACE the POWER:STATE-cached values (a feed removed on the
+        origin disappears here too). Each ref whose state actually changed
+        re-emits the power_outlet_changed meta event so the badge, the p
+        power menu, and the live [POWER] notice catch up exactly as for a
+        regular POWER:STATE frame. metadata.power absent (older origin) is a
+        no-op: the cached feed list stays valid.
+        """
+        feeds = getattr(metadata, "power", None)
+        if not isinstance(feeds, list):
+            return
+        refs: List[str] = []
+        states: Dict[str, Optional[bool]] = {}
+        for f in feeds:
+            if not isinstance(f, dict):
+                continue
+            r = f.get("ref")
+            if not isinstance(r, str) or not r:
+                continue
+            on = f.get("on")
+            if on is not True and on is not False:
+                on = None
+            refs.append(r)
+            states[r] = on
+        if not refs:
+            return
+        old_states = getattr(proxy, "_feed_states", None)
+        old_states = {str(k): v for k, v in old_states.items()} if isinstance(old_states, dict) else {}
+        try:
+            proxy.power = list(refs)
+            proxy._feed_states = dict(states)
+        except Exception:
+            return
+        for ref in refs:
+            old = old_states.get(ref, None)
+            if old == states.get(ref):
+                continue
+            self._update_proxy_power_meta(proxy, ref, states.get(ref))
+            other_on = [r for r in refs if r != ref and states.get(r) is True]
+            try:
+                pm = getattr(self, "main_port_manager", None)
+                if pm and hasattr(pm, "notify_meta_updated"):
+                    pm.notify_meta_updated(
+                        proxy.remote_port_name,
+                        {
+                            "event": "power_outlet_changed",
+                            "outlet": ref,
+                            "on": states.get(ref),
+                            "all_power_lost": (states.get(ref) is not True) and not other_on,
+                            "other_outlets_on": other_on,
+                        },
+                    )
+            except Exception:
+                # justification: optional notification; UI event delivery is best-effort
+                pass
+        # A feed removed on the origin stops being shown; no event needed for
+        # removal (the badge/menu re-render from the refreshed list).
+        self.logger.debug("Refreshed power feeds for %s from re-advertise: %s", proxy.remote_port_name, refs)
+
+    # --- PDU power switch relay (outlet federation) -------------------------
+
+    async def relay_power_switch(
+        self,
+        port_name: str,
+        ref: str,
+        on: bool,
+        claims_list: List[str],
+        client_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Ask the origin node to switch a fed outlet (outlet federation).
+
+        The caller (PduAdapter.set_outlet) has already applied its local
+        permission and group checks against the ports it can see. This sends
+        a POWER:SWITCH frame anchored on the ACTING client's own read-write
+        session on ``port_name`` (``client_id`` must map to an open console
+        session there; there is no arbitrary-session fallback) and awaits
+        the origin's POWER:RESULT. The origin re-runs its own checks
+        against the FULL set of consoles the ref feeds - including ones
+        not federated here - and executes set_outlet itself on success (its
+        audit line + POWER:STATE broadcast then flow back).
+
+        Returns {"ok": True, "on": bool} on success or
+        {"ok": False, "error": str} on any refusal/transport problem.
+        """
+        proxy = None
+        try:
+            pm = getattr(self, "main_port_manager", None)
+            if pm is not None and hasattr(pm, "get_port"):
+                proxy = pm.get_port(port_name)
+        except Exception:
+            proxy = None
+        if proxy is None or not hasattr(proxy, "remote_port_name"):
+            return {"ok": False, "error": "no federated session for this console"}
+        if ref not in (getattr(proxy, "power", None) or []):
+            return {"ok": False, "error": f"{port_name} is not fed by {ref}"}
+        # The proxy's connection_id is its peer GROUP key (derived from the
+        # registration-time connection), same as FEDRW passes to sends.
+        peer_key = getattr(proxy, "connection_id", None)
+        sessions = getattr(proxy, "_client_sessions", None) or {}
+        # The anchor is the ACTING client's own open session on this port -
+        # strict, no arbitrary-session fallback. The origin audits + checks
+        # the mirror of the anchored session, so anchoring someone else's
+        # stream would mis-attribute the switch. The PDU relay layer only
+        # reaches this point when the caller carries a client_id.
+        sid: Optional[int] = None
+        if client_id:
+            cand = sessions.get(client_id)
+            if isinstance(cand, int) and cand > 0:
+                sid = cand
+        if peer_key is None or sid is None:
+            return {"ok": False, "error": "no read-write console session to anchor the switch on"}
+        claims = [str(c) for c in claims_list if isinstance(c, str) and c]
+        loop = asyncio.get_event_loop()
+        fut: "asyncio.Future" = loop.create_future()
+        # The first tuple element is unused by the resolver (kept for a stable
+        # tuple shape); the future is entry[1].
+        self._power_switch_pending[(peer_key, sid)] = (peer_key, fut)
+        frame = (
+            "POWER:SWITCH:"
+            + str(port_name)
+            + ":"
+            + str(sid)
+            + "\n"
+            + json.dumps({"ref": str(ref), "on": bool(on), "claims": claims}, separators=(",", ":"))
+        )
+        try:
+            ok = await self._send_control_mpath(peer_key, frame)
+            if not ok:
+                return {"ok": False, "error": f"federated node {peer_key} unreachable; switch not sent"}
+            return dict(await asyncio.wait_for(fut, timeout=self.power_switch_timeout))
+        except asyncio.TimeoutError:
+            self.logger.warning("POWER:SWITCH %s timed out (peer %s, sid %s)", ref, peer_key, sid)
+            return {"ok": False, "error": f"federated node {peer_key} did not confirm the switch"}
+        except Exception as exc:
+            self.logger.debug("POWER:SWITCH relay failed for %s: %s", ref, exc, exc_info=True)
+            return {"ok": False, "error": "power switch relay failed"}
+        finally:
+            self._power_switch_pending.pop((peer_key, sid), None)
+
+    async def _handle_power_switch_frame(
+        self, conn_id: str, writer: asyncio.StreamWriter, payload: str, pdu_adapter: Any
+    ) -> None:
+        """Origin side: verify and execute one inbound POWER:SWITCH frame.
+
+        The requester is already authenticated (dispatch guard); this adds the
+        session anchor and coverage checks. All refusals send POWER:RESULT ok
+        False with a typed error; only a fully verified switch proceeds to
+        PduAdapter.set_outlet with the fed pseudo-client as the audit user.
+        """
+        writer_for_result = writer
+        try:
+            lines = payload.split("\n", 1)
+            header = lines[0]
+            body = json.loads(lines[1]) if len(lines) > 1 and lines[1].strip() else {}
+        except Exception:
+            self.logger.debug("[%s] Malformed POWER:SWITCH frame", conn_id)
+            return
+        try:
+            rest = header[len("POWER:SWITCH:") :]
+            port_name, sid_str = rest.split(":", 1)
+            sid = int(sid_str)
+        except Exception:
+            self.logger.debug("[%s] Malformed POWER:SWITCH header: %s", conn_id, payload[:120])
+            return
+
+        def _refuse(error: str) -> None:
+            """Queue a POWER:RESULT ok-False reply to the requesting path."""
+            self._send_power_result(conn_id, sid, False, error, writer_for_result)
+
+        peer_key = self._derive_peer_key_from_conn_id(conn_id)
+        # Anchor guard, same shape as FEDRW: the named stream must be a real
+        # origin-side session for exactly this port (anti-spoof).
+        if self._local_session_map.get(peer_key, {}).get(sid) != port_name:
+            self.logger.warning("[%s] POWER:SWITCH for unmapped stream sid=%s port=%s; refusing", conn_id, sid, port_name)
+            _refuse("no open console session to anchor the switch on")
+            return
+        pm = getattr(self, "main_port_manager", None)
+        port_obj = pm.get_port(port_name) if pm is not None and hasattr(pm, "get_port") else None
+        if port_obj is None:
+            _refuse("unknown port " + str(port_name))
+            return
+        fed_id = "fed:" + peer_key + ":" + str(sid)
+        mode = None
+        for c in getattr(port_obj, "connected_clients", None) or []:
+            if isinstance(c, dict) and c.get("client_id") == fed_id:
+                mode = c.get("mode")
+                break
+        if mode != "read-write":
+            _refuse("console session is not read-write; switch it from a read-write session")
+            return
+        ref = body.get("ref")
+        on = body.get("on")
+        if not isinstance(ref, str) or not ref or on is not True and on is not False:
+            _refuse("malformed power switch request")
+            return
+        if pdu_adapter is None:
+            _refuse("power management is not configured")
+            return
+        if ref not in pdu_adapter._refs_of(port_obj):
+            _refuse(f"{port_name} is not fed by {ref}")
+            return
+        claims = body.get("claims")
+        claims = {str(c) for c in claims if isinstance(c, str) and c} if isinstance(claims, list) else set()
+        covered = {n for n, inner in pdu_adapter._port_objects() if ref in pdu_adapter._refs_of(inner)}
+        missing = sorted(n for n in covered if n != port_name and n not in claims)
+        if missing:
+            _refuse(
+                f"{ref} also feeds consoles not known to the requesting node ({', '.join(missing)}); "
+                "switch it on the origin node"
+            )
+            return
+        result = await pdu_adapter.set_outlet(ref, bool(on), user=fed_id, client_id=fed_id)
+        if not result.get("ok"):
+            _refuse(str(result.get("error", "switch failed")))
+            return
+        reading = result.get("reading") or {}
+        # The reply rides the requesting connection's writer (single-path and
+        # multipath share the same receive writer; seq stays per-connection).
+        self._send_power_result(conn_id, sid, True, None, writer_for_result, on=bool(reading.get("on")))
+
+    def _send_power_result(
+        self,
+        target: str,
+        sid: int,
+        ok: bool,
+        error: Optional[str] = None,
+        writer: Optional[asyncio.StreamWriter] = None,
+        on: Optional[bool] = None,
+    ) -> None:
+        """Queue one POWER:RESULT control reply to the requesting node.
+
+        The reply is always sent on the connection the request arrived on
+        (``target`` = that connection id, for the per-connection seq space);
+        the body is one JSON line carrying the outcome so the peer can
+        surface the origin's typed error verbatim. Best-effort: an unsendable
+        reply is dropped, the peer's own timeout then decides.
+        """
+        body = {"ok": bool(ok)}
+        if error:
+            body["error"] = str(error)
+        if on is True or on is False:
+            body["on"] = on
+        if writer is None or not isinstance(writer, asyncio.StreamWriter):
+            return
+        try:
+            seq = self._next_frame_seq(target)
+            frame = self.proto.create_control_frame(0, seq, f"POWER:RESULT:{sid}\n{json.dumps(body, separators=(',', ':'))}")
+            self._tasks.append(asyncio.create_task(self._send_protocol_frame(writer, frame)))
+        except Exception:
+            self.logger.debug("Failed to queue POWER:RESULT for sid %s", sid, exc_info=True)
+
+    async def _handle_power_result_frame(self, conn_id: str, payload: str) -> None:
+        """Peer side: resolve the pending future for a POWER:RESULT frame.
+
+        An unmatched result (request timed out and the caller gave up) is
+        dropped; the future is always popped by the requester.
+        """
+        try:
+            lines = payload.split("\n", 1)
+            sid = int(lines[0][len("POWER:RESULT:") :])
+            body = json.loads(lines[1]) if len(lines) > 1 and lines[1].strip() else {}
+        except Exception:
+            self.logger.debug("[%s] Malformed POWER:RESULT frame", conn_id)
+            return
+        peer_key = self._derive_peer_key_from_conn_id(conn_id)
+        entry = self._power_switch_pending.pop((peer_key, sid), None)
+        if entry is None or entry[1].done():
+            return
+        entry[1].set_result(
+            {"ok": bool(body.get("ok")), "error": body.get("error")}
+            if not body.get("ok")
+            else {"ok": True, "on": body.get("on")}
+        )
 
     async def _broadcast_viewer_presence(
         self, port_name: str, viewers: List[Dict[str, Any]], exclude_conn_id: Optional[str] = None
@@ -3826,6 +4291,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         rw_groups = None
                         ro_groups = None
                         status_msg = None
+                        power_cached = None
                         if meta is not None:
                             try:
                                 origin = getattr(meta, "origin_server", None)
@@ -3840,6 +4306,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                                 # down stays annotated after a full-reload cold start.
                                 status_msg = getattr(meta, "status_message", None)
                                 readiness_cached = getattr(meta, "readiness", None)
+                                # Power feeds (outlet federation): cached so a peer
+                                # that is down keeps its last-reported feed states
+                                # after a full-reload cold start.
+                                _pf = getattr(meta, "power", None)
+                                if isinstance(_pf, list) and _pf:
+                                    power_cached = list(_pf)
                             except Exception:
                                 # justification: optional cache enrichment; the core entry is still written
                                 pass
@@ -3855,6 +4327,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             "read_only_groups": ro_groups,
                             "status_message": status_msg,
                             "readiness": readiness_cached,
+                            "power": power_cached,
                         }
                     except Exception:
                         continue
@@ -3922,6 +4395,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             status_message=rec.get("status_message") or None,
                             # Readiness (issue #68): restored from cache.
                             readiness=rec.get("readiness") or None,
+                            # Power feeds (outlet federation): restored from cache so
+                            # an offline peer's last-reported feed states survive a cold
+                            # start. RemotePortProxy.__init__ derives its ref list and
+                            # state cache from this field.
+                            power=rec.get("power") if isinstance(rec.get("power"), list) else None,
                         )
                         proxy = self.RemotePortProxy(self, peer_key, pname, metadata)
                         proxy.is_connected = bool(rec.get("connected", False))
@@ -4058,6 +4536,35 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 server_type=ServerType.LEAF,
                 description=self.server_description or "",
             )
+            # PDU power feeds (outlet federation): resolve each exposed
+            # port's feed states from the local PDU adapter so peers can
+            # render the same feed badge / power menu. Best-effort: a port
+            # without feeds (or no power adapter) omits the field.
+            power_adapter = None
+            try:
+                for a in getattr(self.main_port_manager, "unified_adapters", []) or []:
+                    try:
+                        if str(a.get_adapter_type()).lower() == "power":
+                            power_adapter = a
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                power_adapter = None
+
+            def feed_states_for(entry: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+                try:
+                    if power_adapter is None or not hasattr(power_adapter, "feed_states"):
+                        return None
+                    port_name = str(entry.get("name") or "")
+                    states = power_adapter.feed_states(port_name) or {}
+                    if not states:
+                        return None
+                    return [{"ref": str(r), "on": states.get(str(r))} for r in states]
+                except Exception:
+                    # justification: optional power metadata; the port advertises without it
+                    return None
+
             metas: List[PortMetadata] = []
             for p in exposed:
                 name = p.get("name") or p.get("port") or "unknown"
@@ -4138,6 +4645,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         read_only_groups=ro_groups,
                         status_message=status_message,
                         readiness=readiness,
+                        power=feed_states_for(p),
                     )
                 )
 
@@ -4601,6 +5109,29 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if not self._is_conn_authenticated(conn_id):
                     return
                 await self._handle_port_status_frame(conn_id, payload)
+                return
+            if payload.startswith("POWER:STATE:"):
+                if not self._is_conn_authenticated(conn_id):
+                    return
+                await self._handle_power_state_frame(conn_id, payload)
+                return
+            if payload.startswith("POWER:SWITCH:"):
+                if not self._is_conn_authenticated(conn_id):
+                    return
+                pdu_adapter = None
+                for uad in getattr(getattr(self, "main_port_manager", None), "unified_adapters", None) or []:
+                    try:
+                        if str(uad.get_adapter_type()).lower() == "power":
+                            pdu_adapter = uad
+                            break
+                    except Exception:
+                        continue
+                await self._handle_power_switch_frame(conn_id, writer, payload, pdu_adapter)
+                return
+            if payload.startswith("POWER:RESULT:"):
+                if not self._is_conn_authenticated(conn_id):
+                    return
+                await self._handle_power_result_frame(conn_id, payload)
                 return
             if payload.startswith("FEDRW:"):
                 if not self._is_conn_authenticated(conn_id):
@@ -6201,6 +6732,28 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         status_msg = pd.get("status_message") or None
         # Readiness (issue #68): forwarded from the origin; missing on older peers.
         readiness_msg = pd.get("readiness") or None
+        # PDU power feeds (outlet federation): [{ref, on}] advertised by the
+        # origin; on = last-reported outlet state (null = unknown). Tolerates
+        # bare-string entries (ref-only) and drops malformed ones so one bad
+        # feed never fails the port registration.
+        power_feeds = None
+        raw_power = pd.get("power")
+        if isinstance(raw_power, list) and raw_power:
+            power_feeds = []
+            for entry in raw_power:
+                if isinstance(entry, dict):
+                    r = entry.get("ref")
+                    if not isinstance(r, str) or not r:
+                        continue
+                    on = entry.get("on")
+                elif isinstance(entry, str) and entry:
+                    r, on = entry, None
+                else:
+                    continue
+                if on is not True and on is not False:
+                    on = None
+                power_feeds.append({"ref": r, "on": on})
+            power_feeds = power_feeds or None
 
         metadata = PortMetadata(
             name=name,
@@ -6218,6 +6771,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             read_only_groups=ro_groups,
             status_message=status_msg,
             readiness=readiness_msg,
+            power=power_feeds,
         )
 
         # Reuse existing proxy if present to preserve clients and sessions
@@ -6252,6 +6806,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         existing.max_read_write_users = wire_to_mode(getattr(metadata, "max_rw_users", None))
                     except Exception:
                         # justification: in-place live update; the next reload retries
+                        pass
+                    # Refresh the power feed list + states from the fresh
+                    # advertisement (outlet federation). The origin re-sends
+                    # authoritative states on re-advertise, so replace (do not
+                    # merge) what the POWER:STATE frames had recorded.
+                    try:
+                        self._apply_power_meta_to_proxy(existing, metadata)
+                    except Exception:
+                        # justification: optional power detail; the port stays functional
                         pass
                     if hasattr(existing, "is_connected"):
                         existing.is_connected = True
@@ -6698,6 +7261,28 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # server's PortMetadata so ConsoleManager enforces the same ACL locally.
             self.read_write_groups: List[str] = list(getattr(metadata, "read_write_groups", None) or [])
             self.read_only_groups: List[str] = list(getattr(metadata, "read_only_groups", None) or [])
+            # PDU power feeds (outlet federation): the origin node's declared
+            # feed refs for this port plus its last-reported outlet states.
+            # `power` mirrors the local port's ``power`` config attribute so
+            # PduAdapter reads (port_power_map / _power_refs_of) work without
+            # caller changes; `_feed_states` (ref -> True/False/None) is the
+            # peer-side stand-in for the origin's live PDU readings. Both are
+            # refreshed by POWER:STATE frames and re-advertisements.
+            _power_meta = getattr(metadata, "power", None)
+            _power_refs: List[str] = []
+            _power_states: Dict[str, Optional[bool]] = {}
+            if isinstance(_power_meta, list):
+                for _f in _power_meta:
+                    if not isinstance(_f, dict):
+                        continue
+                    _r = _f.get("ref")
+                    if not isinstance(_r, str) or not _r:
+                        continue
+                    _on = _f.get("on")
+                    _power_refs.append(_r)
+                    _power_states[_r] = _on if (_on is True or _on is False) else None
+            self.power: List[str] = _power_refs
+            self._feed_states: Dict[str, Optional[bool]] = _power_states
             self.state = PortState.ACTIVE
             # Offline cache support
             self.last_seen: float = time.time()

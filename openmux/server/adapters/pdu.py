@@ -647,6 +647,15 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             }
         if self.enabled is False:
             return {"ok": False, "error": "power management is disabled", "impact": self._empty_impact(on)}
+        # Outlet federation: a ref owned by a remote node is switched on the
+        # origin. The peer pre-checks what it can see (read-write above, the
+        # group check for visible fed ports done by the surface that owns
+        # username) and relays the switch anchored on a federated session on
+        # a port the ref powers; the origin re-verifies the anchor and the
+        # coverage of its FULL fed set, then runs this same method locally.
+        origin_id = self._remote_origin_for_ref(ref)
+        if origin_id:
+            return await self._relay_power_switch(ref, bool(on), client_id=client_id)
         state = self.pdus.get(pdu_name)
         if state is None:
             return {"ok": False, "error": f"PDU {pdu_name} is not configured", "impact": self._empty_impact(on)}
@@ -670,6 +679,101 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             self._emit_outlet_change(pdu_name, outlet_id, prev.on if prev else None, reading.on)
         self._audit_control(ref, bool(on), user, client_id, impact)
         return {"ok": True, "reading": reading.to_dict(), "impact": impact}
+
+    def _find_muxcon_adapter(self) -> Optional[Any]:
+        """The active muxcon adapter, or None (outlet federation relay path)."""
+        pm = self.main_port_manager
+        adapters = getattr(pm, "unified_adapters", None) if pm is not None else None
+        for uad in adapters or []:
+            try:
+                if str(uad.get_adapter_type()).lower() == "muxcon":
+                    return uad
+            except Exception:
+                continue
+        return None
+
+    async def _relay_power_switch(self, ref: str, on: bool, client_id: Optional[str] = None) -> Dict[str, Any]:
+        """Relay one outlet switch to its origin node (outlet federation).
+
+        The group check for visible fed ports was enforced by the calling
+        surface (handle_power_frame / run_power_command). The anchor is the
+        ACTING user's own open session on a federated port that the ref feeds
+        (``client_id`` is that user's server-side session id; the web REST path
+        carries none, so it cannot anchor and keeps the typed refusal). The
+        muxcon relay then pins the stream to the user's own session (the origin
+        audits + checks the mirror of the anchored session). The claims list is
+        every port on this node declaring the ref, which the origin cross-checks
+        against the true fed set to catch consoles this node never saw.
+        """
+        pm = self.main_port_manager
+        ports = getattr(pm, "ports", None) if pm is not None else None
+        if not isinstance(ports, dict):
+            return {"ok": False, "error": "no console registry available for the relay", "impact": self._empty_impact(on)}
+        if not client_id:
+            sid = self._remote_origin_for_ref(ref)
+            return {
+                "ok": False,
+                "error": f"{ref} is owned by federated node {sid}; switch it from a session attached to a port it powers",
+                "impact": self._empty_impact(on),
+            }
+        anchor = None
+        claims: List[str] = []
+        for name, obj in list(ports.items()):
+            refs = self._refs_of(getattr(obj, "unified_port", obj))
+            if ref not in refs:
+                continue
+            claims.append(name)
+            if (
+                anchor is None
+                and getattr(obj, "remote_port_name", None) is not None
+                and getattr(obj, "is_connected", True)
+                and client_id in (getattr(obj, "_client_sessions", None) or {})
+            ):
+                anchor = obj
+        if anchor is None:
+            sid = self._remote_origin_for_ref(ref)
+            return {
+                "ok": False,
+                "error": f"{ref} is owned by federated node {sid}; switch it from a session attached to a port it powers",
+                "impact": self._empty_impact(on),
+            }
+        muxcon = self._find_muxcon_adapter()
+        if muxcon is None or not hasattr(muxcon, "relay_power_switch"):
+            return {"ok": False, "error": "no active federation link to the origin node", "impact": self._empty_impact(on)}
+        result = await muxcon.relay_power_switch(anchor.name, ref, on, claims, client_id=client_id)
+        if isinstance(result, dict) and result.get("ok"):
+            reading = {"on": bool(result.get("on")), "watts": None, "amps": None, "volts": None, "error": ""}
+            return {"ok": True, "reading": reading, "impact": self._empty_impact(on)}
+        return {"ok": False, "error": str((result or {}).get("error", "switch not relayed")), "impact": self._empty_impact(on)}
+
+    def _remote_origin_for_ref(self, ref: str) -> Optional[str]:
+        """Origin node id when ref is declared only on federated ports (outlet
+        federation).
+
+        Scans the port registry for a remote proxy (RemotePortProxy) whose
+        power feed list contains ref and returns its origin server id.
+        Local ports that declare the ref (a real local PDU here) take
+        precedence, so this returns None for locally owned refs.
+        """
+        pm = self.main_port_manager
+        ports = getattr(pm, "ports", None) if pm is not None else None
+        if not isinstance(ports, dict):
+            return None
+        local_declares = False
+        origin_id: Optional[str] = None
+        for _name, obj in list(ports.items()):
+            if hasattr(obj, "remote_port_name"):
+                if origin_id is None and ref in self._power_refs_of(obj):
+                    origin = getattr(getattr(obj, "metadata", None), "origin_server", None)
+                    sid = getattr(origin, "server_id", None)
+                    if isinstance(sid, str) and sid:
+                        origin_id = sid
+                continue
+            if ref in self._refs_of(getattr(obj, "unified_port", obj)):
+                local_declares = True
+        if local_declares:
+            return None
+        return origin_id
 
     @staticmethod
     def _empty_impact(on: bool) -> Dict[str, Any]:
@@ -775,20 +879,75 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         The single place web/CLI/badge code reads the console->outlet
         mapping; it is a plain attribute on the port object set by the
-        port adapters from each port's ``power:`` config key.
+        port adapters from each port's ``power:`` config key. For a
+        federated port (RemotePortProxy) the same attribute is set from
+        the origin's advertised feed list, so the mapping works with no
+        caller changes (outlet federation).
         """
-        pm = self.main_port_manager
-        if pm is None:
-            return []
-        ports = getattr(pm, "ports", None)
-        obj = ports.get(port_name) if isinstance(ports, dict) else None
+        obj = self._port_obj_for_name(port_name)
         if obj is None:
             return []
-        inner = getattr(obj, "unified_port", obj)
+        return self._power_refs_of(obj)
+
+    @staticmethod
+    def _power_refs_of(port_obj: Any) -> List[str]:
+        """Return the raw ``power`` feed refs stored on one port object.
+
+        Reads the plain ``power`` attribute (set by the port adapters from
+        the ``power:`` config key, or from the origin's advertised feed list
+        on a federated proxy) and normalizes it to a list of strings.
+        """
+        inner = getattr(port_obj, "unified_port", port_obj)
         refs = getattr(inner, "power", None)
         if isinstance(refs, (list, tuple)):
             return [str(r) for r in refs]
         return []
+
+    def _is_remote_port(self, port_name: str) -> bool:
+        """True when the port is a federated RemotePortProxy (outlet federation).
+
+        The proxy carries a ``remote_port_name`` attribute that local ports
+        never do; this is the same discriminator the muxcon status relay
+        uses to decide whether to re-broadcast an event.
+        """
+        try:
+            obj = self._port_obj_for_name(port_name)
+            return obj is not None and hasattr(obj, "remote_port_name")
+        except Exception:
+            return False
+
+    def _remote_feed_states(self, port_name: str) -> Dict[str, Optional[bool]]:
+        """Outlet state for a federated port's feeds, as last reported by the
+        origin node over the muxcon POWER:STATE channel ({} when the port is
+        not a remote proxy or carries no state).
+        """
+        try:
+            obj = self._port_obj_for_name(port_name)
+            states = getattr(obj, "_feed_states", None) if obj is not None else None
+            if isinstance(states, dict):
+                return {str(k): states[k] for k in states}
+        except Exception:
+            pass
+        return {}
+
+    def feed_states(self, port_name: str) -> Dict[str, Optional[bool]]:
+        """Current on/off state for one console port's declared feeds.
+
+        Returns ``{ref: on|off|None}`` (None = unknown) covering every feed
+        in the port's ``power`` list. Local ports read the live local PDU
+        readings; a federated port's feeds are backed by the origin node,
+        so this returns the origin's last-reported state cached on the
+        remote proxy (outlet federation). Ports without feeds -> {}.
+        """
+        obj = self._port_obj_for_name(port_name)
+        if obj is None:
+            return {}
+        refs = self._power_refs_of(obj)
+        if not refs:
+            return {}
+        if self._is_remote_port(port_name):
+            return self._remote_feed_states(port_name)
+        return {ref: self._outlet_on_state(ref) for ref in refs}
 
     def _mapped_ports_for_ref(self, ref: str) -> List[str]:
         """Return all console port names declaring the given outlet ref."""
@@ -976,8 +1135,13 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             )
         # Refs declared on console ports that resolve to nothing (renamed
         # PDU, typo, unknown outlet id) - surfaced for the consistency view.
+        # Federated ports are skipped: their refs point at the origin node's
+        # PDUs, which are not local here, so they would only be noise
+        # (outlet federation).
         unresolved: List[str] = []
         for name, inner in self._port_objects():
+            if hasattr(inner, "remote_port_name"):
+                continue
             for ref in self._refs_of(inner):
                 if ref not in resolved_refs and ref not in unresolved:
                     unresolved.append(ref)
@@ -993,27 +1157,36 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         Returns None when the port declares no ``power:`` feed at all
         (callers then omit the key). ``state`` is one of all|some|none|
-        unknown so the client can color without re-deriving rules.
+        unknown so the client can color without re-deriving rules. For a
+        federated port the feed refs and states come from the origin's
+        advertisement (outlet federation): same shape, but watts is None
+        (the peer does not see origin telemetry) and the on-state is the
+        origin's last-reported value.
         """
         feeds = self.port_power_map(port_name)
         if not feeds:
             return None
+        remote = self._is_remote_port(port_name)
+        remote_states = self._remote_feed_states(port_name) if remote else {}
         feed_out: List[Dict[str, Any]] = []
         feeds_on = 0
         known = 0
         for ref in feeds:
-            on = self._outlet_on_state(ref)
             watts = None
-            try:
-                pdu_name, outlet_id = self._parse_ref(ref)
-            except ValueError:
-                pdu_name, outlet_id = None, None
-            if pdu_name is not None:
-                state = self.pdus.get(pdu_name)
-                if state is not None:
-                    reading = state.readings.get(outlet_id)
-                    if reading is not None:
-                        watts = reading.watts
+            if remote:
+                on = remote_states.get(ref)
+            else:
+                on = self._outlet_on_state(ref)
+                try:
+                    pdu_name, outlet_id = self._parse_ref(ref)
+                except ValueError:
+                    pdu_name, outlet_id = None, None
+                if pdu_name is not None:
+                    state = self.pdus.get(pdu_name)
+                    if state is not None:
+                        reading = state.readings.get(outlet_id)
+                        if reading is not None:
+                            watts = reading.watts
             feed_out.append({"ref": ref, "on": on, "watts": watts})
             if on is True:
                 feeds_on += 1

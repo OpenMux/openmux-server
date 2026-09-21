@@ -901,6 +901,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             client.username,
             self.auth_manager,
             getattr(client, "client_id", None),
+            getattr(client, "connected_port", None),
         )
 
     async def process_client_command(self, client: "ClientSession", command: str):
