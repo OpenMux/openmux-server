@@ -960,6 +960,37 @@ async def test_origin_power_switch_executes_and_replies_ok():
 
 
 @pytest.mark.asyncio
+async def test_origin_power_switch_local_wrapped_port_executes():
+    # Regression: on the origin, the fed console is a LOCAL port, and the
+    # port manager exposes local ports through a UnifiedPortWrapper that does
+    # NOT copy the "power" feed list onto itself (it lives on
+    # wrapper.unified_port). The declared-ref check must unwrap the wrapper,
+    # else a correct origin-local ref is refused as "not fed by".
+    pdu = _FakeSwitchPdu()
+    ad, pm, _ = await _origin_for_switch(pdu=pdu)
+    inner = type("Inner", (), {"name": "lp", "power": ["rack1.1", "rack1.2"]})()
+    wrapper = type(
+        "W",
+        (),
+        {"name": "lp", "unified_port": inner, "connected_clients": [{"client_id": "fed:node:peerO:7", "mode": "read-write"}]},
+    )()
+    pm.ports["lp"] = wrapper
+    server, s_reader, s_writer, c_reader, c_writer = await _make_stream_pair()
+    try:
+        conn_id = await _setup_peer_link(ad, s_writer)
+        await ad._process_control_command(
+            conn_id, s_writer, _switch_payload("lp", 7, {"ref": "rack1.1", "on": False, "claims": ["lp"]})
+        )
+        sid, body = await _read_power_result(c_reader)
+        assert sid == 7
+        assert body == {"ok": True, "on": False}
+        assert pdu.calls == [{"ref": "rack1.1", "on": False, "user": "fed:node:peerO:7", "client_id": "fed:node:peerO:7"}]
+    finally:
+        _close_pair(server, s_writer, c_writer)
+        c_writer.close()
+
+
+@pytest.mark.asyncio
 async def test_origin_power_switch_unmapped_stream_refused():
     pdu = _FakeSwitchPdu()
     ad, pm, _ = await _origin_for_switch(pdu=pdu)

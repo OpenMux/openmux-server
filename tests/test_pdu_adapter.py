@@ -1137,6 +1137,20 @@ async def test_set_outlet_relays_dotted_fqdn_origin_ref():
     await adapter2.stop()
 
 
+def test_refs_of_unwraps_unified_port_wrapper():
+    # Regression: a local console port reached through the port manager's
+    # wrapper carries its "power" feed list on wrapper.unified_port, not on
+    # the wrapper; _refs_of must read it there (outlet federation's
+    # origin-side declared-ref check used the unwrapped object).
+    inner = type("Inner", (), {"power": ["rack1.1", "rack1.2"]})()
+    wrapper = type("W", (), {"unified_port": inner})()
+    assert PduAdapter._refs_of(wrapper) == ["rack1.1", "rack1.2"]
+    # A bare object (federated proxy, test fakes) stores the refs directly.
+    assert PduAdapter._refs_of(type("B", (), {"power": ["rack1.3"]})()) == ["rack1.3"]
+    # No wrapper, no power attribute: no refs.
+    assert PduAdapter._refs_of(object()) == []
+
+
 @asyncio_test
 async def test_set_outlet_remote_ref_without_federated_session_refused():
     # No console session anchored: the relay cannot pick a stream, so the

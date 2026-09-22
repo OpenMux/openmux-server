@@ -1061,7 +1061,14 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
 
     @staticmethod
     def _refs_of(port_obj: Any) -> List[str]:
-        refs = getattr(port_obj, "power", None)
+        # Reads the ``power`` feed refs the same way ``_power_refs_of`` does:
+        # a local console port is exposed through the port manager's unified
+        # wrapper, and the ``power:`` config list lives on the wrapped
+        # adapter port (``wrapper.unified_port``), not on the wrapper. A
+        # federated proxy (or a bare port) stores it directly, so the
+        # fallback keeps it (outlet federation).
+        inner = getattr(port_obj, "unified_port", port_obj)
+        refs = getattr(inner, "power", None)
         if isinstance(refs, (list, tuple)):
             return [str(r) for r in refs]
         return []
