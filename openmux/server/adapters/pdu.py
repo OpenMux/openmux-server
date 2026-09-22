@@ -20,6 +20,14 @@ Configuration (top-level ``power`` section, object style):
             - id: "3"
               description: "Switch A"
 
+The driver layer lives in the :mod:`.power_drivers` package, one module
+per driver. The shared API (``PduDriver`` + ``OutletReading``) is
+re-exported here for compatibility, and the ``DRIVERS`` / ``DRIVER_INFO``
+registries at the bottom of this file are where each driver module plugs
+in. The read backoff contract (a driver may return ``None`` from
+``read_states`` while in device-wide failure backoff) is defined in
+``power_drivers.readbackoff`` and honored in ``_refresh_readings``.
+
 Console-port linkage is declared on the PORT side (``power: [rack1.3, ...]``
 on a port entry); this adapter only reads those live from the port
 registry, so it holds no cross-adapter cached state.
@@ -29,178 +37,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from ..data_logger import DataLogger
 from .base_adapter import AdapterCapability, BaseGenericAdapter
+from .power_drivers.api import OutletId, OutletReading, PduDriver  # noqa: F401  (re-exports for existing imports)
+from .power_drivers.dummy import DummyDriver  # noqa: F401  (re-export for existing imports)
 
 # Default poll cadence (seconds) when a PDU entry omits `poll_interval`.
 DEFAULT_POLL_INTERVAL = 10.0
-# Default dummy PDU outlet ids.
-DUMMY_DEFAULT_OUTLETS = [str(i) for i in range(1, 9)]
-
-# A driver reports the outlet ids it knows for ONE PDU device.
-OutletId = str
 
 
-@dataclass
-class OutletReading:
-    """Single outlet reading from a PDU driver.
-
-    ``on`` is None while unknown (PDU unreachable or not yet polled).
-    Power figures are None when the driver does not report them or when the
-    outlet is off (drivers may report zero; both are surfaced as-is).
-    """
-
-    on: Optional[bool] = None
-    watts: Optional[float] = None
-    amps: Optional[float] = None
-    volts: Optional[float] = None
-    error: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Return a JSON-safe dict of this reading."""
-        out: Dict[str, Any] = {"on": self.on, "watts": self.watts, "amps": self.amps, "volts": self.volts}
-        if self.error:
-            out["error"] = self.error
-        return out
-
-
-class PduDriver:
-    """Interface every PDU backend implements.
-
-    A driver instance is bound to exactly one configured PDU entry. Outlet
-    ids are opaque strings taken from the device itself (e.g. ``"1"`` or
-    ``"A1"`` on a 3-phase unit); the adapter never assumes numbering.
-    """
-
-    async def list_outlets(self) -> List[str]:
-        """Return the device's outlet ids (discovery is the driver's job)."""
-        raise NotImplementedError
-
-    async def read_states(self) -> Dict[str, OutletReading]:
-        """Return current readings keyed by outlet id."""
-        raise NotImplementedError
-
-    async def set_state(self, outlet_id: str, on: bool) -> OutletReading:
-        """Switch one outlet and return the resulting reading."""
-        raise NotImplementedError
-
-
-class DummyDriver(PduDriver):
-    """In-memory PDU for development and tests.
-
-    ``options`` keys:
-        outlets (list[str|int]): outlet ids (default 1..8).
-        watts_on (float): simulated watts while on (default 120).
-        volts (float): simulated volts while on (default 230).
-        fail_discovery (bool): make list_outlets raise (tests).
-        fail_reads (bool): make read_states raise (tests).
-
-    Outlets start ON. Tests reach ``_state`` directly to simulate failures.
-    """
-
-    def __init__(self, options: Optional[Dict[str, Any]] = None):
-        opts = options or {}
-        raw = opts.get("outlets")
-        if isinstance(raw, (list, tuple)) and raw:
-            ids: List[str] = []
-            for item in raw:
-                text = str(item).strip()
-                if text and text not in ids:
-                    ids.append(text)
-            if not ids:
-                raise ValueError("dummy driver: options.outlets has no valid ids")
-        else:
-            ids = list(DUMMY_DEFAULT_OUTLETS)
-        self._ids = ids
-        self._watts_on = float(opts.get("watts_on", 120.0))
-        self._volts = float(opts.get("volts", 230.0))
-        self._fail_discovery = bool(opts.get("fail_discovery"))
-        self._fail_reads = bool(opts.get("fail_reads"))
-        self._state: Dict[str, bool] = {oid: True for oid in ids}
-        self.online = True
-
-    async def list_outlets(self) -> List[str]:
-        if self._fail_discovery:
-            raise RuntimeError("dummy discovery failure")
-        return list(self._ids)
-
-    def _reading(self, oid: str) -> OutletReading:
-        on = self._state.get(oid)
-        if on is None:
-            return OutletReading(on=None)
-        return OutletReading(on=on, watts=self._watts_on, volts=self._volts, amps=self._watts_on / self._volts)
-
-    async def read_states(self) -> Dict[str, OutletReading]:
-        if self._fail_reads:
-            raise RuntimeError("dummy read failure")
-        return {oid: self._reading(oid) for oid in self._ids}
-
-    async def set_state(self, outlet_id: str, on: bool) -> OutletReading:
-        if outlet_id not in self._state:
-            raise ValueError(f"unknown outlet {outlet_id!r}")
-        self._state[outlet_id] = bool(on)
-        return self._reading(outlet_id)
-
-
-# Driver registry: name -> class(options) factory. Real drivers (Raritan,
-# APC, ...) plug in here without touching the adapter or the UI.
-DRIVERS: Dict[str, Callable[[Dict[str, Any]], PduDriver]] = {
-    "dummy": lambda opts: DummyDriver(opts),
-}
-
-
-def _driver_info(opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Return the config metadata UI for one PDU driver.
-
-    Each driver declares, in one place, the ``options`` it accepts (key,
-    type, default, and a one-line help) and a JSON example. The Config
-    Editor reads this to render a driver select and driver-specific
-    options help; ``pdu.py`` is the single place to edit when a new driver
-    is added. ``options_keys`` may be None when the driver takes none.
-    """
-    if opts is None:
-        opts = {}
-    outlets = opts.get("outlets")
-    if outlets is not None:
-        example = {"outlets": outlets}
-    else:
-        example = {"outlets": ["1", "2", "3"]}
-    return {
-        "label": "Dummy",
-        "description": "In-memory PDU for development and tests.",
-        "options_keys": [
-            {
-                "key": "outlets",
-                "type": "list of strings",
-                "default": "1..8",
-                "help": "Outlet ids the PDU reports. Default: 1..8.",
-            },
-            {
-                "key": "watts_on",
-                "type": "number",
-                "default": "120",
-                "help": "Simulated watts while an outlet is on.",
-            },
-            {
-                "key": "volts",
-                "type": "number",
-                "default": "230",
-                "help": "Simulated volts while an outlet is on.",
-            },
-        ],
-        "options_example": example,
-    }
+# Driver registry: name -> class(options) factory. Driver modules in the
+# power_drivers package register here at the bottom of this file.
+DRIVERS: Dict[str, Callable[[Dict[str, Any]], PduDriver]] = {}
 
 
 # Per-driver config metadata for the Config Editor. The keys MUST match
-# DRIVERS. Add a new entry here (and to DRIVERS) for every driver so the
-# editor's driver select and options help stay current.
-DRIVER_INFO: Dict[str, Callable[[Optional[Dict[str, Any]]], Dict[str, Any]]] = {
-    "dummy": _driver_info,
-}
+# DRIVERS. Entries are added by the driver imports at the bottom of this
+# file so the editor's driver select and options help stay current.
+DRIVER_INFO: Dict[str, Callable[[Optional[Dict[str, Any]]], Dict[str, Any]]] = {}
 
 
 def driver_catalog() -> List[Dict[str, Any]]:
@@ -626,6 +482,8 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         every outlet whose on/off flag (including None<->value) changed.
         On failure: mark the PDU offline and drop on/off to None so badges
         and impact logic see "unknown" instead of stale truth.
+        On driver backoff (``read_states`` returns None): keep the
+        last-known readings and online state untouched, emit nothing.
         """
         try:
             readings = await state.driver.read_states()
@@ -634,20 +492,27 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
                 self.logger.warning("PDU %s unreachable: %s", state.name, exc)
             self._mark_pdu_offline(state, str(exc))
             return
+        if readings is None:
+            # Driver is inside its device-wide failure backoff window; it
+            # performed no device IO this cycle. Nothing to update.
+            return
+        self._apply_readings(state, readings)
+
+    def _apply_readings(self, state: PduState, readings: Dict[str, OutletReading]) -> None:
+        """Merge a successful driver read into state and emit changes."""
         state.online = True
-        previous = state.readings
         changed: List[tuple] = []
         for oid, reading in readings.items():
-            prev = previous.get(oid)
+            prev = state.readings.get(oid)
             if prev is not None and prev.error:
                 reading.error = ""
-            previous[oid] = reading
+            state.readings[oid] = reading
             if prev is None or prev.on != reading.on:
                 changed.append((oid, prev.on if prev else None, reading.on))
         # Drop outlet ids the driver no longer reports (device changed).
-        for oid in list(previous.keys()):
+        for oid in list(state.readings.keys()):
             if oid not in readings:
-                del previous[oid]
+                del state.readings[oid]
         for oid, old_on, new_on in changed:
             self._emit_outlet_change(state.name, oid, old_on, new_on)
 
@@ -1439,3 +1304,20 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "pdu_online": online,
             },
         }
+
+
+# --- driver registration ---------------------------------------------------
+#
+# Each power driver lives in its own module under power_drivers/. The
+# imports must come at the bottom of pdu.py so driver modules (which import
+# the api module, not this one) never create a circular import. To add a
+# driver: import its module here, then add one line to DRIVERS and one to
+# DRIVER_INFO.
+
+from .power_drivers import command as _command_driver  # noqa: E402
+from .power_drivers import dummy as _dummy_driver  # noqa: E402
+
+DRIVERS["dummy"] = _dummy_driver.DummyDriver
+DRIVER_INFO["dummy"] = _dummy_driver.info
+DRIVERS["command"] = _command_driver.CommandDriver
+DRIVER_INFO["command"] = _command_driver.info

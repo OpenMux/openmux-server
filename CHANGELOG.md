@@ -8,6 +8,11 @@ Update rule: after committing a user-visible change, add one entry to the curren
 
 Changes since v1.0.3 (2026-09-17).
 
+### New
+
+- **PDU power `command` driver.** The `power:` section gains `driver: command`:
+  configure CLI commands that read outlet states and switch outlets, so GPIO scripts on a Raspberry Pi, custom USB power devices, or any other user-wired tool works as a PDU backend. Commands run without a shell, in a sanitized environment, with a per-command timeout (the command's process group is killed on timeout); per-outlet state commands run under a bounded concurrency (`max_parallel`, default 4); repeated device-wide read failures put the driver into a read backoff (30 s doubling to a 5 min cap) so a dead device is not hammered. Outlets are declared in the PDU `options`: one PDU-level set template (`on_cmd`/`off_cmd`, with a `{outlet_id}` placeholder) plus one batch `state_cmd` (prints `<id> <state>` per outlet), or per-outlet `on_cmd`/`off_cmd`/`state_cmd`/`state_pattern`; per-outlet values win. No config change is required for existing `dummy` PDUs. See `docs/configuration/adapters.md` (PDU Power, "Command driver").
+
 ### Behavior changes (no config change required)
 
 - **The web in-session power menu no longer uses the power plugin's REST route.** Switching from the console header badge menu now sends the OMXCTRL `power_switch` control frame over the console WebSocket (the same core path as the `p` power menu). The badge and menu therefore work even when the `power_monitor` web plugin is not enabled (previously the menu button got a 404), and they can switch a federated outlet from an open session (the REST route had no session to anchor the relay on). The standalone web Power page (`/power` and `POST /api/power/outlets/{ref}`) is unchanged; it stays read-only for federated outlets.

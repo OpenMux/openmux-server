@@ -60,9 +60,15 @@ v3 adds new capabilities beyond a single node. Each item is independent; they
 can be delivered in any order.
 
 - [ ] **Real PDU drivers.** Add at least one real vendor driver (for example
-      Raritan or APC) via the `DRIVERS` and `DRIVER_INFO` registries in
+      Raritan or APC) as a module in `openmux/server/adapters/power_drivers/`,
+      registered in the `DRIVERS` and `DRIVER_INFO` registries at the bottom of
       `openmux/server/adapters/pdu.py`. The Config Editor driver select and the
       per-driver options help update automatically from the registry.
+      Partially done: 2026-09-22 the driver layer moved to one module per
+      driver (shared API + read-backoff contract in `power_drivers/api.py` and
+      `power_drivers/readbackoff.py`), and the user-defined `command` driver
+      shipped (YAML-configured CLI commands for GPIO, USB power tools, etc.).
+      Vendor drivers with an SNMP or vendor API stay open.
 - [x] **MuxCon outlet federation** (console ports only) — 2026-09-20. A
       federated console port carries the origin's declared power feeds and
       last-reported outlet state across the wire. The feed list and state

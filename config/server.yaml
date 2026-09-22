@@ -65,10 +65,11 @@ client_listener:
   connection_timeout: 30
 
 # PDU power control (optional): manages outlets (on/off + watts/volts/amps)
-# behind a driver interface; the dummy driver simulates the device in memory. Real
-# drivers (e.g. Raritan, APC) plug in via `driver:` with no other changes. Outlet
-# ids are the device's OWN ids (free strings: "1", "A1", "C2", ...). The console
-# side maps a port to its feeds with `power: [refs]` on port entries.
+# behind a driver interface. `driver: dummy` simulates the device in memory;
+# `driver: command` runs user CLI commands (GPIO scripts, USB power tools).
+# More drivers (e.g. Raritan, APC) plug in via `driver:` with no other changes.
+# Outlet ids are the device's OWN ids (free strings: "1", "A1", "C2", ...).
+# The console side maps a port to its feeds with `power: [refs]` on port entries.
 power:
   enabled: true
   pdus:
@@ -91,6 +92,23 @@ power:
       outlets:
         - id: "A1"
           description: "Phase A primary"
+    # Command driver example (commented out): run CLI commands per PDU and/or
+    # per outlet. The PDU-level templates must contain {outlet_id}; the
+    # PDU-level state_cmd prints one "<id> <state>" line per outlet
+    # (on/off/1/0/true/false/yes/no). Per-outlet on_cmd/off_cmd/state_cmd
+    # override the PDU level (see docs/configuration/adapters.md, PDU Power).
+    # - name: "raspiboard"
+    #   description: "GPIO power board"
+    #   driver: command
+    #   poll_interval: 30
+    #   options:
+    #     on_cmd: "sudo /opt/openmux/scripts/set_output.sh {outlet_id} 1"
+    #     off_cmd: "sudo /opt/openmux/scripts/set_output.sh {outlet_id} 0"
+    #     state_cmd: "/opt/openmux/scripts/get_states.sh"
+    #     timeout: 5
+    #     outlets:
+    #       - id: "1"
+    #       - id: "2"
 
 # Web console with Config Editor plugin enabled
 web_console:

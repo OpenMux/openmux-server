@@ -1216,3 +1216,28 @@ def test_split_remote_ref_round_trip_and_reject_local_refs():
     assert split_remote_ref("peerO::nodots") is None
     assert split_remote_ref(None) is None
     assert split_remote_ref(42) is None
+
+
+# --- driver read backoff (None contract) --------------------------------------
+
+
+@asyncio_test
+async def test_driver_backoff_none_keeps_readings_and_emits_nothing():
+    """A driver returning None (in read backoff) leaves everything untouched."""
+    pm = _FakePortManager({"console1": _FakePort("console1", ["rack1.3"])})
+    adapter = await _start(_make_adapter(pm))
+    state = adapter.pdus["rack1"]
+    assert state.online is True
+    assert state.readings["3"].on is True
+    events_before = len(pm.meta_events)
+
+    async def _in_backoff():
+        return None
+
+    state.driver.read_states = _in_backoff  # type: ignore[method-assign]
+    await adapter._refresh_readings(state)
+    assert state.online is True  # NOT flipped offline
+    assert state.readings["3"].on is True  # last known kept
+    assert not state.readings["3"].error
+    assert len(pm.meta_events) == events_before  # nothing emitted
+    await adapter.stop()

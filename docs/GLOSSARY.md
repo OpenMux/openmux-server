@@ -58,6 +58,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 |---|---|---|
 | PDU | A power distribution unit managed by the `power` adapter. | power supply, power unit (for a managed unit) |
 | PDU adapter | The portless built-in adapter (config section `power`) that manages PDUs and their outlets. | power adapter (when meaning the PDU one), outlet adapter |
+| Power driver | A backend module under `power_drivers/` that implements the PDU driver API for one device class. Selected per PDU entry with `driver:` (for example `dummy`, `command`). Not a port adapter: the "command adapter" is the console-port adapter for shell commands and is unrelated. | PDU backend, power plugin |
 | Outlet | A single switchable circuit on a PDU. Not a console port; never listed in `LIST` output. | breaker slot, socket, plug |
 | Outlet id | The device's own id for an outlet: a free string (for example `1` or `A1`), discovered from the device. Users annotate, not name, outlets. | outlet name (the id is the identity), outlet number (ids are strings) |
 | Outlet ref | The single canonical outlet identifier used by the CLI, the web API, and port `power:` keys. A local ref is `<pdu_name>.<outlet_id>` (for example `rack1.3`); a federated feed of an origin node is globally qualified (`Global outlet ref`). The two forms never collide because a local pdu name cannot contain `::`. | outlet (when the pair is meant), feed ref |
