@@ -87,6 +87,31 @@
       }
   };
 
+  window.togglePowerMenu = function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      const el = document.getElementById('power-pdus');
+      const btn = document.getElementById('power-expand-btn');
+      if (el.style.display === 'none') {
+          el.style.display = 'block';
+          btn.textContent = '-';
+          localStorage.setItem('omx_power_expanded', '1');
+      } else {
+          el.style.display = 'none';
+          btn.textContent = '+';
+          localStorage.removeItem('omx_power_expanded');
+      }
+  };
+
+  // Clicking the "Power" label expands the PDU list when it's collapsed,
+  // instead of always navigating away to the PDU list page.
+  window.onPowerNavClick = function(e) {
+      const el = document.getElementById('power-pdus');
+      if (el && el.style.display === 'none') {
+          window.togglePowerMenu(e);
+      }
+  };
+
   window.toggleConfigMenu = function(e) {
       e.preventDefault();
       e.stopPropagation();
@@ -116,6 +141,16 @@
   if (localStorage.getItem('omx_config_expanded')) {
        const el = document.getElementById('config-menu');
        const btn = document.getElementById('config-expand-btn');
+       if (el && btn) {
+           el.style.display = 'block';
+           btn.textContent = '-';
+       }
+  }
+  // Restore power menu state; auto-expanded on the power pages
+  const powerParent = document.getElementById('nav-power-parent');
+  if (localStorage.getItem('omx_power_expanded') || (powerParent && powerParent.classList.contains('active'))) {
+       const el = document.getElementById('power-pdus');
+       const btn = document.getElementById('power-expand-btn');
        if (el && btn) {
            el.style.display = 'block';
            btn.textContent = '-';

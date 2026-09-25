@@ -87,6 +87,7 @@
   [data-config-section].read-only { opacity: 0.6; position: relative; }
   .read-only-note { font-size: 12px; color: var(--warn-color, #b45309); font-weight: 600; margin: 6px 0; }
   [data-config-section].read-only .tbl-wrap.locked { pointer-events: none; }
+  .tbl-wrap.power-disabled { opacity: 0.55; pointer-events: none; }
 </style>
 {% endblock %}
 
@@ -267,6 +268,18 @@
   </div>
   </div>
 
+  <div id="view-power" class="config-view" style="display:none">
+  <div class="config-section" data-config-section="power">
+    <div class="section-header"><span class="title">PDU power</span><span class="reload-hint reload-hint-soft" title="The power adapter reconciles the section on a Soft Reload">SOFT</span> <span class="desc">Power distribution units and their outlets</span></div>
+    <div class="section">
+      <div class="field"><label for="power.enabled">Power management</label><input id="power.enabled" type="checkbox" checked /><span class="help">Turn off to stop polling and hide the Power menu; the PDU list below is ignored while off.</span></div>
+    </div>
+    <div class="legend" style="margin-top:10px"><span class="title">PDUs</span><span class="desc">One row per power distribution unit</span></div>
+    <div id="power.pdus"></div>
+    <div class="help" style="margin-top:6px">Edit a PDU to set its driver options (JSON) and optional per-outlet descriptions. On the Ports view, map a console to its feeds with the "Power feeds" field (outlet refs <code>&lt;pdu&gt;.&lt;outlet id&gt;</code>, comma-separated for A/B dual feed).</div>
+  </div>
+  </div>
+
   <div id="view-muxcon" class="config-view" style="display:none">
   <div class="config-section" data-config-section="muxcon">
     <div class="section-header"><span class="title">Muxcon</span><span class="reload-hint reload-hint-full" title="Core and advanced settings are only re-read on a Full Reload">FULL</span> <span class="desc">Federation and transport</span></div>
@@ -376,7 +389,8 @@
     writableSections: {{ writable_sections|default([])|tojson|safe }},
     writableEnforced: {{ writable_enforced|default(False)|tojson|safe }},
     accessDefault: {{ access_default|default('allow')|tojson|safe }},
-    defaultsDocJson: {{ defaults_doc_json|tojson|safe }}
+    defaultsDocJson: {{ defaults_doc_json|tojson|safe }},
+    powerDrivers: {{ power_drivers_json|default('[]')|safe }}
   };
 </script>
 <script src="{{ base_path }}/static/js/config_editor.js"></script>

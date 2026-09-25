@@ -384,6 +384,18 @@ class TcpClientAdapter(BaseClientAdapter):
         """Ask the server for the current read-write holder(s) of the attached port."""
         return await self._send_control_frame({"type": "query_rw_holders"})
 
+    async def _send_power_control(self, payload: Dict[str, Any]) -> bool:
+        """Send one power control frame on the control channel (NUL-prefixed)."""
+        return await self._send_control_frame(payload)
+
+    async def request_power_feeds(self) -> bool:
+        """Ask the server for the power feeds of the attached console."""
+        return await self._send_power_control({"type": "power_query"})
+
+    async def switch_power_outlet(self, ref: str, on: bool) -> bool:
+        """Ask the server to switch one console power feed on or off."""
+        return await self._send_power_control({"type": "power_switch", "ref": ref, "on": on})
+
     async def read_data(self, timeout: Optional[float] = None) -> Optional[Union[str, bytes]]:
         """Read a chunk of bytes from the active port stream.
 
@@ -445,6 +457,9 @@ class TcpClientAdapter(BaseClientAdapter):
         except Exception:
             return b""
         if not isinstance(payload, dict):
+            return b""
+        if payload.get("type") in ("power_feeds", "power_switch"):
+            self.last_power_reply = payload
             return b""
         _msg_type, message = format_control_response(self, payload)
         return message.encode("utf-8") if message else b""

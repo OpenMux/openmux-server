@@ -307,6 +307,33 @@ class ConsoleManager:
         # access_default allow: the global permission decides.
         return permissions == "read-write", ""
 
+    def blocked_ports_for_user(self, port_names: List[str], username: str) -> List[str]:
+        """Return the subset of ``port_names`` this user may not drive.
+
+        Reuses the attach-time access ladder (``_taker_entitled``), so "may
+        drive" means "would get read-write access to this console". ``admin``
+        is never blocked. For the others, a port whose group lists exclude the
+        user, a read-only-only grant, a denied ``access_default``, or a global
+        permission below read-write all count as blocked.
+
+        Used by the PDU power adapter to scope outlet switching to consoles the
+        user can open: turning an outlet off may only cut power to consoles the
+        user has read-write access to, otherwise admin is required.
+        """
+        permissions = self.auth_manager.get_user_permissions(username) if self.auth_manager else None
+        if permissions == "admin":
+            return []
+        blocked: List[str] = []
+        for name in port_names:
+            try:
+                port = self.port_manager.get_port(name)
+            except Exception:
+                port = None
+            entitled, _reason = self._taker_entitled(port, name, permissions, username)
+            if not entitled:
+                blocked.append(name)
+        return blocked
+
     def _resolve_access_mode(
         self, port: Optional[Any], port_name: str, permissions: Optional[str], username: str
     ) -> Tuple[Optional[str], Optional[str]]:

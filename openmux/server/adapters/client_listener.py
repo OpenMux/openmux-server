@@ -25,6 +25,7 @@ from openmux.server.access_control import capacity_to_wire, holder_id_short
 from openmux.server.port_utils import resolve_port_connected_state, safe_get_port
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
+from .power_command import find_power_adapter, run_power_command
 
 # Out-of-band control frame marker for raw TCP/character-mode clients. Mirrors the
 # web_console adapter's "OMXCTRL " text-frame convention, but is prefixed with a
@@ -200,6 +201,23 @@ class TcpServerAdapter(BaseGenericAdapter):
             if not port_name or port_name not in self.port_clients:
                 return
             if isinstance(changes, dict):
+                # PDU power feed change (PDU feature): relay the new feed state as a
+                # visible in-terminal notice to every client attached to this console.
+                if changes.get("event") == "power_outlet_changed":
+                    outlet = changes.get("outlet")
+                    on = changes.get("on")
+                    all_lost = bool(changes.get("all_power_lost"))
+                    if all_lost:
+                        self._emit_notice_to_port_clients(
+                            port_name,
+                            "\r\n[POWER WARNING] all power feeds are now OFF for this console (" + str(outlet) + ")\r\n",
+                        )
+                    else:
+                        state_txt = "on" if on is True else ("off" if on is False else "unknown")
+                        self._emit_notice_to_port_clients(
+                            port_name, "\r\n[POWER] feed " + str(outlet) + " is now " + state_txt + "\r\n"
+                        )
+                    return
                 # Down events: federated proxy disconnects, or any adapter reporting
                 # connected=False (e.g. serial_disconnected/tcp_disconnected).
                 if changes.get("event") in ("federated_disconnected", "federated_cached_offline") or (
@@ -722,7 +740,28 @@ class TcpServerAdapter(BaseGenericAdapter):
         req_type = req.get("type")
         resp: Dict[str, Any] = {"type": "client_mode"}
         try:
-            if req_type in ("request_rw", "promote"):
+            if req_type in ("power_query", "power_switch"):
+                # PDU power control from the console CLI (console.py `p` menu):
+                # feed list or one switch. The PDU adapter owns the lookup,
+                # permission, group and audit logic; the live [POWER] notice
+                # rides the existing port meta fan-out.
+                pdu = find_power_adapter(self.console_manager) if self.console_manager else None
+                if pdu is None:
+                    # Not configured: reply on the matching reply type so the
+                    # console menu (which filters its read path on these) can show it.
+                    if req_type == "power_query":
+                        resp = {"type": "power_feeds", "ok": False, "error": "power management is not configured", "feeds": []}
+                    else:
+                        resp = {"type": "power_switch", "ok": False, "error": "power management is not configured"}
+                else:
+                    resp = await pdu.handle_power_frame(
+                        port_name, req, getattr(client, "username", None), client_id=getattr(client, "client_id", None)
+                    ) or {
+                        "type": "power_switch",
+                        "ok": False,
+                        "error": "power management is not configured",
+                    }
+            elif req_type in ("request_rw", "promote"):
                 ok = await self.console_manager.promote_client_to_read_write(client.client_id, port_name)
                 resp["ok"] = bool(ok)
                 resp["mode"] = "read-write" if ok else "read-only"
@@ -769,8 +808,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             resp = {"type": "client_mode", "ok": False, "mode": client.mode or "read-only"}
 
         if resp.get("type") == "client_mode":
-            client.mode = resp.get("mode")
-
+            client.mode = resp.get("mode")  # power frames: no mode change
         try:
             await client.send_raw_data(CTRL_MARKER + json.dumps(resp, separators=(",", ":")).encode("utf-8") + b"\n")
         except Exception:
@@ -842,6 +880,30 @@ class TcpServerAdapter(BaseGenericAdapter):
             pass
         return None
 
+    async def handle_power_command_text(self, client: "ClientSession", command: str):
+        """Handle the ``POWER`` command (PDU power over the text protocol).
+
+        Delegates to the shared `run_power_command`, so the same forms and
+        wording work on the telnet and SSH listeners as on the client listener:
+            POWER                       - list every PDU + outlet with state
+            POWER <pdu>                 - list one PDU's outlets
+            POWER <pdu>.<outlet>        - report one outlet
+            POWER <pdu>.<outlet> on|off - switch an outlet (read-write/admin,
+                                          scoped to the user's console groups)
+
+        Switching a power feed that would remove ALL power to a console prints
+        a WARNING naming those consoles first.
+        """
+        await run_power_command(
+            self.console_manager,
+            command,
+            client.send_line,
+            client.username,
+            self.auth_manager,
+            getattr(client, "client_id", None),
+            getattr(client, "connected_port", None),
+        )
+
     async def process_client_command(self, client: "ClientSession", command: str):
         """Parse and execute a client command.
 
@@ -894,6 +956,10 @@ class TcpServerAdapter(BaseGenericAdapter):
         elif command == "QUIT":
             # Client wants to disconnect
             client.connected = False
+
+        elif command.startswith("POWER"):
+            # PDU power control: list or switch outlets (PDU feature)
+            await self.handle_power_command_text(client, command)
 
         else:
             # If connected to a port, forward the data

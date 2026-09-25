@@ -2,7 +2,7 @@ import asyncio
 import base64
 import json
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from aiohttp import ClientSession, TCPConnector, WSMsgType
@@ -10,7 +10,8 @@ from aiohttp import ClientSession, TCPConnector, WSMsgType
 from openmux.server.auth_manager import AuthManager
 from openmux.server.console_manager import ConsoleManager
 from openmux.server.port_manager import PortManager
-from openmux.server.web_console import WebConsoleAdapter
+from openmux.server.web_console import WebConsoleAdapter, handle_ws
+from openmux.server.web_plugins import ADAPTER_APP_KEY
 
 
 def _bound_port(adapter) -> int:
@@ -297,3 +298,212 @@ async def test_websocket_send_uses_falsy_socket_object():
     assert result is True
     assert falsy_ws.sent == [b"abc"]
     assert "ws:test" in adapter._clients
+
+
+# --- OMXCTRL power frames + in-terminal [POWER] notice ------------------------
+
+PDU_SECTION = {
+    "power": {"pdus": [{"name": "rack1", "driver": "dummy", "poll_interval": 0, "options": {"outlets": ["1", "2"]}}]}
+}
+
+_U_HASH = "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
+
+
+class _PowerPort:
+    """Real-port stand-in: writable, carries the console's PDU feed refs."""
+
+    def __init__(self, name, power=()):
+        self.name = name
+        self.description = "dummy"
+        self.power = list(power)
+        self.connected_clients = []
+        self.max_read_write_users = 5
+        self.is_running = True
+        self.unified_port = self
+
+    async def write_data(self, data):
+        return len(data)
+
+    def get_status(self):
+        return {"name": self.name, "is_running": True}
+
+
+class _ScriptedWS:
+    """WebSocket stand-in: replays scripted incoming messages, records sends.
+
+    Driven as `async for msg in ws` by `handle_ws`; the script ends so the
+    loop exits cleanly through the normal teardown path.
+    """
+
+    def __init__(self, incoming=()):
+        self.incoming = list(incoming)
+        self.sent = []
+        self.closed = False
+        self.close_code = None
+
+    async def prepare(self, request):
+        return None
+
+    async def send_str(self, text):
+        self.sent.append(text)
+
+    async def send_bytes(self, data):
+        self.sent.append(data)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.incoming:
+            raise StopAsyncIteration
+        return self.incoming.pop(0)
+
+    def exception(self):
+        return None
+
+    async def close(self, code=None, message=None):
+        self.closed = True
+        self.close_code = code
+
+
+def _power_frame(text):
+    from aiohttp import WSMessage, WSMsgType
+
+    return WSMessage(WSMsgType.TEXT, text, None)
+
+
+async def _power_ws_adapter(username="u"):
+    """WebConsoleAdapter wired to a real console manager + one dummy PDU.
+
+    The PDU gets the SAME auth manager (its switches check
+    `get_user_permissions`), so `u` (no explicit role) is read-write and a
+    `permissions: read-only` user is denied.
+    """
+    from openmux.server.adapters.pdu import PduAdapter
+
+    user = {"username": username, "password_hash": _U_HASH}
+    if username != "u":
+        user["permissions"] = "read-only"
+    pm = PortManager([])
+    pm.ports["console1"] = _PowerPort("console1", ["rack1.1", "rack1.2"])
+    auth = AuthManager({"users": [user]})
+    cm = ConsoleManager(pm, auth)
+    adapter = WebConsoleAdapter("wc", {"web_console": {"enable_ui": False}})
+    adapter.set_auth_manager(auth)
+    adapter.set_console_manager(cm)
+    pdu = PduAdapter("power", PDU_SECTION)
+    pdu.main_port_manager = pm
+    pdu.set_auth_manager(auth)
+    assert await pdu.start() is True
+    pm.unified_adapters = [pdu]
+    return adapter, pdu
+
+
+def _fake_ws_request(adapter, username):
+    request = MagicMock()
+    request.app = {ADAPTER_APP_KEY: adapter}
+    request.get = lambda key, default=None: username if key == "username" else default
+    request.match_info = {"port_name": "console1"}
+    request._fqpn_port = None
+    rel_url = MagicMock()
+    rel_url.query = {"meta": "1"}
+    request.rel_url = rel_url
+    request.headers = {}
+    request.transport = None
+    return request
+
+
+def _ws_strs(ws):
+    return [m for m in ws.sent if isinstance(m, str)]
+
+
+def _ws_ctrl_frames(ws):
+    return [json.loads(t[len("OMXCTRL ") :]) for t in _ws_strs(ws) if t.startswith("OMXCTRL ")]
+
+
+async def _await_ws_pred(ws, pred, tries=200):
+    for _ in range(tries):
+        if any(pred(t) for t in _ws_strs(ws)):
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_ws_power_frames_answered_and_switched():
+    adapter, pdu = await _power_ws_adapter()
+    ws = _ScriptedWS(
+        incoming=[
+            _power_frame("OMXCTRL " + json.dumps({"type": "power_query"})),
+            _power_frame("OMXCTRL " + json.dumps({"type": "power_switch", "ref": "rack1.1", "on": False})),
+        ]
+    )
+    with patch("openmux.server.web_console.web.WebSocketResponse") as mock_ws_cls:
+        mock_ws_cls.return_value = ws
+        res = await handle_ws(_fake_ws_request(adapter, "u"))
+    assert res is ws
+    feeds = [c for c in _ws_ctrl_frames(ws) if c["type"] == "power_feeds"][0]
+    assert feeds["feeds_total"] == 2
+    assert [f["ref"] for f in feeds["feeds"]] == ["rack1.1", "rack1.2"]
+    sw = [c for c in _ws_ctrl_frames(ws) if c["type"] == "power_switch"][0]
+    assert sw["ok"] is True and sw["ref"] == "rack1.1" and sw["on"] is False and sw["state"] == "off"
+    assert pdu.pdus["rack1"].readings["1"].on is False
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_power_switch_denied_for_read_only():
+    adapter, pdu = await _power_ws_adapter(username="ro")
+    ws = _ScriptedWS(incoming=[_power_frame("OMXCTRL " + json.dumps({"type": "power_switch", "ref": "rack1.1", "on": False}))])
+    with patch("openmux.server.web_console.web.WebSocketResponse") as mock_ws_cls:
+        mock_ws_cls.return_value = ws
+        await handle_ws(_fake_ws_request(adapter, "ro"))
+    sw = [c for c in _ws_ctrl_frames(ws) if c["type"] == "power_switch"][0]
+    assert sw["ok"] is False
+    assert "insufficient permission" in sw["error"]
+    assert pdu.pdus["rack1"].readings["1"].on is True
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_power_notice_pushed_on_meta_update():
+    adapter, pdu = await _power_ws_adapter()
+    ws = _ScriptedWS()
+    cid = "ws:test"
+    adapter._clients[cid] = ws
+    adapter._meta_subscribers["console1"] = {cid}
+    adapter._meta_debounce["console1"] = 0.0
+
+    adapter._on_port_meta_update(
+        "console1",
+        {
+            "event": "power_outlet_changed",
+            "outlet": "rack1.1",
+            "on": False,
+            "all_power_lost": False,
+            "other_outlets_on": ["rack1.2"],
+        },
+    )
+
+    assert await _await_ws_pred(ws, lambda t: "feed rack1.1 is now off" in t)
+    # The meta frame still rides along for the web badge (fire-and-forget)
+    assert await _await_ws_pred(ws, lambda t: t.startswith("OMXCTRL ") and '"power"' in t)
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_power_notice_all_power_lost_variant():
+    adapter, pdu = await _power_ws_adapter()
+    ws = _ScriptedWS()
+    cid = "ws:test"
+    adapter._clients[cid] = ws
+    adapter._meta_subscribers["console1"] = {cid}
+    adapter._meta_debounce["console1"] = 0.0
+
+    adapter._on_port_meta_update(
+        "console1",
+        {"event": "power_outlet_changed", "outlet": "rack1.2", "on": False, "all_power_lost": True, "other_outlets_on": []},
+    )
+
+    assert await _await_ws_pred(ws, lambda t: "all power feeds are now OFF" in t and "rack1.2" in t)
+    await pdu.stop()

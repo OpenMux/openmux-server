@@ -1,0 +1,251 @@
+{% extends "layout.html.j2" %}
+
+{% set active_page = 'power' %}
+
+{% block page_title %}Power / {{ pdu.name }}{% endblock %}
+
+{% block header_actions %}
+  <div class="extras">
+    <a class="btn" href="{{ base_path }}/power">All PDUs</a>
+  </div>
+{% endblock %}
+
+{% block content %}
+  <h2>{{ pdu.name }}
+    {% if pdu.online is false %}<span class="tag tiny bad">offline</span>{% elif pdu.online is none %}<span class="tag tiny warn">unknown</span>{% else %}<span class="tag tiny ok">online</span>{% endif %}
+  </h2>
+  <div class="cards">
+    <div class="card">
+      <div class="muted">Outlets on</div>
+      <div class="metric">{{ pdu.outlets_on }}/{{ pdu.outlet_count }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Load</div>
+      <div class="metric">{{ ("%.0f"|format(pdu.total_watts)) ~ " W" if pdu.total_watts is not none else "—" }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Driver</div>
+      <div class="metric">{{ pdu.driver }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Poll</div>
+      <div class="metric">{% if pdu.poll_interval and pdu.poll_interval > 0 %}{{ pdu.poll_interval }} s{% else %}on demand{% endif %}</div>
+    </div>
+  </div>
+  {% if pdu.description %}<p class="muted">{{ pdu.description }}</p>{% endif %}
+  {% if pdu.online is false %}
+    <div class="card"><span class="tag tiny bad">PDU offline</span>
+    <span class="muted">Outlet states below are the last known values.</span></div>
+  {% endif %}
+
+  <table class="table-compact" id="outlet-table">
+    <thead>
+      <tr>
+        <th>Outlet</th>
+        <th>Description</th>
+        <th>State</th>
+        <th>Power</th>
+        <th>Feeds consoles</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="outlet-rows">
+      {% for o in pdu.outlets|default([]) %}
+        {% set ref = o.ref %}
+        <tr data-ref="{{ ref }}">
+          <td><span class="tag tiny">{{ o.id }}</span></td>
+          <td class="muted">{{ o.description or "—" }}</td>
+          <td>
+            {% if o.online is false %}<span class="tag tiny bad">offline</span>
+            {% elif o.on is none %}<span class="tag tiny warn">unknown</span>
+            {% elif o.on %}<span class="tag tiny ok">on</span>
+            {% else %}<span class="tag tiny">off</span>
+            {% endif %}
+            {% if o.error %}<span class="muted">{{ o.error }}</span>{% endif %}
+          </td>
+          <td>
+            {% if o.watts is not none %}{{ "%.0f"|format(o.watts) }} W{% else %}—{% endif %}
+            {% if o.volts is not none %}<span class="muted">{{ "%.0f"|format(o.volts) }} V</span>{% endif %}
+            {% if o.amps is not none %}<span class="muted">{{ "%.1f"|format(o.amps) }} A</span>{% endif %}
+          </td>
+          <td>
+            {% if o.mapped_ports|default([])|length > 0 %}
+              {% for pn in o.mapped_ports %}
+                <a href="{{ base_path }}/console?port={{ pn | urlencode }}">{{ pn }}</a>{% if not loop.last %}, {% endif %}
+              {% endfor %}
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td>
+            {% if user_permission in ('read-write', 'admin') %}
+              <button class="btn tiny" type="button" data-toggle="{{ ref }}" data-target="{% if o.on %}false{% else %}true{% endif %}">
+                {% if o.on %}Turn off{% else %}Turn on{% endif %}
+              </button>
+            {% else %}<span class="muted">read-only</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if (snapshot.unresolved_refs|default([]))|length > 0 %}
+    <h2>Unresolved power feeds</h2>
+    <table class="table-compact">
+      <thead><tr><th>Feed (pdu.outlet)</th></tr></thead>
+      <tbody>
+        {% for ref in snapshot.unresolved_refs %}<tr><td><span class="tag tiny bad">{{ ref }}</span></td></tr>{% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endblock %}
+
+{% block scripts %}
+  <script>
+  // Outlet switching: POST /api/power/outlets/<ref> with the CSRF token.
+  // Live updates arrive over /ws/power; we re-render rows from /api/power
+  // on every frame. A warning line in the terminal is shown via alert for
+  // errors; the console badge on the console pages shows the live state.
+  (function () {
+    var base = "{{ base_path }}" || "";
+    var pduName = {{ pdu.name|tojson }};
+    var editable = {{ "true" if user_permission in ('read-write', 'admin') else "false" }};
+    var rowsEl = document.getElementById("outlet-rows");
+    if (!rowsEl) return;
+
+    var csrf = null;
+    function ensureCsrf(cb) {
+      if (csrf) { cb(); return; }
+      fetch(base + "/api/csrf", { credentials: "same-origin" })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { csrf = (d && (d.token || d.csrf)) || null; cb(); })
+        .catch(function () { csrf = null; cb(); });
+    }
+
+    function portLink(pn) { return '<a href="' + base + '/console?port=' + encodeURIComponent(pn) + '">' + pn + '</a>'; }
+
+    function outletRow(o) {
+      var ref = o.ref;
+      var state = (o.online === false) ? '<span class="tag tiny bad">offline</span>'
+        : (o.on === null || o.on === undefined) ? '<span class="tag tiny warn">unknown</span>'
+        : (o.on ? '<span class="tag tiny ok">on</span>' : '<span class="tag tiny">off</span>');
+      if (o.error) state += ' <span class="muted">' + o.error + '</span>';
+      var power = "—";
+      var parts = [];
+      if (o.watts !== null && o.watts !== undefined) parts.push(Math.round(o.watts) + " W");
+      if (o.volts !== null && o.volts !== undefined) parts.push(Math.round(o.volts) + " V");
+      if (o.amps !== null && o.amps !== undefined) parts.push(o.amps.toFixed(1) + " A");
+      if (parts.length) power = parts.join(" ");
+      var mapped = (o.mapped_ports || []).map(portLink).join(", ") || '<span class="muted">—</span>';
+      var action = editable
+        ? '<button class="btn tiny" type="button" data-toggle="' + ref + '" data-target="' + (o.on ? "false" : "true") + '">' + (o.on ? "Turn off" : "Turn on") + "</button>"
+        : '<span class="muted">read-only</span>';
+      var tr = document.createElement("tr");
+      tr.setAttribute("data-ref", ref);
+      tr.innerHTML =
+        "<td><span class=\"tag tiny\">" + o.id + "</span></td>" +
+        '<td class="muted">' + (o.description || "—") + "</td>" +
+        "<td>" + state + "</td>" +
+        "<td>" + power + "</td>" +
+        "<td>" + mapped + "</td>" +
+        "<td>" + action + "</td>";
+      return tr;
+    }
+
+    function renderOutlets(pdus) {
+      var p = (pdus || []).filter(function (x) { return x.name === pduName; })[0];
+      if (!p) return;
+      var frag = document.createElement("tbody");
+      (p.outlets || []).forEach(function (o) { frag.appendChild(outletRow(o)); });
+      rowsEl.replaceWith(frag);
+      rowsEl = frag;
+      rowsEl.id = "outlet-rows";
+      window._outletRows = rowsEl;
+    }
+
+    var lastSnap = null;
+    function refresh() {
+      fetch(base + "/api/power", { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (snap) {
+          if (snap && snap.pdus) { lastSnap = snap; renderOutlets(snap.pdus); }
+        })
+        .catch(function () { /* transient; next frame retries */ });
+    }
+
+    function findOutlet(ref) {
+      if (!lastSnap) return null;
+      var p = (lastSnap.pdus || []).filter(function (x) { return x.name === pduName; })[0];
+      if (!p) return null;
+      return (p.outlets || []).filter(function (o) { return o.ref === ref; })[0] || null;
+    }
+
+    function commitToggle(ref, on) {
+      fetch(base + "/api/power/outlets/" + encodeURIComponent(ref), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-OMX-CSRF": csrf || "" },
+        body: JSON.stringify({ on: on })
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok) {
+            var msg = (res.d && res.d.message) || "request failed";
+            var impact = res.d && res.d.impact;
+            if (impact && impact.losing_power && impact.losing_power.length) {
+              var losing = impact.losing_power.map(function (x) { return x.port; }).join(", ");
+              msg += " - consoles losing ALL power: " + losing;
+            }
+            window.alert("Error: " + msg);
+          }
+          refresh();
+        })
+        .catch(function (e) { window.alert("Request failed: " + e); });
+    }
+
+    function doToggle(ref, on) {
+      ensureCsrf(function () {
+        if (on === false) {
+          // Pre-flight: show which consoles lose ALL power before switching.
+          var o = findOutlet(ref);
+          var losing = (o && o.off_impact && o.off_impact.losing_power) || [];
+          var staying = (o && o.off_impact && o.off_impact.staying_up) || [];
+          if (losing.length && !window.confirm(
+            "This removes ALL power to: " +
+            losing.map(function (x) { return x.port + (x.description ? " (" + x.description + ")" : ""); }).join(", ") +
+            ".\n\nContinue?"
+          )) return;
+          if (staying.length && !window.confirm(
+            "Consoles staying up via other feeds: " +
+            staying.map(function (x) { return x.port + " (via " + (x.via || "other feed") + ")"; }).join(", ") +
+            ".\n\nContinue?"
+          )) return;
+        }
+        commitToggle(ref, on);
+      });
+    }
+    document.addEventListener("click", function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest("button[data-toggle]") : null;
+      if (!btn || !editable) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      var ref = btn.getAttribute("data-toggle");
+      var on = btn.getAttribute("data-target") === "true";
+      doToggle(ref, on);
+    });
+
+    // Live updates
+    function connect() {
+      var scheme = location.protocol === "https:" ? "wss" : "ws";
+      var ws = new WebSocket(scheme + "://" + location.host + base + "/ws/power");
+      ws.onmessage = function (ev) {
+        try {
+          var msg = JSON.parse(ev.data);
+          if (msg.event === "power_snapshot" || msg.event === "outlet_changed") refresh();
+        } catch (_) { /* ignore malformed frame */ }
+      };
+      ws.onclose = function () { setTimeout(connect, 3000); };
+      ws.onerror = function () { try { ws.close(); } catch (_) {} };
+    }
+    connect();
+  })();
+  </script>
+{% endblock %}

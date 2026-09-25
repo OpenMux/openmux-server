@@ -53,6 +53,14 @@ class BaseClientAdapter(ABC):
         self.protocol_version = None
         self.session_id = None
 
+        # Power (PDU) control: the console `p` menu drives this. When the
+        # adapter's read path sees a `power_feeds` / `power_switch` OMXCTRL
+        # frame it stores the decoded payload here and swallows it; the menu
+        # polls this for the structured reply. Cleared by the menu before each
+        # request. (Plain `[POWER]` live-notice text still flows through the
+        # normal read path and is rendered live.)
+        self.last_power_reply = None
+
     @abstractmethod
     async def connect(self) -> bool:
         """Open the underlying transport connection.
@@ -189,6 +197,26 @@ class BaseClientAdapter(ABC):
             bool: True if the request was sent; False if unsupported or the
             request could not be sent.
         """
+        return False
+
+    # Power (PDU) control. Base implementations are no-ops so adapters that
+    # have no way to carry the control frames degrade gracefully; the console
+    # falls back to a "not supported" notice. TCP and WebSocket override these.
+    async def _send_power_control(self, payload: Dict[str, Any]) -> bool:
+        """Send one power control frame. Returns True when the frame was sent."""
+        return False
+
+    async def request_power_feeds(self) -> bool:
+        """Ask the server for the power feeds of the attached console.
+
+        Returns:
+            bool: True if the request was sent (the feed list arrives
+            asynchronously); False if unsupported or the send failed.
+        """
+        return False
+
+    async def switch_power_outlet(self, ref: str, on: bool) -> bool:
+        """Switch one console power feed. Returns True when the request was sent."""
         return False
 
     # Common utility methods

@@ -269,6 +269,18 @@ class WebSocketClientAdapter(BaseClientAdapter):
         """Ask the server for the current read-write holder(s) of the attached port."""
         return await self._send_control_frame({"type": "query_rw_holders"})
 
+    async def _send_power_control(self, payload: Dict[str, Any]) -> bool:
+        """Send one power control frame on the WebSocket control channel."""
+        return await self._send_control_frame(payload)
+
+    async def request_power_feeds(self) -> bool:
+        """Ask the server for the power feeds of the attached console."""
+        return await self._send_power_control({"type": "power_query"})
+
+    async def switch_power_outlet(self, ref: str, on: bool) -> bool:
+        """Ask the server to switch one console power feed on or off."""
+        return await self._send_control_frame({"type": "power_switch", "ref": ref, "on": on})
+
     async def read_data(self, timeout: Optional[float] = None) -> Optional[Union[str, bytes]]:
         if not self.is_connected or not self.websocket:
             return None
@@ -286,6 +298,9 @@ class WebSocketClientAdapter(BaseClientAdapter):
                     try:
                         payload = data[len("OMXCTRL ") :]
                         info = json.loads(payload)
+                        if isinstance(info, dict) and info.get("type") in ("power_feeds", "power_switch"):
+                            self.last_power_reply = info
+                            return b""
                         if isinstance(info, dict) and info.get("type") in ("client_mode", "rw_holders"):
                             _msg_type, message = format_control_response(self, info)
                             return message or b""

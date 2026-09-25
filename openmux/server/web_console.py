@@ -46,6 +46,7 @@ from openmux.server.data_logger import DataLogger
 from openmux.server.locations import web_tls_dir
 from openmux.server.port_utils import natural_sort_key, safe_get_port
 from openmux.server.web_plugins import ADAPTER_APP_KEY
+from openmux.server.web_plugins import power_monitor as _power_monitor
 
 try:  # Prefer importlib.metadata (std lib)
     from importlib.metadata import version as _dist_version  # type: ignore
@@ -545,7 +546,6 @@ async def handle_console(request: web.Request) -> web.Response:
         ports = adapter._get_ports_snapshot()
         current_port = request.query.get("port")
         embed = request.query.get("embed", "").lower() in ("1", "true", "yes", "on")
-
         body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm, embed=embed)  # type: ignore[attr-defined]
     except Exception as exc:
         adapter.logger.error("Console render failed: %s", exc)
@@ -1279,6 +1279,38 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
                                     # justification: best-effort control message; the UI tolerates a miss
                                     pass
                                 continue  # handled control; do not forward
+                            if isinstance(req, dict) and req.get("type") in ("power_query", "power_switch"):
+                                # PDU power control from the console CLI (console.py
+                                # `p` menu): feed list for the attached port or one
+                                # switch. `username` is the Basic-Auth identity; the
+                                # live [POWER] notice rides the meta fan-out.
+                                pdu = adapter._find_power_adapter()
+                                if pdu is None:
+                                    if req.get("type") == "power_query":
+                                        resp = {
+                                            "type": "power_feeds",
+                                            "ok": False,
+                                            "error": "power management is not configured",
+                                            "feeds": [],
+                                        }
+                                    else:
+                                        resp = {
+                                            "type": "power_switch",
+                                            "ok": False,
+                                            "error": "power management is not configured",
+                                        }
+                                else:
+                                    resp = await pdu.handle_power_frame(port_name, req, username, client_id=client_id) or {
+                                        "type": "power_switch",
+                                        "ok": False,
+                                        "error": "power management is not configured",
+                                    }
+                                try:
+                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+                                except Exception:
+                                    # justification: best-effort control message; the UI tolerates a miss
+                                    pass
+                                continue  # handled control; do not forward
                             if isinstance(req, dict) and req.get("type") == "request_scrollback":
                                 try:
                                     scrollback = adapter.console_manager.port_manager.get_scrollback(port_name)
@@ -1656,6 +1688,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
             nav = list(self._plugin_nav or [])
         except Exception:
             nav = []
+        # Power is a core feature: emit its nav entry live when a PDU adapter
+        # is enabled, independent of any web plugin (soft reload of the
+        # `power:` section only).
+        if self._power_adapter_present():
+            nav.append({"title": "Power", "path": "/power"})
         if not nav:
             return items
         perm = self._get_effective_permission(username, request)
@@ -1664,10 +1701,28 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 req = n.get("require") if isinstance(n, dict) else None
                 if req and perm != req:
                     continue
-                items.append({"title": n.get("title"), "path": n.get("path"), "require": req})
+                item = {"title": n.get("title"), "path": n.get("path"), "require": req}
+                if item["path"] == "/power":
+                    # Enrich live: PDUs can change on soft reload, so the
+                    # per-PDU sub-links are rebuilt for every page, not cached
+                    # in the startup nav items.
+                    item["links"] = self._power_nav_links()
+                items.append(item)
             except Exception:
                 continue
         return items
+
+    def _power_nav_links(self) -> list:
+        """Sorted PDU names for the Power sidebar sub-links (or an empty list)."""
+        pdu = self._find_power_adapter()
+        states = getattr(pdu, "pdus", None) if pdu is not None else None
+        if not isinstance(states, dict) or not states:
+            return []
+        try:
+            return sorted(str(name) for name in states.keys())
+        except Exception:
+            # justification: decorative sub-links; the section renders without them
+            return []
 
     # --- SSO helpers ---
     def _verify_sso_header(self, header_value: str) -> Optional[Dict[str, Any]]:
@@ -1842,12 +1897,23 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 app.router.add_get("/logs/{port_name}", handle_logs)
                 app.router.add_get("/status", handle_status)
                 app.router.add_get("/about", handle_about)
+                # Power (PDU) pages are core: registered always so a soft
+                # reload of the `power:` section needs no restart; the
+                # handlers reply 404 when no PDU adapter is active.
+                app.router.add_get("/power", _power_monitor._handle_power_list)
+                app.router.add_get(r"/power/{pdu_name}", _power_monitor._handle_power_detail, name="power_detail")
             # Login/logout
             app.router.add_get("/login", handle_login)
             app.router.add_post("/login", handle_login)
             app.router.add_get("/logout", handle_logout)
             app.router.add_get("/api/ports", handle_api_ports)
             app.router.add_post("/api/reload", handle_api_reload)
+            # Power (PDU) API + live socket routes are core: registered always
+            # so a soft reload of the `power:` section needs no restart; the
+            # handlers reply 404 when no PDU adapter is active.
+            app.router.add_get("/api/power", _power_monitor._handle_api_power)
+            app.router.add_post(r"/api/power/outlets/{outlet_ref:.+}", _power_monitor._handle_set_outlet)
+            app.router.add_get("/ws/power", _power_monitor._handle_ws_power)
             app.router.add_get("/api/csrf", self._handle_api_csrf)
             app.router.add_get("/ws/{port_name}", handle_ws)
             app.router.add_get("/ws/{server_id}/{port_name}", handle_ws_fqpn)
@@ -2364,6 +2430,50 @@ class WebConsoleAdapter(BaseGenericAdapter):
             pass
         return None
 
+    def _push_power_notice(self, port_name: str, changes: Dict[str, Any]) -> None:
+        """Fire-and-forget the in-terminal power notice to a port's WS clients.
+
+        Best-effort: a closed socket is pruned by the meta-subscriber cleanup,
+        so a send failure here is not surfaced.
+        """
+        try:
+            outlet = changes.get("outlet")
+            if changes.get("all_power_lost"):
+                notice = "\r\n[POWER WARNING] all power feeds are now OFF for this console (" + str(outlet) + ")\r\n"
+            else:
+                on = changes.get("on")
+                state_txt = "on" if on is True else ("off" if on is False else "unknown")
+                notice = "\r\n[POWER] feed " + str(outlet) + " is now " + state_txt + "\r\n"
+            for cid in list(self._meta_subscribers.get(port_name) or []):
+                ws = self._clients.get(cid)
+                if ws is None:
+                    continue
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    break
+                loop.create_task(ws.send_str(notice))
+        except Exception:
+            # justification: best-effort notice; the meta frame still arrives
+            pass
+
+    def _find_power_adapter(self):
+        """Find the active PDU adapter (adapter_type ``power``), or None."""
+        pm = getattr(self.console_manager, "port_manager", None) if self.console_manager else None
+        try:
+            unified = getattr(pm, "unified_adapters", []) if pm else []
+            for ad in unified or []:
+                try:
+                    atype = ad.get_adapter_type()
+                    if str(atype).lower() == "power":
+                        return ad
+                except Exception:
+                    continue
+        except Exception:
+            # justification: optional lookup; the UI renders without power info
+            pass
+        return None
+
     # --- Event-driven meta push helpers ---
     def _on_port_meta_update(self, port_name: str, changes: Optional[Dict[str, Any]] = None):
         """PortManager meta listener: schedule a meta broadcast to WS subscribers.
@@ -2373,7 +2483,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
         immediately to keep the UI responsive (e.g., unplug/replug scenarios).
         """
         try:
-            subs = self._meta_subscribers.get(port_name)
+            subs = self._meta_subscribers.get(port_name) or set()
+            # PDU power feed change (PDU feature): the /ws/<port> socket is a
+            # raw console stream, so push the in-terminal [POWER] notice as
+            # plain text (mirrors the client listener's raw-tcp notice and the
+            # telnet/SSH live notice). The web badge still updates its own
+            # state from the `power` block the meta frame carries below.
+            if isinstance(changes, dict) and changes.get("event") == "power_outlet_changed" and subs:
+                self._push_power_notice(port_name, changes)
             if not subs:
                 return
             # Check if we should bypass debounce for connection state changes
@@ -2389,6 +2506,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         "federated_disconnected",
                         "port_registered",
                         "port_unregistered",
+                        "power_outlet_changed",
                     ):
                         immediate = True
             except Exception:
@@ -2539,6 +2657,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
             readiness = info.get("readiness")
             if readiness in (READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE):
                 meta["readiness"] = readiness
+            # PDU power feed state (PDU feature): present only when the port
+            # declares a `power:` feed, so unmapped ports ignore the key.
+            power_info = info.get("power")
+            if isinstance(power_info, dict) and power_info:
+                meta["power"] = power_info
             payload = "OMXCTRL " + json.dumps(meta, separators=(",", ":"))
             for cid in list(subs):
                 try:
@@ -3292,6 +3415,16 @@ class WebConsoleAdapter(BaseGenericAdapter):
         return None
 
     # --- Plugin loader ---
+    # Real optional web plugins (e.g. config_editor, os_customizer, port_actions)
+    # are loaded from web_console.plugins. The Power feature is NOT a plugin:
+    # its routes are core (registered in start()) and its sidebar item is
+    # emitted live per page in _get_allowed_plugin_nav, so neither depends on a
+    # plugins entry.
+    def _power_adapter_present(self) -> bool:
+        """True when an enabled power adapter is registered (live nav gate)."""
+        pdu = self._find_power_adapter()
+        return pdu is not None and getattr(pdu, "enabled", True) is not False
+
     def _load_plugins(self, app: web.Application) -> None:
         """Load and initialize web plugins as configured.
 
@@ -3301,16 +3434,16 @@ class WebConsoleAdapter(BaseGenericAdapter):
         Each module may expose register_plugin(app, adapter) -> Optional[dict]
         The returned mapping may include a "nav" list for UI integration.
         """
-        cfg = self.plugins_cfg or []
-        if not isinstance(cfg, list) or not cfg:
+        entries = self.plugins_cfg if isinstance(self.plugins_cfg, list) else []
+        if not entries:
             return
         nav_items: list[Dict[str, Any]] = []
-        for entry in cfg:
+        for entry in entries:
             try:
                 if isinstance(entry, str):
                     mod_name = entry
                     enabled = True
-                    opts = {}
+                    opts: Dict[str, Any] = {}
                 elif isinstance(entry, dict):
                     mod_name = entry.get("module") or entry.get("name")
                     enabled = entry.get("enabled", True)
@@ -3349,11 +3482,23 @@ class WebConsoleAdapter(BaseGenericAdapter):
         if pm is not None:
             try:
                 raw_ports = getattr(pm, "ports", {}) or {}
+                power_adapter = self._find_power_adapter()
                 for name, port in list(raw_ports.items()):
                     try:
                         info = port.get_status() if hasattr(port, "get_status") else {"name": name}
                         if "name" not in info:
                             info["name"] = name
+                        # PDU power feed state (PDU feature): feeds, derived
+                        # all|some|none|unknown, and all_power_lost. Omitted
+                        # entirely when the port declares no `power:` feed.
+                        if power_adapter is not None:
+                            try:
+                                power_payload = power_adapter.port_power_payload(str(name))
+                                if power_payload is not None:
+                                    info["power"] = power_payload
+                            except Exception:
+                                # justification: optional status detail; the port entry stays complete
+                                pass
                         # Compute a stable composite id: <server_id>::<port_name>
                         comp_id = None
                         try:

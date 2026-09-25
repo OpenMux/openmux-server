@@ -247,6 +247,15 @@ class PortMetadata:
     # peer sees the origin's view of the port; missing on older peers.
     readiness: Optional[str] = None
 
+    # PDU power feeds declared on this port (outlet federation). A list of
+    # {"ref": "<pdu>.<id>", "on": bool|None} entries; "on" is the origin's
+    # last-reported outlet state (None = unknown). Mirrors the port's local
+    # ``power:`` config plus the origin's live state so a federated peer can
+    # render the same feed badge / power menu without owning the PDUs. Missing
+    # (None) on ports with no feeds and on older peers. Live updates flow over
+    # the dedicated POWER:STATE control frame, not through re-advertisement.
+    power: Optional[List[Dict[str, Any]]] = None
+
     def get_display_name(self) -> str:
         """Return the user‑facing port name.
 
@@ -300,6 +309,7 @@ class PortMetadata:
             **({"read_only_groups": self.read_only_groups} if self.read_only_groups else {}),
             **({"status_message": self.status_message} if self.status_message else {}),
             **({"readiness": self.readiness} if self.readiness else {}),
+            **({"power": self.power} if self.power else {}),
         }
 
     def to_federation_dict(self) -> Dict[str, Any]:
@@ -329,4 +339,8 @@ class PortMetadata:
             **({"read_only_groups": self.read_only_groups} if self.read_only_groups else {}),
             **({"status_message": self.status_message} if self.status_message else {}),
             **({"readiness": self.readiness} if self.readiness else {}),
+            # Power feeds (outlet federation): the origin's declared feed refs
+            # plus current state, so peers render the same badge/menu. The
+            # optional-key convention means older peers simply never see it.
+            **({"power": self.power} if self.power else {}),
         }

@@ -31,6 +31,10 @@ loopback_ports:
     # log_file: "logs/ports/loopback.jsonl"
     # To log only outbound data uncomment:
     # log_direction: out
+    # PDU power feeds (optional): `<pdu_name>.<outlet_id>` refs for the outlets
+    # this console is powered by. Multiple entries = A/B dual feed. See the
+    # `power:` section below and docs/configuration/adapters.md.
+    power: ["rack1.3", "phaseA.A1"]
 
 serial_ports:
   - name: "console1"
@@ -59,6 +63,79 @@ client_listener:
   port: 8023
   max_connections: 200
   connection_timeout: 30
+
+# PDU power control (optional): manages outlets (on/off + watts/volts/amps)
+# behind a driver interface. `driver: dummy` simulates the device in memory;
+# `driver: command` runs user CLI commands (GPIO scripts, USB power tools).
+# More drivers (e.g. Raritan, APC) plug in via `driver:` with no other changes.
+# Outlet ids are the device's OWN ids (free strings: "1", "A1", "C2", ...).
+# The console side maps a port to its feeds with `power: [refs]` on port entries.
+power:
+  enabled: true
+  pdus:
+    - name: "rack1"            # unique PDU name (no dots/whitespace; prefixes refs)
+      description: "Rack 1 PDU"
+      driver: dummy
+      poll_interval: 30        # PER-PDU seconds; 0 = no poll task (on-demand reads)
+      options:
+        outlets: ["1", "2", "3", "4", "5", "6", "7", "8"]
+      outlets:                 # optional per-outlet annotations, keyed by id
+        - id: "3"
+          description: "Switch A"
+    - name: "phaseA"           # 3-phase-style example: string outlet ids
+      description: "Phase A PDU"
+      driver: dummy
+      poll_interval: 10
+      options:
+        outlets: ["A1", "B1", "C2"]
+        watts_on: 55
+      outlets:
+        - id: "A1"
+          description: "Phase A primary"
+    # Command driver example (commented out): run CLI commands per PDU and/or
+    # per outlet. The PDU-level templates must contain {outlet_id} or
+    # {outlet_index}; the PDU-level state_cmd prints one "<id> <state>" line
+    # per outlet (on/off/1/0/true/false/yes/no), or the lines can carry the
+    # device format and state_pattern parses them. Per-outlet
+    # on_cmd/off_cmd/state_cmd override the PDU level
+    # (see docs/configuration/adapters.md, PDU Power).
+    # - name: "raspiboard"
+    #   description: "GPIO power board"
+    #   driver: command
+    #   poll_interval: 30
+    #   options:
+    #     on_cmd: "sudo /opt/openmux/scripts/set_output.sh {outlet_id} 1"
+    #     off_cmd: "sudo /opt/openmux/scripts/set_output.sh {outlet_id} 0"
+    #     state_cmd: "/opt/openmux/scripts/get_states.sh"
+    #     timeout: 5
+    #     outlets:
+    #       - id: "1"
+    #       - id: "2"
+    # Command driver example against an SNMP PDU (commented out): the
+    # {host}/{username}/{password} placeholders come from the options and are
+    # also exported as PDU_HOST/PDU_USERNAME/PDU_PASSWORD to the commands;
+    # {outlet_index} comes from the per-outlet index and maps an outlet ref to
+    # the device's own outlet index; state_pattern parses each state_cmd line
+    # (named groups id + value); state_token_off extends the state tokens
+    # (PowerNet reports 1 = on, 2 = off). See docs/configuration/adapters.md.
+    # - name: "apc01"
+    #   description: "APC AP8959 lab"
+    #   driver: command
+    #   poll_interval: 60
+    #   options:
+    #     host: "10.0.0.5"
+    #     password: "private"
+    #     on_cmd: "snmpset -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{outlet_index} i 1"
+    #     off_cmd: "snmpset -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{outlet_index} i 2"
+    #     state_cmd: "snmpwalk -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3"
+    #     timeout: 15                # let snmp's own retries finish
+    #     state_pattern: "(?P<id>\\d+) = INTEGER: (?P<value>\\d+)"
+    #     state_token_off: ["2"]
+    #     outlets:
+    #       - id: "web-rack-top"
+    #         index: "1"
+    #       - id: "storage-1"
+    #         index: "4"
 
 # Web console with Config Editor plugin enabled
 web_console:

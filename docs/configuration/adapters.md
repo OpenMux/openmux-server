@@ -515,6 +515,196 @@ web_console:
   ssl_key: /etc/ssl/private/openmux.key
 ```
 
+## PDU Power (`power`)
+
+Manages power distribution unit (PDU) outlets: on/off state plus watts, volts, and amps when the device reports them. The adapter is portless: outlets are not console ports. The console side maps a port to its feeds with the `power:` key on port entries (see below).
+
+Drivers implement a common interface (in `openmux/server/adapters/power_drivers/api.py`):
+- `list_outlets()` returns the device's own outlet ids. Outlet ids are free strings as reported by the device (for example `1`, or `A1`, `B1`, `C2` on a 3-phase PDU). Config only holds optional per-outlet annotations; a PDU needs no outlet config to be fully listed.
+- `read_states()` returns on/off plus watts/volts/amps per outlet. `on: null` = unknown (PDU down, not yet polled). The method may return `None` while the driver is inside its read backoff window (below); the adapter then keeps the last-known readings and performs no further action this cycle.
+- `set_state(outlet_id, on)` switches one outlet.
+
+Two drivers ship with the server: `dummy` simulates a device in memory (development and tests), and `command` runs user CLI commands against a real device (see the command driver reference below). Vendor drivers (for example Raritan, APC) register new keys in the same interface with no other changes.
+
+Read backoff: every driver wraps its device-wide read path with the shared helper in `power_drivers/readbackoff.py`. The first failed read suppresses further reads for 30 s; each later failed read (one per lapsed window) doubles the window, capped at 5 min. A successful read resets the window. Explicit switches are never suppressed. This keeps a dead device from being polled at full cadence forever. Per-outlet failures (one outlet's read error) do not start the window; they surface as errors on the affected readings.
+
+Supported keys:
+- `enabled`: Disable the whole feature when false (default: true)
+- `pdus`: List of PDU entries
+- `pdus[].name`: PDU name. Unique; no dots or whitespace (it prefixes every outlet ref)
+- `pdus[].description`: Free text (default: not set)
+- `pdus[].driver`: Driver registry key: `dummy` or `command`
+- `pdus[].poll_interval`: PER-PDU refresh in seconds. `0` = no poll task (reads on demand only). Default: 10
+- `pdus[].options`: Object passed to the driver. Keys are driver-specific (see the driver references below); the driver validates them and rejects unknown keys at startup
+- `pdus[].outlets`: Optional per-outlet annotations; each item is `{id: "<outlet id>", description: "..."}`. `id` must match the device's id exactly (a string). Ids that the device does not report raise a warning at startup
+
+Outlet ref = `<pdu_name>.<outlet_id>` (for example `rack1.3`, `phaseA.A1`). This is the single identity used by the CLI, the web API, the Power page, and the status page.
+
+Console-side mapping: add `power: ["<ref>", ...]` to a port entry in any of the four port sections (`serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`). Multiple entries = A/B dual feed. A ref to an unknown PDU or outlet raises a warning at startup (not fatal). The web status page and the console header show a power dot (green all feeds on, yellow partial, red all off, grey unknown); the console header badge opens a per-outlet on/off menu (its switches travel as OMXCTRL power frames on the console WebSocket, the same core path as the `p` menu — not the power plugin's REST route).
+
+Any power change (web toggle, CLI, or a poll that detects out-of-band drift) sends a message to every attached session of every console the outlet feeds, and updates the web badges live. A successful manual switch also writes two records: one `POWER CONTROL` audit line in the server log (user, outlet ref, new state, consoles that lose all power), and a `power_control_notice` meta event in each affected console's port data log (the `[POWER]` notice wording, so the event stays in the log with no client attached). Polls that detect out-of-band drift update the badges but do not audit-log; only a user's switch is a control event.
+
+The `POWER` command is available on the client listener (command phase). The telnet, SSH, and OpenMux CLI clients get the escape-menu `p` command, which opens an interactive menu for the console you are attached to (see below). An outlet ref is always `<pdu-name>.<outlet-id>` (for example `rack1.3`; the PDU name is the `pdus[].name` you set, not a device number). Syntax:
+```
+POWER                       # list every PDU + outlet
+POWER rack1                 # list one PDU's outlets
+POWER rack1.3               # report one outlet
+POWER rack1.3 off           # switch an outlet (needs read-write)
+```
+Switching an outlet off prints `WARNING:` lines naming the consoles that would lose ALL power, and `NOTE:` lines naming the consoles that stay up on other feeds.
+
+Who may switch is scoped to console groups: switching needs `read-write` or `admin`, plus the entitlement to open every console the outlet feeds (the same console-access rules as attach time: `read_write_groups`/`read_only_groups` and `access_default`). A read-write user whose groups do not cover one of the outlet's consoles sees an `ERROR:POWER` line (CLI, telnet, SSH) or a 403 (web API) naming that console; switching an outlet that feeds any console outside the user's groups requires `admin`. An outlet that feeds no console stays switchable by any read-write user. The check runs on every switch path (web API, client-listener `POWER`, and the `p` power menu on the telnet, SSH, and CLI clients).
+
+Reload behavior: a soft reload re-applies the `power:` section without a restart. Description or annotation edits apply in place. A material change (driver, `poll_interval`, `options`) re-creates that PDU and re-discovers its outlets. Console-side `power:` mapping is read live from the ports and needs no reload work at all.
+
+Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power`) edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `options` as JSON, and optional per-outlet descriptions). The per-port `power:` feed refs are edited as the "Power feeds" field on the Ports view. Apply, then use **Soft Reload** to reconcile the section.
+
+Web console: the standalone `/power` page, the per-PDU pages, the
+`/api/power` routes, and the `/ws/power` socket are core. The web console
+registers them always, so no `web_console.plugins` entry is needed. A
+`power:` section added or removed on a soft reload takes effect without a
+restart. Each route replies 404 ("Power management is not configured")
+while no PDU adapter is active. The "Power" sidebar item is emitted live
+per page when a PDU adapter is enabled, like the in-session badge, the
+power menu, and the live `[POWER]` notices. No web power surface depends
+on a plugin.
+
+Example:
+```yaml
+power:
+  enabled: true
+  pdus:
+    - name: "rack1"
+      description: "Rack 1 PDU"
+      driver: dummy
+      poll_interval: 30
+      options:
+        outlets: ["1", "2", "3"]
+      outlets:
+        - id: "3"
+          description: "Switch A"
+    - name: "phaseA"
+      driver: dummy
+      poll_interval: 10
+      options:
+        outlets: ["A1", "B1", "C2"]
+```
+
+### Command driver (`driver: command`)
+
+Runs CLI commands against a real device: GPIO scripts on a Raspberry Pi, custom USB power tools, or anything the user can address from the shell. The driver validates all options and rejects the PDU entry at startup (one log line) when they are invalid.
+
+Two command levels. A per-outlet value wins over the PDU-level value:
+- PDU level (in `options`): `on_cmd` and `off_cmd` templates. Each must contain the placeholder `{outlet_id}` or `{outlet_index}` (below). One `state_cmd` reports every outlet: by default one `<id> <state>` line per outlet, or a device-specific line format parsed by `state_pattern`.
+- Outlet level (on an `outlets` entry): `on_cmd`, `off_cmd`, `state_cmd`, an optional `state_pattern` that matches that outlet's state output with a regex, and an optional `index` (the outlet's device-side identity, for `{outlet_index}`).
+
+Example, template style (one script per operation):
+```yaml
+power:
+  pdus:
+    - name: "raspiboard"
+      driver: command
+      poll_interval: 30
+      options:
+        on_cmd: "sudo /opt/openmux/scripts/set_output.sh {outlet_id} 1"
+        off_cmd: "sudo /opt/openmux/scripts/set_output.sh {outlet_id} 0"
+        state_cmd: "/opt/openmux/scripts/get_states.sh"   # prints: 1 on / 2 off
+        timeout: 5
+        outlets:
+          - id: "1"
+          - id: "2"
+```
+
+Example, per-outlet style (each tool is different), with the two levels mixed:
+```yaml
+power:
+  pdus:
+    - name: "shop"
+      driver: command
+      poll_interval: 60
+      options:
+        cwd: "/opt/openmux"
+        outlets:
+          - id: "relay-a"
+            on_cmd: "./relay-a.sh on"
+            off_cmd: "./relay-a.sh off"
+            state_cmd: "./relay-a.sh state"            # prints: on
+          - id: "usb-charger"
+            on_cmd: "usb-power set charger on"
+            off_cmd: "usb-power set charger off"
+            state_cmd: "usb-power status charger"
+            state_pattern: \": (?P<on>connected)|(?P<off>disconnected)\"
+```
+
+Example, an SNMP PDU (APC NetManager rack PDU) with no helper scripts: the connection fields (`host`, `username`, `password`) substitute into `{host}` / `{username}` / `{password}` (the OIDs are plain text in the command), each outlet's `index` maps the outlet ref to the device outlet index behind `{outlet_index}`, and `state_pattern` parses the `snmpwalk` lines:
+```yaml
+power:
+  pdus:
+    - name: "apc01"
+      description: "APC AP8959 lab"
+      driver: command
+      poll_interval: 60
+      options:
+        host: "10.0.0.5"
+        password: "private"          # SNMP v2c community; for v3 pass the credentials to the snmp tools in the command strings or via env
+        on_cmd: "snmpset -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{outlet_index} i 1"
+        off_cmd: "snmpset -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{outlet_index} i 2"
+        state_cmd: "snmpwalk -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3"
+        timeout: 15                  # let snmp's own retries finish (default 5s is shorter than snmp's retry loop)
+        state_pattern: "(?P<id>\\d+) = INTEGER: (?P<value>\\d+)"
+        state_token_off: ["2"]       # PowerNet reports 1 = on, 2 = off
+        outlets:
+          - id: "web-rack-top"
+            index: "1"
+          - id: "storage-1"
+            index: "2"
+```
+
+Option keys:
+- `outlets`: Required. List of outlet entries. Each entry: `id` (required; the ref part; no dots or whitespace; unique), `index` (optional; the device-side identity behind `{outlet_index}`; must be unique across all ids and indexes), plus the optional per-outlet `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`.
+- `on_cmd` / `off_cmd` (PDU level): Templates. Each must contain `{outlet_id}` or `{outlet_index}`. Required for an outlet that has no per-outlet value of the same name.
+- `host` / `username` / `password`: Connection fields, optional. Substitute into `{host}` / `{username}` / `{password}` and export as `PDU_HOST` / `PDU_USERNAME` / `PDU_PASSWORD` to the spawned commands (a user `env` key wins). `host` is non-blank when set; it is required when any command references a connection placeholder. The same fields let the credentials stay out of argv (for example `env: {SNMP_COMMUNITY: "private"}` plus `state_cmd: "snmpwalk -v2c -c $SNMP_COMMUNITY ..."`).
+- `state_cmd` (PDU level): One command that reports every outlet. Without `state_pattern`: one non-empty line per outlet, `<id> <state>`; `id` is the outlet id or its `index`. With `state_pattern`: the device's own line format. Lines that do not parse are skipped.
+- `state_pattern` (PDU level): A line regex with the named groups `id` (outlet id or index) and `value` (a state token, classified by the token table). Matched per line; the first match per outlet wins. Requires `state_cmd`.
+- `state_token_on` / `state_token_off`: Optional lists of extra state tokens (case-insensitive) added to the built-in table (`on` / `1` / `true` / `yes` and `off` / `0` / `false` / `no`). They extend the table, never replace it; a token in both lists is a config error. Example: `state_token_off: ["2"]` for the PowerNet enum.
+- Per-outlet `state_cmd`: Reports ONE outlet. The first non-empty stdout line decides: a state token sets the state; anything else keeps the last-known state and sets an error on the reading. A matching `state_pattern` overrides the token parse (below).
+- Per-outlet `state_pattern`: Regex, matched against the outlet's `state_cmd` output. A pattern with both named groups `(?P<on>...)` and `(?P<off>...)` requires exactly one group to match. A plain pattern means: match = on, no match = off. Requires a per-outlet `state_cmd`.
+- `cwd`: Working directory for the commands (default: the server's cwd).
+- `timeout`: Per-command timeout in seconds (default: 5, max: 300). On timeout the driver kills the command's whole process group and reports the read/switch as failed. Size it for the slowest command the PDU runs: for SNMP commands, the net-snmp retry loop (default 5 retries at ~1 s intervals) takes ~6 s to declare a host dead, so use `timeout: 15` — the default 5 s would kill the command mid-retry, and a live-but-slow PDU would fail every poll instead of the read backoff handling it.
+- `env`: Extra environment variables, merged over a minimal allow-list (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`). Wins over the exported `PDU_*` defaults.
+- `max_parallel`: Max concurrent per-outlet state commands per poll (default: 4, max: 64).
+
+Commands run without a shell: the driver splits each command with shell word splitting (`shlex.split`) and spawns the result directly. Quote parts of the command when a value contains spaces. The placeholders are the only substitutions the driver performs: `{outlet_id}` (the outlet id), `{outlet_index}` (the outlet's `index`), and `{host}` / `{username}` / `{password}` (the PDU-level connection fields). A set command that uses `{outlet_index}` on an outlet without an `index` is rejected at startup, as is a PDU-level `state_cmd` that contains `{outlet_index}` (there is no per-outlet context there). Placeholders resolve at startup, so all commands are split and validated before the server starts polling.
+
+Read behavior: the batch `state_cmd` runs once per poll and serves every outlet that has no per-outlet `state_cmd`. A line's outlet identity (the first word, or the pattern's `id` group) matches the outlet `id` or its `index` (the mapping is checked at startup). Per-outlet `state_cmd` commands run concurrently, bounded by `max_parallel`. An outlet that receives no report in a good batch read keeps its last-known state and gets an error note ("outlet not reported by state command"). An outlet with no state command anywhere reports the last state a switch set. A device-wide read failure (the batch command failed, or every spawned state command failed) starts the read backoff (above): further polls spawn nothing until the window lapses, and `read_states()` returns `None` (the adapter keeps the last-known readings).
+
+Switch behavior: `set_state` runs exactly one command (`on_cmd` or `off_cmd` for that outlet). It is never suppressed by the backoff. A non-zero exit or a timeout fails the switch: every switch surface (web, CLI, `p` menu) reports the error, and no audit record is written.
+
+The driver reports no watts/volts/amps: those stay unknown for command-driven outlets.
+
+### Writing a power driver
+
+Each driver lives in one module under `openmux/server/adapters/power_drivers/` (for example `dummy.py`, `command.py`):
+- Implement `api.PduDriver` for the class: `list_outlets`, `read_states`, `set_state`; the constructor takes the `options` dict and raises `ValueError` on invalid config (the adapter logs a line and skips the PDU entry).
+- Wrap the device-wide read path with `readbackoff.ReadBackoff`: while `in_backoff()` is true, do no device IO and return `None` from `read_states()`. Call `note_failure()` and also return `None` on a device-wide read failure (connection refused, timeout, whole-device error). Call `note_success()` on a device-wide successful read. Per-outlet failures ride as reading errors and do not touch the window.
+- Expose an `info()` function that returns the Config Editor metadata: `label`, `description`, `options_keys` (one entry per supported key: `key`, `type`, `default`, `help`), and `options_example`.
+- Register the module at the bottom of `openmux/server/adapters/pdu.py`: import it, then add one line to `DRIVERS` (key -> class) and one to `DRIVER_INFO` (key -> `info`). The Config Editor driver select and the per-driver options help update automatically from the registry.
+- Static discovery (discovery is `list_outlets()`'s job; the `command` driver uses the configured outlet list) and option validation are the driver's responsibilities.
+
+Example port mapping:
+```yaml
+serial_ports:
+  - name: console1
+    device: "/dev/ttyS0"
+    power: ["rack1.3", "phaseA.A1"]   # dual feed
+```
+
+The telnet, SSH, and CLI-client escape menus have a `p` command for power. It shows an interactive menu of the feeds for the console you are attached to, numbered one per line with an on/off tag (for example ` 1  [on]   rack1.1`). Enter a number to toggle that feed. Enter `a` to toggle all feeds of the console. Press Enter to leave the menu without a change; the menu ends with an `[EXITING POWER]` marker. Switching needs the same access as the `POWER` command above. The CLI client sends the request and switch as OMXCTRL control frames, so it works over both the TCP client protocol and the WebSocket protocol; the unimplemented playback `p`/`P` placeholders it used are removed. Every attached session (CLI client, client listener, telnet, SSH, web console) also gets the live `[POWER]` / `[POWER WARNING]` notice when a feed changes under it. See [../GLOSSARY.md](../GLOSSARY.md) for the terms PDU, outlet, outlet id, outlet ref, and feed.
+
+Federation: when a port federates across MuxCon, its declared power feeds and the origin node's last-reported outlet state travel with the port (a `POWER:STATE` control frame carries live changes). A peer renders the feed badge, the `/api/ports` power block, and the `p` power menu for a federated port as it does for a local one, and the state survives a peer restart via the federated cache. The peer shows the origin's state only (no origin PDU list, telemetry, or watts). Federated feeds are named with the **global ref** form `<origin_server_id>::<pdu>.<outlet>` (the same `::` origin convention as the federation display strings), so an outlet of the same name on two nodes never collides: a bare ref always means this node's own outlet, and a federated feed is switched by its global name (for example `POWER peerO::rack1.1 off`). Switching an origin-owned outlet is possible from a peer when the user holds an open read-write console session on a fed port that the outlet feeds — the switch relays to the origin node over `POWER:SWITCH` / `POWER:RESULT` and executes there (web in-session power menu, `POWER` command, telnet/SSH/CLI `p` menu), like a local outlet. The origin refuses when the user cannot open every console the outlet feeds that it knows of, and names those consoles in the refusal. The web Power REST page (no console session to anchor on) stays read-only for such refs, replying with one typed error naming the origin node. Feed-list config edits on the origin reach peers at the next re-advertise. See [../design/muxcon.md](../design/muxcon.md) section 4.5 (state) and section 4.6 (switch relay) for the wire format and the one-hop state limit.
+
+Follow-on work beyond v1 (vendor drivers like Raritan and APC, more listener surfaces, metrics history, multi-hop live-power relay) is tracked in [../power-roadmap.md](../power-roadmap.md). The user-defined `command` driver covers devices that expose a CLI; vendor drivers cover managed PDUs with an SNMP or vendor API.
+
 ## Configuration Validation
 
 At startup, each adapter validates its configuration and the server reports clear errors for:

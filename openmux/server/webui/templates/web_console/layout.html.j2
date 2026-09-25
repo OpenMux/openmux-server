@@ -32,13 +32,13 @@
           </a>
           {% if plugin_nav and plugin_nav|length > 0 %}
             {% for item in plugin_nav %}
+              {# config-editor renders in its own block below; Power renders as an
+                 expandable block below Console (see sidebar-console-area) #}
               {% set required = item.require %}
-              {% if not required or required == user_permission %}
-                {% if item.path != '/config-editor' %}
-                  <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="{{ base_path }}{{ item.path }}">
-                    <span class="icon">🔌</span> {{ item.title }}
-                  </a>
-                {% endif %}
+              {% if (not required or required == user_permission) and item.path not in ('/config-editor', '/power') %}
+                <a class="nav-item {% if active_page == item.path %}active{% endif %}" href="{{ base_path }}{{ item.path }}">
+                  <span class="icon">🔌</span> {{ item.title }}
+                </a>
               {% endif %}
             {% endfor %}
           {% endif %}
@@ -46,7 +46,8 @@
         <!-- Console: fills remaining space; port list scrolls within -->
         <div class="sidebar-console-area">
           <div class="nav-item-row">
-            <a class="nav-item {% if active_page == 'console' %}active{% endif %}" href="{{ base_path }}/console" onclick="onConsoleNavClick(event)">
+            <!-- Active only on the port-less landing; the port rows carry the highlight otherwise -->
+            <a class="nav-item {% if active_page == 'console' and not current_port %}active{% endif %}" href="{{ base_path }}/console" onclick="onConsoleNavClick(event)">
               <span class="icon">💻</span> Console
             </a>
             <button class="nav-expand" id="console-expand-btn" onclick="toggleConsolePorts(event)" title="Show ports">+</button>
@@ -67,6 +68,33 @@
               <div class="nav-sub-empty">No ports</div>
             {% endif %}
           </div>
+          <!-- Power: expandable like Console; one link per configured PDU, rebuilt per request -->
+          {% if plugin_nav and plugin_nav|length > 0 %}
+            {% for item in plugin_nav %}
+              {% if item.path == '/power' %}
+                {% set required = item.require %}
+                {% if not required or required == user_permission %}
+                  <div class="nav-group">
+                    <div class="nav-item-row">
+                      <a class="nav-item {% if active_page == 'power' %}active{% endif %}" href="{{ base_path }}/power" onclick="onPowerNavClick(event)" id="nav-power-parent">
+                        <span class="icon">⚡</span> {{ item.title }}
+                      </a>
+                      <button class="nav-expand" id="power-expand-btn" onclick="togglePowerMenu(event)" title="Show PDUs">+</button>
+                    </div>
+                    <div class="nav-sub" id="power-pdus" style="display:none">
+                      {% if item.links %}
+                        {% for pname in item.links %}
+                          <a class="nav-sub-item {% if pdu_name == pname %}active{% endif %}" href="{{ base_path }}/power/{{ pname }}" data-pdu-name="{{ pname }}">{{ pname }}</a>
+                        {% endfor %}
+                      {% else %}
+                        <div class="nav-sub-empty">No PDUs configured</div>
+                      {% endif %}
+                    </div>
+                  </div>
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
         </div>
         <!-- Config editor: pinned above footer, admin-only, expands upward -->
         {% if plugin_nav and plugin_nav|length > 0 %}
@@ -84,6 +112,7 @@
                     </div>
                     <div class="nav-sub" id="config-menu" style="display:none">
                       <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=ports" id="nav-config-ports">Ports</a>
+                      <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=power" id="nav-config-power">Power</a>
                       <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=listeners" id="nav-config-listeners">Listeners</a>
                       <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=muxcon" id="nav-config-muxcon">Muxcon</a>
                       <a class="nav-sub-item" href="{{ base_path }}{{ item.path }}?view=actions" id="nav-config-actions">Actions</a>

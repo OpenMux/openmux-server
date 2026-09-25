@@ -50,6 +50,24 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Telnet listener | The adapter that accepts inbound Telnet client connections to a port. | — |
 | Web console | The adapter that gives the HTML5 web interface and its plugins (for example the Config Editor). | web UI, web interface (use "web console") |
 | Web status | The adapter that gives a lightweight HTTP status/API endpoint. | — |
+| PDU adapter | The portless adapter (config section `power`) that manages PDU outlets via a driver interface. It is not a console port adapter. | power adapter (use "PDU adapter") |
+
+## PDU Power
+
+| Term | Meaning | Do not use |
+|---|---|---|
+| PDU | A power distribution unit managed by the `power` adapter. | power supply, power unit (for a managed unit) |
+| PDU adapter | The portless built-in adapter (config section `power`) that manages PDUs and their outlets. | power adapter (when meaning the PDU one), outlet adapter |
+| Power driver | A backend module under `power_drivers/` that implements the PDU driver API for one device class. Selected per PDU entry with `driver:` (for example `dummy`, `command`). Not a port adapter: the "command adapter" is the console-port adapter for shell commands and is unrelated. | PDU backend, power plugin |
+| Outlet | A single switchable circuit on a PDU. Not a console port; never listed in `LIST` output. | breaker slot, socket, plug |
+| Outlet id | The device's own id for an outlet: a free string (for example `1` or `A1`), discovered from the device. Users annotate, not name, outlets. | outlet name (the id is the identity), outlet number (ids are strings) |
+| Outlet ref | The single canonical outlet identifier used by the CLI, the web API, and port `power:` keys. A local ref is `<pdu_name>.<outlet_id>` (for example `rack1.3`); a federated feed of an origin node is globally qualified (`Global outlet ref`). The two forms never collide because a local pdu name cannot contain `::`. | outlet (when the pair is meant), feed ref |
+| Global outlet ref | `<server_id>::<pdu_name>.<outlet_id>` (for example `peerO::rack1.3`): an outlet of a federated origin node, qualified with that node's server id so the same outlet name on two nodes stays unambiguous (MuxCon outlet federation). The `::` form is this convention's origin separator, shared with the federation display strings. A bare (unprefixed) ref always means this node's own outlet. | origin-qualified ref, remote ref (say "global ref") |
+| Feed | One outlet power source declared on a console port's `power:` list. A port declares one or more feeds (dual feed = A/B). | power feed is fine; avoid "line" or "cable" |
+| Power page | The web console "Power" menu and its PDU list + per-PDU pages (core web console routes, not a plugin). | power monitor UI, power tab |
+| Power badge | The console session header chip showing this port's feed state (green all on, yellow partial, red all off, grey unknown). | power indicator, power dot (that is the status-page cell) |
+| `POWER` command | The client-listener text command that lists or switches outlets. | power command (use the exact form) |
+| MuxCon outlet federation | The feature that makes a federated console port's declared power feeds and the origin node's last-reported outlet state visible across a federation. A user with an open read-write console session on a fed port can also switch those outlets; the peer relays the switch, and the origin node runs and audits it. | federated PDU, power federation (say "outlet federation") |
 
 ## MuxCon Federation
 

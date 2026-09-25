@@ -187,6 +187,100 @@ if (viewersBadge) viewersBadge.addEventListener('click', (e) => {
   if (viewersMenu) viewersMenu.style.display = opening ? 'block' : 'none';
 });
 document.addEventListener('click', () => closeViewersMenu());
+
+// PDU power badge (PDU feature): tinted chip in the header for console ports
+// that declare a `power:` feed. State comes from the server's per-port meta
+// frames (`msg.power`: feeds/feeds_on/feeds_total/state/all_power_lost).
+// Click opens a per-outlet menu (On/Off for read-write, view-only otherwise).
+const powerBadgeWrap = document.getElementById('powerBadgeWrap');
+const powerBadge = document.getElementById('powerBadge');
+const powerBadgeLabel = document.getElementById('powerBadgeLabel');
+const powerMenu = document.getElementById('powerMenu');
+const powerMenuList = document.getElementById('powerMenuList');
+let powerState = null; // last { feeds, feeds_on, feeds_total, state, all_power_lost }
+function closePowerMenu() { if (powerMenu) powerMenu.style.display = 'none'; }
+function updatePowerBadge(power) {
+  powerState = (power && power.state) ? power : null;
+  if (!powerBadgeWrap) return;
+  if (!powerState || !powerState.feeds || powerState.feeds.length === 0) {
+    powerBadgeWrap.style.display = 'none';
+    if (powerBadge) powerBadge.className = 'ro-indicator power-badge';
+    return;
+  }
+  const s = powerState.state; // all | some | none | unknown
+  powerBadgeWrap.style.display = '';
+  powerBadgeLabel.textContent = powerState.feeds_on + '/' + powerState.feeds_total;
+  if (powerBadge) {
+    powerBadge.className = 'ro-indicator power-badge ' + (s === 'all' ? 'all' : s === 'some' ? 'some' : s === 'none' ? 'none' : 'unknown');
+    powerBadge.title = (s === 'none' ? 'ALL POWER LOST - ' : 'PDU power: ') + powerState.feeds_on + ' of ' + powerState.feeds_total + ' feeds on';
+  }
+  renderPowerMenu();
+}
+function renderPowerMenu() {
+  if (!powerMenuList) return;
+  powerMenuList.innerHTML = '';
+  if (!powerState) { powerMenuList.style.display = 'none'; return; }
+  // Outlet federation: a federated (remote) port's feeds show the origin's
+  // last-reported state with the same toggle buttons. The switch travels
+  // over the core OMXCTRL power_switch control frame on this console
+  // WebSocket (the same path the p power menu uses): it carries the
+  // session, so a federated feed can relay over the federation
+  // (POWER:SWITCH). The standalone /power REST page stays read-only for
+  // remote refs (no session to bind).
+  powerState.feeds.forEach((f) => {
+    const row = document.createElement('div');
+    const stateTxt = (f.on === true) ? 'on' : (f.on === false ? 'off' : 'unknown');
+    const watts = (f.watts !== null && f.watts !== undefined) ? ' - ' + Math.round(f.watts) + ' W' : '';
+    row.textContent = f.ref + '  ' + stateTxt + watts;
+    row.style.marginBottom = '2px';
+    if (clientMode === 'read-write') {
+      // Per-outlet On/Off button for read-write users, sent as an OMXCTRL
+      // power_switch frame (core console path; no REST, no CSRF).
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ro-menu-item';
+      btn.textContent = (f.on === true) ? 'Turn off ' + f.ref : 'Turn on ' + f.ref;
+      btn.style.marginTop = '2px';
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        closePowerMenu();
+        powerToggleOutlet(f.ref, f.on !== true);
+      });
+      row.appendChild(btn);
+    }
+    powerMenuList.appendChild(row);
+  });
+  powerMenuList.style.display = '';
+}
+// The reply arrives as an OMXCTRL frame handled in the ws.onmessage
+// dispatch below (msg.type === 'power_switch').
+function powerToggleOutlet(ref, on) {
+  if (!isConnected()) {
+    try { window.alert('Power request not sent: console connection is not open'); } catch (_) {}
+    return;
+  }
+  try {
+    ws.send('OMXCTRL ' + JSON.stringify({ type: 'power_switch', ref: ref, on: on }));
+  } catch (e) {
+    try { window.alert('Power request not sent: ' + e); } catch (_) {}
+  }
+}
+if (powerBadge) powerBadge.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const opening = powerMenu && powerMenu.style.display === 'none';
+  if (opening) {
+    hideCtrlMenu(); closeRoMenu(); closeViewersMenu();
+    renderPowerMenu();
+  }
+  if (powerMenu) powerMenu.style.display = opening ? 'block' : 'none';
+});
+document.addEventListener('click', () => closePowerMenu());
+// Seed the badge from the initial ports snapshot (the meta WS only updates
+// on change, so the first paint must come from the list data).
+(function () {
+  const meta = (ports || []).find(p => p.name === currentPort()) || null;
+  if (meta && meta.power) updatePowerBadge(meta.power);
+})();
 function updateCtrlMenuButtons() {
   const isRW = (clientMode === 'read-write');
   if (ctrlReqRW) ctrlReqRW.style.display = isRW ? 'none' : '';
@@ -1422,6 +1516,18 @@ function connectSelected() {
       try {
         const payload = ev.data.slice('OMXCTRL '.length);
         const msg = JSON.parse(payload);
+        if (msg && msg.type === 'power_switch') {
+          if (msg.ok === false) {
+            let m = (msg && msg.error) ? msg.error : 'power switch failed';
+            const im = (msg && msg.impact) ? msg.impact : null;
+            if (im && im.losing_power && im.losing_power.length) {
+              m += ' - consoles losing ALL power: ' + im.losing_power.map(function (x) { return x.port; }).join(', ');
+            }
+            try { term.write('\r\n[POWER error: ' + m + ']\r\n'); } catch (_) {}
+            try { window.alert('Power change failed: ' + m); } catch (_) {}
+          }
+          return;
+        }
         if (msg && msg.type === 'rw_holders') {
           updateRoMenuInfo(msg.holders, msg.max_rw_users);
           return;
@@ -1509,6 +1615,7 @@ function connectSelected() {
           applyIf('server_chain');
           applyIf('last_seen');
           applyIf('readiness');
+          applyIf('power'); // PDU feeds (PDU feature): live state from the server
           // status_message (issue #57): the server omits the key when the port
           // is healthy, so drop it explicitly when a snapshot clears it.
           if (Object.prototype.hasOwnProperty.call(msg, 'status_message')) {
@@ -1521,6 +1628,19 @@ function connectSelected() {
             ports.push(merged);
           }
           if (currentPort() === msg.name) updatePortDisplay();
+          // PDU power (PDU feature): the `power` feed state rides every meta
+          // frame for a mapped port, so the header badge re-derives from it.
+          if (currentPort() === msg.name && merged.power) {
+            const p = merged.power;
+            updatePowerBadge(p);
+            // Visible console notice when ALL power to this console is lost
+            // or restored (plan: push a warning on any all-power-loss event).
+            if (p.all_power_lost) {
+              try { term.write('\r\n[POWER WARNING: all power feeds are OFF - ' + (p.feeds_total || 0) + ' feed(s) down]\r\n'); } catch (_) {}
+            } else if (powerState && powerState.all_power_lost) {
+              try { term.write('\r\n[POWER restored: ' + p.feeds_on + '/' + p.feeds_total + ' feed(s) on]\r\n'); } catch (_) {}
+            }
+          }
           // Track port-up/down for selected port
           if (currentPort() === msg.name) {
             portIsUp = !!merged.connected;

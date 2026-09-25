@@ -8,6 +8,114 @@ Update rule: after committing a user-visible change, add one entry to the curren
 
 Changes since v1.0.3 (2026-09-17).
 
+### New
+
+- **PDU power `command` driver.** The `power:` section gains `driver: command`:
+  configure CLI commands that read outlet states and switch outlets, so GPIO scripts on a Raspberry Pi, custom USB power devices, or any other user-wired tool works as a PDU backend. Commands run without a shell, in a sanitized environment, with a per-command timeout (the command's process group is killed on timeout); per-outlet state commands run under a bounded concurrency (`max_parallel`, default 4); repeated device-wide read failures put the driver into a read backoff (30 s doubling to a 5 min cap) so a dead device is not hammered. Outlets are declared in the PDU `options`: one PDU-level set template (`on_cmd`/`off_cmd`, with a `{outlet_id}` placeholder) plus one batch `state_cmd` (prints `<id> <state>` per outlet), or per-outlet `on_cmd`/`off_cmd`/`state_cmd`/`state_pattern`; per-outlet values win. No config change is required for existing `dummy` PDUs. See `docs/configuration/adapters.md` (PDU Power, "Command driver").
+
+- **PDU `command` driver: connection fields, device index, pattern state output, extensible state tokens.** `power:` PDUs with `driver: command` gain four optional `options` keys and one optional per-outlet key: `host`, `username`, `password` (substituted as `{host}`/`{username}`/`{password}` into the commands and exported to them as `PDU_HOST`/`PDU_USERNAME`/`PDU_PASSWORD`; a user `env` entry wins; `host` is required when the placeholders are used); per-outlet `index` + the `{outlet_index}` placeholder (maps an outlet ref to the device's own outlet index/name; a set command that uses `{outlet_index}` on an outlet without `index` is a startup error, `state_cmd` may not contain it; batch reads match the line's id against ids AND indexes, checked for collisions at startup); PDU-level `state_pattern` (line regex with named groups `id` + `value` that parses a `state_cmd` in the device's own format, e.g. `snmpwalk` output); `state_token_on`/`state_token_off` (extra state tokens, case-insensitive, extending the built-in on/off tables — set `state_token_off: ["2"]` for PowerNet's 1=on/2=off enum). Existing command-PDU configs are unchanged in meaning (the built-in token table and `{outlet_id}` semantics are identical to before). This lets an SNMP rack PDU (for example the APC NetManager line) be configured entirely from YAML: `on_cmd`/`off_cmd` with OIDs and community in the command, one `snmpwalk` as `state_cmd`, plus `state_pattern` + `state_token_off`. See `config/server.yaml` (commented `apc01` example) and `docs/configuration/adapters.md`.
+
+### Behavior changes (no config change required)
+
+- **The web Power pages and API are core, not a plugin.** The standalone
+  `/power` and `/power/{pdu}` pages, `GET /api/power`,
+  `POST /api/power/outlets/{ref}`, and `GET /ws/power` are now registered by
+  the web console itself: no `web_console.plugins` entry is needed (an
+  existing one is ignored), and a `power:` section added or removed on a soft
+  reload takes effect without a restart (the routes reply 404 - "Power
+  management is not configured" - while no PDU adapter is active). The
+  "Power" sidebar item is emitted live per page when a PDU adapter is
+  enabled, like the in-session badge and menu, which already used the core
+  OMXCTRL `power_switch` frame. The standalone REST route stays read-only for
+  federated outlets (it has no console session to anchor the relay on). No
+  config change is required.
+
+- **Power outlet switching is scoped to console groups.** A `read-write` user
+  may now switch an outlet only if the user can open every console the outlet
+  feeds, using the same console-access rules as attach time
+  (`read_write_groups` / `read_only_groups` and `access_default`). Switching an
+  outlet that feeds a console outside the user's groups now requires `admin`.
+  Affected surfaces: the web API `POST /api/power/outlets/{ref}` (now returns
+  403) and the client-listener command `POWER <pdu>.<outlet> on|off` (now
+  replies with an `ERROR:POWER` line naming the out-of-group consoles). No
+  config change is required. An outlet that feeds no console stays switchable
+  by any read-write user.
+
+- **PDU power state federates across MuxCon (console ports only).** A federated
+  console port now carries the origin node's declared power feeds and its
+  last-reported outlet state. A peer renders the same feed badge,
+  `/api/ports` power block, `p` power menu, and live `[POWER]` /
+  `[POWER WARNING]` terminal notices for a federated port as for a local one;
+  the state also survives a peer restart (federated cache). Federated feeds
+  are named globally as `<origin_server_id>::<pdu>.<outlet>` (the same `::`
+  origin convention as the federation display strings, in the badge and
+  menu, `/api/ports`, the `p` menu, and the `POWER` command); a bare ref
+  always means this node's own outlet, so two nodes with a same-named
+  outlet coexist. The origin segment accepts a dotted FQDN (a server id
+  such as `openmux.example.com`): the first `::` is the separator and only
+  the local `<pdu>.<outlet>` half must be single-dotted. Live outlet
+  changes travel in a new `POWER:STATE:<port>`
+  MuxCon control frame (one JSON line per change, per outlet ref) and are
+  applied sender-scoped, so one origin's update never touches another
+  origin's same-named ref. MuxCon peers from before this release do not
+  exchange federated power state (mixed-version limitation). The origin's
+  PDU catalog, telemetry, and watts are not federated. No config change is
+  required for nodes that already run the `power:` section and MuxCon
+  federation. State flows one hop (origin to direct peers); a deeper chain
+  does not see live state today. See `docs/design/muxcon.md` section 4.5
+  and `docs/configuration/adapters.md` (PDU Power, "Federation").
+
+- **Peers can now switch origin-owned outlets from a session (outlet
+  federation, MuxCon only).** A ref declared only on a federated port no
+  longer always refuses on a peer. A user who holds an open read-write
+  console session on a fed port that the outlet feeds can now switch that
+  outlet from every in-session switch surface (web in-session power menu and
+  browser `/ws/<port>`, client-listener `POWER <ref> on|off`, telnet/SSH/CLI
+  `p` menu) — the same rule as on a local outlet, extended over the
+  federation. The switch is anchored on that already-open console session
+  (no username crosses the wire), sent in a new `POWER:SWITCH` control
+  frame that carries the origin's local ref and plain port-name claims, and
+  executed on the origin node under the session's federated mirror client
+  id (audited there). From the client listener, switch a federated outlet
+  by its global name (for example `POWER peerO::rack1.1 off`); a bare name
+  switches this node's own outlet. The origin re-checks that the user can
+  open every console the outlet feeds *that it knows of* (including
+  consoles not federated to the requesting node) and answers with a typed
+  `POWER:RESULT` refusal naming any console the requester cannot see. The
+  web Power REST page (`POST /api/power/outlets/{ref}`) has no console
+  session to anchor on, so it stays read-only for such refs (same typed
+  refusal as before). A ref also declared on a local port still switches
+  locally on this node. No config change is required; the peer waits on new
+  optional `muxcon.power_switch_timeout_sec` (default 5.0) for the origin's
+  reply. See `docs/design/muxcon.md` sections 4.5/4.6 and
+  `docs/configuration/adapters.md` (PDU Power, "Federation").
+
+### Web console and observability
+
+- **New: PDU power control** (a new user-facing feature). Add a `power:` section to `server.yaml` to manage one or more PDUs (v1 ships the `dummy` driver). A "Power" item appears in the web console sidebar (below the Console section, expandable to list every PDU) when the section is present, with a PDU list and per-PDU outlet pages (on/off, watts/volts/amps, and which consoles each outlet feeds). Console ports declare their power feeds with a new optional `power: ["<pdu>.<outlet>", ...]` key (`serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`); the web console header and status page show a power dot per console (green all feeds on, yellow partial, red all off, grey unknown), the console header badge has a per-outlet on/off menu, and any power change messages every attached session of every affected console. A new `POWER` command on the client listener lists or switches outlets (switching needs read-write). The Config Editor gains a "Power" view (`/config-editor?view=power`) that edits the section, and a per-port "Power feeds" field on the Ports view; a Soft Reload reconciles the section. See `docs/configuration/adapters.md` (PDU Power) and `docs/GLOSSARY.md`.
+
+- **POWER control over telnet and SSH.** The telnet and SSH listeners now
+  support power (not only the client listener and the web console). Open the
+  escape menu (default `Ctrl-E` then `c`) and press `p`: an interactive menu
+  lists the feeds of the console you are attached to, numbered one per line
+  with an on/off tag. Enter a number to toggle that feed, `a` to toggle all
+  feeds of the console, or Enter to leave without a change. The live
+  `[POWER]` / `[POWER WARNING]` notice reaches telnet and SSH sessions, and
+  the same `read-write`/console-group access rules apply as on every other
+  surface. The client-listener `POWER` command keeps its text forms
+  (`POWER`, `POWER <pdu>`, `POWER <ref>`, `POWER <ref> on|off`). No config
+  change is required.
+
+- **POWER control on the OpenMux CLI client.** The CLI client
+  (`openmux client`) now has the same `p` power menu in its escape menu, and
+  it works over both the TCP client protocol and the WebSocket protocol. Press
+  `p` after attaching: the numbered feed list (a number toggles a feed, `a`
+  toggles all, Enter leaves with an `[EXITING POWER]` marker) behaves exactly
+  like the telnet/SSH menu, including the live `[POWER]` / `[POWER WARNING]`
+  notice. Switching enforces the same `read-write`/console-group access rules
+  on the server. The CLI client's old unimplemented playback `p`/`P` escape
+  commands are removed. No config change is required.
+
 ## [1.0.3]
 
 Changes since v1.0.2 (2026-08-27).

@@ -233,6 +233,21 @@ body.mode-readonly header.site { background: #2a2200; border-bottom-color: #6b5a
 .tag.bad { background: var(--status-err-bg); color: var(--status-err-text); }
 .tag.muted { background: var(--bg-hover); color: var(--text-dim); }
 
+/* PDU power indicators (PDU feature): colored dots on the status page and
+   the console header badge. Green = all feeds on, yellow = partial,
+   red = none on, grey = unknown. */
+.power-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--text-dim); margin-right: 6px; vertical-align: baseline; }
+.power-dot.all { background: var(--status-ok-bg); }
+.power-dot.some { background: var(--status-warn-bg); }
+.power-dot.none { background: var(--status-err-bg); }
+
+/* Console header power badge: reuses the ro-indicator button shape, tinted
+   by state. Toggles a per-outlet menu (see console.js). */
+.ro-indicator.power-badge { cursor: pointer; font-size: 12px; padding: 2px 8px; border: 1px solid var(--border-color, #444); border-radius: 10px; background: var(--bg-hover); color: var(--text-main); }
+.ro-indicator.power-badge.all { border-color: var(--status-ok-text); color: var(--status-ok-text); }
+.ro-indicator.power-badge.some { border-color: var(--status-warn-text); color: var(--status-warn-text); }
+.ro-indicator.power-badge.none { border-color: var(--status-err-text); color: var(--status-err-text); }
+
 .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .chip { display: inline-block; padding: 4px 8px; border-radius: 14px; background: var(--bg-hover); color: var(--text-main); border: 1px solid var(--border-color); font-size: 12px; }
 .chip.ok { border-color: var(--status-ok-text); }
@@ -331,7 +346,7 @@ body.mode-readonly header.site { background: #2a2200; border-bottom-color: #6b5a
 .sidebar-static { padding: 4px 8px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; }
 .sidebar-console-area { flex: 1; min-height: 80px; display: flex; flex-direction: column; overflow: hidden; padding: 0 8px; }
 .sidebar-console-area .nav-item-row { flex-shrink: 0; padding-top: 4px; }
-.sidebar-console-area .nav-sub { flex: 1; overflow-y: auto; min-height: 0; }
+.sidebar-console-area #console-ports { flex: 1; overflow-y: auto; min-height: 0; }
 .sidebar-config-area { flex-shrink: 0; border-top: 1px solid var(--border-color); padding: 4px 8px; }
 .sidebar-footer { padding: 8px; border-top: 1px solid var(--border-color); }
 

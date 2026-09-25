@@ -180,6 +180,13 @@ async def test_view_happy_path_unchanged():
     assert response.content_type == "text/html"
     body = response.body.decode("utf-8")
     assert "OpenMux Config Editor" in body
+    # The PDU power view and its driver catalog render into the bootstrap.
+    # The driver list is the single source of truth for the driver select,
+    # so a new driver added in pdu.py shows up here without a template edit.
+    assert 'id="view-power"' in body
+    assert "powerDrivers" in body
+    assert '"driver": "dummy"' in body
+    assert "options_keys" in body
     # No error logging on the happy path
     assert not adapter.logger.error.call_args_list
 

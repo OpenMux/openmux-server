@@ -183,6 +183,7 @@ CONTROL_MENU_HELP = (
     "u  Show who is viewing this port\r\n"
     "i  Show session info\r\n"
     "v  Show version\r\n"
+    "p  Power (this console's feeds: number = toggle, a = all)\r\n"
     "e  Change escape sequence\r\n"
     ".  Disconnect\r\n"
     "?  Show this menu\r\n"
@@ -194,13 +195,14 @@ CONTROL_MENU_HELP = (
 TAKE_TARGET_PROMPT = "[Take from holder (client_id, or Enter for latest): ]"
 
 
-async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], bool]:
-    """Prompt for the client_id a write-slot takeover should target (issue #61).
+async def read_prompt_line(reader: Any, writer: Any, prompt: str) -> Tuple[Optional[str], bool]:
+    """Prompt for one input line, echoing each typed byte as it arrives.
 
-    Shared by the telnet and SSH listeners' `f` command: both feed stdin
-    through an `asyncio.StreamReader`-style `read(n)`, so the prompt loop is
-    transport-agnostic. Echoes each typed byte, strips CR/LF, and stops at
-    the first newline.
+    Shared by the telnet and SSH interactive prompts (write-slot takeover
+    target, the `p` power menu): both feed stdin through an
+    `asyncio.StreamReader`-style `read(n)`, so the loop is transport-agnostic.
+    CR/LF terminate the line; CR alone is handled because telnet clients send
+    ``\r\n``.
 
     Args:
         reader: Object with `async read(n)` returning bytes (``b""`` at EOF).
@@ -209,24 +211,25 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
             forwarding path, which would leak them to the port).
 
     Returns:
-        Tuple[Optional[str], bool]: (target or None for the no-target
-        fallback, keep_going). `keep_going` is False only when the client
-        disconnected while answering; the caller should stop pumping.
+        Tuple[Optional[str], bool]: (line or None, keep_going). The line is
+        ``''`` when the client pressed Enter at an empty prompt. `keep_going`
+        is False only when the client disconnected while answering; the caller
+        should stop pumping.
     """
-    writer.write(TAKE_TARGET_PROMPT.encode())
+    writer.write(prompt.encode())
     try:
         await writer.drain()
     except Exception:
         # justification: best-effort prompt echo; the client may have left mid-prompt
         pass
-    target = ""
+    line = ""
     while True:
         try:
             data = await reader.read(1)
         except Exception:
-            return None, True
+            return line, True
         if not data:
-            return None, False  # client left mid-prompt
+            return line, False  # client left mid-prompt
         ch = data[:1]
         if ch in (b"\r", b"\n"):
             writer.write(b"\r\n")
@@ -235,7 +238,7 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
             except Exception:
                 # justification: best-effort prompt echo; the client may have left mid-prompt
                 pass
-            return target or None, True
+            return line, True
         if ch in (b"\x7f", b"\x08"):  # backspace: erase the echoed byte
             writer.write(b"\b \b")
             try:
@@ -243,8 +246,8 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
             except Exception:
                 # justification: best-effort prompt echo; the client may have left mid-prompt
                 pass
-            if target:
-                target = target[:-1]
+            if line:
+                line = line[:-1]
             continue
         writer.write(ch)
         try:
@@ -252,7 +255,20 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
         except Exception:
             # justification: best-effort prompt echo; the client may have left mid-prompt
             pass
-        target += ch.decode("latin1", errors="ignore")
+        line += ch.decode("latin1", errors="ignore")
+
+
+async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], bool]:
+    """Prompt for the client_id a write-slot takeover should target (issue #61).
+
+    Shared by the telnet and SSH listeners' `f` command; wraps
+    `read_prompt_line` and normalizes an empty answer to None (the no-target
+    fallback: take the most recently attached holder).
+    """
+    raw, keep_going = await read_prompt_line(reader, writer, TAKE_TARGET_PROMPT)
+    if not keep_going:
+        return None, False
+    return raw or None, True
 
 
 def format_rw_notice(payload: Dict[str, Any]) -> str:
@@ -363,6 +379,9 @@ __all__ = [
     "EscapeState",
     "feed_escape_byte",
     "CONTROL_MENU_HELP",
+    "TAKE_TARGET_PROMPT",
+    "read_prompt_line",
+    "read_take_target",
     "format_rw_notice",
     "format_viewer_label",
     "format_viewers_notice",

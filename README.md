@@ -114,6 +114,7 @@ Recommended dependency model:
 
 ### Server
 - **Modular Adapter System**: Support for serial devices, SSH/Telnet, TCP/SSL connections, and loopback testing
+- **PDU power control**: A `power` adapter with a driver interface (dummy driver in v1) that lists and switches PDU outlets, shows watts/volts, maps consoles to their power feeds, and exposes a Power menu, a power badge, and a `POWER` CLI command
 - Authentication with username/password or API key
 - Dynamic configuration reloading without disconnecting clients
 - Multiple serial ports active simultaneously
@@ -376,7 +377,7 @@ The client uses a two‑character escape sequence to issue local commands.
   - `i`: Show connection info
   - `w`: Who is using this console [not implemented]
   - `v`: Show version
-  - `p` / `P`: Playback last N lines [not implemented] / Set playback lines
+  - `p`: Power menu for this console's feeds (a number = toggle a feed, `a` = toggle all, Enter = exit)
   - `r` / `R`: Replay last N lines [not implemented] / Set replay lines
   - `l`: List break sequences [not implemented]
   - `o`: Reconnect to session (manual reconnect)

@@ -55,6 +55,7 @@ _KNOWN_ADAPTER_TYPES: FrozenSet[str] = frozenset(
         "openmuxclient",
         "telnetlistener",
         "sshlistener",
+        "power",
     }
 )
 
@@ -76,6 +77,7 @@ _KNOWN_CONFIG_SECTIONS: FrozenSet[str] = frozenset(
         "web_console",
         "web_status",
         "port_actions",
+        "power",
     }
 )
 

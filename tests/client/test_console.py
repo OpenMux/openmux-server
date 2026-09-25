@@ -9,6 +9,7 @@ import select
 import sys
 import termios
 import tty
+import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -454,3 +455,348 @@ class TestTakeTargetInput:
             help_text = mock_stdout.getvalue()
         assert "take the write slot" in help_text
         assert "holder id" in help_text
+
+
+def _make_ui(current_port="c1", feeds_reply=None, switch_out=True, supported=True):
+    """Build a ConsoleUI over a fake connection that models the
+    single-reader power flow.
+
+    The fake connection mimics the client adapters: a power OMXCTRL frame
+    arrives on `last_power_reply` (never as console bytes), and the plain
+    follow-up bytes (the live [POWER] notice) are delivered through
+    `read_data` a short beat after the reply - exactly like the server sends
+    them and the background console loop renders them. The test's
+    `_fake_console_bg` task plays that sole background reader. `_stdin_fd` is
+    None so the menu reads stdin through the (patched) `sys.stdin.read`.
+    `supported=False` omits the power methods to exercise the "not supported
+    by this connection" guard.
+    """
+    from openmux.client.console import ConsoleUI
+
+    class FakeConnection:
+        def __init__(self):
+            self.is_connected = True
+            self.is_authenticated = True
+            self.last_power_reply = None
+            self.current_port = current_port
+            self._pending_reply = None
+            self._notice = None
+            self._notice_at = None
+            self._switch_plan = []
+            self._query_calls = 0
+            self._switch_calls = []
+            self._switch_out = switch_out
+            self.rendered = []
+            self.read_calls = 0  # regression guard: who reads the stream
+
+        def plan_switch(self, notice, reply, notice_delay=0.06):
+            """Stage one switch round-trip: `reply` (power_switch dict) lands
+            on `last_power_reply` when the next switch_power_outlet call is
+            made, and `notice` (plain bytes or None) is delivered through
+            read_data `notice_delay` seconds later - mirroring the server,
+            which sends the live notice next to the reply."""
+            self._switch_plan.append((notice, reply, notice_delay))
+
+    async def _switch_power_outlet(conn, ref, on):
+        conn._switch_calls.append((ref, bool(on)))
+        if conn._switch_plan:
+            notice, reply, delay = conn._switch_plan.pop(0)
+            conn._pending_reply = (reply, notice, asyncio.get_event_loop().time() + delay)
+        return conn._switch_out
+
+    async def _request_power_feeds(conn):
+        conn._query_calls += 1
+        return True
+
+    async def _read_data(conn, timeout=None):
+        conn.read_calls += 1
+        await asyncio.sleep(0)  # yield so the menu's poll ticks can run
+        loop = asyncio.get_event_loop()
+        if conn._pending_reply is not None:
+            reply, notice, at = conn._pending_reply
+            conn._pending_reply = None
+            # Model the adapter's interception: stored, not console bytes.
+            conn.last_power_reply = reply
+            if notice is not None:
+                conn._notice = notice
+                conn._notice_at = at
+            return b""
+        if conn._notice_at is not None and loop.time() >= conn._notice_at:
+            conn._notice_at = None
+            notice = conn._notice
+            conn._notice = None
+            return notice
+        return b""
+
+    conn = FakeConnection()
+    if feeds_reply is not None:
+        conn._pending_reply = (feeds_reply, None, None)
+    if supported:
+        conn.switch_power_outlet = types.MethodType(_switch_power_outlet, conn)
+        conn.request_power_feeds = types.MethodType(_request_power_feeds, conn)
+    # `read_data` is always present: the background console loop (or the
+    # fake `_fake_console_bg` task) is its only caller.
+    conn.read_data = types.MethodType(_read_data, conn)
+    ui = ConsoleUI(conn)
+    ui.is_running = True
+    ui._stdin_fd = None
+    return ui, conn
+
+
+async def _fake_console_bg(ui, conn):
+    """Play the one background reader the console keeps running at all times.
+
+    Pulls plain payloads off the fake stream and records them in
+    `conn.rendered` (standing in for `_read_from_server` rendering to the
+    terminal), bumping `ui._stream_activity` like the real loop does. It
+    never touches `last_power_reply`.
+    """
+    while ui.is_running:
+        data = await conn.read_data(timeout=0.05)
+        if data:
+            conn.rendered.append(data)
+            ui._stream_activity += 1
+
+
+class TestPowerMenu:
+    """The `p` command's per-console PDU power menu (mirrors telnet/SSH).
+
+    These tests run a fake background reader task (`_fake_console_bg`) that
+    models the ONE reader the console keeps at all times; the menu never
+    reads the stream itself - it waits for the reply the fake "adapter"
+    captures plus a settle of the stream.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_connection_support(self, capsys):
+        ui, conn = _make_ui(supported=False)
+        await ui._power_menu()
+        out = capsys.readouterr().out
+        assert "not supported by this connection" in out
+        assert ui._stream_exclusive is False
+
+    @pytest.mark.asyncio
+    async def test_requires_attached_console(self, capsys):
+        ui, conn = _make_ui(current_port=None)
+        await ui._power_menu()
+        out = capsys.readouterr().out
+        assert "CONNECT first" in out
+
+    @pytest.mark.asyncio
+    async def test_captures_power_reply_and_clears(self):
+        ui, conn = _make_ui(feeds_reply={"type": "power_feeds", "feeds": [], "feeds_total": 0, "state": "unknown"})
+        conn.last_power_reply = {"type": "power_switch", "ok": False, "error": "leftover"}  # cleared by the wait
+        bg = asyncio.create_task(_fake_console_bg(ui, conn))
+        reply = await ui._await_power_reply()
+        bg.cancel()
+        assert reply["type"] == "power_feeds"
+        assert conn.last_power_reply is None
+
+    @pytest.mark.asyncio
+    async def test_enter_leaves_and_markers(self, capsys):
+        ui, conn = _make_ui(
+            feeds_reply={"type": "power_feeds", "feeds": [{"ref": "r.1", "on": True}], "feeds_total": 1, "state": "all"}
+        )
+        bg = asyncio.create_task(_fake_console_bg(ui, conn))
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(ui, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.return_value = "\n"  # Enter leaves
+            await ui._power_menu()
+        bg.cancel()
+        out = capsys.readouterr().out
+        assert "POWER: feeds for c1" in out
+        assert "[on]" in out
+        assert "[EXITING POWER]" in out
+        assert ui._stream_exclusive is False
+
+    @pytest.mark.asyncio
+    async def test_toggle_single_feed_notice_before_confirm(self, capsys):
+        # Feeds: r.1 on, r.2 off. "1" toggles r.1 to off. The live [POWER]
+        # notice (plain bytes, delivered by the background reader a beat
+        # after the reply) must reach the terminal BEFORE the menu prints
+        # the "POWER r.1 -> off" confirmation and re-renders.
+        ui, conn = _make_ui(
+            feeds_reply={
+                "type": "power_feeds",
+                "feeds": [{"ref": "r.1", "on": True}, {"ref": "r.2", "on": False}],
+                "feeds_total": 2,
+                "state": "some",
+            }
+        )
+        conn.plan_switch(
+            b"\r\n[POWER] feed r.1 is now off\r\n",
+            {"type": "power_switch", "ok": True, "ref": "r.1", "on": False, "state": "off", "impact": {}},
+        )
+        bg = asyncio.create_task(_fake_console_bg(ui, conn))
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(ui, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.side_effect = ["1", "\n", "\n"]  # "1", Enter (post-switch), Enter (exit)
+            await ui._power_menu()
+        bg.cancel()
+        out = capsys.readouterr().out
+        assert ("r.1", False) in conn._switch_calls
+        # The background reader rendered the notice (and _wait_stream_settle
+        # only returned after it had), so it lands BEFORE the confirmation.
+        assert b"\r\n[POWER] feed r.1 is now off\r\n" in conn.rendered
+        assert out.index("POWER r.1 -> off") > 0
+        assert "POWER r.1 -> off" in out
+
+    @pytest.mark.asyncio
+    async def test_feed_request_send_failure(self, capsys):
+        ui, conn = _make_ui(feeds_reply={"type": "power_feeds", "feeds": [], "feeds_total": 0, "state": "unknown"})
+
+        async def _no_send():
+            return False
+
+        conn.request_power_feeds = _no_send
+        await ui._power_menu()
+        out = capsys.readouterr().out
+        assert "could not send the feed request" in out
+        assert conn._query_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_toggle_all_feeds(self, capsys):
+        ui, conn = _make_ui(
+            feeds_reply={
+                "type": "power_feeds",
+                "feeds": [{"ref": "r.1", "on": True}, {"ref": "r.2", "on": True}],
+                "feeds_total": 2,
+                "state": "all",
+            }
+        )
+        for ref in ("r.1", "r.2"):
+            notice = ("\r\n[POWER] feed " + ref + " is now off\r\n").encode("utf-8")
+            conn.plan_switch(
+                notice, {"type": "power_switch", "ok": True, "ref": ref, "on": False, "state": "off", "impact": {}}
+            )
+        bg = asyncio.create_task(_fake_console_bg(ui, conn))
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(ui, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.side_effect = ["a", "\n", "\n"]  # "a", Enter (post-switch), Enter (exit)
+            await ui._power_menu()
+        bg.cancel()
+        out = capsys.readouterr().out
+        assert conn._switch_calls == [("r.1", False), ("r.2", False)]
+        assert "POWER r.1 -> off" in out
+        assert "POWER r.2 -> off" in out
+        assert "[EXITING POWER]" in out
+        assert ui._stream_exclusive is False
+
+    @pytest.mark.asyncio
+    async def test_denied_switch_shows_error(self, capsys):
+        ui, conn = _make_ui(
+            feeds_reply={"type": "power_feeds", "feeds": [{"ref": "r.1", "on": True}], "feeds_total": 1, "state": "all"}
+        )
+        conn.plan_switch(None, {"type": "power_switch", "ok": False, "error": "insufficient permission (need read-write)"})
+        bg = asyncio.create_task(_fake_console_bg(ui, conn))
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(ui, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.side_effect = ["1", "\n", "\n"]  # "1", Enter (post-switch), Enter (exit)
+            await ui._power_menu()
+        bg.cancel()
+        out = capsys.readouterr().out
+        assert ("r.1", False) in conn._switch_calls
+        assert "ERROR:POWER: insufficient permission" in out
+        assert "POWER r.1 ->" not in out  # no confirmation on denial
+        assert "[EXITING POWER]" in out
+
+    @pytest.mark.asyncio
+    async def test_not_configured_reply(self, capsys):
+        ui, conn = _make_ui(
+            feeds_reply={"type": "power_feeds", "ok": False, "error": "power management is not configured", "feeds": []}
+        )
+        bg = asyncio.create_task(_fake_console_bg(ui, conn))
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(ui, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.return_value = "\n"
+            await ui._power_menu()
+        bg.cancel()
+        out = capsys.readouterr().out
+        assert "power management is not configured" in out
+        assert ui._stream_exclusive is False
+
+    @pytest.mark.asyncio
+    async def test_invalid_and_out_of_range_loop(self, capsys):
+        ui, conn = _make_ui(
+            feeds_reply={"type": "power_feeds", "feeds": [{"ref": "r.1", "on": True}], "feeds_total": 1, "state": "all"}
+        )
+        bg = asyncio.create_task(_fake_console_bg(ui, conn))
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(ui, "_is_data_available", return_value=True),
+        ):
+            # "z" invalid, "9" out of range, then Enter.
+            mock_stdin.read.side_effect = ["z", "\n", "9", "\n", "\n"]
+            await ui._power_menu()
+        bg.cancel()
+        out = capsys.readouterr().out
+        assert "enter a feed number" in out
+        assert "number out of range (1-1)" in out
+        assert "[EXITING POWER]" in out
+        assert conn._switch_calls == []
+        assert ui._stream_exclusive is False
+
+    @pytest.mark.asyncio
+    async def test_await_power_reply_never_reads_the_stream(self):
+        # Regression: the menu's waiter must ONLY poll the captured reply.
+        # A second reader on the same transport raced the background loop
+        # and broke the session ("could not send the switch request").
+        ui, conn = _make_ui()
+        reply = await ui._await_power_reply(timeout=0.05)
+        assert reply is None  # nothing was sent; the wait timed out
+        assert conn.read_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_await_power_reply_gives_up_on_disconnect(self):
+        ui, conn = _make_ui()
+
+        async def _drop_later():
+            await asyncio.sleep(0.02)
+            conn.is_connected = False
+
+        droptask = asyncio.create_task(_drop_later())
+        t0 = asyncio.get_event_loop().time()
+        reply = await ui._await_power_reply(timeout=6.0)
+        droptask.cancel()
+        assert reply is None
+        # bailed out on the disconnect instead of waiting the full timeout
+        assert asyncio.get_event_loop().time() - t0 < 3.0
+
+    @pytest.mark.asyncio
+    async def test_escape_p_routes_to_power_menu(self, capsys):
+        ui, conn = _make_ui(
+            feeds_reply={"type": "power_feeds", "feeds": [{"ref": "r.1", "on": True}], "feeds_total": 1, "state": "all"}
+        )
+        bg = asyncio.create_task(_fake_console_bg(ui, conn))
+        with (
+            patch("openmux.client.console.sys.stdin") as mock_stdin,
+            patch.object(ui, "_is_data_available", return_value=True),
+        ):
+            mock_stdin.read.return_value = "\n"
+            await ui._process_escape_command("p")
+        bg.cancel()
+        out = capsys.readouterr().out
+        assert "POWER: feeds for" in out
+        assert ui._stream_exclusive is False
+
+    @pytest.mark.asyncio
+    async def test_help_lists_power_not_playback(self, capsys):
+        import openmux.client.console as console_mod
+
+        ui, _conn = _make_ui()
+        with patch.object(console_mod.sys, "stdout", new=io.StringIO()) as mock_stdout:
+            await ui._show_help()
+            help_text = mock_stdout.getvalue()
+        assert "power (this console's feeds: number = toggle, a = all)" in help_text
+        assert "playback" not in help_text
+        assert "set number of playback lines" not in help_text
