@@ -1,9 +1,11 @@
-"""Tests for the PDU power web plugin (power_monitor.py).
+"""Tests for the PDU power web routes (core web console).
 
 Boots a real WebConsoleAdapter in-process on 127.0.0.1 with a dummy PDU
 adapter and a loopback port, then exercises the HTTP + WS routes:
 permission gates, CSRF, the outlet-toggle impact payload, and the
-snapshot-then-frames live socket.
+snapshot-then-frames live socket. The routes are core: the web console
+registers them itself (the handlers live in web_plugins/power_monitor.py
+for layout only), so no plugin entry is involved.
 """
 
 import base64
@@ -160,8 +162,12 @@ async def test_pages_render_with_nav_and_permission():
     ctx = await _start(0)
     try:
         web_adapter, _, _, _, port = ctx
-        # No "require": Power state is visible to every permission level
-        assert web_adapter._plugin_nav == [{"title": "Power", "path": "/power"}]
+        # The Power sidebar entry is core (emitted live per page, not a
+        # plugin nav item): no "require" gate, live PDU sub-links.
+        nav = web_adapter._get_allowed_plugin_nav("u", request=None)
+        power = [n for n in nav if n.get("path") == "/power"]
+        assert power and power[0]["title"] == "Power"
+        assert power[0]["links"] == ["rack1", "rack2"]
         async with ClientSession(connector=TCPConnector(ssl=False)) as session:
             async with session.get(f"http://127.0.0.1:{port}/power", headers=_hdr("u")) as resp:
                 assert resp.status == 200
@@ -408,7 +414,9 @@ async def test_ws_power_snapshot_then_change_frame():
 
 @pytest.mark.asyncio
 async def test_no_nav_when_no_power_adapter():
-    """Without a `power:` section the plugin registers no routes or nav."""
+    """Without a `power:` section the power routes reply 404 and no Power
+    sidebar item is emitted (the routes themselves are core and always
+    registered)."""
     pm = PortManager([])
     loop_adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "p1"}]})
     loop_adapter.main_port_manager = pm
@@ -422,9 +430,6 @@ async def test_no_nav_when_no_power_adapter():
             "port": 0,
             "enable_ui": True,
             "enable_probes": False,
-            "plugins": [
-                {"module": "openmux.server.web_plugins.power_monitor", "enabled": True},
-            ],
         }
     }
     web_adapter = WebConsoleAdapter("wc", dict(config["web_console"]))
@@ -434,7 +439,7 @@ async def test_no_nav_when_no_power_adapter():
     assert await web_adapter.start()
     try:
         bound_port = int(web_adapter._http_site._server.sockets[0].getsockname()[1])
-        assert web_adapter._plugin_nav == []
+        assert web_adapter._get_allowed_plugin_nav("u", request=None) == []
         async with ClientSession(connector=TCPConnector(ssl=False)) as session:
             async with session.get(f"http://127.0.0.1:{bound_port}/api/power", headers=_hdr("u")) as resp:
                 assert resp.status == 404
@@ -512,27 +517,31 @@ async def test_api_ports_includes_power_block_for_federated_port():
         await _stop(ctx)
 
 
-# --- Autoloading (core web console loads the power plugin when a PDU adapter
-#     is active, no web_console.plugins entry needed) ---------------------------
+# --- Power is core: no web plugin is involved. The standalone /power routes
+#     are registered by the web console itself (the 404 gate without an
+#     adapter is covered by test_no_nav_when_no_power_adapter), and the
+#     sidebar entry is emitted live per page when a PDU adapter is active.
+#     ---------------------------------------------------------------------------
 
 
-class _FakePduForPluginLoad:
+class _FakePduForNav:
     enabled = True
+    pdus = {"rack1": object(), "rack2": object()}
 
     def get_adapter_type(self) -> str:
         return "power"
 
 
-class _FakePMForPluginLoad:
+class _FakePMForNav:
     def __init__(self, adapters):
         self.unified_adapters = adapters
 
 
-def _wc_for_plugin_load(plugins, pdu):
+def _wc_for_power_nav(plugins, pdu):
     wc = WebConsoleAdapter("wc", {})
     wc.plugins_cfg = plugins
     if pdu is not None:
-        cm = types.SimpleNamespace(port_manager=_FakePMForPluginLoad([pdu]))
+        cm = types.SimpleNamespace(port_manager=_FakePMForNav([pdu]))
         wc.console_manager = cm
     return wc
 
@@ -553,50 +562,20 @@ class _FakeApp:
         self.router = _FakeRouter()
 
 
-def test_plugins_autoload_power_monitor_when_pdu_adapter_active():
-    """No web_console.plugins entry, but a PDU adapter: the power plugin is
-    loaded (standalone /power page + /api/power routes) without configuration.
-
-    The in-session badge/menu does not depend on this; the autoload exists so
-    the standalone /power page keeps working on configs that predate the
-    plugins list.
-    """
-    wc = _wc_for_plugin_load([], _FakePduForPluginLoad())
-    app = _FakeApp()
-    wc._load_plugins(app)
-    paths = [a[0] for m, a, k in app.router.added]
-    assert "/power" in paths
-    assert "/api/power" in paths
-    # Nav item present for the sidebar.
-    assert any(n.get("path") == "/power" for n in wc._plugin_nav)
-
-
-def test_plugins_autoload_skipped_without_pdu_adapter():
-    wc = _wc_for_plugin_load([], None)
+def test_power_nav_live_without_plugin():
+    """No plugins entry: _load_plugins registers no power routes (the core
+    routes are registered by start()), but the Power sidebar item is still
+    emitted live per page, with the PDU sub-links."""
+    wc = _wc_for_power_nav([], _FakePduForNav())
     app = _FakeApp()
     wc._load_plugins(app)
     assert app.router.added == []
-    assert wc._plugin_nav == []
+    nav = wc._get_allowed_plugin_nav(None, request=None)
+    power = [n for n in nav if n.get("path") == "/power"]
+    assert power and power[0]["title"] == "Power"
+    assert power[0]["links"] == ["rack1", "rack2"]
 
 
-def test_plugins_autoload_honors_disabled_manual_entry():
-    # An explicit enabled: false opts out of the autoload.
-    wc = _wc_for_plugin_load(
-        [{"module": "openmux.server.web_plugins.power_monitor", "enabled": False}],
-        _FakePduForPluginLoad(),
-    )
-    app = _FakeApp()
-    wc._load_plugins(app)
-    assert app.router.added == []
-    assert wc._plugin_nav == []
-
-
-def test_plugins_autoload_respects_manual_entry_options():
-    # A manual explicit entry is left untouched (loaded once, not twice).
-    wc = _wc_for_plugin_load(
-        [{"module": "openmux.server.web_plugins.power_monitor", "enabled": True}],
-        _FakePduForPluginLoad(),
-    )
-    app = _FakeApp()
-    wc._load_plugins(app)
-    assert sum(1 for m, a, k in app.router.added if a and a[0] == "/api/power") == 1
+def test_power_nav_absent_without_pdu_adapter():
+    wc = _wc_for_power_nav([], None)
+    assert wc._get_allowed_plugin_nav(None, request=None) == []

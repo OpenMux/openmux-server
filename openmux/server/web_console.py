@@ -46,6 +46,7 @@ from openmux.server.data_logger import DataLogger
 from openmux.server.locations import web_tls_dir
 from openmux.server.port_utils import natural_sort_key, safe_get_port
 from openmux.server.web_plugins import ADAPTER_APP_KEY
+from openmux.server.web_plugins import power_monitor as _power_monitor
 
 try:  # Prefer importlib.metadata (std lib)
     from importlib.metadata import version as _dist_version  # type: ignore
@@ -1687,6 +1688,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
             nav = list(self._plugin_nav or [])
         except Exception:
             nav = []
+        # Power is a core feature: emit its nav entry live when a PDU adapter
+        # is enabled, independent of any web plugin (soft reload of the
+        # `power:` section only).
+        if self._power_adapter_present():
+            nav.append({"title": "Power", "path": "/power"})
         if not nav:
             return items
         perm = self._get_effective_permission(username, request)
@@ -1891,12 +1897,23 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 app.router.add_get("/logs/{port_name}", handle_logs)
                 app.router.add_get("/status", handle_status)
                 app.router.add_get("/about", handle_about)
+                # Power (PDU) pages are core: registered always so a soft
+                # reload of the `power:` section needs no restart; the
+                # handlers reply 404 when no PDU adapter is active.
+                app.router.add_get("/power", _power_monitor._handle_power_list)
+                app.router.add_get(r"/power/{pdu_name}", _power_monitor._handle_power_detail, name="power_detail")
             # Login/logout
             app.router.add_get("/login", handle_login)
             app.router.add_post("/login", handle_login)
             app.router.add_get("/logout", handle_logout)
             app.router.add_get("/api/ports", handle_api_ports)
             app.router.add_post("/api/reload", handle_api_reload)
+            # Power (PDU) API + live socket routes are core: registered always
+            # so a soft reload of the `power:` section needs no restart; the
+            # handlers reply 404 when no PDU adapter is active.
+            app.router.add_get("/api/power", _power_monitor._handle_api_power)
+            app.router.add_post(r"/api/power/outlets/{outlet_ref:.+}", _power_monitor._handle_set_outlet)
+            app.router.add_get("/ws/power", _power_monitor._handle_ws_power)
             app.router.add_get("/api/csrf", self._handle_api_csrf)
             app.router.add_get("/ws/{port_name}", handle_ws)
             app.router.add_get("/ws/{server_id}/{port_name}", handle_ws_fqpn)
@@ -3398,76 +3415,35 @@ class WebConsoleAdapter(BaseGenericAdapter):
         return None
 
     # --- Plugin loader ---
-    # Web plugin autoloading: a plugin whose backing feature is active (a
-    # `power:` section) is loaded without a web_console.plugins entry, so
-    # the standalone /power page keeps working on configs that predate the
-    # plugins list. A manual entry with enabled: false opts out. The power
-    # badge, the in-session menu, and the live [POWER] notices live in core
-    # and do not depend on the plugin at all.
-    def _autoload_plugin_modules(self) -> Dict[str, str]:
-        """Module names autoloaded now: {module: reason}. Empty when none.
-
-        A module listed here is loaded as long as a manual config entry does
-        not disable it (``enabled: false``).
-        """
-        found: Dict[str, str] = {}
-        if self._power_adapter_present():
-            found["openmux.server.web_plugins.power_monitor"] = "a PDU adapter is active"
-        return found
-
+    # Real optional web plugins (e.g. config_editor, os_customizer, port_actions)
+    # are loaded from web_console.plugins. The Power feature is NOT a plugin:
+    # its routes are core (registered in start()) and its sidebar item is
+    # emitted live per page in _get_allowed_plugin_nav, so neither depends on a
+    # plugins entry.
     def _power_adapter_present(self) -> bool:
-        """True when an enabled power adapter is registered (autoload gate)."""
+        """True when an enabled power adapter is registered (live nav gate)."""
         pdu = self._find_power_adapter()
         return pdu is not None and getattr(pdu, "enabled", True) is not False
 
     def _load_plugins(self, app: web.Application) -> None:
-        """Load and initialize web plugins as configured, plus autoloading.
+        """Load and initialize web plugins as configured.
 
         Config schema examples under web_console.plugins:
           - ["openmux.server.web_plugins.config_editor"]
           - [{"module": "openmux.server.web_plugins.os_customizer", "enabled": true}]
         Each module may expose register_plugin(app, adapter) -> Optional[dict]
         The returned mapping may include a "nav" list for UI integration.
-
-        Modules from ``_autoload_plugin_modules`` are loaded (reason in the
-        log) unless a manual config entry disables them, so a feature whose
-        core UI is on (a ``power:`` section) does not depend on the operator
-        remembering a plugins entry.
         """
-        cfg = self.plugins_cfg if isinstance(self.plugins_cfg, list) else []
-        seen_modules: set[str] = set()
-        disabled_modules: set[str] = set()
-        for e in cfg:
-            if isinstance(e, dict) and e.get("module"):
-                seen_modules.add(str(e["module"]))
-                if e.get("enabled") is False:
-                    disabled_modules.add(str(e["module"]))
-        # Autoload: load plugins whose backing feature is active even when
-        # the config has no entry for them (a manual `enabled: false` opts
-        # out; a manual explicit entry is left untouched).
-        entries: list = list(cfg)
-        autoloaded: list[str] = []
-        for name, reason in self._autoload_plugin_modules().items():
-            if name in seen_modules:
-                if name not in disabled_modules:
-                    self.logger.info("Autoload skipped (already configured): %s - %s", name, reason)
-                continue
-            entries.append({"module": name, "enabled": True})
-            autoloaded.append(name)
-            self.logger.info(
-                "Autoloading web plugin: %s - %s (set enabled: false in web_console.plugins to opt out)", name, reason
-            )
+        entries = self.plugins_cfg if isinstance(self.plugins_cfg, list) else []
         if not entries:
             return
         nav_items: list[Dict[str, Any]] = []
         for entry in entries:
             try:
-                # Config entries (str or dict, as before) plus synthesized
-                # autoload entries (dicts with module/enabled only).
                 if isinstance(entry, str):
                     mod_name = entry
                     enabled = True
-                    opts = {}
+                    opts: Dict[str, Any] = {}
                 elif isinstance(entry, dict):
                     mod_name = entry.get("module") or entry.get("name")
                     enabled = entry.get("enabled", True)
@@ -3490,8 +3466,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
                     nav = info.get("nav")
                     if isinstance(nav, list):
                         nav_items.extend([n for n in nav if isinstance(n, dict)])
-                label = mod_name + (" (autoloaded)" if mod_name in autoloaded else "")
-                self.logger.info("Loaded web plugin: %s", label)
+                self.logger.info("Loaded web plugin: %s", mod_name)
             except Exception as e:
                 self.logger.error("Error loading plugin %s: %s", entry, e, exc_info=True)
         self._plugin_nav = nav_items

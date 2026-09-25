@@ -1,26 +1,23 @@
-"""Power monitoring web plugin.
+"""Power monitoring web routes (core web console feature).
 
-Adds a "Power" entry to the left sidebar when a `power:` section is active,
-plus:
+Route handlers for the standalone Power surface:
 - `GET /power`                - PDU list page
 - `GET /power/{pdu_name}`     - per-PDU outlet page
 - `GET /api/power`            - full power snapshot JSON
 - `POST /api/power/outlets/{outlet_ref}`  - switch one outlet (read-write or admin, CSRF)
 - `GET /ws/power`             - live outlet-change frames (snapshot first)
 
-Loaded automatically as long as a `power:` section is enabled (the core web
-console autoloads it) - no `web_console.plugins` entry is required. To keep
-the standalone /power page off on a node that runs PDUs, disable it:
+The routes are CORE: the web console registers them unconditionally
+(`WebConsoleAdapter.start`), so they follow a `power:` section added or
+removed on a soft reload without a restart. Each route replies 404 -
+"Power management is not configured" - when no PDU adapter is active, the
+same as every other feature-gated core path. The sidebar "Power" item is
+equally core: the web console emits it per page when a PDU adapter is
+enabled (``_get_allowed_plugin_nav`` adds it in addition to real plugin
+nav).
 
-    web_console:
-      plugins:
-        - module: openmux.server.web_plugins.power_monitor
-          enabled: false
-
-The plugin returns no nav entry when the PDU adapter is absent or disabled,
-so servers without a `power:` section show no Power menu item.
-Note: the in-session console power badge/menu does NOT depend on this
-plugin; it is served by the core web console (OMXCTRL power frames).
+The in-session console power badge/menu is served by the core web console
+itself (OMXCTRL power frames) and does not use these handlers.
 """
 
 import asyncio
@@ -31,8 +28,6 @@ from typing import Any, Dict, Optional
 from aiohttp import WSMsgType, web
 
 from . import get_web_adapter
-
-_STATE_KEY = "power_monitor_state"
 
 
 def _find_power_adapter(adapter):
@@ -61,7 +56,7 @@ def _get_power_adapter(request: web.Request):
     adapter = get_web_adapter(request)
     pdu = _find_power_adapter(adapter)
     if pdu is None:
-        raise web.NotFound(text="Power management is not configured\n")
+        raise web.HTTPNotFound(text="Power management is not configured\n")
     return adapter, pdu
 
 
@@ -269,23 +264,3 @@ async def _handle_ws_power(request: web.Request) -> web.WebSocketResponse:
         pass
     await _ws_power_finish(ws, pdu, reader_task, _on_change)
     return ws
-
-
-def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Register Power plugin routes. No nav when no PDU adapter is active."""
-    pdu = _find_power_adapter(adapter)
-    if pdu is None:
-        adapter.logger.info("power_monitor plugin registered without a PDU adapter; no routes")
-        return {}
-    if getattr(pdu, "enabled", True) is False:
-        return {}
-    app.router.add_get("/power", _handle_power_list)
-    app.router.add_get(r"/power/{pdu_name}", _handle_power_detail, name="power_detail")
-    app.router.add_get("/api/power", _handle_api_power)
-    app.router.add_post(r"/api/power/outlets/{outlet_ref:.+}", _handle_set_outlet)
-    app.router.add_get("/ws/power", _handle_ws_power)
-    # No "require": power state is visible to every permission level;
-    # only the toggle button and the API write need read-write/admin.
-    # The WebConsoleAdapter enriches this entry with a live "links" list of
-    # PDU names on every page render (soft reloads change the PDU set).
-    return {"nav": [{"title": "Power", "path": "/power"}]}

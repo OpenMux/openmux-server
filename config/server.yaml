@@ -147,7 +147,6 @@ web_console:
   host: 127.0.0.1
   plugins:
   - openmux.server.web_plugins.config_editor
-  - openmux.server.web_plugins.power_monitor
   port: 80
   probes_include_details: true
   respect_forwarded_prefix: false

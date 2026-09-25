@@ -225,9 +225,8 @@ function renderPowerMenu() {
   // over the core OMXCTRL power_switch control frame on this console
   // WebSocket (the same path the p power menu uses): it carries the
   // session, so a federated feed can relay over the federation
-  // (POWER:SWITCH), and it does not depend on the power_monitor web
-  // plugin. The standalone /power REST page stays read-only for remote
-  // refs (no session to bind).
+  // (POWER:SWITCH). The standalone /power REST page stays read-only for
+  // remote refs (no session to bind).
   powerState.feeds.forEach((f) => {
     const row = document.createElement('div');
     const stateTxt = (f.on === true) ? 'on' : (f.on === false ? 'off' : 'unknown');

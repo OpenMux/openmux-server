@@ -557,7 +557,17 @@ Who may switch is scoped to console groups: switching needs `read-write` or `adm
 
 Reload behavior: a soft reload re-applies the `power:` section without a restart. Description or annotation edits apply in place. A material change (driver, `poll_interval`, `options`) re-creates that PDU and re-discovers its outlets. Console-side `power:` mapping is read live from the ports and needs no reload work at all.
 
-Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power`) edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `options` as JSON, and optional per-outlet descriptions). The per-port `power:` feed refs are edited as the "Power feeds" field on the Ports view. Apply, then use **Soft Reload** to reconcile the section. The web Power page plugin (`power_monitor`) that serves the standalone `/power` page and its REST endpoints autoloades as long as a PDU adapter is enabled; to keep it off, add `enabled: false` for the module under `web_console.plugins`. The in-session badge and power menu never depend on the plugin.
+Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power`) edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `options` as JSON, and optional per-outlet descriptions). The per-port `power:` feed refs are edited as the "Power feeds" field on the Ports view. Apply, then use **Soft Reload** to reconcile the section.
+
+Web console: the standalone `/power` page, the per-PDU pages, the
+`/api/power` routes, and the `/ws/power` socket are core. The web console
+registers them always, so no `web_console.plugins` entry is needed. A
+`power:` section added or removed on a soft reload takes effect without a
+restart. Each route replies 404 ("Power management is not configured")
+while no PDU adapter is active. The "Power" sidebar item is emitted live
+per page when a PDU adapter is enabled, like the in-session badge, the
+power menu, and the live `[POWER]` notices. No web power surface depends
+on a plugin.
 
 Example:
 ```yaml
