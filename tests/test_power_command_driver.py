@@ -14,12 +14,15 @@ the adapter end-to-end (snapshot, set_outlet, backoff keeping last known).
 """
 
 import asyncio
+import re
 
 import pytest
 
 from openmux.server.adapters.pdu import PduAdapter
 from openmux.server.adapters.power_drivers import command as command_mod
 from openmux.server.adapters.power_drivers.command import (
+    _OFF_TOKENS,
+    _ON_TOKENS,
     CommandDriver,
     _parse_batch_lines,
 )
@@ -304,10 +307,25 @@ def test_parse_batch_lines_first_line_wins_and_ignores_malformed():
     # ignored (an outlet id appearing ONLY on a malformed line is a
     # caller problem: the outlet will simply be unreported).
     out = "1 on\n2 OFF\n3 true\nx9 on\n1 off\n5\n"
-    parsed = _parse_batch_lines(out)
+    parsed = _parse_batch_lines(out, None, _ON_TOKENS, _OFF_TOKENS)
     assert parsed == {"1": True, "2": False, "3": True, "x9": True}
     # Unparseable state tokens are skipped too.
-    assert _parse_batch_lines("1 maybe\n") == {}
+    assert _parse_batch_lines("1 maybe\n", None, _ON_TOKENS, _OFF_TOKENS) == {}
+
+
+def test_parse_batch_lines_pattern_and_tokens():
+    pattern = re.compile("sPDUOutletCtl\\.(?P<id>\\d+) = INTEGER: (?P<value>\\d+)")
+    out = (
+        "APC PowerNet-MIB::sPDUOutletCtl.1 = INTEGER: 1 (outletOn)\n"
+        "APC PowerNet-MIB::sPDUOutletCtl.2 = INTEGER: 2 (outletOff)\n"
+        "junk line with no match\n"
+        "APC PowerNet-MIB::sPDUOutletCtl.1 = INTEGER: 2\n"  # first line wins
+    )
+    tokens_on, tokens_off = _ON_TOKENS, _OFF_TOKENS + ("2",)
+    parsed = _parse_batch_lines(out, pattern, frozenset(tokens_on), frozenset(tokens_off))
+    assert parsed == {"1": True, "2": False}
+    # Non-token values are skipped (e.g. SNMP "no command pending").
+    assert _parse_batch_lines("sPDUOutletCtl.9 = INTEGER: 3", pattern, frozenset(tokens_on), frozenset(tokens_off)) == {}
 
 
 @asyncio_test
@@ -581,3 +599,195 @@ async def test_adapter_command_pdu_end_to_end(monkeypatch):
     await adapter._refresh_readings(state)  # inside backoff window
     assert len(rec.calls) == spawns_after_failure
     await adapter.stop()
+
+
+# --- connection placeholders, index, token lists, batch pattern -----------------
+
+
+APC_WALK = (
+    "APC PowerNet-MIB::sPDUOutletCtl.1 = INTEGER: 1 (outletOn)\nAPC PowerNet-MIB::sPDUOutletCtl.2 = INTEGER: 2 (outletOff)\n"
+)
+APC_PATTERN = "(?P<id>\\d+) = INTEGER: (?P<value>\\d+)"
+
+
+def _apc_driver(**overrides):
+    opts = dict(
+        host="10.0.0.5",
+        password="private",
+        on_cmd="snmpset -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{outlet_index} i 1",
+        off_cmd="snmpset -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{outlet_index} i 2",
+        state_cmd="snmpwalk -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3",
+        state_pattern=APC_PATTERN,
+        state_token_off=["2"],
+        outlets=[{"id": "top-rack", "index": "1"}, {"id": "mid-rack", "index": "2"}],
+    )
+    opts.update(overrides)
+    return CommandDriver(opts)
+
+
+@pytest.mark.parametrize(
+    "opts",
+    [
+        dict(host=7),  # host not a string
+        dict(host=" "),  # host blank
+        dict(username=5),
+        dict(password=5),
+        dict(state_token_on="on"),  # not a list
+        dict(state_token_on=[]),  # empty
+        dict(state_token_on=["on", 1]),
+        dict(state_token_on=["  "]),
+        dict(state_token_on=["2"], state_token_off=["2"]),  # overlap
+        dict(state_pattern="x"),  # no named groups
+        dict(state_pattern="(?P<id>\\d+)"),  # missing value group
+        dict(state_pattern="(["),  # does not compile
+        dict(state_pattern=".+"),  # no state_cmd to parse
+        dict(state_cmd="true {outlet_index} all"),  # per-outlet context in batch command
+        dict(outlets=[{"id": "a", "index": 3}]),  # index not a string
+        dict(outlets=[{"id": "a", "index": " "}], on_cmd="true {outlet_id}", off_cmd="true {outlet_id}"),
+        dict(
+            outlets=[
+                {"id": "a", "index": "2"},
+                {"id": "b", "index": "2"},
+            ]
+        ),  # duplicate index
+        dict(outlets=[{"id": "a", "index": "2"}, {"id": "2"}]),  # index collides with an outlet id
+        dict(outlet_id_missing_index=None),  # placeholder without index: see parametrized body below
+        dict(outlets=[{"id": "a"}, {"id": "b", "on_cmd": "true {outlet_index}"}]),  # index placeholder w/o index
+    ],
+)
+def test_ctor_connection_index_token_errors(opts):
+    # The generic case: PDU-level commands reference the connection or
+    # index placeholders but the matching field is absent.
+    if opts.get("outlet_id_missing_index") is not None:
+        with pytest.raises(ValueError):
+            _apc_driver(
+                outlets=[{"id": "top-rack"}, {"id": "mid-rack"}],  # no index on either outlet
+            )
+        return
+    with pytest.raises(ValueError):
+        _apc_driver(**opts)
+
+
+def test_credentials_without_host_rejected():
+    # Credentials can only be used when host is set.
+    with pytest.raises(ValueError, match="no host is set"):
+        CommandDriver(
+            {
+                "username": "u",
+                "password": "p",
+                "on_cmd": "tool {host} {username} {password} {outlet_id} on",
+                "off_cmd": "tool {host} {username} {password} {outlet_id} off",
+                "outlets": [{"id": "1"}],
+            }
+        )
+    # No connection reference at all: valid without host.
+    CommandDriver(
+        {
+            "on_cmd": "tool {outlet_id} on",
+            "off_cmd": "tool {outlet_id} off",
+            "outlets": [{"id": "1"}],
+        }
+    )
+
+
+def test_ctor_apc_style_full_config_ok():
+    d = _apc_driver()
+    assert d._index_by_id == {"top-rack": "1", "mid-rack": "2"}
+    assert d._batch_id_map == {"top-rack": "top-rack", "1": "top-rack", "mid-rack": "mid-rack", "2": "mid-rack"}
+    assert "2" in d._off_tokens
+    assert "on" in d._on_tokens  # built-ins preserved
+
+
+def test_env_exports_pdu_credentials():
+    d = _apc_driver()
+    env = d._env
+    assert env["PDU_HOST"] == "10.0.0.5"
+    assert env["PDU_PASSWORD"] == "private"
+    assert "PDU_USERNAME" not in env  # not configured
+
+
+def test_env_user_override_wins():
+    d = _apc_driver(env={"PDU_PASSWORD": "renamed"})
+    assert d._env["PDU_PASSWORD"] == "renamed"
+    assert d._env["PDU_HOST"] == "10.0.0.5"
+
+
+@asyncio_test
+async def test_set_state_substitutes_index_and_credentials(monkeypatch):
+    d = _apc_driver()
+    rec = _rec(monkeypatch, [_spec(), _spec()])
+    await d.set_state("top-rack", True)
+    assert rec.calls[0] == [
+        "snmpset",
+        "-v2c",
+        "-c",
+        "private",
+        "10.0.0.5",
+        ".1.3.6.1.4.1.318.1.1.4.4.2.1.3.1",
+        "i",
+        "1",
+    ]
+    await d.set_state("mid-rack", False)
+    assert rec.calls[1] == [
+        "snmpset",
+        "-v2c",
+        "-c",
+        "private",
+        "10.0.0.5",
+        ".1.3.6.1.4.1.318.1.1.4.4.2.1.3.2",
+        "i",
+        "2",
+    ]
+
+
+@asyncio_test
+async def test_batch_state_pattern_reads_indexed_outlets(monkeypatch):
+    d = _apc_driver()
+    _rec(monkeypatch, [_spec(out=APC_WALK)])
+    readings = await d.read_states()
+    assert readings["top-rack"].on is True
+    assert readings["mid-rack"].on is False  # "2" via state_token_off
+    assert not readings["top-rack"].error
+
+
+@asyncio_test
+async def test_batch_id_falls_back_to_outlet_id(monkeypatch):
+    # No index, no pattern: the device line id IS the outlet id.
+    d = _driver(state_cmd="true all")
+    _rec(monkeypatch, [_spec(out="1 on\n2 off\n")])
+    readings = await d.read_states()
+    assert readings["1"].on is True
+    assert readings["2"].on is False
+
+
+@asyncio_test
+async def test_single_token_path_uses_extended_tokens(monkeypatch):
+    d = _driver(
+        outlets=[{"id": "1", "state_cmd": "true one"}],
+        state_token_off=["2"],
+    )
+    _rec(monkeypatch, [_spec(out="2")])
+    readings = await d.read_states()
+    assert readings["1"].on is False
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        ("1 on\n", True),
+        ("2 off\n", False),
+        ("3 1\n", True),
+        ("4 0\n", False),
+        ("5 yes\n", True),
+        ("6 no\n", False),
+        ("7 2\n", None),  # "2" is NOT a default token (state_token_off extends it)
+    ],
+)
+def test_default_token_table_unchanged(line, expected):
+    tokens_on = frozenset(_ON_TOKENS)
+    tokens_off = frozenset(_OFF_TOKENS)
+    parsed = _parse_batch_lines(line, None, tokens_on, tokens_off)
+    if expected is None:
+        assert parsed == {}
+    else:
+        assert parsed == {line.split()[0]: expected}

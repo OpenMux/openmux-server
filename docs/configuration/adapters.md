@@ -585,8 +585,8 @@ power:
 Runs CLI commands against a real device: GPIO scripts on a Raspberry Pi, custom USB power tools, or anything the user can address from the shell. The driver validates all options and rejects the PDU entry at startup (one log line) when they are invalid.
 
 Two command levels. A per-outlet value wins over the PDU-level value:
-- PDU level (in `options`): `on_cmd` and `off_cmd` templates. Each must contain the placeholder `{outlet_id}`, which the driver replaces with the outlet id. One `state_cmd` prints the state of every outlet as one `<id> <state>` line per outlet.
-- Outlet level (on an `outlets` entry): `on_cmd`, `off_cmd`, `state_cmd`, and an optional `state_pattern` that matches that outlet's state output with a regex.
+- PDU level (in `options`): `on_cmd` and `off_cmd` templates. Each must contain the placeholder `{outlet_id}` or `{outlet_index}` (below). One `state_cmd` reports every outlet: by default one `<id> <state>` line per outlet, or a device-specific line format parsed by `state_pattern`.
+- Outlet level (on an `outlets` entry): `on_cmd`, `off_cmd`, `state_cmd`, an optional `state_pattern` that matches that outlet's state output with a regex, and an optional `index` (the outlet's device-side identity, for `{outlet_index}`).
 
 Example, template style (one script per operation):
 ```yaml
@@ -626,20 +626,47 @@ power:
             state_pattern: \": (?P<on>connected)|(?P<off>disconnected)\"
 ```
 
+Example, an SNMP PDU (APC NetManager rack PDU) with no helper scripts: the connection fields (`host`, `username`, `password`) substitute into `{host}` / `{username}` / `{password}` (the OIDs are plain text in the command), each outlet's `index` maps the outlet ref to the device outlet index behind `{outlet_index}`, and `state_pattern` parses the `snmpwalk` lines:
+```yaml
+power:
+  pdus:
+    - name: "apc01"
+      description: "APC AP8959 lab"
+      driver: command
+      poll_interval: 60
+      options:
+        host: "10.0.0.5"
+        password: "private"          # SNMP v2c community; for v3 pass the credentials to the snmp tools in the command strings or via env
+        on_cmd: "snmpset -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{outlet_index} i 1"
+        off_cmd: "snmpset -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{outlet_index} i 2"
+        state_cmd: "snmpwalk -v2c -c {password} {host} .1.3.6.1.4.1.318.1.1.4.4.2.1.3"
+        timeout: 15                  # let snmp's own retries finish (default 5s is shorter than snmp's retry loop)
+        state_pattern: "(?P<id>\\d+) = INTEGER: (?P<value>\\d+)"
+        state_token_off: ["2"]       # PowerNet reports 1 = on, 2 = off
+        outlets:
+          - id: "web-rack-top"
+            index: "1"
+          - id: "storage-1"
+            index: "2"
+```
+
 Option keys:
-- `outlets`: Required. List of outlet entries. Each entry: `id` (required; no dots or whitespace; unique), plus the optional per-outlet `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`.
-- `on_cmd` / `off_cmd` (PDU level): Templates. Each must contain `{outlet_id}`. Required for an outlet that has no per-outlet value of the same name.
-- `state_cmd` (PDU level): One command that reports every outlet. Output: one non-empty line per outlet, `<id> <state>`. A `state:` line with an unknown id or an unparseable token is skipped.
-- Per-outlet `state_cmd`: Reports ONE outlet. The first non-empty stdout line decides: a state token (`on` / `1` / `true` / `yes`, or `off` / `0` / `false` / `no`, case-insensitive) sets the state; anything else keeps the last-known state and sets an error on the reading. A matching `state_pattern` overrides the token parse (below).
-- `state_pattern`: Regex, matched against the outlet's `state_cmd` output. A pattern with both named groups `(?P<on>...)` and `(?P<off>...)` requires exactly one group to match. A plain pattern means: match = on, no match = off. Requires a per-outlet `state_cmd`.
+- `outlets`: Required. List of outlet entries. Each entry: `id` (required; the ref part; no dots or whitespace; unique), `index` (optional; the device-side identity behind `{outlet_index}`; must be unique across all ids and indexes), plus the optional per-outlet `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`.
+- `on_cmd` / `off_cmd` (PDU level): Templates. Each must contain `{outlet_id}` or `{outlet_index}`. Required for an outlet that has no per-outlet value of the same name.
+- `host` / `username` / `password`: Connection fields, optional. Substitute into `{host}` / `{username}` / `{password}` and export as `PDU_HOST` / `PDU_USERNAME` / `PDU_PASSWORD` to the spawned commands (a user `env` key wins). `host` is non-blank when set; it is required when any command references a connection placeholder. The same fields let the credentials stay out of argv (for example `env: {SNMP_COMMUNITY: "private"}` plus `state_cmd: "snmpwalk -v2c -c $SNMP_COMMUNITY ..."`).
+- `state_cmd` (PDU level): One command that reports every outlet. Without `state_pattern`: one non-empty line per outlet, `<id> <state>`; `id` is the outlet id or its `index`. With `state_pattern`: the device's own line format. Lines that do not parse are skipped.
+- `state_pattern` (PDU level): A line regex with the named groups `id` (outlet id or index) and `value` (a state token, classified by the token table). Matched per line; the first match per outlet wins. Requires `state_cmd`.
+- `state_token_on` / `state_token_off`: Optional lists of extra state tokens (case-insensitive) added to the built-in table (`on` / `1` / `true` / `yes` and `off` / `0` / `false` / `no`). They extend the table, never replace it; a token in both lists is a config error. Example: `state_token_off: ["2"]` for the PowerNet enum.
+- Per-outlet `state_cmd`: Reports ONE outlet. The first non-empty stdout line decides: a state token sets the state; anything else keeps the last-known state and sets an error on the reading. A matching `state_pattern` overrides the token parse (below).
+- Per-outlet `state_pattern`: Regex, matched against the outlet's `state_cmd` output. A pattern with both named groups `(?P<on>...)` and `(?P<off>...)` requires exactly one group to match. A plain pattern means: match = on, no match = off. Requires a per-outlet `state_cmd`.
 - `cwd`: Working directory for the commands (default: the server's cwd).
-- `timeout`: Per-command timeout in seconds (default: 5, max: 300). On timeout the driver kills the command's whole process group and reports the read/switch as failed.
-- `env`: Extra environment variables, merged over a minimal allow-list (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`).
+- `timeout`: Per-command timeout in seconds (default: 5, max: 300). On timeout the driver kills the command's whole process group and reports the read/switch as failed. Size it for the slowest command the PDU runs: for SNMP commands, the net-snmp retry loop (default 5 retries at ~1 s intervals) takes ~6 s to declare a host dead, so use `timeout: 15` — the default 5 s would kill the command mid-retry, and a live-but-slow PDU would fail every poll instead of the read backoff handling it.
+- `env`: Extra environment variables, merged over a minimal allow-list (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`). Wins over the exported `PDU_*` defaults.
 - `max_parallel`: Max concurrent per-outlet state commands per poll (default: 4, max: 64).
 
-Commands run without a shell: the driver splits each command with shell word splitting (`shlex.split`) and spawns the result directly. Quote parts of the command when a value contains spaces. The PDU-level `{outlet_id}` is the only substitution the driver performs.
+Commands run without a shell: the driver splits each command with shell word splitting (`shlex.split`) and spawns the result directly. Quote parts of the command when a value contains spaces. The placeholders are the only substitutions the driver performs: `{outlet_id}` (the outlet id), `{outlet_index}` (the outlet's `index`), and `{host}` / `{username}` / `{password}` (the PDU-level connection fields). A set command that uses `{outlet_index}` on an outlet without an `index` is rejected at startup, as is a PDU-level `state_cmd` that contains `{outlet_index}` (there is no per-outlet context there). Placeholders resolve at startup, so all commands are split and validated before the server starts polling.
 
-Read behavior: the batch `state_cmd` runs once per poll and serves every outlet that has no per-outlet `state_cmd`. Per-outlet `state_cmd` commands run concurrently, bounded by `max_parallel`. An outlet that receives no report in a good batch read keeps its last-known state and gets an error note ("outlet not reported by state command"). An outlet with no state command anywhere reports the last state a switch set. A device-wide read failure (the batch command failed, or every spawned state command failed) starts the read backoff (above): further polls spawn nothing until the window lapses, and `read_states()` returns `None` (the adapter keeps the last-known readings).
+Read behavior: the batch `state_cmd` runs once per poll and serves every outlet that has no per-outlet `state_cmd`. A line's outlet identity (the first word, or the pattern's `id` group) matches the outlet `id` or its `index` (the mapping is checked at startup). Per-outlet `state_cmd` commands run concurrently, bounded by `max_parallel`. An outlet that receives no report in a good batch read keeps its last-known state and gets an error note ("outlet not reported by state command"). An outlet with no state command anywhere reports the last state a switch set. A device-wide read failure (the batch command failed, or every spawned state command failed) starts the read backoff (above): further polls spawn nothing until the window lapses, and `read_states()` returns `None` (the adapter keeps the last-known readings).
 
 Switch behavior: `set_state` runs exactly one command (`on_cmd` or `off_cmd` for that outlet). It is never suppressed by the backoff. A non-zero exit or a timeout fails the switch: every switch surface (web, CLI, `p` menu) reports the error, and no audit record is written.
 
