@@ -20,6 +20,13 @@ override_dh_auto_install:
 	@echo "Generating deb default configs from config/ ..."
 	install -d -m 0755 debian/deb-package-config/generated
 	python3 scripts/make_deb_server_config.py config/server.yaml debian/deb-package-config/generated/server.yaml
+	# Stamp the full Debian version (e.g. 1.0.3-16~git202609261620.019a9e4).
+	# The pybuild wheel build cannot produce it: Debian drops the post-release
+	# part setuptools-scm computes, so the wheel metadata only carries the tag
+	# base. The About page reads this file, so a packaged install reports the
+	# dpkg-visible version without a runtime dpkg call.
+	dpkg-parsechangelog -l debian/changelog --show-field Version \
+		> debian/deb-package-config/generated/package-version
 	for f in server.yaml security.yaml; do \
 		if [ ! -f config/$$f ]; then \
 			echo "ERROR: config/$$f is required for the package build" >&2; \

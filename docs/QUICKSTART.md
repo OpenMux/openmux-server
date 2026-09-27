@@ -78,7 +78,10 @@ You can also open the web console in a browser at `http://localhost` (or the
 The Status page (`/`) shows the server version and uptime in its header.
 The About page (`/about`, link in the sidebar footer) shows the server
 version, runtime details, and the hardware identity from
-`/etc/openmux-hardware` on OpenMux console hardware.
+`/etc/openmux-hardware` on OpenMux console hardware. A .deb install also
+shows the full Debian package version (for example
+`1.0.3-16~git202609261620.019a9e4`) from a stamp file written at
+package-build time.
 
 ## 3. Local control with `openmuxctl`
 

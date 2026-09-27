@@ -5,6 +5,8 @@
 # dir is gitignored, so dh auto-install ignores it and these explicit lines
 # control exactly what ships.
 debian/deb-package-config/generated/server.yaml usr/share/openmux/default-config/
+# Full Debian version stamp (deb build only; read by the About page).
+debian/deb-package-config/generated/package-version usr/share/openmux/
 config/security.yaml usr/share/openmux/default-config/
 debian/package-config/authentication.yaml usr/share/openmux/default-config/
 debian/package-config/client.yaml usr/share/openmux/default-config/

@@ -19,6 +19,9 @@
         {% if server.version != server.version_base %}
         <div class="about-version-sub"><code>v{{ server.version }}</code></div>
         {% endif %}
+        {% if server.package_version %}
+        <div class="about-version-sub"><code>package {{ server.package_version }}</code></div>
+        {% endif %}
         <div class="about-subtitle">
           Up {{ server.uptime_human or '---' }}
           {% if server.started %}&middot; started {{ server.started | fmt_ts }}{% endif %}

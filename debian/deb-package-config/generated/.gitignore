@@ -1,5 +1,8 @@
 # This directory is populated at package-build time by
-# debian/rules override_dh_auto_install (scripts/make_deb_server_config.py).
-# Nothing in it is tracked; it is installed via an explicit line in
+# debian/rules override_dh_auto_install (server.yaml via
+# scripts/make_deb_server_config.py; package-version stamped from
+# debian/changelog).
+# Nothing in it is tracked; each file is installed via an explicit line in
 # debian/openmux.install.
 server.yaml
+package-version

@@ -43,7 +43,7 @@ from openmux.common.identity import basic_authenticate_header, get_server_id, ge
 from openmux.server.access_control import capacity_display_label, capacity_to_wire, holder_id_short
 from openmux.server.adapters.lifecycle import READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE
 from openmux.server.data_logger import DataLogger
-from openmux.server.locations import web_tls_dir
+from openmux.server.locations import package_version_file, web_tls_dir
 from openmux.server.port_utils import natural_sort_key, safe_get_port
 from openmux.server.web_plugins import ADAPTER_APP_KEY
 from openmux.server.web_plugins import power_monitor as _power_monitor
@@ -68,6 +68,24 @@ def _get_dist_version() -> str:
         return str(_dist_version("openmux"))
     except Exception:
         return "unknown"
+
+
+def _read_package_version() -> str:
+    """Return the Debian package version from the build-time stamp file, or "".
+
+    A Debian package stamps the wheel with the distro's upstream version (the
+    tag base, without the commit distance); the full deb version
+    (``1.0.3-16~git...``) is written to ``package-version`` at build time
+    (debian/rules) and shipped to /usr/share/openmux. The About page reads
+    that file and shows it as a detail line, so a packaged install is
+    identifiable. Returns "" when the file is absent (pip, venv, dev)
+    or malformed.
+    """
+    try:
+        return Path(package_version_file()).read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        # justification: the stamp is optional; the About page renders without it
+        return ""
 
 
 def _format_uptime(seconds: Optional[float]) -> str:
@@ -638,6 +656,19 @@ async def handle_status(request: web.Request) -> web.Response:
     return await _render_status_page(request, adapter, default_status_path="/status")
 
 
+def _collect_about_user_groups(auth_manager, username: Optional[str]) -> Set[str]:
+    """Return the user's group set for the About page.
+
+    Returns an empty set when the auth manager or the user is unavailable.
+    A lookup failure is not an error; the page renders without groups.
+    """
+    try:
+        return auth_manager.get_user_groups(username) if username and auth_manager else set()
+    except Exception:
+        # justification: the groups list is optional; the About page renders without it
+        return set()
+
+
 async def handle_about(request: web.Request) -> web.Response:
     adapter = _get_adapter(request)
     username = request.get("username")
@@ -650,10 +681,12 @@ async def handle_about(request: web.Request) -> web.Response:
         user_perm = adapter._get_effective_permission(username, request)
     except Exception:
         user_perm = None
+    user_groups = _collect_about_user_groups(adapter.auth_manager, username)
     try:
-        user_groups = adapter.auth_manager.get_user_groups(username) if username and adapter.auth_manager else set()
+        package_version = _read_package_version()
     except Exception:
-        user_groups = set()
+        # justification: version detail is optional; the page renders without it
+        package_version = ""
     try:
         body = adapter._render_about(
             username=username,
@@ -661,6 +694,7 @@ async def handle_about(request: web.Request) -> web.Response:
             plugin_nav=plugin_nav,
             user_permission=user_perm,
             ports=ports,
+            package_version=package_version,
         )
     except Exception as exc:
         adapter.logger.error("About page render failed: %s", exc)
@@ -2360,12 +2394,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
         plugin_nav: Optional[list[Dict[str, Any]]] = None,
         user_permission: Optional[str] = None,
         ports: Optional[list] = None,
+        package_version: Optional[str] = None,
     ) -> bytes:
         """Render the About page (logged-in user, server identity, runtime, hardware)."""
         assert self._jinja_env is not None
         tmpl = self._jinja_env.get_template("about.html.j2")
         info = _about_server_info(self, ports_snapshot=ports)
         info["uptime_human"] = _format_uptime(info["uptime_seconds"]) if info["uptime_seconds"] is not None else ""
+        info["package_version"] = package_version or ""
         base_path = self._effective_base_path(None)
         perm = user_permission or ""
         # Tag colors: admin is the "granted everything" case (ok),

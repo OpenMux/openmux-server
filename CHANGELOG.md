@@ -94,6 +94,17 @@ Changes since v1.0.3 (2026-09-17).
 
 ### Web console and observability
 
+- **The About page shows the Debian package version for .deb installs.** A
+  Debian package stamps the built wheel with the distro's upstream version
+  (the tag base, e.g. `1.0.3` - the commit distance lives in the Debian
+  revision, not in the wheel metadata). The deb build now also writes the
+  full version to `package-version` (shipped to
+  `/usr/share/openmux/package-version`) and the web About page reads that
+  file, adding a detail line `package <version>` (e.g.
+  `package 1.0.3-16~git202609261620.019a9e4`) so a packaged install is
+  identifiable without `dpkg-query`. The line is hidden when the stamp file
+  is absent (pip, venv, dev runs). No config change is required.
+
 - **New: PDU power control** (a new user-facing feature). Add a `power:` section to `server.yaml` to manage one or more PDUs (v1 ships the `dummy` driver). A "Power" item appears in the web console sidebar (below the Console section, expandable to list every PDU) when the section is present, with a PDU list and per-PDU outlet pages (on/off, watts/volts/amps, and which consoles each outlet feeds). Console ports declare their power feeds with a new optional `power: ["<pdu>.<outlet>", ...]` key (`serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`); the web console header and status page show a power dot per console (green all feeds on, yellow partial, red all off, grey unknown), the console header badge has a per-outlet on/off menu, and any power change messages every attached session of every affected console. A new `POWER` command on the client listener lists or switches outlets (switching needs read-write). The Config Editor gains a "Power" view (`/config-editor?view=power`) that edits the section, and a per-port "Power feeds" field on the Ports view; a Soft Reload reconciles the section. See `docs/configuration/adapters.md` (PDU Power) and `docs/GLOSSARY.md`.
 
 - **POWER control over telnet and SSH.** The telnet and SSH listeners now

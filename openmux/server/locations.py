@@ -295,6 +295,27 @@ def server_schema_override() -> Optional[str]:
     return value or None
 
 
+# Build-time Debian package version stamp (written by debian/rules, shipped
+# to the FHS share dir by debian/openmux.install). A dev checkout, wheel, or
+# Docker image has no such file; the About page hides its line in that case.
+ENV_PACKAGE_VERSION = "OPENMUX_PACKAGE_VERSION_FILE"
+DEFAULT_PACKAGE_VERSION_FILE = "/usr/share/openmux/package-version"
+
+
+def package_version_file() -> Path:
+    """Path of the Debian package version stamp file.
+
+    Resolution: ``OPENMUX_PACKAGE_VERSION_FILE`` (process env, then
+    /etc/defaults/openmux) when set, else the FHS location the Debian
+    package ships to. The file is written at package-build time by
+    ``debian/rules``; a missing file is the normal case for pip, venv,
+    and dev installs.
+    """
+    override = _env(ENV_PACKAGE_VERSION)
+    path = Path(override) if override else Path(DEFAULT_PACKAGE_VERSION_FILE)
+    return path
+
+
 # Location keys removed from the schema in favor of env-based resolution.
 # They are accepted and stripped (with a warning) until the next minor
 # release; a stale conffile upgrades smoothly instead of failing validation.

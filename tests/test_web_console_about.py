@@ -83,6 +83,41 @@ def test_about_version_split(monkeypatch):
     assert info["version_base"] == "1.0.1"
 
 
+def test_read_package_version(monkeypatch, tmp_path):
+    """The deb version comes from the build-time stamp file; no file -> ''."""
+    import openmux.server.web_console as wc
+
+    stamp = tmp_path / "package-version"
+    stamp.write_text("1.0.3-16~git202609261620.019a9e4\n", encoding="utf-8")
+    monkeypatch.setattr(wc, "package_version_file", lambda: stamp)
+    assert wc._read_package_version() == "1.0.3-16~git202609261620.019a9e4"
+
+    # No stamp file (pip / venv / dev install) -> ""
+    monkeypatch.setattr(wc, "package_version_file", lambda: tmp_path / "missing")
+    assert wc._read_package_version() == ""
+
+    # Empty file -> "" (a build never writes one, but guard anyway)
+    blank = tmp_path / "blank"
+    blank.write_text("\n", encoding="utf-8")
+    monkeypatch.setattr(wc, "package_version_file", lambda: blank)
+    assert wc._read_package_version() == ""
+
+
+def test_render_about_shows_package_version():
+    from jinja2 import Environment, FileSystemLoader
+
+    tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
+    adapter = _make_adapter(0)
+    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+
+    html = adapter._render_about(username="u", package_version="1.0.3-16~git202609261620.019a9e4").decode()
+    assert "package 1.0.3-16~git202609261620.019a9e4" in html
+
+    # no stamp (pip/venv/dev runs, handle_about passes "") -> the line is absent
+    html = adapter._render_about(username="u").decode()
+    assert "package " not in html
+
+
 def test_login_page_shows_server_version(monkeypatch):
     from jinja2 import Environment, FileSystemLoader
 
