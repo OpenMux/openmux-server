@@ -23,8 +23,10 @@ POWER_SECTION = {
                 "name": "rack1",
                 "driver": "dummy",
                 "poll_interval": 0,
-                "options": {"outlets": ["1", "2"]},
-                "outlets": [{"id": "2", "description": "Switch A"}],
+                "outlets": [
+                    {"id": "1"},
+                    {"id": "2", "description": "Switch A"},
+                ],
             },
         ],
     }

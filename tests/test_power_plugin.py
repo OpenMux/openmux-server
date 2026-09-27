@@ -55,14 +55,16 @@ POWER_SECTION = {
                 "name": "rack1",
                 "driver": "dummy",
                 "poll_interval": 0,
-                "options": {"outlets": ["1", "2"]},
-                "outlets": [{"id": "2", "description": "Switch A"}],
+                "outlets": [
+                    {"id": "1"},
+                    {"id": "2", "description": "Switch A"},
+                ],
             },
             {
                 "name": "rack2",
                 "driver": "dummy",
                 "poll_interval": 0,
-                "options": {"outlets": ["1", "2"]},
+                "outlets": [{"id": "1"}, {"id": "2"}],
             },
         ],
     },
@@ -229,7 +231,7 @@ async def test_power_pages_render_sidebar_with_pdus_and_ports():
                 await pdu.reconcile_ports(
                     {
                         "pdus": [dict(d) for d in POWER_SECTION["power"]["pdus"]]
-                        + [{"name": "rack3", "driver": "dummy", "poll_interval": 0, "options": {"outlets": ["1"]}}]
+                        + [{"name": "rack3", "driver": "dummy", "poll_interval": 0, "outlets": [{"id": "1"}]}]
                     }
                 )
                 async with session.get(f"http://127.0.0.1:{port}/power", headers=_hdr("u")) as resp:

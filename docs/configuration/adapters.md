@@ -535,8 +535,10 @@ Supported keys:
 - `pdus[].description`: Free text (default: not set)
 - `pdus[].driver`: Driver registry key: `dummy` or `command`
 - `pdus[].poll_interval`: PER-PDU refresh in seconds. `0` = no poll task (reads on demand only). Default: 10
-- `pdus[].options`: Object passed to the driver. Keys are driver-specific (see the driver references below); the driver validates them and rejects unknown keys at startup
-- `pdus[].outlets`: Optional per-outlet annotations; each item is `{id: "<outlet id>", description: "..."}`. `id` must match the device's id exactly (a string). Ids that the device does not report raise a warning at startup
+- `pdus[].options`: Object of pure driver settings, passed to the driver. Keys are driver-specific (see the driver references below); the driver validates them and rejects unknown keys at startup. The key `outlets` is reserved and rejected here: the per-PDU `outlets` list below is the single outlet source
+- `pdus[].outlets`: The outlet list. Each entry is `{id: "<outlet id>", ...}` (a bare string `"<outlet id>"` is shorthand for `{id: ...}`) and may carry optional keys: `description` (a label shown by the web UI; owned by the power adapter) and driver-specific fields (for the `command` driver: `index`, `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`). The power adapter reads `id` and `description`; the same list is passed to the driver (merged into the driver's `options` as `outlets`) and the driver owns the remaining keys. `id` must match the device's id exactly (a string), unique per PDU
+
+One list, no duplication: an outlet that needs a label AND driver fields lives once in `pdus[].outlets` with both. Ids that the device does not report raise a warning at startup
 
 Outlet ref = `<pdu_name>.<outlet_id>` (for example `rack1.3`, `phaseA.A1`). This is the single identity used by the CLI, the web API, the Power page, and the status page.
 
@@ -555,9 +557,9 @@ Switching an outlet off prints `WARNING:` lines naming the consoles that would l
 
 Who may switch is scoped to console groups: switching needs `read-write` or `admin`, plus the entitlement to open every console the outlet feeds (the same console-access rules as attach time: `read_write_groups`/`read_only_groups` and `access_default`). A read-write user whose groups do not cover one of the outlet's consoles sees an `ERROR:POWER` line (CLI, telnet, SSH) or a 403 (web API) naming that console; switching an outlet that feeds any console outside the user's groups requires `admin`. An outlet that feeds no console stays switchable by any read-write user. The check runs on every switch path (web API, client-listener `POWER`, and the `p` power menu on the telnet, SSH, and CLI clients).
 
-Reload behavior: a soft reload re-applies the `power:` section without a restart. Description or annotation edits apply in place. A material change (driver, `poll_interval`, `options`) re-creates that PDU and re-discovers its outlets. Console-side `power:` mapping is read live from the ports and needs no reload work at all.
+Reload behavior: a soft reload re-applies the `power:` section without a restart. Description edits apply in place (including `description` on a PDU or on an outlet entry). A material change (driver, `poll_interval`, `options`, or one outlet's id / driver fields) re-creates that PDU and re-discovers its outlets. Console-side `power:` mapping is read live from the ports and needs no reload work at all.
 
-Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power`) edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `options` as JSON, and optional per-outlet descriptions). The per-port `power:` feed refs are edited as the "Power feeds" field on the Ports view. Apply, then use **Soft Reload** to reconcile the section.
+Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power") edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `outlets` as id + description rows, and `options` as JSON). The panel keeps any driver-specific keys already present on an outlet entry when it saves; add those keys by editing the YAML directly.
 
 Web console: the standalone `/power` page, the per-PDU pages, the
 `/api/power` routes, and the `/ws/power` socket are core. The web console
@@ -578,16 +580,18 @@ power:
       description: "Rack 1 PDU"
       driver: dummy
       poll_interval: 30
-      options:
-        outlets: ["1", "2", "3"]
       outlets:
+        - id: "1"
+        - id: "2"
         - id: "3"
           description: "Switch A"
     - name: "phaseA"
       driver: dummy
       poll_interval: 10
-      options:
-        outlets: ["A1", "B1", "C2"]
+      outlets:
+        - id: "A1"
+        - id: "B1"
+        - id: "C2"
 ```
 
 ### Command driver (`driver: command`)
@@ -596,7 +600,7 @@ Runs CLI commands against a real device: GPIO scripts on a Raspberry Pi, custom 
 
 Two command levels. A per-outlet value wins over the PDU-level value:
 - PDU level (in `options`): `on_cmd` and `off_cmd` templates. Each must contain the placeholder `{outlet_id}` or `{outlet_index}` (below). One `state_cmd` reports every outlet: by default one `<id> <state>` line per outlet, or a device-specific line format parsed by `state_pattern`.
-- Outlet level (on an `outlets` entry): `on_cmd`, `off_cmd`, `state_cmd`, an optional `state_pattern` that matches that outlet's state output with a regex, and an optional `index` (the outlet's device-side identity, for `{outlet_index}`).
+- Outlet level (on an entry of the per-PDU `outlets` list, which the power adapter passes into the driver): `on_cmd`, `off_cmd`, `state_cmd`, an optional `state_pattern` that matches that outlet's state output with a regex, and an optional `index` (the outlet's device-side identity, for `{outlet_index}`).
 
 Example, template style (one script per operation):
 ```yaml
@@ -610,9 +614,9 @@ power:
         off_cmd: "sudo /opt/openmux/scripts/set_output.sh {outlet_id} 0"
         state_cmd: "/opt/openmux/scripts/get_states.sh"   # prints: 1 on / 2 off
         timeout: 5
-        outlets:
-          - id: "1"
-          - id: "2"
+      outlets:
+        - id: "1"
+        - id: "2"
 ```
 
 Example, per-outlet style (each tool is different), with the two levels mixed:
@@ -624,16 +628,16 @@ power:
       poll_interval: 60
       options:
         cwd: "/opt/openmux"
-        outlets:
-          - id: "relay-a"
-            on_cmd: "./relay-a.sh on"
-            off_cmd: "./relay-a.sh off"
-            state_cmd: "./relay-a.sh state"            # prints: on
-          - id: "usb-charger"
-            on_cmd: "usb-power set charger on"
-            off_cmd: "usb-power set charger off"
-            state_cmd: "usb-power status charger"
-            state_pattern: \": (?P<on>connected)|(?P<off>disconnected)\"
+      outlets:
+        - id: "relay-a"
+          on_cmd: "./relay-a.sh on"
+          off_cmd: "./relay-a.sh off"
+          state_cmd: "./relay-a.sh state"            # prints: on
+        - id: "usb-charger"
+          on_cmd: "usb-power set charger on"
+          off_cmd: "usb-power set charger off"
+          state_cmd: "usb-power status charger"
+          state_pattern: \": (?P<on>connected)|(?P<off>disconnected)\"
 ```
 
 Example, an SNMP PDU (APC NetManager rack PDU) with no helper scripts: the connection fields (`host`, `username`, `password`) substitute into `{host}` / `{username}` / `{password}` (the OIDs are plain text in the command), each outlet's `index` maps the outlet ref to the device outlet index behind `{outlet_index}`, and `state_pattern` parses the `snmpwalk` lines:
@@ -653,15 +657,18 @@ power:
         timeout: 15                  # let snmp's own retries finish (default 5s is shorter than snmp's retry loop)
         state_pattern: "(?P<id>\\d+) = INTEGER: (?P<value>\\d+)"
         state_token_off: ["2"]       # PowerNet reports 1 = on, 2 = off
-        outlets:
-          - id: "web-rack-top"
-            index: "1"
-          - id: "storage-1"
-            index: "2"
+      outlets:
+        - id: "web-rack-top"
+          index: "1"
+          description: "web rack, top feed"
+        - id: "storage-1"
+          index: "2"
 ```
 
-Option keys:
-- `outlets`: Required. List of outlet entries. Each entry: `id` (required; the ref part; no dots or whitespace; unique), `index` (optional; the device-side identity behind `{outlet_index}`; must be unique across all ids and indexes), plus the optional per-outlet `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`.
+The per-PDU `outlets` list (not an option):
+- `outlets`: Required. List of outlet entries. Each entry: `id` (required; the ref part; no dots or whitespace; unique), `description` (optional; web UI label), `index` (optional; the device-side identity behind `{outlet_index}`; must be unique across all ids and indexes), plus the optional per-outlet `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`.
+
+Option keys (`driver: command`):
 - `on_cmd` / `off_cmd` (PDU level): Templates. Each must contain `{outlet_id}` or `{outlet_index}`. Required for an outlet that has no per-outlet value of the same name.
 - `host` / `username` / `password`: Connection fields, optional. Substitute into `{host}` / `{username}` / `{password}` and export as `PDU_HOST` / `PDU_USERNAME` / `PDU_PASSWORD` to the spawned commands (a user `env` key wins). `host` is non-blank when set; it is required when any command references a connection placeholder. The same fields let the credentials stay out of argv (for example `env: {SNMP_COMMUNITY: "private"}` plus `state_cmd: "snmpwalk -v2c -c $SNMP_COMMUNITY ..."`).
 - `state_cmd` (PDU level): One command that reports every outlet. Without `state_pattern`: one non-empty line per outlet, `<id> <state>`; `id` is the outlet id or its `index`. With `state_pattern`: the device's own line format. Lines that do not parse are skipped.
@@ -685,7 +692,7 @@ The driver reports no watts/volts/amps: those stay unknown for command-driven ou
 ### Writing a power driver
 
 Each driver lives in one module under `openmux/server/adapters/power_drivers/` (for example `dummy.py`, `command.py`):
-- Implement `api.PduDriver` for the class: `list_outlets`, `read_states`, `set_state`; the constructor takes the `options` dict and raises `ValueError` on invalid config (the adapter logs a line and skips the PDU entry).
+- Implement `api.PduDriver` for the class: `list_outlets`, `read_states`, `set_state`; the constructor takes the `options` dict and raises `ValueError` on invalid config (the adapter logs a line and skips the PDU entry). The power adapter merges the per-PDU `outlets` list into that dict as `options["outlets"]` before constructing, so a driver that takes an outlet list reads it from `options["outlets"]` (entries are `{id, ...}` mappings or bare id strings). The `options` section must not set its own `outlets` key.
 - Wrap the device-wide read path with `readbackoff.ReadBackoff`: while `in_backoff()` is true, do no device IO and return `None` from `read_states()`. Call `note_failure()` and also return `None` on a device-wide read failure (connection refused, timeout, whole-device error). Call `note_success()` on a device-wide successful read. Per-outlet failures ride as reading errors and do not touch the window.
 - Expose an `info()` function that returns the Config Editor metadata: `label`, `description`, `options_keys` (one entry per supported key: `key`, `type`, `default`, `help`), and `options_example`.
 - Register the module at the bottom of `openmux/server/adapters/pdu.py`: import it, then add one line to `DRIVERS` (key -> class) and one to `DRIVER_INFO` (key -> `info`). The Config Editor driver select and the per-driver options help update automatically from the registry.

@@ -56,14 +56,18 @@ POWER_SECTION = {
                 "description": "Rack 1 PDU",
                 "driver": "dummy",
                 "poll_interval": 0,  # keep tests free of background polling
-                "options": {"outlets": ["1", "2", "3"]},
-                "outlets": [{"id": "3", "description": "Switch A"}],
+                "outlets": [
+                    {"id": "1"},
+                    {"id": "2"},
+                    {"id": "3", "description": "Switch A"},
+                ],
             },
             {
                 "name": "phaseA",
                 "driver": "dummy",
                 "poll_interval": 0,
-                "options": {"outlets": ["A1", "B1", "C2"], "watts_on": 55.0, "volts": 230.0},
+                "options": {"watts_on": 55.0, "volts": 230.0},
+                "outlets": [{"id": "A1"}, {"id": "B1"}, {"id": "C2"}],
             },
         ],
     }
@@ -127,6 +131,11 @@ def test_validate_config_rejects_bad_names_and_ids():
         PduAdapter.validate_config({"power": {"pdus": [{"name": "r", "driver": "dummy"}, {"name": "r", "driver": "dummy"}]}})
         is False
     )
+    # the per-PDU outlets list is the single outlet source; options must not set its own
+    assert (
+        PduAdapter.validate_config({"power": {"pdus": [{"name": "r", "driver": "dummy", "options": {"outlets": ["1"]}}]}})
+        is False
+    )
     # 3-phase style ids are accepted
     assert (
         PduAdapter.validate_config(
@@ -149,6 +158,9 @@ async def test_dummy_driver_default_and_custom_ids():
     assert await d.list_outlets() == [str(i) for i in range(1, 9)]
     d2 = DRIVERS["dummy"]({"outlets": ["A1", "B1", "C2"]})
     assert await d2.list_outlets() == ["A1", "B1", "C2"]
+    # mapping entries (the per-PDU outlet list shape) resolve via 'id'
+    d3 = DRIVERS["dummy"]({"outlets": [{"id": "A1"}, {"id": "B1", "description": "label"}]})
+    assert await d3.list_outlets() == ["A1", "B1"]
     reading = await d2.set_state("A1", False)
     assert reading.on is False
     reading = await d2.set_state("A1", True)
@@ -165,6 +177,13 @@ def test_dummy_driver_rejects_blank_id_list():
     assert d._ids == ["1", "2"]
 
 
+def test_dummy_driver_rejects_idless_mapping_entry():
+    with pytest.raises(ValueError):
+        DRIVERS["dummy"]({"outlets": [{"id": " "}]})
+    with pytest.raises(ValueError):
+        DRIVERS["dummy"]({"outlets": [{"description": "no id"}]})
+
+
 def test_driver_catalog_matches_registry_and_is_json_safe():
     import json
 
@@ -173,12 +192,15 @@ def test_driver_catalog_matches_registry_and_is_json_safe():
     assert [e["driver"] for e in catalog] == list(DRIVERS)
     assert [e["driver"] for e in catalog] == list(DRIVER_INFO)
     by_name = {e["driver"]: e for e in catalog}
-    # The dummy driver advertises its options and a JSON example.
+    # The dummy driver advertises its options and a JSON example. The outlet
+    # list is NOT an option (it is the per-PDU `outlets` key), so the
+    # advertised keys are the pure settings only.
     dummy = by_name["dummy"]
     assert dummy["label"] == "Dummy"
     assert dummy["description"]
-    assert [k["key"] for k in dummy["options_keys"]] == ["outlets", "watts_on", "volts"]
-    assert dummy["options_example"] == {"outlets": ["1", "2", "3"]}
+    assert [k["key"] for k in dummy["options_keys"]] == ["watts_on", "volts"]
+    assert dummy["options_example"] == {}
+    assert "outlets" not in [k["key"] for k in dummy["options_keys"]]
     # The whole catalog must be JSON-serializable for the /data bootstrap.
     json.loads(json.dumps(catalog))
 
@@ -428,8 +450,19 @@ async def test_discovery_failure_keeps_adapter_running():
     section = {
         "power": {
             "pdus": [
-                {"name": "ok1", "driver": "dummy", "poll_interval": 0, "options": {"outlets": ["1"]}},
-                {"name": "bad", "driver": "dummy", "poll_interval": 0, "options": {"outlets": ["1"], "fail_discovery": True}},
+                {
+                    "name": "ok1",
+                    "driver": "dummy",
+                    "poll_interval": 0,
+                    "outlets": [{"id": "1"}],
+                },
+                {
+                    "name": "bad",
+                    "driver": "dummy",
+                    "poll_interval": 0,
+                    "options": {"fail_discovery": True},
+                    "outlets": [{"id": "1"}],
+                },
             ]
         }
     }
@@ -450,8 +483,8 @@ async def test_poll_task_respects_per_pdu_interval_and_zero_cancels():
     section = {
         "power": {
             "pdus": [
-                {"name": "fast", "driver": "dummy", "poll_interval": 0.02, "options": {"outlets": ["1"]}},
-                {"name": "stopped", "driver": "dummy", "poll_interval": 0, "options": {"outlets": ["1"]}},
+                {"name": "fast", "driver": "dummy", "poll_interval": 0.02, "outlets": [{"id": "1"}]},
+                {"name": "stopped", "driver": "dummy", "poll_interval": 0, "outlets": [{"id": "1"}]},
             ]
         }
     }
@@ -490,18 +523,21 @@ async def test_reconcile_adds_removes_and_in_place_notes():
                     "description": "NEW",
                     "driver": "dummy",
                     "poll_interval": 0,
-                    "options": {"outlets": ["1", "2", "3"]},
-                    "outlets": [{"id": "3", "description": "changed"}],
+                    "outlets": [
+                        {"id": "1"},
+                        {"id": "2"},
+                        {"id": "3", "description": "changed"},
+                    ],
                 },
                 # new PDU
-                {"name": "rack2", "driver": "dummy", "poll_interval": 0, "options": {"outlets": ["1"]}},
+                {"name": "rack2", "driver": "dummy", "poll_interval": 0, "outlets": [{"id": "1"}]},
             ],
         }
     }
     res = await adapter.reconcile_ports(new_section)
     assert res == {"added": ["rack2"], "removed": ["phaseA"], "updated": [], "unchanged": ["rack1"]}
     assert adapter.pdus["rack1"].description == "NEW"
-    assert adapter.pdus["rack1"].annotations == {"3": "changed"}
+    assert adapter.pdus["rack1"].annotations == {"1": "", "2": "", "3": "changed"}
     assert "rack2" in adapter.pdus and adapter.pdus["rack2"].online is True
     assert "phaseA" not in adapter.pdus
     await adapter.stop()
@@ -513,10 +549,15 @@ async def test_reconcile_material_change_recreates():
     new_section = {
         "power": {
             "pdus": [
-                # same name/name but different options -> material -> recreate
-                {"name": "rack1", "driver": "dummy", "poll_interval": 0, "options": {"outlets": ["9"]}},
+                # same name/name but different outlet ids -> material -> recreate
+                {"name": "rack1", "driver": "dummy", "poll_interval": 0, "outlets": [{"id": "9"}]},
                 # poll_interval change is material too
-                {"name": "phaseA", "driver": "dummy", "poll_interval": 7, "options": {"outlets": ["A1", "B1", "C2"]}},
+                {
+                    "name": "phaseA",
+                    "driver": "dummy",
+                    "poll_interval": 7,
+                    "outlets": [{"id": "A1"}, {"id": "B1"}, {"id": "C2"}],
+                },
             ]
         }
     }

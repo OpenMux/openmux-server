@@ -339,16 +339,34 @@ async function fetchCSRF(){ try{ const r=await fetch(withBase('/api/csrf')); if(
       function q(id){ return document.getElementById(id); }
       function setVal(id, v){ const el=q(id); if(!el) return; if(el.type==='checkbox'){ el.checked=!!v; } else if(el.tagName==='SELECT'){ el.value = (v==null?'':String(v)); } else { el.value = (v==null?'':String(v)); } }
       function getVal(id){ const el=q(id); if(!el) return undefined; if(el.type==='checkbox') return !!el.checked; if(el.type==='number') return el.value? Number(el.value) : undefined; const val = el.value; return val===''? undefined : val; }
-      // Power (PDU editor): flatten the nested outlets annotations into the
-      // rows the inline sub-list reads, and turn them back into the
-      // [{id, description}] list the config schema expects.
+      // Power (PDU editor): flatten the per-PDU outlet list into the rows the
+      // inline sub-list reads, and turn them back into the [{id, description,
+      // ...driver fields}] list the config schema expects. The panel edits id
+      // and description; every other key on an entry (driver-specific, e.g.
+      // the command driver's index) is preserved unchanged across the edit.
       function _powerOutletRows(pduRow){
         const list = pduRow && Array.isArray(pduRow.outlets) ? pduRow.outlets : [];
-        return list.map(r=>({id: r && r.id!=null ? String(r.id) : '', description: r && r.description!=null ? String(r.description) : ''}));
+        return list.map(r=>{
+          if(r && typeof r==='object' && !Array.isArray(r)){
+            const row={};
+            for(const k in r){ if(Object.prototype.hasOwnProperty.call(r,k)) row[k]=r[k]; }
+            row.id = row.id!=null ? String(row.id) : '';
+            row.description = row.description!=null ? String(row.description) : '';
+            return row;
+          }
+          return {id: r!=null ? String(r) : '', description: ''};
+        });
       }
       function _powerOutletsFromRows(rows){
         const out = (rows||[]).filter(r=>r && String(r.id||'').trim().length>0);
-        return out.map(r=>({id: String(r.id).trim(), description: r.description!=null && String(r.description).trim()!=='' ? String(r.description).trim() : undefined}));
+        return out.map(r=>{
+          const row={};
+          for(const k in r){ if(Object.prototype.hasOwnProperty.call(r,k) && k!=='id' && k!=='description') row[k]=r[k]; }
+          row.id = String(r.id).trim();
+          const d = r.description!=null ? String(r.description).trim() : '';
+          if(d!=='') row.description = d;
+          return row;
+        });
       }
 
       function toDisplay(v){ if(v===undefined||v===null||v==='') return '—'; if(typeof v==='boolean') return v?'true':'false'; return String(v); }
@@ -523,7 +541,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
             editor.appendChild(drvField); editor.appendChild(optField);
             getters.push(()=>['driver', drv.value||undefined]);
             reqChecks.push(()=>{ if(!drv.value){ errBox.className='err'; errBox.textContent='Choose a driver.'; return {key:'driver', ok:false}; } errBox.textContent=''; return {key:'driver', ok:true}; });
-            getters.push(()=>['options', (function(){ const t=(optInput.value||'').trim(); if(t==='') return undefined; const v=JSON.parse(t); if(typeof v!=='object'||v===null||Array.isArray(v)) throw new Error('Driver options must be a JSON object'); return v; })()]);
+            function optionsParsed(){ const t=(optInput.value||'').trim(); if(t==='') return undefined; const v=JSON.parse(t); if(typeof v!=='object'||v===null||Array.isArray(v)) throw new Error('Driver options must be a JSON object'); return v; }
+            getters.push(()=>['options', optionsParsed()]);
             // Nested per-outlet descriptions, laid out like every other field
             // in this panel: label (220px), then the value slot (flex:1). The
             // outlet list starts at the same x-position as every other field's
@@ -566,13 +585,15 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
             renderOList();
             editor.appendChild(ofield);
             getters.push(()=>['outlets', _powerOutletsFromRows(olist)]);
-            reqChecks.push(()=>{ const bad=olist.some(r=>/\s/.test(String(r.id||'')) || String(r.id||'').indexOf('.')!==-1); if(bad){ errBox.className='err'; errBox.textContent='An outlet id contains a dot or a space. The outlet ref is <pdu name>.<id>, so both parts must stay dot-free.'; return {key:'outlets', ok:false}; } errBox.textContent=''; return {key:'outlets', ok:true}; });
+            reqChecks.push(()=>{ const ids=olist.map(r=>String(r.id||'').trim()).filter(x=>x); if(new Set(ids).size!==ids.length){ errBox.className='err'; errBox.textContent='Duplicate outlet id. Each id appears once in the PDU outlet list; the ref is <pdu name>.<id>. Duplicates are rejected at startup.'; return {key:'outlets', ok:false}; } errBox.textContent=''; return {key:'outlets', ok:true}; });
+            reqChecks.push(()=>{ let opts=undefined; try{ opts=optionsParsed(); }catch(_e){ /* bad JSON: the options getter reports it */ } if(opts && Array.isArray(opts.outlets)){ errBox.className='err'; errBox.textContent='Driver options must not set "outlets". The per-PDU outlet list (above) is the single outlet source; the adapter merges it into options.outlets for the driver.'; return {key:'options', ok:false}; } errBox.textContent=''; return {key:'options', ok:true}; });
           }
           columns.forEach(c=>{
             // PDU power: driver + options are custom fields driven by
-            // POWER_DRIVERS (rendered above). Keep them only as list columns;
-            // skip the generic input so they are not duplicated in the editor.
-            if(rootId==='power.pdus' && (c.key==='driver' || c.key==='options')) return;
+            // POWER_DRIVERS (rendered above), and outlets is the custom
+            // per-outlet panel. Keep them only as list columns; skip the
+            // generic input so they are not duplicated in the editor.
+            if(rootId==='power.pdus' && (c.key==='driver' || c.key==='options' || c.key==='outlets')) return;
             // Inline group for serial settings
             if(isSerial && (c.key==='baudrate' || c.key==='bytesize' || c.key==='parity' || c.key==='stopbits' || c.key==='dtr' || c.key==='rts' || c.key==='flow_control')){
               // Defer handling to a single grouped row once (on baudrate)

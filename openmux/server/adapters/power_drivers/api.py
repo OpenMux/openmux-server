@@ -54,8 +54,16 @@ class PduDriver:
     constructor receives the driver's free-form ``options`` dict and
     raises ``ValueError`` on invalid config (the adapter then rejects the
     PDU entry with a log line). Outlet ids are opaque strings taken from
-    the device itself (e.g. ``"1"`` or ``"A1"`` on a 3-phase unit); the
-    adapter never assumes numbering.
+    the config (e.g. ``"1"`` or ``"A1"`` on a 3-phase unit); the adapter
+    never assumes numbering.
+
+    The adapter passes the per-PDU ``outlets`` list into the options dict
+    as ``options["outlets"]`` before constructing (the PDU-level key and
+    the options key both being ``outlets`` is the ONE place the two meet).
+    Drivers that take an outlet list therefore read ``options["outlets"]``;
+    an entry may be a bare id string or a mapping with an ``id`` key plus
+    driver-specific keys (the adapter ignores the extra keys; it owns
+    ``id`` and ``description`` only).
     """
 
     async def list_outlets(self) -> List[str]:

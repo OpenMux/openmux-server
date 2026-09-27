@@ -8,20 +8,24 @@ parsed with ``shlex.split`` and spawned as plain process groups.
 Two command levels are supported, per-outlet values win:
 
 * PDU level (in ``options``): ``on_cmd`` / ``off_cmd`` templates that
-  must contain the literal ``{outlet_id}`` placeholder, and one
-  ``state_cmd`` that reports every outlet as ``<id> <state>`` lines.
-* Outlet level (on an ``outlets`` entry): ``on_cmd`` / ``off_cmd`` and a
-  single-outlet ``state_cmd`` whose output is one state token (or a
-  ``state_pattern`` regex).
+  must contain the ``{outlet_id}`` or ``{outlet_index}`` placeholder, and
+  one ``state_cmd`` that reports every outlet as ``<id> <state>`` lines.
+* Outlet level (on an entry of the per-PDU ``outlets`` list, which the
+  adapter passes in as ``options[outlets]``): ``on_cmd`` / ``off_cmd`` and
+  a single-outlet ``state_cmd`` whose output is one state token (or a
+  ``state_pattern`` regex), plus ``index`` for ``{outlet_index}``.
 
 Placeholders: ``{outlet_id}`` (the outlet id) and ``{outlet_index}`` (the
-device index/name on the ``index`` key of the outlet, when it differs from
-the id) may appear in on/off commands; ``{host}``, ``{username}`` and
+device index/name on the ``index`` key of the outlet entry, when it
+differs from the id) may appear in on/off commands; ``{host}``,
+``{username}`` and
 ``{password}`` map to the PDU-level options of the same name and are also
 exported to the child environment as ``PDU_HOST`` / ``PDU_USERNAME`` /
 ``PDU_PASSWORD``. A PDU-level ``state_pattern`` (a regex with named
 ``id`` / ``value`` groups) parses ``state_cmd`` output line by line;
 ``state_token_on`` / ``state_token_off`` extend the state-token table.
+A per-outlet ``description`` is the adapter's label (owned by
+``pdu.py``); the driver ignores it.
 
 Safety: every command runs in its own session/group and is killed as a
 group (plus a bounded reap) when its ``timeout`` elapses; per-outlet
@@ -92,7 +96,7 @@ _KNOWN_OPTIONS = frozenset(
         "max_parallel",
     }
 )
-_KNOWN_OUTLET_KEYS = frozenset({"id", "index", "on_cmd", "off_cmd", "state_cmd", "state_pattern"})
+_KNOWN_OUTLET_KEYS = frozenset({"id", "description", "index", "on_cmd", "off_cmd", "state_cmd", "state_pattern"})
 
 
 class _CmdResult:
@@ -666,7 +670,9 @@ def info(opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "the {outlet_id} and {outlet_index} placeholders plus the {host}/{username}/{password} "
             "connection fields; a PDU-level state_cmd prints one '<id> <state>' line per outlet, "
             "or the lines can be parsed with a state_pattern (named id/value groups). "
-            "Per-outlet on_cmd/off_cmd/state_cmd/index override the PDU level."
+            "Per-outlet on_cmd/off_cmd/state_cmd/index override the PDU level. The outlet list "
+            "itself is the per-PDU 'outlets' key (with id, description, and driver fields); the "
+            "adapter merges it into options.outlets for the driver."
         ),
         "options_keys": [
             {
@@ -738,15 +744,6 @@ def info(opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 ),
             },
             {
-                "key": "outlets",
-                "type": "list of mappings",
-                "default": "(required)",
-                "help": (
-                    "Each entry: id (required, the outlet ref part); optional index (device-side "
-                    "identity behind {outlet_index}), on_cmd, off_cmd, state_cmd, state_pattern."
-                ),
-            },
-            {
                 "key": "cwd",
                 "type": "string",
                 "default": "server cwd",
@@ -783,9 +780,5 @@ def info(opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "timeout": 15,
             "state_pattern": "(?P<id>\\d+) = INTEGER: (?P<value>\\d+)",
             "state_token_off": ["2"],
-            "outlets": [
-                {"id": "top-rack", "index": "1"},
-                {"id": "mid-rack", "index": "2"},
-            ],
         },
     }

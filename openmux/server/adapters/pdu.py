@@ -15,10 +15,20 @@ Configuration (top-level ``power`` section, object style):
           description: "Rack 1 PDU"
           driver: dummy           # driver registry key
           poll_interval: 10      # per-PDU seconds; 0 = poll on demand only
-          options: {}            # free-form, driver-specific
-          outlets:               # optional annotations by device outlet id
+          outlets:               # the outlet list: ids + labels + driver fields
             - id: "3"
               description: "Switch A"
+              index: "3"         # driver-specific (command driver, e.g.)
+          options: {}            # pure driver settings (no outlet entries)
+
+One ``outlets`` list per PDU, and nothing else. The adapter reads ``id``
+and ``description`` from each entry as the UI label for the outlet, and
+the same list is handed to the driver (merged over the PDU ``options``,
+which must not set its own ``outlets`` key) as ``options.outlets`` -- that
+is the list the ``dummy`` and ``command`` drivers consume. Per-entry
+``description`` is the only non-driver key the adapter owns; every other
+key is driver territory, so an entry's extra keys survive the pass to the
+driver untouched (the JSON schema keeps the item open on purpose).
 
 The driver layer lives in the :mod:`.power_drivers` package, one module
 per driver. The shared API (``PduDriver`` + ``OutletReading``) is
@@ -98,7 +108,8 @@ class PduState:
         self.description: str = str(cfg.get("description") or "")
         self.driver_name: str = str(cfg.get("driver"))
         self.poll_interval: float = _as_poll_interval(cfg.get("poll_interval"))
-        self.options: Dict[str, Any] = dict(cfg.get("options") or {})
+        self.cfg_options_raw: Dict[str, Any] = dict(cfg.get("options") or {})
+        self.outlets_raw: Optional[List[Any]] = cfg.get("outlets")
         self.annotations: Dict[str, str] = _parse_annotations(cfg.get("outlets"))
         self.driver = driver
         self.online: Optional[bool] = None
@@ -106,8 +117,20 @@ class PduState:
         self.task: Optional[asyncio.Task] = None
 
     def material(self) -> Dict[str, Any]:
-        """Fields whose change forces a PDU re-create on soft reload."""
-        return {"driver": self.driver_name, "poll_interval": self.poll_interval, "options": self.options}
+        """Fields whose change forces a PDU re-create on soft reload.
+
+        The driver sees ``options`` merged with the per-PDU ``outlets``
+        list (_driver_options), so a change to either half recreates the
+        PDU. The ``description`` labels are stripped from the comparison
+        (see ``_outlet_material``), so a pure label edit is an in-place
+        update, not a recreate.
+        """
+        return {
+            "driver": self.driver_name,
+            "poll_interval": self.poll_interval,
+            "options": dict(self.cfg_options_raw),
+            "outlets": _outlet_material(self.outlets_raw),
+        }
 
 
 def _as_poll_interval(value: Any) -> float:
@@ -126,7 +149,9 @@ def _parse_annotations(value: Any) -> Dict[str, str]:
     """Parse the optional per-outlet description annotations.
 
     Returns a mapping of outlet id -> description. Raises ValueError on a
-    malformed entry so validate_config can reject the config early.
+    malformed entry so a broken label list cannot start. Driver-specific
+    keys on an entry are ignored here (they belong to the driver, which
+    gets the same list via ``_driver_options``).
     """
     out: Dict[str, str] = {}
     if value is None:
@@ -149,6 +174,47 @@ def _parse_annotations(value: Any) -> Dict[str, str]:
 
 def _valid_ref_token(text: str) -> bool:
     return bool(text) and "." not in text and not any(ch.isspace() for ch in text)
+
+
+def _outlet_material(outlets: Any) -> Any:
+    """Canonical form of the outlet list for soft-reload comparison.
+
+    Strips the adapter-owned ``description`` labels: editing a label (or
+    adding/removing one) is an in-place update on reconcile; everything
+    else (ids, driver fields) recreates the PDU, matching what gets passed
+    to the driver.
+    """
+    if outlets is None:
+        return None
+    out: List[Any] = []
+    for item in outlets:
+        if isinstance(item, dict):
+            out.append({k: v for k, v in item.items() if k != "description"})
+        else:
+            out.append(item)
+    return out
+
+
+def _driver_options(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the options dict one PDU's driver receives.
+
+    The per-PDU ``outlets`` list is the single source for outlet ids and their
+    driver fields, so it is merged over the PDU ``options`` here and the
+    driver reads ``outlets`` from ``options.outlets`` (its constructor
+    contract, unchanged on the drivers' side). An ``options`` dict must not
+    set its own ``outlets`` key: that would be a second, conflicting outlet
+    list, and a ``TypeError`` (like the other bad-shape errors) makes the
+    caller reject the entry.
+    """
+    raw_options = cfg.get("options") or {}
+    if not isinstance(raw_options, dict):
+        raise TypeError("pdu 'options' must be a mapping")
+    if "outlets" in raw_options:
+        raise TypeError("pdu 'options' must not set 'outlets'; use the per-PDU 'outlets' list")
+    outlets = cfg.get("outlets")
+    if outlets is not None and not isinstance(outlets, list):
+        raise TypeError("pdu 'outlets' must be a list")
+    return {**raw_options, "outlets": outlets}
 
 
 # Separator between the origin server id and the local outlet ref in a remote
@@ -266,12 +332,10 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
                 _as_poll_interval(pdu.get("poll_interval"))
             except ValueError:
                 return False
-            options = pdu.get("options")
-            if options is not None and not isinstance(options, dict):
-                return False
             try:
+                _driver_options(pdu)
                 _parse_annotations(pdu.get("outlets"))
-            except ValueError:
+            except (TypeError, ValueError):
                 return False
         return True
 
@@ -438,9 +502,8 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.error("Ignoring malformed PDU entry (not a mapping)")
             return
         try:
-            state = PduState(
-                str(pdu_cfg.get("name")), pdu_cfg, DRIVERS[str(pdu_cfg.get("driver"))](pdu_cfg.get("options") or {})
-            )
+            driver_options = _driver_options(pdu_cfg)
+            state = PduState(str(pdu_cfg.get("name")), pdu_cfg, DRIVERS[str(pdu_cfg.get("driver"))](driver_options))
         except (KeyError, TypeError, ValueError) as exc:
             self.logger.error("Ignoring invalid PDU entry %r: %s", pdu_cfg, exc)
             return
@@ -1243,6 +1306,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
                     "driver": str(cfg.get("driver")),
                     "poll_interval": _as_poll_interval(cfg.get("poll_interval")),
                     "options": dict(cfg.get("options") or {}),
+                    "outlets": _outlet_material(cfg.get("outlets")),
                 }
             except (KeyError, TypeError, ValueError):
                 new_mat = None  # invalid new entry: keep the running instance

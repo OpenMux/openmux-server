@@ -1,7 +1,11 @@
 """``driver: dummy`` - in-memory PDU for development and tests.
 
-Outlets start ON. ``options`` keys:
-    outlets (list[str|int]): outlet ids (default 1..8).
+Outlets start ON. The outlet ids come from the per-PDU ``outlets`` list,
+which the adapter merges into the driver's ``options`` as ``outlets``
+before constructing; an entry may be a bare id string or a
+``{id: ...}`` mapping (mapping entries need ``id``; the other keys, like
+``description``, belong to the adapter and are ignored here). Other
+``options`` keys:
     watts_on (float): simulated watts while on (default 120).
     volts (float): simulated volts while on (default 230).
     fail_discovery (bool): make list_outlets raise (tests).
@@ -35,7 +39,16 @@ class DummyDriver(PduDriver):
         if isinstance(raw, (list, tuple)) and raw:
             ids: List[str] = []
             for item in raw:
-                text = str(item).strip()
+                if isinstance(item, dict):
+                    # Mapping entry from the per-PDU outlet list: it needs
+                    # 'id' (the other keys, like description, are the
+                    # adapter's).
+                    raw_id = item.get("id")
+                    if raw_id is None or not str(raw_id).strip():
+                        raise ValueError(f"dummy driver: outlet mapping entry needs a non-empty 'id': {item!r}")
+                    text = str(raw_id).strip()
+                else:
+                    text = str(item).strip()
                 if text and text not in ids:
                     ids.append(text)
             if not ids:
@@ -80,25 +93,14 @@ def info(opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     accepts (key, type, default, and a one-line help) and a JSON
     example. The Config Editor reads this to render the driver select
     and driver-specific options help; ``options_keys`` may be None when
-    the driver takes none.
+    the driver takes none. The outlet list is NOT an option: it is the
+    per-PDU ``outlets`` list, which the adapter merges into the driver's
+    ``options`` before constructing (see :mod:`.api`).
     """
-    if opts is None:
-        opts = {}
-    outlets = opts.get("outlets")
-    if outlets is not None:
-        example = {"outlets": outlets}
-    else:
-        example = {"outlets": ["1", "2", "3"]}
     return {
         "label": "Dummy",
         "description": "In-memory PDU for development and tests.",
         "options_keys": [
-            {
-                "key": "outlets",
-                "type": "list of strings",
-                "default": "1..8",
-                "help": "Outlet ids the PDU reports. Default: 1..8.",
-            },
             {
                 "key": "watts_on",
                 "type": "number",
@@ -112,5 +114,5 @@ def info(opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 "help": "Simulated volts while an outlet is on.",
             },
         ],
-        "options_example": example,
+        "options_example": {},
     }

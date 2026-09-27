@@ -303,7 +303,7 @@ async def test_websocket_send_uses_falsy_socket_object():
 # --- OMXCTRL power frames + in-terminal [POWER] notice ------------------------
 
 PDU_SECTION = {
-    "power": {"pdus": [{"name": "rack1", "driver": "dummy", "poll_interval": 0, "options": {"outlets": ["1", "2"]}}]}
+    "power": {"pdus": [{"name": "rack1", "driver": "dummy", "poll_interval": 0, "outlets": [{"id": "1"}, {"id": "2"}]}]}
 }
 
 _U_HASH = "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"

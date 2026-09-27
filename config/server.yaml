@@ -68,8 +68,12 @@ client_listener:
 # behind a driver interface. `driver: dummy` simulates the device in memory;
 # `driver: command` runs user CLI commands (GPIO scripts, USB power tools).
 # More drivers (e.g. Raritan, APC) plug in via `driver:` with no other changes.
-# Outlet ids are the device's OWN ids (free strings: "1", "A1", "C2", ...).
-# The console side maps a port to its feeds with `power: [refs]` on port entries.
+# Each PDU has ONE `outlets` list: the outlet ids (bare strings or mappings)
+# plus optional per-outlet labels (`description`) and driver-specific fields
+# (e.g. the command driver's `index`). `options` holds only the pure driver
+# settings and must not set its own `outlets` key. Outlet ids are the
+# device's OWN ids (free strings: "1", "A1", "C2", ...). The console side
+# maps a port to its feeds with `power: [refs]` on port entries.
 power:
   enabled: true
   pdus:
@@ -77,27 +81,35 @@ power:
       description: "Rack 1 PDU"
       driver: dummy
       poll_interval: 30        # PER-PDU seconds; 0 = no poll task (on-demand reads)
-      options:
-        outlets: ["1", "2", "3", "4", "5", "6", "7", "8"]
-      outlets:                 # optional per-outlet annotations, keyed by id
+      outlets:
+        - id: "1"
+        - id: "2"
         - id: "3"
-          description: "Switch A"
+          description: "Switch A"   # optional per-outlet label (web UI)
+        - id: "4"
+        - id: "5"
+        - id: "6"
+        - id: "7"
+        - id: "8"
     - name: "phaseA"           # 3-phase-style example: string outlet ids
       description: "Phase A PDU"
       driver: dummy
       poll_interval: 10
       options:
-        outlets: ["A1", "B1", "C2"]
         watts_on: 55
       outlets:
         - id: "A1"
           description: "Phase A primary"
+        - id: "B1"
+        - id: "C2"
     # Command driver example (commented out): run CLI commands per PDU and/or
     # per outlet. The PDU-level templates must contain {outlet_id} or
     # {outlet_index}; the PDU-level state_cmd prints one "<id> <state>" line
     # per outlet (on/off/1/0/true/false/yes/no), or the lines can carry the
     # device format and state_pattern parses them. Per-outlet
-    # on_cmd/off_cmd/state_cmd override the PDU level
+    # on_cmd/off_cmd/state_cmd override the PDU level. The outlet list is the
+    # per-PDU `outlets` key, with each entry carrying its driver fields
+    # (index, per-outlet commands) next to the id
     # (see docs/configuration/adapters.md, PDU Power).
     # - name: "raspiboard"
     #   description: "GPIO power board"
@@ -108,9 +120,9 @@ power:
     #     off_cmd: "sudo /opt/openmux/scripts/set_output.sh {outlet_id} 0"
     #     state_cmd: "/opt/openmux/scripts/get_states.sh"
     #     timeout: 5
-    #     outlets:
-    #       - id: "1"
-    #       - id: "2"
+    #   outlets:
+    #     - id: "1"
+    #     - id: "2"
     # Command driver example against an SNMP PDU (commented out): the
     # {host}/{username}/{password} placeholders come from the options and are
     # also exported as PDU_HOST/PDU_USERNAME/PDU_PASSWORD to the commands;
@@ -131,11 +143,11 @@ power:
     #     timeout: 15                # let snmp's own retries finish
     #     state_pattern: "(?P<id>\\d+) = INTEGER: (?P<value>\\d+)"
     #     state_token_off: ["2"]
-    #     outlets:
-    #       - id: "web-rack-top"
-    #         index: "1"
-    #       - id: "storage-1"
-    #         index: "4"
+    #   outlets:
+    #     - id: "web-rack-top"
+    #       index: "1"
+    #     - id: "storage-1"
+    #       index: "4"
 
 # Web console with Config Editor plugin enabled
 web_console:

@@ -193,6 +193,15 @@ def test_ctor_rejects_bad_options(opts):
         CommandDriver(opts)
 
 
+def test_ctor_ignores_adapter_owned_description_key():
+    # The per-PDU outlets list carries the adapter's description label next
+    # to each id; the command driver ignores it (and does not reject it).
+    d = CommandDriver(
+        {"outlets": [{"id": "1", "description": "label"}], "on_cmd": "t {outlet_id} 1", "off_cmd": "t {outlet_id} 0"}
+    )
+    assert d._ids == ["1"]
+
+
 def test_ctor_requires_set_commands_per_outlet():
     # No PDU-level templates and no per-outlet set commands for one op.
     with pytest.raises(ValueError):
@@ -532,8 +541,8 @@ COMMAND_SECTION = {
                     "on_cmd": "true {outlet_id} 1",
                     "off_cmd": "true {outlet_id} 0",
                     "state_cmd": "true all",
-                    "outlets": [{"id": "1"}, {"id": "2"}],
                 },
+                "outlets": [{"id": "1"}, {"id": "2", "description": "second outlet"}],
             }
         ],
     }

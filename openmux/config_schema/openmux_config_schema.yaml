@@ -457,12 +457,13 @@ properties:
         additionalProperties:
           type: array
           items: { type: string }
-  # PDU power management. Outlets are discovered from the device via the
-  # driver; config only carries optional per-outlet annotations. Console
-  # ports declare their own feeds via the per-port `power` key. Outlet ids
-  # are opaque device strings (e.g. "1", "A1" on 3-phase units); refs are
-  # <pdu name>.<outlet id>, so pdu name and id must not contain dots or
-  # whitespace.
+  # PDU power management. The per-PDU `outlets` list is the single source
+  # for the outlet ids and their driver fields; the adapter merges it into
+  # the driver's options (as options.outlets) and reads id + description
+  # as the UI label. Console ports declare their own feeds via the
+  # per-port `power` key. Outlet ids are opaque device strings (e.g. "1",
+  # "A1" on 3-phase units); refs are <pdu name>.<outlet id>, so pdu name
+  # and id must not contain dots or whitespace.
   power:
     type: object
     additionalProperties: false
@@ -481,19 +482,32 @@ properties:
             # their connection settings in `options` below.
             driver: { type: string }
             # Per-PDU poll cadence in seconds; 0 = on-demand reads only.
+            # Deliberate: 0 is a real value (on-demand reads), not "unset".
             # Default 10 (see pdu.py DEFAULT_POLL_INTERVAL).
-            poll_interval: { type: number, minimum: 0, default: 10 }
-            # Free-form, driver-specific settings.
+            poll_interval: { type: number, minimum: 0 }
+            # Free-form, driver-specific settings. The adapter requires it
+            # to be a mapping and rejects an `outlets` key here (the
+            # per-PDU `outlets` list below is the only outlet source).
             options: { type: object }
+            # THE outlet list: ids, optional labels, and driver-specific
+            # per-outlet fields. A bare string entry is shorthand for
+            # {id: <string>}. The item stays open (no
+            # additionalProperties) on purpose: the driver fields
+            # (e.g. command driver's index / on_cmd / off_cmd /
+            # state_cmd / state_pattern) are driver territory, and hard-
+            # coding them here would couple the schema to every driver.
+            # Malformed entries surface as a startup log line (the driver
+            # rejects them) instead of a schema error.
             outlets:
               type: array
               items:
-                type: object
-                additionalProperties: false
-                required: [id]
-                properties:
-                  id: { type: string, pattern: '^[^.\\s]+$' }
-                  description: { type: string }
+                anyOf:
+                  - { type: string, minLength: 1 }
+                  - type: object
+                    required: [id]
+                    properties:
+                      id: { type: string, pattern: '^[^.\\s]+$' }
+                      description: { type: string }
 
   # Fallback for the fail-fast switch, read only when server.
   # fail_fast_adapters is absent (adapters/factory.py checks top-level as a
