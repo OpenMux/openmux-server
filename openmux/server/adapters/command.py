@@ -5,12 +5,14 @@ Provides command execution ports that run external processes.
 """
 
 import asyncio
+import fcntl
 import logging
 import os
 import pty
 import shlex
 import signal
 import socket
+import termios
 from typing import Any, Dict, List, Optional, Set
 
 from ...common.identity import get_server_id
@@ -605,7 +607,7 @@ class CommandPort:
                             stderr=slave_fd,
                             cwd=self.cwd,
                             env=env,
-                            preexec_fn=preexec_fn,
+                            preexec_fn=self._build_preexec_fn(slave_fd),
                         )
                     else:
                         parts = shlex.split(self.command)
@@ -616,7 +618,7 @@ class CommandPort:
                             stderr=slave_fd,
                             cwd=self.cwd,
                             env=env,
-                            preexec_fn=preexec_fn,
+                            preexec_fn=self._build_preexec_fn(slave_fd),
                         )
                     try:
                         os.close(slave_fd)
@@ -713,12 +715,36 @@ class CommandPort:
             snapshot["status_message"] = self.status_message
         return snapshot
 
-    def _build_preexec_fn(self):
+    def _build_preexec_fn(self, slave_fd: Optional[int] = None):
+        """Build the preexec hook for PTY spawns.
+
+        The child becomes a session leader (``os.setsid``) and adopts the
+        pty slave as its controlling terminal (``TIOCSCTTY``), like getty
+        and sshd do. Without the adoption the pty is only on fd 0/1/2:
+        shells report ``no job control`` (no ``m`` flag) and
+        ``tcsetpgrp`` fails with ENOTTY, and a session with no controlling
+        tty cannot be properly HUP'd.
+
+        ``slave_fd`` is the exact fd the child's stdio was duped from
+        (preexec runs before asyncio rewrites fd 0/1/2). When given, the
+        ioctl targets that fd; otherwise fd 0. Both platforms (Linux,
+        macOS) require the session leader to perform this call, and the
+        constant is present in the stdlib ``termios`` on both. Failure is
+        non-fatal: the port still relays bytes, only job control degrades
+        (as before the fix).
+        """
         if not self.use_pty:
             return None
 
         def _preexec():
             os.setsid()
+            adopt_fd = slave_fd if slave_fd is not None else 0
+            try:
+                fcntl.ioctl(adopt_fd, termios.TIOCSCTTY, 0)
+            # justification: adoption is best-effort; a missing controlling
+            # terminal degrades job control, not data flow
+            except OSError:
+                pass
 
         return _preexec
 

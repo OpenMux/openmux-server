@@ -90,6 +90,7 @@ Note on shells and interactive flags:
 Behavior that is always on (issue #67 removed the config knobs):
 - Sanitized environment: the process starts from a minimal environment (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`; `TERM` set to `xterm` if missing) with variables that trigger terminal feature probes stripped (e.g. `TERM_PROGRAM`, `ITERM_SESSION_ID`, kitty/VTE vars). Merge additional values via `env:`.
 - Terminal capability queries: XTGETTCAP queries are intercepted and answered as unsupported, so editor probes do not stall the session.
+- Controlling terminal (PTY ports): the process runs in its own session, and that session adopts the pty as its controlling terminal, like `getty` and `sshd` do. Shell job control (`Ctrl+Z`, `bg`, `fg`) works, and the process group gets SIGHUP when the port stops (as with a closed SSH session). Both Linux and macOS.
 - Newline normalization: output converts LF to CRLF (on a PTY) or normalizes to LF (on pipes); pipe input normalizes to LF when `normalize_newlines` is on.
 - I/O batching: output flushes at 1024 bytes, 2 ms idle, or a 1.0 s cap; writes flush at 1024 bytes or 2 ms.
 - No automatic restart: the process never restarts itself after it exits. The port shows the exit reason (non-zero exit) or rests (code 0); press Enter in the console to respawn. Supervised daemons belong under systemd; expose their socket on a TCP port instead.

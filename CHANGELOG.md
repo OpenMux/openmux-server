@@ -92,6 +92,17 @@ Changes since v1.0.3 (2026-09-17).
   reply. See `docs/design/muxcon.md` sections 4.5/4.6 and
   `docs/configuration/adapters.md` (PDU Power, "Federation").
 
+- **`command_ports` with `interactive: true` now adopt their PTY as the
+  controlling terminal.** The child runs in its own session (as before) and
+  now also calls `TIOCSCTTY`, like `getty` and `sshd` do. Shell job
+  control works in the console: `Ctrl+Z`, `bg`, `fg`, and `jobs` no longer
+  fail with "no job control in this shell", and `tcsetpgrp` stops failing
+  with `ENOTTY`. When the port stops, the process group now gets SIGHUP,
+  mirroring a dropped SSH session (instead of running on until it hits
+  write errors). Works on Linux and macOS; if the kernel refuses the
+  adoption the port still relays bytes as before. No config change is
+  required.
+
 ### Web console and observability
 
 - **The About page shows the Debian package version for .deb installs.** A

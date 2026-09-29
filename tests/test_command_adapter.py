@@ -916,6 +916,60 @@ async def test_write_data_non_newline_stopped_emits_notice():
 
 
 # ---------------------------------------------------------------------------
+# Controlling terminal (TIOCSCTTY) adoption on PTY spawns
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pty_child_gets_controlling_terminal():
+    """interactive (PTY) spawns adopt the pty slave as controlling terminal.
+
+    Without TIOCSCTTY after setsid the session has the pty on fd 0/1/2 but
+    no controlling terminal: shells report "no job control in this shell"
+    (missing `m` flag) and tcsetpgrp fails with ENOTTY. The probe child is
+    plain python (no shell, so nothing in the chain can hide the result)
+    and opens /dev/tty, which fails with ENXIO when the calling session
+    has no controlling terminal. Verified stable on Linux and macOS.
+    """
+    if not hasattr(os, "setsid"):
+        pytest.skip("POSIX ptys not supported")
+    import shlex
+    import sys
+
+    probe = (
+        "import os\n"
+        "try:\n"
+        "    f = os.open('/dev/tty', os.O_WRONLY)\n"
+        "    os.close(f)\n"
+        "    print('CT_OK')\n"
+        "except OSError as e:\n"
+        "    print('CT_FAIL %d' % e.errno)\n"
+    )
+    pm = CapturingPortManager()
+    adapter: Any = SimpleNamespace(main_port_manager=pm)
+    # shell=False: the command is parsed by sh, so single-quote the -c code.
+    cfg = {"command": "%s -c %s" % (sys.executable, shlex.quote(probe)), "interactive": True}
+    port = CommandPort("ctty1", cfg, adapter)
+    assert await port.start() is True
+    try:
+        got = b""
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while b"CT_OK" not in got and b"CT_FAIL" not in got:
+            if asyncio.get_event_loop().time() > deadline:
+                break
+            try:
+                chunk = await asyncio.wait_for(pm.output_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                if not port.process_active and not port.is_running:
+                    break
+                continue
+            got += chunk
+        assert b"CT_OK" in got, "no controlling terminal: %r" % got
+    finally:
+        await port.stop()
+
+
+# ---------------------------------------------------------------------------
 # issue #67: removed-keys deprecation shim + schema rejection + Enter-respawn
 # ---------------------------------------------------------------------------
 
