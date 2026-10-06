@@ -14,4 +14,5 @@ mypy>=0.950
 pylint>=2.13.0
 black>=22.3.0
 isort>=5.10.0
+ruff>=0.4.0
 setuptools-scm>=8  # build backend for the dynamic (git-derived) version
