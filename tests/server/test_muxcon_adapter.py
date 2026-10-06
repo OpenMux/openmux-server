@@ -1217,7 +1217,7 @@ async def test_data_plane_buffering_and_ack_and_routing(monkeypatch):
         None,
     ]
 
-    async def fake_read_frame(reader):
+    async def fake_read_frame(reader, conn_id=None):
         await asyncio.sleep(0)
         return frames.pop(0)
 
@@ -1544,6 +1544,44 @@ async def test_read_frame_skips_noise_and_parses():
     assert obj and obj["frame_type"] == "C" and obj["seq"] == 9 and obj["payload"] == b"X"
 
 
+class _ResettingReader:
+    """Mid-frame peer reset: raises ConnectionResetError on readexactly."""
+
+    def __init__(self, data: bytes = b"#0:C:1:9:"):
+        # A frame header without its payload/newline: the reset must strike
+        # mid-frame, not at a clean stop boundary.
+        self._data = data
+        self._pos = 0
+
+    async def readexactly(self, n: int) -> bytes:
+        await asyncio.sleep(0)
+        if self._pos >= len(self._data):
+            raise ConnectionResetError(54, "Connection reset by peer")
+        chunk = self._data[self._pos : self._pos + n]
+        self._pos += n
+        return chunk
+
+
+@pytest.mark.asyncio
+async def test_read_frame_peer_reset_logs_warning_without_traceback(caplog):
+    """A peer closing the TCP leg is expected: one warning line, no stack.
+
+    Regression: a plain ``except Exception`` used to log ECONNRESET via
+    ``logger.error(..., exc_info=True)`` and dump a 5-frame traceback on
+    every peer restart/reload.
+    """
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    logger_name = a.logger.name
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        obj = await a._read_frame(cast(Any, _ResettingReader()), "in:peer-1:42")
+    assert obj is None
+    warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("in:peer-1:42" in m and "Connection reset by peer" in m for m in warns)
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not errors
+    assert not any(r.exc_info for r in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_hb_control_req_ack_updates(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
@@ -1694,7 +1732,7 @@ async def test_ack_removes_sendbuf_entry(monkeypatch):
         None,
     ]
 
-    async def fake_read_frame(reader):
+    async def fake_read_frame(reader, conn_id=None):
         await asyncio.sleep(0)
         return frames.pop(0)
 
@@ -2003,7 +2041,7 @@ async def test_read_loop_open_close_paths(monkeypatch):
         None,
     ]
 
-    async def fake_read_frame(reader):
+    async def fake_read_frame(reader, conn_id=None):
         await asyncio.sleep(0)
         return frames.pop(0)
 
@@ -2060,7 +2098,7 @@ def _scripted_read_loop(a, cid, writer, frames, monkeypatch):
     }
     a._register_mpath_connection(cid)
 
-    async def fake_read_frame(reader):
+    async def fake_read_frame(reader, conn_id=None):
         await asyncio.sleep(0)
         if frames:
             f = frames.pop(0)
@@ -2273,7 +2311,7 @@ async def test_open_frame_reused_stream_id_stops_old_session(monkeypatch):
     }
     a._register_mpath_connection("in:127.0.0.1:6:1")
 
-    async def slow_second_frame(reader):
+    async def slow_second_frame(reader, conn_id=None):
         await asyncio.sleep(0)
         if not frames:
             await asyncio.sleep(0.5)

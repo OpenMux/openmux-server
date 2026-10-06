@@ -3538,7 +3538,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         break
                     continue
                 # Read next ASCII-framed protocol line
-                frame = await self._read_frame(reader)
+                frame = await self._read_frame(reader, conn_id)
                 if not frame:
                     break
                 ftype = frame.get("frame_type")
@@ -7212,54 +7212,73 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception as e:
             self.logger.error("Failed to send protocol frame: %s", e, exc_info=True)
 
-    async def _read_frame(self, reader: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
+    async def _read_frame_raw(self, reader: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
+        """Read and parse one ASCII frame (header + payload + newline).
+
+        Returns the parsed frame dict, or None when the header fails to parse.
+        The caller maps transport/EOF failures.
+        """
+        header_bytes = b""
+        colon_count = 0
+        # Seek start '#'
+        while True:
+            bch = await reader.readexactly(1)
+            if bch == b"#":
+                header_bytes = bch
+                break
+            # Skip whitespace/newlines
+            if bch in (b"\n", b"\r", b" ", b"\t"):
+                continue
+            # Unexpected byte; continue searching
+        # Need 4 colons for header format: #<sid>:<type>:<len>:<seq>:
+        while colon_count < 4:
+            bch = await reader.readexactly(1)
+            header_bytes += bch
+            if bch == b":":
+                colon_count += 1
+        parsed = self.proto.parse_frame_header(header_bytes)
+        if not parsed:
+            return None
+        stream_id, frame_type, payload_len, seq_val = parsed
+        payload = await reader.readexactly(payload_len) if payload_len > 0 else b""
+        # trailing newline
+        _ = await reader.readexactly(1)
+        frame_obj = {
+            "stream_id": stream_id,
+            "frame_type": frame_type,
+            "payload_length": payload_len,
+            "payload": payload,
+            "seq": seq_val,
+        }
+        self.logger.debug("RX header parsed: sid=%s type=%s len=%s", stream_id, frame_type, payload_len)
+        return frame_obj
+
+    async def _read_frame(self, reader: asyncio.StreamReader, conn_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Read one ASCII frame (header + payload + newline) from the stream.
 
         Returns a dict with parsed components or None on EOF / parse error.
 
         Args:
             reader: StreamReader tied to the TCP connection.
+            conn_id: Connection identifier for log attribution (optional).
 
         Returns:
             Parsed frame dictionary or None.
         """
         try:
-            header_bytes = b""
-            colon_count = 0
-            # Seek start '#'
-            while True:
-                bch = await reader.readexactly(1)
-                if bch == b"#":
-                    header_bytes = bch
-                    break
-                # Skip whitespace/newlines
-                if bch in (b"\n", b"\r", b" ", b"\t"):
-                    continue
-                # Unexpected byte; continue searching
-            # Need 4 colons for header format: #<sid>:<type>:<len>:<seq>:
-            while colon_count < 4:
-                bch = await reader.readexactly(1)
-                header_bytes += bch
-                if bch == b":":
-                    colon_count += 1
-            header = header_bytes.decode("ascii", errors="ignore")
-            parsed = self.proto.parse_frame_header(header_bytes)
-            if not parsed:
-                return None
-            stream_id, frame_type, payload_len, seq_val = parsed
-            payload = await reader.readexactly(payload_len) if payload_len > 0 else b""
-            # trailing newline
-            _ = await reader.readexactly(1)
-            frame_obj = {
-                "stream_id": stream_id,
-                "frame_type": frame_type,
-                "payload_length": payload_len,
-                "payload": payload,
-                "seq": seq_val,
-            }
-            self.logger.debug("RX header parsed: sid=%s type=%s len=%s", stream_id, frame_type, payload_len)
-            return frame_obj
+            return await self._read_frame_raw(reader)
         except asyncio.IncompleteReadError:
+            # justification: clean EOF (peer closed gracefully); the read loop
+            # breaks and _close_connection logs the disconnect
+            return None
+        except ConnectionError as e:
+            # Transport-level failures (ECONNRESET, ECONNABORTED, EPIPE):
+            # expected in a federation mesh when a peer restarts, reloads,
+            # or its network dips. Log one warning line without a trace-
+            # back (the read loop tears the connection down via
+            # _close_connection), consistent with the initiator loop's
+            # handling of the same events.
+            self.logger.warning("MuxCon peer connection %s terminated: %s", conn_id, e)
             return None
         except Exception as e:
             self.logger.error("Error reading frame: %s", e, exc_info=True)

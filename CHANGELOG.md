@@ -103,6 +103,13 @@ Changes since v1.0.3 (2026-09-17).
   adoption the port still relays bytes as before. No config change is
   required.
 
+- **MuxCon: a peer closing the connection logs one line, not a traceback.**
+  A peer restart, reload, or network blip used to surface in the server log
+  as a full `ConnectionResetError` stack at error level. The read loop now
+  treats transport-level failures (reset, aborted, pipe) as expected and
+  logs a single warning line naming the connection; graceful EOF stays on
+  the existing silent path. No config change is required.
+
 ### Web console and observability
 
 - **The About page shows the Debian package version for .deb installs.** A
