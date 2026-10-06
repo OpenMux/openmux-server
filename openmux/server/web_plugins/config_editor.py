@@ -795,7 +795,7 @@ def _read_defaults_doc() -> Dict[str, Any]:
                 return v.lower() == "true"
             # Numbers (int or float)
             try:
-                if v.startswith("0") and v != "0" and not "." in v:
+                if v.startswith("0") and v != "0" and "." not in v:
                     # keep as string (paths like 0.0.0.0 handled below)
                     pass
                 else:

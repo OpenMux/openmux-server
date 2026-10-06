@@ -75,7 +75,7 @@ def test_window_caps_at_cap_seconds():
         lengths.append(rb.note_failure())
         probe_t = clock.t + lengths[-1] + 1  # one failed probe after each lapse
     assert lengths[:4] == [30.0, 60.0, 120.0, 240.0]
-    assert all(l == BACKOFF_CAP_SECONDS for l in lengths[4:])
+    assert all(length == BACKOFF_CAP_SECONDS for length in lengths[4:])
 
 
 def test_success_resets_failure_streak():

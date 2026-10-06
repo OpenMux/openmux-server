@@ -1049,7 +1049,7 @@ class TcpServerAdapter(BaseGenericAdapter):
 
         except Exception as e:
             self.logger.error("Error connecting client to port %s: %s", port_name, e, exc_info=True)
-            await client.send_line(f"ERROR:CONNECT:Connection error")
+            await client.send_line("ERROR:CONNECT:Connection error")
 
     async def _resolve_port_by_origin(self, port_name: str, server_id: str) -> Optional[str]:
         """Resolve port uniquely by (origin_server_id, name) using PortManager listing.
@@ -1199,7 +1199,7 @@ class TcpServerAdapter(BaseGenericAdapter):
 
         # For loopback ports, provide immediate character-by-character echo
         if "loop" in client.connected_port.lower():
-            self.logger.debug(f"Providing immediate character echo for loopback port")
+            self.logger.debug("Providing immediate character echo for loopback port")
             # Echo each character individually for loopback ports
             for i in range(len(data)):
                 char_byte = data[i : i + 1]

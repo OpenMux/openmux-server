@@ -69,7 +69,7 @@ async def run(session):
         timeout=120.0,
     )
     if name.lower() == "crash":
-        await session.send(f"waiting for non-existant prompt to time out (10s)\n")
+        await session.send("waiting for non-existant prompt to time out (10s)\n")
         await session.expect(r"\[NON-EXISTANT-PROMPT\]", timeout=10.0)
 
     session.progress("mode", 25)
@@ -106,7 +106,7 @@ async def run(session):
 
     session.progress("waiting for non-existant prompt to time out (5s)", 90)
     try:
-        await session.send(f"waiting for non-existant prompt to time out (5s)\n")
+        await session.send("waiting for non-existant prompt to time out (5s)\n")
         await session.expect(r"\[NON-EXISTANT-PROMPT\]", timeout=5.0)
     except ActionTimeoutError:
         session.log("timed out waiting for non-existant prompt (5s)")

@@ -161,7 +161,7 @@ async def _read_ports_federated(c_reader):
         if txt == "END:PORTS" or "END:PORTS" in txt:
             break
         lines.append(txt)
-    entries = [json.loads(l) for l in lines if l.strip()]
+    entries = [json.loads(line) for line in lines if line.strip()]
     for e in entries:
         if isinstance(e.get("power"), list):
             e["power"] = [

@@ -290,7 +290,7 @@ class GenericAdapterFactory:
 
         # Check for unified adapters format if explicitly provided
         if "adapters" in config:
-            logger.info(f"Using unified adapters configuration format")
+            logger.info("Using unified adapters configuration format")
             for adapter_config in config["adapters"]:
                 try:
                     adapter_type = adapter_config.get("type")

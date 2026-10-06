@@ -167,7 +167,7 @@ async def test_power_list_single_pdu_and_single_outlet():
     adapter, pdu, pm = await _started()
     client = _FakeClient()
     await adapter.process_client_command(client, "POWER rack1")
-    assert all(l.startswith("POWER rack1.") for l in client.lines)
+    assert all(line.startswith("POWER rack1.") for line in client.lines)
     assert len(client.lines) == 2
     await adapter.process_client_command(client, "POWER rack1.1")
     assert client.lines[-1].startswith("POWER rack1.1 on")
@@ -312,7 +312,7 @@ async def test_meta_change_pushes_notice_to_attached_clients():
         },
     )
     await asyncio.sleep(0)
-    assert any("feed rack1.1 is now off" in l for l in attached.raw)
+    assert any("feed rack1.1 is now off" in line for line in attached.raw)
     # All-lost variant produces the WARNING notice
     attached.raw.clear()
     adapter._on_port_meta_update(
@@ -320,7 +320,7 @@ async def test_meta_change_pushes_notice_to_attached_clients():
         {"event": "power_outlet_changed", "outlet": "rack1.2", "on": False, "all_power_lost": True, "other_outlets_on": []},
     )
     await asyncio.sleep(0)
-    assert any("POWER WARNING" in l and "rack1.2" in l for l in attached.raw)
+    assert any("POWER WARNING" in line and "rack1.2" in line for line in attached.raw)
     await pdu.stop()
 
 
@@ -505,7 +505,8 @@ async def test_switch_remote_ref_origin_coverage_error_propagates():
     client.connected_port = "r1"
     await adapter.process_client_command(client, "POWER peerO::rack9.1 off")
     assert any(
-        l.startswith("ERROR:POWER: rack9.1 also feeds consoles not known to the requesting node (c7)") for l in client.lines
+        line.startswith("ERROR:POWER: rack9.1 also feeds consoles not known to the requesting node (c7)")
+        for line in client.lines
     )
     assert pm.ports["r1"]._feed_states == {"peerO::rack9.1": True}  # unchanged
     await pdu.stop()
@@ -523,7 +524,7 @@ async def test_switch_remote_ref_group_blocked_on_peer_refused_before_relay():
     client = _FakeClient()
     client.connected_port = "r1"
     await adapter.process_client_command(client, "POWER peerO::rack9.1 off")
-    assert any("outside your groups" in l and "r2" in l for l in client.lines)
+    assert any("outside your groups" in line and "r2" in line for line in client.lines)
     assert muxcon.calls == []  # refused before any relay
     await pdu.stop()
 
