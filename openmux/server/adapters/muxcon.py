@@ -138,6 +138,74 @@ class FederationPeer:
     options: Dict[str, Any] = field(default_factory=dict)
 
 
+# Bounds the orderly-shutdown wait in _close_connection. asyncio defers the
+# transport's connection_lost (hence StreamWriter.wait_closed completion, and
+# the peer-side EOF that wakes the connection's read loop) until its pending
+# write buffer fully drains. On a dead NAT/CGNAT session that never happens,
+# so the read loop would hang and the initiator retry loop would never dial
+# the peer again until kernel TCP retransmission gives up (~15 min or more).
+# After this timeout the transport is aborted, which forces the close.
+CLOSE_WAIT_TIMEOUT_SEC = 5.0
+
+
+def _abort_transport_quietly(transport: Optional[asyncio.Transport]) -> None:
+    """Abort a transport if possible. Never raises; a no-op when unavailable.
+
+    Args:
+        transport: Transport to abort, or None.
+    """
+    try:
+        if transport is not None and hasattr(transport, "abort"):
+            transport.abort()
+    except Exception:  # justification: abort is best-effort; the transport may already be gone
+        pass
+
+
+async def _await_writer_closed(writer: asyncio.StreamWriter, logger: Optional[logging.Logger] = None) -> None:
+    """Close a writer and wait for its transport to finish closing.
+
+    asyncio defers the transport's connection_lost until its pending write
+    buffer fully drains. If the peer is unreachable (e.g. a NAT/CGNAT session
+    dropped by both sides after long idle), the drain never completes and
+    wait_closed() would otherwise wait until kernel TCP retransmission gives
+    up (~15 min). Until then the StreamReader also gets no EOF, so the
+    connection's parked read-loop task cannot exit and the initiator retry
+    loop stays blocked.
+
+    Resolution order: call close() once, wait for wait_closed(), and let a
+    watchdog abort the transport after CLOSE_WAIT_TIMEOUT_SEC. abort()
+    defers no writes and always calls connection_lost, which resolves
+    wait_closed and feeds EOF to the StreamReader so parked read tasks exit.
+
+    Args:
+        writer: Stream writer to close (already connected; never None).
+        logger: Optional logger used to report slow-close fallbacks.
+    """
+    if writer.is_closing():
+        return
+    transport = None
+    with contextlib.suppress(Exception):
+        transport = getattr(writer, "transport", None)
+    writer.close()
+
+    def _abort_slow_close() -> None:
+        _abort_transport_quietly(transport)
+        if logger is not None:
+            logger.warning("Writer transport did not finish closing within %.0fs; aborting transport", CLOSE_WAIT_TIMEOUT_SEC)
+
+    watchdog = asyncio.get_event_loop().call_later(CLOSE_WAIT_TIMEOUT_SEC, _abort_slow_close)
+    try:
+        await writer.wait_closed()
+    except asyncio.CancelledError:
+        # The caller was cancelled before the close finished. The transport
+        # may still hold pending writes and a parked read: abort now so the
+        # socket is released and any blocked reader is woken.
+        _abort_transport_quietly(transport)
+        raise
+    finally:
+        watchdog.cancel()
+
+
 class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
     """Federation adapter implementing MuxCon protocol (MVP phase).
 
@@ -2445,11 +2513,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # Close connections
             for conn_id, conn in list(self.connections.items()):
                 writer = conn.get("writer")
-                if writer and not writer.is_closing():
-                    writer.close()
+                if writer:
                     try:
-                        await writer.wait_closed()
-                    except Exception:  # justification: mpath group key registration optional for handshake; connection usable
+                        await _await_writer_closed(writer)
+                    except Exception:  # justification: shutdown close is best-effort
                         pass
                 self.connections.pop(conn_id, None)
 
@@ -3006,8 +3073,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception as e:
             self.logger.error("Handshake failed for %s: %s", conn_id, e, exc_info=True)
             try:
-                writer.close()
-                await writer.wait_closed()
+                await _await_writer_closed(writer, self.logger)
             except Exception:  # justification: writer cleanup on handshake failure is best-effort
                 pass
 
@@ -3033,7 +3099,21 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         backoff = base_backoff
         while not self._stop_event.is_set():
             try:
-                self.logger.info("Connecting to MuxCon peer %s:%s", peer.host, peer.port)
+                # Dial attempt bookkeeping survives restarts of the loop, so the
+                # retry logs show how long this peer has been unreachable.
+                if getattr(peer, "_last_dial_ts", 0):
+                    peer._dial_attempts = int(getattr(peer, "_dial_attempts", 0)) + 1
+                    self.logger.info(
+                        "Retrying MuxCon peer %s:%s (attempt %d, %.0fs since last dial)",
+                        peer.host,
+                        peer.port,
+                        peer._dial_attempts,
+                        time.time() - peer._last_dial_ts,
+                    )
+                else:
+                    peer._dial_attempts = 1
+                    self.logger.info("Connecting to MuxCon peer %s:%s", peer.host, peer.port)
+                peer._last_dial_ts = time.time()
                 # Build client SSL context if requested
                 # Default-safe: enable TLS for initiators unless explicitly disabled
                 use_tls = bool(peer.options.get("use_tls", True))
@@ -3106,8 +3186,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             "Peer fingerprint verification failed for %s:%s: %s", peer.host, peer.port, e, exc_info=True
                         )
                         try:
-                            writer.close()
-                            await writer.wait_closed()
+                            await _await_writer_closed(writer, self.logger)
                         except Exception:  # justification: writer close best-effort after fingerprint failure
                             pass
                         raise
@@ -4132,11 +4211,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:  # justification: best-effort wire-state cleanup
             pass
         writer: Optional[asyncio.StreamWriter] = conn.get("writer")
-        if writer and not writer.is_closing():
+        if writer:
             try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:  # justification: writer may already be closed or broken; ignore
+                await _await_writer_closed(writer, self.logger)
+            except Exception:  # justification: teardown must not fail the close path
                 pass
         self.logger.info("Connection closed: %s", conn_id)
         # Mark federated proxies for this peer based on current live-path state

@@ -110,6 +110,20 @@ Changes since v1.0.3 (2026-09-17).
   logs a single warning line naming the connection; graceful EOF stays on
   the existing silent path. No config change is required.
 
+- **MuxCon: an idle-dropped peer no longer wedges the reconnect loop.**
+  When the multipath sweep drops a stale outbound connection (log line
+  "Idle TTL exceeded ... dropping neighbor") while the peer's NAT/CGNAT
+  session is already dead, the socket's pending write data could never
+  drain. The cleanup then waited in `wait_closed()` until kernel TCP
+  retransmission timed out (about 15 minutes or more). During that wait
+  the connection's read loop was parked with no EOF, so the initiator
+  loop never dialed the peer again and no further log lines appeared.
+  Closing now falls back to aborting the transport after 5 seconds, which
+  wakes the read loop and the retry proceeds on its normal backoff.
+  Retries are now logged with an attempt counter so a dead peer is visible
+  in the log ("Retrying MuxCon peer ... attempt N"). No config change is
+  required.
+
 ### Web console and observability
 
 - **The About page shows the Debian package version for .deb installs.** A

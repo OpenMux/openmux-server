@@ -2025,6 +2025,120 @@ async def test_mpath_failover_ttl_prunes_idle_and_closes(monkeypatch):
     assert cid in closed["ids"]
 
 
+class _StalledSocketProto(asyncio.Protocol):
+    """Protocol for the stalled-write close test: real feeds, exposed close future."""
+
+    def __init__(self, reader: asyncio.StreamReader, loop: asyncio.AbstractEventLoop):
+        self._reader = reader
+        self._closed = loop.create_future()
+
+    def connection_made(self, transport):
+        self._reader.set_transport(transport)
+
+    def data_received(self, data):
+        self._reader.feed_data(data)
+
+    def eof_received(self):
+        return True
+
+    def connection_lost(self, exc):
+        if exc is None:
+            self._reader.feed_eof()
+        else:
+            self._reader.set_exception(exc)
+        if not self._closed.done():
+            if exc is None:
+                self._closed.set_result(None)
+            else:
+                self._closed.set_exception(exc)
+
+    def _get_close_waiter(self, stream):
+        return self._closed
+
+
+@pytest.mark.asyncio
+async def test_close_connection_waits_bounded_when_write_buffer_stalls(monkeypatch):
+    """Regression: a stalled write buffer must not wedge the reconnect loop.
+
+    asyncio defers transport connection_lost (and thus writer.wait_closed and
+    the StreamReader EOF that wakes a parked read loop) until pending write
+    data fully drains. On a dead link the drain never happens, so
+    _close_connection used to wait ~15 minutes (kernel TCP retransmit
+    timeout) with the connector stuck and no retry ever dialed. The fix
+    bounds the wait and aborts the transport, which wakes the reader.
+    """
+    import openmux.server.adapters.muxcon as muxmod
+
+    monkeypatch.setattr(muxmod, "CLOSE_WAIT_TIMEOUT_SEC", 0.2)
+    loop = asyncio.get_event_loop()
+    sa, sb = socket.socketpair()
+    for s in (sa, sb):
+        s.setblocking(False)
+    reader = asyncio.StreamReader()
+    proto = _StalledSocketProto(reader, loop)
+    transport = (await loop.create_connection(lambda: proto, sock=sa))[0]
+    writer = asyncio.StreamWriter(transport, proto, reader, loop)
+
+    aborted = {"called": False}
+    real_abort = transport.abort
+
+    def abort_and_flag():
+        aborted["called"] = True
+        real_abort()
+
+    transport.abort = abort_and_flag  # instance shadow, real close stays intact
+
+    # Keep the peer end silent: the write buffer below can never fully drain.
+    writer.write(b"Z" * (1024 * 1024))
+    parked_read = asyncio.ensure_future(reader.readexactly(64))
+    await asyncio.sleep(0.02)
+    assert not aborted["called"]
+    assert transport.get_write_buffer_size() > 0  # data still queued -> stall condition
+
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    cid = "out:stall.h:7822:1"
+    a.connections[cid] = {"writer": writer, "reader": reader, "opened_at": time.time()}
+    t0 = time.monotonic()
+    await asyncio.wait_for(a._close_connection(cid), timeout=2.0)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, f"_close_connection took {elapsed:.1f}s; the wait is not bounded"
+    assert aborted["called"], "slow close should fall back to transport.abort()"
+    assert cid not in a.connections
+    # The parked read must have been woken by the forced connection_lost (EOF),
+    # which is what frees the stuck read loop and lets the initiator retry.
+    assert parked_read.done()
+    with pytest.raises(asyncio.IncompleteReadError):
+        parked_read.result()
+    sb.close()
+
+
+@pytest.mark.asyncio
+async def test_await_writer_closed_clean_fast_path(monkeypatch):
+    """A transport that closes promptly must not take the abort path."""
+    import openmux.server.adapters.muxcon as muxmod
+
+    loop = asyncio.get_event_loop()
+    sa, sb = socket.socketpair()
+    for s in (sa, sb):
+        s.setblocking(False)
+    reader = asyncio.StreamReader()
+    proto = _StalledSocketProto(reader, loop)
+    transport = (await loop.create_connection(lambda: proto, sock=sa))[0]
+    writer = asyncio.StreamWriter(transport, proto, reader, loop)
+    aborted = {"called": False}
+    real_abort = transport.abort
+
+    def abort_and_flag():
+        aborted["called"] = True
+        real_abort()
+
+    transport.abort = abort_and_flag  # instance shadow; must never be called
+    await asyncio.wait_for(muxmod._await_writer_closed(writer), timeout=2.0)
+    assert writer.is_closing()
+    assert not aborted["called"], "prompt close must not escalate to abort"
+    sb.close()
+
+
 @pytest.mark.asyncio
 async def test_read_loop_open_close_paths(monkeypatch):
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
