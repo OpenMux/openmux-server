@@ -600,45 +600,57 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.warning("Failed to read MuxCon auth private key file '%s': %s", path, e)
             return None
         try:
-            # PEM formats
-            if data.startswith(b"-----BEGIN"):
-                try:
-                    priv = serialization.load_pem_private_key(data, password=None)
-                    if isinstance(priv, Ed25519PrivateKey):
-                        return priv
-                    # Try OpenSSH private key loader on PEM-labeled but OpenSSH-formatted keys
-                    try:
-                        priv2 = serialization.load_ssh_private_key(data, password=None)
-                        if isinstance(priv2, Ed25519PrivateKey):
-                            return priv2
-                    except Exception:
-                        # justification: key format probe; the next parser is tried
-                        pass
-                    self.logger.warning("MuxCon auth private key '%s' is not an Ed25519 key", path)
-                    return None
-                except Exception:
-                    # Try OpenSSH private key format
-                    try:
-                        priv = serialization.load_ssh_private_key(data, password=None)
-                        if isinstance(priv, Ed25519PrivateKey):
-                            return priv
-                    except Exception:
-                        # justification: key format probe; the next parser is tried
-                        pass
-                    self.logger.warning("Failed to parse MuxCon auth private key '%s' as PEM or OpenSSH", path)
-                    return None
-            # Raw/base64 seed in file
+            return self._parse_private_key_data(data, path)
+        except Exception as e:
+            self.logger.warning("Failed to load MuxCon auth private key '%s': %s", path, e, exc_info=True)
+            return None
+
+    def _parse_private_key_data(self, data: bytes, path: str) -> Optional[Ed25519PrivateKey]:
+        """Parse key file bytes as PEM/OpenSSH (if labeled) or a raw 32-byte seed.
+
+        PEM-labeled input goes to ``_parse_ssh_labeled_key`` (no fallback to
+        the raw form); unlabeled input is tried as a base64-encoded 32-byte
+        Ed25519 seed.
+        """
+        if data.startswith(b"-----BEGIN"):
+            return self._parse_ssh_labeled_key(data, path)
+        # Raw/base64 seed in file
+        try:
+            raw = base64.b64decode(data.strip())
+            if len(raw) == 32:
+                return Ed25519PrivateKey.from_private_bytes(raw)
+        except Exception:
+            # justification: key format probe; nothing else to try
+            pass
+        self.logger.warning("MuxCon auth private key '%s' is not PEM, OpenSSH, or a raw 32-byte base64 Ed25519 key", path)
+        return None
+
+    def _parse_ssh_labeled_key(self, data: bytes, path: str) -> Optional[Ed25519PrivateKey]:
+        """Parse a PEM-labeled key, trying the PEM then the OpenSSH loader."""
+        try:
+            priv = serialization.load_pem_private_key(data, password=None)
+            if isinstance(priv, Ed25519PrivateKey):
+                return priv
+            # Try OpenSSH private key loader on PEM-labeled but OpenSSH-formatted keys
             try:
-                raw = base64.b64decode(data.strip())
-                if len(raw) == 32:
-                    return Ed25519PrivateKey.from_private_bytes(raw)
+                priv2 = serialization.load_ssh_private_key(data, password=None)
+                if isinstance(priv2, Ed25519PrivateKey):
+                    return priv2
             except Exception:
                 # justification: key format probe; the next parser is tried
                 pass
-            self.logger.warning("MuxCon auth private key '%s' is not PEM, OpenSSH, or a raw 32-byte base64 Ed25519 key", path)
+            self.logger.warning("MuxCon auth private key '%s' is not an Ed25519 key", path)
             return None
-        except Exception as e:
-            self.logger.warning("Failed to load MuxCon auth private key '%s': %s", path, e, exc_info=True)
+        except Exception:
+            # Try OpenSSH private key format
+            try:
+                priv = serialization.load_ssh_private_key(data, password=None)
+                if isinstance(priv, Ed25519PrivateKey):
+                    return priv
+            except Exception:
+                # justification: key format probe; the next parser is tried
+                pass
+            self.logger.warning("Failed to parse MuxCon auth private key '%s' as PEM or OpenSSH", path)
             return None
 
     def _is_conn_authenticated(self, conn_id: str) -> bool:
@@ -981,48 +993,59 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             return
         notified: List[str] = []
         for pname, proxy in proxies.items():
-            if ref not in self._proxy_local_refs(proxy):
-                continue
-            refs = self._proxy_power_refs(proxy)
-            # The proxy caches states under the GLOBAL ref ("sender::<ref>");
-            # pick the entry whose local form is the frame's ref (one per
-            # proxy; a malformed duplicate cannot hold two states).
-            global_ref = ref
-            for r in refs:
-                split = split_remote_ref(r)
-                if (split[1] if split is not None else r) == ref:
-                    global_ref = r
-                    break
-            try:
-                states = getattr(proxy, "_feed_states", None)
-                if not isinstance(states, dict):
-                    states = {}
-                    proxy._feed_states = states
-                states[global_ref] = on
-                self._update_proxy_power_meta(proxy, global_ref, on)
-            except Exception:
-                # justification: optional state detail; the port stays functional
-                continue
-            other_on = [r for r in refs if r != global_ref and states.get(r) is True]
-            notified.append(pname)
-            try:
-                pm = getattr(self, "main_port_manager", None)
-                if pm and hasattr(pm, "notify_meta_updated"):
-                    pm.notify_meta_updated(
-                        pname,
-                        {
-                            "event": "power_outlet_changed",
-                            "outlet": global_ref,
-                            "on": on,
-                            "all_power_lost": (on is not True) and not other_on,
-                            "other_outlets_on": other_on,
-                        },
-                    )
-            except Exception:
-                # justification: optional notification; UI event delivery is best-effort
-                pass
+            if self._apply_power_state_to_proxy(pname, proxy, ref, on):
+                notified.append(pname)
         if notified:
             self.logger.debug("[%s] POWER:STATE %s=%s applied to %s: %s", conn_id, ref, on, len(notified), notified)
+
+    def _apply_power_state_to_proxy(self, pname: str, proxy: Any, ref: str, on: Any) -> bool:
+        """Apply one peer's POWER:STATE to a single proxy.
+
+        Stores the new outlet state under the proxy's GLOBAL ref, refreshes
+        its power metadata, and re-emits the power_outlet_changed port meta
+        event so the UI updates. Returns False when the port is not fed by
+        the ref or the state could not be applied (the port stays functional).
+        """
+        if ref not in self._proxy_local_refs(proxy):
+            return False
+        refs = self._proxy_power_refs(proxy)
+        # The proxy caches states under the GLOBAL ref ("sender::<ref>");
+        # pick the entry whose local form is the frame's ref (one per
+        # proxy; a malformed duplicate cannot hold two states).
+        global_ref = ref
+        for r in refs:
+            split = split_remote_ref(r)
+            if (split[1] if split is not None else r) == ref:
+                global_ref = r
+                break
+        try:
+            states = getattr(proxy, "_feed_states", None)
+            if not isinstance(states, dict):
+                states = {}
+                proxy._feed_states = states
+            states[global_ref] = on
+            self._update_proxy_power_meta(proxy, global_ref, on)
+        except Exception:
+            # justification: optional state detail; the port stays functional
+            return False
+        other_on = [r for r in refs if r != global_ref and states.get(r) is True]
+        try:
+            pm = getattr(self, "main_port_manager", None)
+            if pm and hasattr(pm, "notify_meta_updated"):
+                pm.notify_meta_updated(
+                    pname,
+                    {
+                        "event": "power_outlet_changed",
+                        "outlet": global_ref,
+                        "on": on,
+                        "all_power_lost": (on is not True) and not other_on,
+                        "other_outlets_on": other_on,
+                    },
+                )
+        except Exception:
+            # justification: optional notification; UI event delivery is best-effort
+            pass
+        return True
 
     @staticmethod
     def _proxy_power_refs(proxy: Any) -> List[str]:
@@ -1206,37 +1229,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 proxy = pm.get_port(port_name)
         except Exception:
             proxy = None
-        if proxy is None or not hasattr(proxy, "remote_port_name"):
-            return {"ok": False, "error": "no federated session for this console"}
-        proxy_refs = [str(r) for r in (getattr(proxy, "power", None) or [])]
-        local_refs = self._proxy_local_refs(proxy)
-        # The frame carries the ORIGIN-LOCAL ref ("<pdu>.<id>"): the origin
-        # checks and executes it on its own PDUs, naming ITS local ports in
-        # any coverage refusal. The caller's ref arrives globally qualified
-        # ("origin::<ref>") from the port's feed list; the bare form is
-        # tolerated (defensive) (outlet federation).
-        wire_ref = ref
-        split = split_remote_ref(ref)
-        if split is not None:
-            wire_ref = split[1]
-        if ref not in proxy_refs and wire_ref not in local_refs:
-            return {"ok": False, "error": f"{port_name} is not fed by {ref}"}
-        # The proxy's connection_id is its peer GROUP key (derived from the
-        # registration-time connection), same as FEDRW passes to sends.
-        peer_key = getattr(proxy, "connection_id", None)
-        sessions = getattr(proxy, "_client_sessions", None) or {}
-        # The anchor is the ACTING client's own open session on this port -
-        # strict, no arbitrary-session fallback. The origin audits + checks
-        # the mirror of the anchored session, so anchoring someone else's
-        # stream would mis-attribute the switch. The PDU relay layer only
-        # reaches this point when the caller carries a client_id.
-        sid: Optional[int] = None
-        if client_id:
-            cand = sessions.get(client_id)
-            if isinstance(cand, int) and cand > 0:
-                sid = cand
-        if peer_key is None or sid is None:
-            return {"ok": False, "error": "no read-write console session to anchor the switch on"}
+        anchor = self._power_switch_anchor(proxy, port_name, ref, client_id)
+        if isinstance(anchor, dict):
+            return anchor
+        peer_key, sid, wire_ref = anchor
         claims = [str(c) for c in claims_list if isinstance(c, str) and c]
         loop = asyncio.get_event_loop()
         fut: "asyncio.Future" = loop.create_future()
@@ -1264,6 +1260,45 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             return {"ok": False, "error": "power switch relay failed"}
         finally:
             self._power_switch_pending.pop((peer_key, sid), None)
+
+    def _power_switch_anchor(self, proxy: Any, port_name: str, ref: str, client_id: Optional[str]) -> Any:
+        """Resolve the anchor for a federated POWER:SWITCH relay.
+
+        Returns a refusal dict (``{ok: False, error}``) when the proxy is
+        missing, the ref is not fed by the port, or no read-write console
+        session can anchor the switch; otherwise a
+        ``(peer_key, sid, wire_ref)`` tuple. The wire ref is the
+        origin-local form ("<pdu>.<id>"): the caller's ref arrives globally
+        qualified ("origin::<ref>") from the port's feed list, the bare form
+        is tolerated (defensive) (outlet federation).
+        """
+        if proxy is None or not hasattr(proxy, "remote_port_name"):
+            return {"ok": False, "error": "no federated session for this console"}
+        proxy_refs = [str(r) for r in (getattr(proxy, "power", None) or [])]
+        local_refs = self._proxy_local_refs(proxy)
+        wire_ref = ref
+        split = split_remote_ref(ref)
+        if split is not None:
+            wire_ref = split[1]
+        if ref not in proxy_refs and wire_ref not in local_refs:
+            return {"ok": False, "error": f"{port_name} is not fed by {ref}"}
+        # The proxy's connection_id is its peer GROUP key (derived from the
+        # registration-time connection), same as FEDRW passes to sends.
+        peer_key = getattr(proxy, "connection_id", None)
+        sessions = getattr(proxy, "_client_sessions", None) or {}
+        # The anchor is the ACTING client's own open session on this port -
+        # strict, no arbitrary-session fallback. The origin audits + checks
+        # the mirror of the anchored session, so anchoring someone else's
+        # stream would mis-attribute the switch. The PDU relay layer only
+        # reaches this point when the caller carries a client_id.
+        sid: Optional[int] = None
+        if client_id:
+            cand = sessions.get(client_id)
+            if isinstance(cand, int) and cand > 0:
+                sid = cand
+        if peer_key is None or sid is None:
+            return {"ok": False, "error": "no read-write console session to anchor the switch on"}
+        return (peer_key, sid, wire_ref)
 
     async def _handle_power_switch_frame(
         self, conn_id: str, writer: asyncio.StreamWriter, payload: str, pdu_adapter: Any
@@ -1603,21 +1638,28 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         else:
             self.logger.debug("[%s] Unknown FEDRW action %r for %s", conn_id, action, port_name)
             return
-        mode = "read-only"
-        try:
-            port = pm.get_port(port_name)
-            for c in getattr(port, "connected_clients", None) or []:
-                if c.get("client_id") == fed_client_id:
-                    mode = c.get("mode", "read-only")
-                    break
-        except Exception:
-            self.logger.debug("[%s] Failed to resolve resulting mode for %s", conn_id, port_name, exc_info=True)
+        mode = self._connected_client_mode(pm, port_name, fed_client_id, conn_id)
         try:
             seq = self._next_frame_seq(conn_id)
             frame = self.proto.create_control_frame(0, seq, f"FEDRWACK:{port_name}:{sid}:{mode}")
             await self._send_protocol_frame(writer, frame)
         except Exception:
             self.logger.debug("[%s] Failed to send FEDRWACK for %s", conn_id, port_name, exc_info=True)
+
+    def _connected_client_mode(self, pm: Any, port_name: str, client_id: str, conn_id: str) -> str:
+        """The access mode a client currently has on a port (for FEDRWACK).
+
+        Returns ``"read-only"`` when the port or client cannot be resolved;
+        the caller reports read-only then rather than failing the frame.
+        """
+        try:
+            port = pm.get_port(port_name)
+            for c in getattr(port, "connected_clients", None) or []:
+                if c.get("client_id") == client_id:
+                    return c.get("mode", "read-only")
+        except Exception:
+            self.logger.debug("[%s] Failed to resolve resulting mode for %s", conn_id, port_name, exc_info=True)
+        return "read-only"
 
     def _resolve_fedrw_take_target(self, pm: Any, port_name: str, fed_client_id: str, spec: str) -> Optional[Dict[str, Any]]:
         """Pick the one holder a FEDRW TAKE demotes (issue #59 Part 2, origin side).
@@ -1996,28 +2038,38 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # Unified listeners only
         listeners_list = cfg.get("listeners")
         if isinstance(listeners_list, list):
-            for i, lst in enumerate(listeners_list):
-                if not isinstance(lst, dict):
-                    raise ValueError(f"listeners[{i}] must be a dict")
-                if not lst.get("enabled", True):
-                    continue
-                port = lst.get("port", 7822)
-                if not isinstance(port, int) or not (1 <= port <= 65535):
-                    raise ValueError(f"listeners[{i}].port must be 1-65535")
-                # Default must match _normalize_listener_conf (use_tls on) so
-                # validation and runtime see the same effective TLS setting.
-                use_tls = bool(lst.get("use_tls", True))
-                if use_tls:
-                    if (not lst.get("ssl_cert") or not lst.get("ssl_key")) and not bool(lst.get("tls_autogen", True)):
-                        raise ValueError(f"listeners[{i}] TLS enabled but missing cert/key and tls_autogen disabled")
+            cls._validate_muxcon_listeners(listeners_list)
 
         # Initiators
-        for p in cfg.get("initiators", []) or []:
+        cls._validate_muxcon_initiators(cfg.get("initiators", []) or [])
+        return True
+
+    @staticmethod
+    def _validate_muxcon_listeners(listeners_list: List[Dict[str, Any]]) -> None:
+        """Check each unified listener entry's port and TLS requirements."""
+        for i, lst in enumerate(listeners_list):
+            if not isinstance(lst, dict):
+                raise ValueError(f"listeners[{i}] must be a dict")
+            if not lst.get("enabled", True):
+                continue
+            port = lst.get("port", 7822)
+            if not isinstance(port, int) or not (1 <= port <= 65535):
+                raise ValueError(f"listeners[{i}].port must be 1-65535")
+            # Default must match _normalize_listener_conf (use_tls on) so
+            # validation and runtime see the same effective TLS setting.
+            use_tls = bool(lst.get("use_tls", True))
+            if use_tls:
+                if (not lst.get("ssl_cert") or not lst.get("ssl_key")) and not bool(lst.get("tls_autogen", True)):
+                    raise ValueError(f"listeners[{i}] TLS enabled but missing cert/key and tls_autogen disabled")
+
+    @staticmethod
+    def _validate_muxcon_initiators(initiators: List[Dict[str, Any]]) -> None:
+        """Check each initiator has a host and a 1-65535 port."""
+        for p in initiators:
             if "host" not in p or "port" not in p:
                 raise ValueError("Each initiator requires 'host' and 'port'")
             if not isinstance(p["port"], int) or not (1 <= p["port"] <= 65535):
                 raise ValueError("initiator.port must be 1-65535")
-        return True
 
     def _apply_federation_filters(self, effective_config: Dict[str, Any]) -> None:
         """Read the adapter-level advertise/accept filter sets into flat attributes.
@@ -2180,33 +2232,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             for peer in self.peers:
                 self._start_single_initiator(peer)
 
-            # Start heartbeat loop if enabled
-            if self.heartbeat_interval and self.heartbeat_interval > 0:
-                hb_task = asyncio.create_task(self._heartbeat_loop())
-                self._tasks.append(hb_task)
-            # Multipath failover loop
-            if getattr(self, "mpath_failover_check_sec", 0) > 0:
-                mpath_task = asyncio.create_task(self._mpath_failover_loop())
-                self._tasks.append(mpath_task)
-            # Retransmission loop
-            retx_task = asyncio.create_task(self._retx_loop())
-            self._tasks.append(retx_task)
-
-            # Start cache cleanup loop if enabled with TTL
-            try:
-                if self.federated_cache_enabled and self.federated_cache_ttl_sec > 0 and not self._cache_cleanup_task:
-                    self._cache_cleanup_task = asyncio.create_task(self._cache_cleanup_loop())
-            except Exception:
-                # justification: optional background task; the adapter runs without the sweep
-                pass
-
-            # Load any persisted federated cache
-            try:
-                if self.federated_cache_enabled:
-                    await self._load_federated_cache()
-            except Exception:
-                # justification: optional persisted cache; the in-memory state stays authoritative
-                pass
+            # Background loops: heartbeat, multipath failover, retransmit
+            self._spawn_background_loops()
+            await self._load_persisted_federated_cache()
 
             self.is_running = True
             return True
@@ -2214,6 +2242,37 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.error("Failed to start Unified MuxCon adapter: %s", e, exc_info=True)
             self.is_running = False
             return False
+
+    def _spawn_background_loops(self) -> None:
+        """Start the heartbeat, multipath-failover, and retransmission loops."""
+        if self.heartbeat_interval and self.heartbeat_interval > 0:
+            hb_task = asyncio.create_task(self._heartbeat_loop())
+            self._tasks.append(hb_task)
+        # Multipath failover loop
+        if getattr(self, "mpath_failover_check_sec", 0) > 0:
+            mpath_task = asyncio.create_task(self._mpath_failover_loop())
+            self._tasks.append(mpath_task)
+        # Retransmission loop
+        retx_task = asyncio.create_task(self._retx_loop())
+        self._tasks.append(retx_task)
+
+    async def _load_persisted_federated_cache(self) -> None:
+        """Start the cache-cleanup sweep and load the persisted federated cache."""
+        # Start cache cleanup loop if enabled with TTL
+        try:
+            if self.federated_cache_enabled and self.federated_cache_ttl_sec > 0 and not self._cache_cleanup_task:
+                self._cache_cleanup_task = asyncio.create_task(self._cache_cleanup_loop())
+        except Exception:
+            # justification: optional background task; the adapter runs without the sweep
+            pass
+
+        # Load any persisted federated cache
+        try:
+            if self.federated_cache_enabled:
+                await self._load_federated_cache()
+        except Exception:
+            # justification: optional persisted cache; the in-memory state stays authoritative
+            pass
 
     async def _prepare_listener_tls(self, host: str, port: int, lconf: Dict[str, Any]) -> Tuple[bool, Optional[Any]]:
         """Resolve TLS-autogen + build the server SSL context for one listener.
@@ -2855,37 +2914,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         try:
             if os.path.exists(self._known_peers_path):
-                path = self._known_peers_path
-                ext = os.path.splitext(path)[1].lower()
-                # Read file content once to allow multiple parse attempts
-                with open(path, "r", encoding="utf-8") as f:
+                with open(self._known_peers_path, "r", encoding="utf-8") as f:
                     content = f.read()
                 # Prefer YAML for .yaml/.yml
-                if ext in (".yaml", ".yml"):
-                    try:
-                        import yaml  # type: ignore
-
-                        data = yaml.safe_load(content) or {}
-                        if isinstance(data, dict):
-                            return {str(k): str(v) for k, v in data.items()}
-                    except Exception:
-                        # Fallback: content might be JSON-in-YAML; try JSON
-                        try:
-                            return json.loads(content)
-                        except Exception:
-                            return {}
-                # JSON or unknown extension: try JSON, then YAML
-                try:
-                    return json.loads(content)
-                except Exception:
-                    try:
-                        import yaml  # type: ignore
-
-                        data = yaml.safe_load(content) or {}
-                        if isinstance(data, dict):
-                            return {str(k): str(v) for k, v in data.items()}
-                    except Exception:
-                        return {}
+                if os.path.splitext(self._known_peers_path)[1].lower() in (".yaml", ".yml"):
+                    return self._parse_known_peers_yaml(content)
+                return self._parse_known_peers_json(content)
             # Backward-compat: if YAML file not present, try legacy JSON filename
             try:
                 if self._known_peers_path.endswith(".yaml"):
@@ -2896,6 +2930,40 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             except Exception:
                 pass
         except Exception:  # justification: freeze bookkeeping best-effort; stale aging still proceeds
+            pass
+        return {}
+
+    @staticmethod
+    def _parse_known_peers_yaml(content: str) -> Dict[str, str]:
+        """Parse a .yaml known-peers file to a mapping (tolerates JSON content)."""
+        try:
+            import yaml  # type: ignore
+
+            data = yaml.safe_load(content) or {}
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            # Fallback: content might be JSON-in-YAML; try JSON
+            pass
+        try:
+            return json.loads(content)
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _parse_known_peers_json(content: str) -> Dict[str, str]:
+        """Parse a JSON-or-YAML known-peers file to a mapping (JSON first)."""
+        try:
+            return json.loads(content)
+        except Exception:
+            pass
+        try:
+            import yaml  # type: ignore
+
+            data = yaml.safe_load(content) or {}
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except Exception:
             pass
         return {}
 
@@ -4935,14 +5003,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         server_inc = f.get("server_include") or []
         if self._match_any(name, name_exc) or self._match_any(adapter_type, adapter_exc):
             if self.logger.isEnabledFor(logging.DEBUG):
-                reason = None
-                pat = self._first_match(name, name_exc)
-                if pat:
-                    reason = f"name excluded by '{pat}'"
-                else:
-                    pat = self._first_match(adapter_type, adapter_exc)
-                    if pat:
-                        reason = f"adapter excluded by '{pat}'"
+                reason = self._adv_exclude_reason(name, adapter_type, name_exc, adapter_exc)
                 self.logger.debug("[%s] ADV DROP name='%s' adapter='%s' reason=%s", conn_id, name, adapter_type, reason)
             return False
         if server_id and self._match_any(server_id, server_exc):
@@ -4963,15 +5024,33 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         inc_adapter = not adapter_inc or self._match_any(adapter_type, adapter_inc)
         inc_server = not server_inc or (server_id and self._match_any(server_id, server_inc))
         if not (inc_name and inc_adapter and inc_server) and self.logger.isEnabledFor(logging.DEBUG):
-            parts = []
-            if not inc_name:
-                parts.append("name not in include")
-            if not inc_adapter:
-                parts.append("adapter not in include")
-            if not inc_server:
-                parts.append("server not in include")
-            self.logger.debug(f"[{conn_id}] ADV DROP name='{name}' adapter='{adapter_type}' reason={'; '.join(parts)}")
+            reason = self._adv_include_reason(inc_name, inc_adapter, inc_server)
+            self.logger.debug(f"[{conn_id}] ADV DROP name='{name}' adapter='{adapter_type}' reason={reason}")
         return bool(inc_name and inc_adapter and inc_server)
+
+    def _adv_exclude_reason(self, name: str, adapter_type: str, name_exc: List[str], adapter_exc: List[str]) -> Optional[str]:
+        """First name/adapter exclude-match reason for a DROP log, or None."""
+        reason = None
+        pat = self._first_match(name, name_exc)
+        if pat:
+            reason = f"name excluded by '{pat}'"
+        else:
+            pat = self._first_match(adapter_type, adapter_exc)
+            if pat:
+                reason = f"adapter excluded by '{pat}'"
+        return reason
+
+    @staticmethod
+    def _adv_include_reason(inc_name: bool, inc_adapter: bool, inc_server: bool) -> str:
+        """Reason for a port failing an advertise include check."""
+        parts = []
+        if not inc_name:
+            parts.append("name not in include")
+        if not inc_adapter:
+            parts.append("adapter not in include")
+        if not inc_server:
+            parts.append("server not in include")
+        return "; ".join(parts)
 
     def _allow_advertise_port(self, name: str, adapter_type: str, server_id: Optional[str]) -> bool:
         # Exclude takes precedence
@@ -5420,22 +5499,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             conn = self.connections.get(conn_id) or {}
             hs = conn.get("handshake")
             # hs could be MuxConHandshake or dict
-            server_id = None
-            if hs:
-                try:
-                    # Direct server_id attribute from handshake (new)
-                    if server_id is None and not isinstance(hs, dict):
-                        server_id = getattr(hs, "server_id", None)
-                except Exception:  # justification: handshake server_id retrieval is optional; safe fallback
-                    pass
-                try:
-                    if server_id is None and hasattr(hs, "server_info"):
-                        si = getattr(hs, "server_info")
-                        server_id = getattr(si, "server_id", None)
-                    elif isinstance(hs, dict):
-                        server_id = hs.get("server_id")
-                except Exception:  # justification: server_info access is best-effort; grouping tolerates unknown
-                    pass
+            server_id = self._handshake_server_id(hs) if hs else None
             # Prefer stable server_id for grouping
             if server_id:
                 return f"node:{server_id}"
@@ -5458,6 +5522,32 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:  # justification: server_chain population is advisory metadata; ignore errors
             pass
         return "unknown:0"
+
+    @staticmethod
+    def _handshake_server_id(hs: Any) -> Optional[str]:
+        """Best-effort server_id from a handshake record (object or dict).
+
+        Tries the direct ``server_id`` attribute, then ``server_info.server_id``
+        (object form), then the ``server_id`` key (dict form). Returns None
+        when none carry a stable id - callers fall back to address-derived
+        grouping.
+        """
+        server_id = None
+        try:
+            # Direct server_id attribute from handshake (new)
+            if not isinstance(hs, dict):
+                server_id = getattr(hs, "server_id", None)
+        except Exception:  # justification: handshake server_id retrieval is optional; safe fallback
+            pass
+        try:
+            if server_id is None and hasattr(hs, "server_info"):
+                si = getattr(hs, "server_info")
+                server_id = getattr(si, "server_id", None)
+            elif isinstance(hs, dict):
+                server_id = hs.get("server_id")
+        except Exception:  # justification: server_info access is best-effort; grouping tolerates unknown
+            pass
+        return server_id
 
     def _retire_old_generation(self, conn_id: str) -> None:
         """Retire older generation connections for the same logical peer.
