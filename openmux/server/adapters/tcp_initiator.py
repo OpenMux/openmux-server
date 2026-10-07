@@ -22,12 +22,11 @@ Configuration (list-of-dicts under tcp_initiator_ports):
 
 import asyncio
 import logging
-import ssl
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
-from .lifecycle import PortLifecycleEvent, PortState
+from .lifecycle import PortState
 from .protocols import get_handler
 from .protocols.base import TcpProtocolHandler
 

@@ -4,7 +4,6 @@ import types
 import pytest
 
 from openmux.server.adapters.command import CommandPort
-from openmux.server.adapters.lifecycle import PortState
 from openmux.server.adapters.loopback import LoopbackPort
 from openmux.server.adapters.serial import SerialPortWrapper
 from openmux.server.adapters.tcp_initiator import TcpInitiatorPort

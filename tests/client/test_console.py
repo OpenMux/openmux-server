@@ -4,11 +4,8 @@ Tests for the OpenMux client console UI
 
 import asyncio
 import io
-import os
-import select
 import sys
 import termios
-import tty
 import types
 from unittest.mock import AsyncMock, MagicMock, patch
 

@@ -2,7 +2,6 @@
 Tests for the OpenMux server client manager
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest

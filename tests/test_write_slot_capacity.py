@@ -9,7 +9,6 @@ wire mapping (local mode -> wire int -> remote mode).
 import logging
 import math
 from typing import Any, Dict
-from unittest.mock import MagicMock
 
 import pytest
 

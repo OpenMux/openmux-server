@@ -7,7 +7,6 @@ from the legacy `ServerConnection`; redundant patterns have been reduced.
 """
 
 import asyncio
-from typing import Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

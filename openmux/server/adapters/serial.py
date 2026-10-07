@@ -15,7 +15,6 @@ import stat
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from ..access_control import WRITE_MODES, InvalidWriteMode, parse_write_mode, wire_to_mode
-from ..data_logger import DataLogger
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
 

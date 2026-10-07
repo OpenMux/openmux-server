@@ -12,7 +12,6 @@ The meta-notify callback is a simple closure, so tests pass a capture list.
 
 import logging
 import sys
-import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 

@@ -1,7 +1,6 @@
 """Tests for openmux.common.fsutil.ensure_directory (issue #42)."""
 
 import logging
-from pathlib import Path
 
 import pytest
 

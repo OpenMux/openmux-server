@@ -118,7 +118,7 @@ from ...common.federation_types import (
 )
 from ..muxcon_protocol import MuxConProtocolHandler
 from .base_adapter import AdapterCapability, BaseGenericAdapter
-from .lifecycle import PortLifecycleEvent, PortState, derive_port_readiness
+from .lifecycle import PortState, derive_port_readiness
 from .pdu import remote_ref, split_remote_ref
 
 
@@ -1867,10 +1867,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "clients": clients,
                 "details": {
                     "adapter_name": self.name,
-                    "listener_enabled": any(l.get("enabled") for l in self.listeners_conf),
+                    "listener_enabled": any(line.get("enabled") for line in self.listeners_conf),
                     "listeners": self.listeners_conf,
                     "peers_configured": len(self.peers),
-                    "listener_tls": any(l.get("use_tls") for l in self.listeners_conf),
+                    "listener_tls": any(line.get("use_tls") for line in self.listeners_conf),
                     "active_connections": list(self.connections.keys()),
                 },
             }

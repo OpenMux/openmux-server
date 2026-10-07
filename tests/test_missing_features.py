@@ -1,20 +1,15 @@
-import asyncio
 import copy
-import logging
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
 
 # Import client components for testing logging and terminal features
 from openmux.client.console import ConsoleUI
-from openmux.server.console_manager import ConsoleManager
 
 # Import server components for testing metrics and monitoring
 from openmux.server.main import OpenMuxServer
 from openmux.server.port_manager import PortManager
-from tests.support.protocol_handler import OpenMuxProtocolHandler as ClientManager
 
 
 @pytest.fixture

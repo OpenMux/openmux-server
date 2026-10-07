@@ -2,13 +2,11 @@
 Tests for OpenMux client adapters
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from openmux.client.adapters import (
-    BaseClientAdapter,
     ClientAdapterFactory,
     TcpClientAdapter,
     WebSocketClientAdapter,

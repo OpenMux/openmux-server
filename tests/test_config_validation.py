@@ -5,8 +5,6 @@ lenient log-only wiring in ConfigManager, the packaged schema resolution
 (locations.server_schema_file), and the --check-config CLI early path.
 """
 
-import json
-import subprocess
 import sys
 from pathlib import Path
 

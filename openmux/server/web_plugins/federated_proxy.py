@@ -4,7 +4,7 @@ import hmac
 import json
 import re
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional
 from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, web

@@ -15,7 +15,6 @@ Covers:
   link-down precedence over a stale origin value
 """
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 

@@ -1,9 +1,7 @@
-import asyncio
-
 import pytest
 
 from openmux.server.adapters.base_adapter import AdapterCapability, BaseGenericAdapter
-from openmux.server.adapters.lifecycle import DynamicPortManager, PortState
+from openmux.server.adapters.lifecycle import DynamicPortManager
 from openmux.server.adapters.loopback import LoopbackPort
 
 

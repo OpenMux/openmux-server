@@ -4,15 +4,11 @@ MuxCon protocol handler with federation extensions
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from ..common.federation_types import (
-    ClientType,
-    FederationType,
     MuxConHandshake,
     PortMetadata,
-    ServerInfo,
-    ServerType,
 )
 
 

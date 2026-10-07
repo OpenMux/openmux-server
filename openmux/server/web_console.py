@@ -35,7 +35,7 @@ import time
 import urllib.parse
 from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aiohttp import web
 

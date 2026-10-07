@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import json
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -367,7 +366,7 @@ class _ScriptedWS:
 
 
 def _power_frame(text):
-    from aiohttp import WSMessage, WSMsgType
+    from aiohttp import WSMessage
 
     return WSMessage(WSMsgType.TEXT, text, None)
 

@@ -7,7 +7,6 @@ import os
 import socket
 import ssl
 import sys
-import tempfile
 import time
 from collections import OrderedDict
 from types import SimpleNamespace

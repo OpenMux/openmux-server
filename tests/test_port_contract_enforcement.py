@@ -2,7 +2,7 @@ import asyncio
 import importlib
 import inspect
 import pkgutil
-from typing import Set, Type, get_type_hints
+from typing import get_type_hints
 
 import openmux.server.adapters as adapters_pkg
 from openmux.server.adapters.lifecycle import PortState

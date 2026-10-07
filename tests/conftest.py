@@ -13,9 +13,10 @@ import pytest
 # Add the project root to the Python path so we can import openmux
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Verify the package can be imported
+# Verify the package can be imported (side-effect free: openmux __init__ only
+# reads distribution metadata)
 try:
-    import openmux
+    __import__("openmux")
 except ImportError as e:
     print(f"ERROR: Failed to import openmux package: {e}")
     print(f"Python path: {sys.path}")

@@ -170,9 +170,6 @@ async def test_command_stop_clears_status(monkeypatch):
     assert any(p.get("event") == "command_status_changed" and p.get("status_message") == "" for p in pushed)
 
 
-from openmux.server.adapters.lifecycle import PortState
-
-
 @pytest.mark.asyncio
 async def test_command_get_status_snapshot_includes_reason_when_set():
     """get_status_snapshot surfaces status_message only when non-empty."""

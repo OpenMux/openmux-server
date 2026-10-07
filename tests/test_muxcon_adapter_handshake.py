@@ -1,11 +1,10 @@
 import asyncio
 import os
 import ssl
-from types import SimpleNamespace
 
 import pytest
 
-from openmux.server.adapters.muxcon import FederationPeer, UnifiedMuxConAdapter
+from openmux.server.adapters.muxcon import UnifiedMuxConAdapter
 
 
 async def make_stream_pair():

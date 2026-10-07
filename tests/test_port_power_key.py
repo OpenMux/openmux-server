@@ -81,7 +81,6 @@ async def test_command_reconcile_updates_power_in_place():
 
 @asyncio_test
 async def test_serial_reconcile_updates_power_in_place():
-    from unittest.mock import patch
 
     section = [{"name": "s1", "device": "/dev/null", "power": ["rack1.3"]}]
     adapter = SerialAdapter("serial", {"serial_ports": section})

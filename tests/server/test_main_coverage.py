@@ -378,7 +378,6 @@ def test_openmuxctl_resolve_socket_path(tmp_path, monkeypatch):
 
 def test_setup_basic_logging_warns_once_for_uncreatable_dir(tmp_path, caplog, monkeypatch):
     """issue #42: a log dir that cannot be created warns once, not per setup call."""
-    import logging
 
     from openmux.common import fsutil
 
