@@ -1109,8 +1109,6 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
     except Exception:
         want_meta = False
 
-    meta_task = None
-
     attached = False
     meta_only = False
 
@@ -1431,7 +1429,7 @@ async def handle_ws_fqpn(request: web.Request) -> web.StreamResponse:
     If no exact match exists, a 404 is returned.
     """
     adapter = _get_adapter(request)
-    username = request.get("username") or "web"
+    # Username is re-derived per-client by the plain handler we delegate to.
     server_id = request.match_info.get("server_id")
     port_name = request.match_info.get("port_name")
     if not server_id or not port_name:
@@ -2330,7 +2328,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
         rport_map: Dict[str, list] = {}
         conns = (fed.get("connections") or []) if isinstance(fed, dict) else []
-        groups = (mpath.get("groups") or []) if isinstance(mpath, dict) else []
         # Prefer the connection's own mpath_group key for grouping
         for c in conns:
             if not isinstance(c, dict):

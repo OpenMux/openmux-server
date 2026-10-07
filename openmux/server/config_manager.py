@@ -201,7 +201,6 @@ class ConfigManager:
               Any legacy binding keys are ignored if present.
         """
         assert self.config is not None  # Type narrowing
-        srv = self.config.get("server", {})
         # Purposely do not synthesize host/port. If present, they are ignored.
         # Optionally, we could strip them, but we avoid mutating on load.
         # Leave any values as-is for round-trip friendliness.

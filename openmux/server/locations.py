@@ -354,7 +354,6 @@ def removed_location_keys(config: Any) -> List[str]:
         List[str]: Dotted keys, e.g. ``["logging.log_dir", "server.name"]``.
         Empty when the config is clean or not a mapping.
     """
-    found: List[str] = []
     return _detect_removed_location_keys(config)
 
 
