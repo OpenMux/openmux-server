@@ -6306,21 +6306,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 return
             if seq == expected:
                 # deliver now
-                try:
-                    self._peer_bytes_rx[peer_key] = self._peer_bytes_rx.get(peer_key, 0) + len(data)
-                except Exception:
-                    # justification: optional metrics; the data path is unaffected
-                    pass
+                self._count_peer_rx(peer_key, len(data))
                 await self._route_data_frame(conn_id, stream_id, data, seq)
                 expected += 1
                 # drain contiguous buffered
                 while expected in buf:
                     sid2, data2 = buf.pop(expected)
-                    try:
-                        self._peer_bytes_rx[peer_key] = self._peer_bytes_rx.get(peer_key, 0) + len(data2)
-                    except Exception:
-                        # justification: optional metrics; the data path is unaffected
-                        pass
+                    self._count_peer_rx(peer_key, len(data2))
                     await self._route_data_frame(conn_id, sid2, data2, expected)
                     expected += 1
                 st["expected"] = expected
@@ -6340,6 +6332,18 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 await self._flush_stuck_gap(peer_key, conn_id, st, expected)
         except Exception as e:
             self.logger.debug("Inbound order handler error on %s:%s seq=%s: %s", conn_id, stream_id, seq, e, exc_info=True)
+
+    def _count_peer_rx(self, peer_key: str, n: int) -> None:
+        """Add ``n`` bytes to the peer's inbound DATA byte counter (best-effort).
+
+        The counter feeds observability only; a failure never affects the
+        data path.
+        """
+        try:
+            self._peer_bytes_rx[peer_key] = self._peer_bytes_rx.get(peer_key, 0) + n
+        except Exception:
+            # justification: optional metrics; the data path is unaffected
+            pass
 
     async def _retx_loop(self):
         """Background retransmission loop for unacked DATA frames (peer-level).

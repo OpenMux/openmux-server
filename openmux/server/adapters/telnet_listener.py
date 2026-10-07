@@ -23,6 +23,8 @@ from .listener_common import (
     CONTROL_MENU_HELP,
     AclEntry,
     EscapeState,
+    _dispatch_control_command,
+    _origin_entry_matches,
     compile_acl,
     feed_escape_byte,
     format_rw_notice,
@@ -538,26 +540,15 @@ class TelnetListenerAdapter(BaseGenericAdapter):
     async def _handle_control_command(self, session: TelnetSession, cmd: str) -> bool:
         """Execute one control-menu command. Returns True to request disconnect."""
         cm = self.console_manager
-        if cmd == "a":
-            await self._cmd_request_rw(session, cm)
-        elif cmd == "f":
-            await self._cmd_force_rw(session, cm)
-        elif cmd == "s":
-            await self._cmd_release_rw(session, cm)
-        elif cmd == "w":
-            holders = cm.get_rw_holders_display(session.port_name) if cm else []
-            await self._write_session(session, format_rw_notice({"type": "rw_holders", "holders": holders}))
-        elif cmd == "u":
-            viewers = cm.get_viewers_display(session.port_name) if cm else []
-            await self._write_session(session, format_viewers_notice(viewers))
-        elif cmd == "?":
-            await self._write_session(session, CONTROL_MENU_HELP)
-        elif cmd == "i":
-            await self._write_session(session, self._format_session_info(session))
-        elif cmd == "v":
-            await self._write_session(session, f"\r\n[OpenMux Server v{_OPENMUX_VERSION}]\r\n")
-        elif cmd == "p":
-            await run_power_menu(
+        return await _dispatch_control_command(
+            session,
+            cmd,
+            cm,
+            lambda text: self._write_session(session, text),
+            lambda: self._cmd_request_rw(session, cm),
+            lambda: self._cmd_force_rw(session, cm),
+            lambda: self._cmd_release_rw(session, cm),
+            lambda: run_power_menu(
                 cm,
                 session.port_name,
                 session.reader,
@@ -566,11 +557,9 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 session.username,
                 self.auth_manager,
                 session.client_id,
-            )
-        elif cmd == ".":
-            await self._write_session(session, "\r\n[Disconnecting...]\r\n")
-            return True
-        return False
+            ),
+            lambda: self._format_session_info(session),
+        )
 
     async def _cmd_request_rw(self, session: TelnetSession, cm: Any) -> None:
         if session.listener.read_only:
@@ -975,6 +964,12 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         return True
 
     async def _resolve_remote_by_origin(self, port_name: str, server_id: Optional[str]) -> Optional[str]:
+        """Resolve a port name to an unambiguous origin-matched entry.
+
+        Delegates the per-entry filter to the shared ``_origin_entry_matches``
+        (listener_common); returns the port name only when exactly one entry
+        matches.
+        """
         entries = []
         try:
             getter = getattr(self.main_port_manager, "get_port_list_with_federation", None)
@@ -982,21 +977,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 entries = await asyncio.wait_for(getter(), timeout=1.0)
         except Exception:
             entries = []
-        matches = []
-        for entry in entries or []:
-            if entry.get("name") != port_name:
-                continue
-            origin = entry.get("origin_server_id")
-            if server_id is None:
-                if origin:
-                    matches.append(entry)
-                continue
-            if server_id.lower() in {"local", "localhost"}:
-                if origin:
-                    continue
-                matches.append(entry)
-            elif origin == server_id:
-                matches.append(entry)
+        matches = [e for e in (entries or []) if _origin_entry_matches(e, port_name, server_id)]
         if len(matches) == 1:
             return matches[0].get("name")
         return None

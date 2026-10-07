@@ -29,6 +29,8 @@ from .listener_common import (
     CONTROL_MENU_HELP,
     AclEntry,
     EscapeState,
+    _dispatch_control_command,
+    _origin_entry_matches,
     compile_acl,
     feed_escape_byte,
     format_rw_notice,
@@ -570,19 +572,11 @@ class SshListenerAdapter(BaseGenericAdapter):
 
     async def _handle_process(self, listener: ListenerConfig, process: Any) -> None:
         if process.command or process.subsystem:
-            try:
-                process.stderr.write(b"Only interactive sessions are supported.\r\n")
-                await process.stderr.drain()
-            except Exception:
-                self.logger.debug("SSH: could not deliver exit notice", exc_info=True)
+            await self._write_exit_notice(process.stderr, b"Only interactive sessions are supported.\r\n")
             process.exit(1)
             return
         if not self.main_port_manager:
-            try:
-                process.stdout.write(b"Server unavailable\r\n")
-                await process.stdout.drain()
-            except Exception:
-                self.logger.debug("SSH: could not deliver exit notice", exc_info=True)
+            await self._write_exit_notice(process.stdout, b"Server unavailable\r\n")
             process.exit(1)
             return
 
@@ -633,6 +627,14 @@ class SshListenerAdapter(BaseGenericAdapter):
             await self._pump_client_input(session)
         finally:
             await self._disconnect_session(client_id, reason="disconnect")
+
+    async def _write_exit_notice(self, stream: Any, message: bytes) -> None:
+        """Best-effort delivery of a pre-exit notice to a process stream."""
+        try:
+            stream.write(message)
+            await stream.drain()
+        except Exception:
+            self.logger.debug("SSH: could not deliver exit notice", exc_info=True)
 
     async def _pump_client_input(self, session: SshSession) -> None:
         stdin = session.process.stdin
@@ -724,26 +726,15 @@ class SshListenerAdapter(BaseGenericAdapter):
     async def _handle_control_command(self, session: SshSession, cmd: str) -> bool:
         """Execute one control-menu command. Returns True to request disconnect."""
         cm = self.console_manager
-        if cmd == "a":
-            await self._cmd_request_rw(session, cm)
-        elif cmd == "f":
-            await self._cmd_force_rw(session, cm)
-        elif cmd == "s":
-            await self._cmd_release_rw(session, cm)
-        elif cmd == "w":
-            holders = cm.get_rw_holders_display(session.port_name) if cm else []
-            await self._write_session(session, format_rw_notice({"type": "rw_holders", "holders": holders}))
-        elif cmd == "u":
-            viewers = cm.get_viewers_display(session.port_name) if cm else []
-            await self._write_session(session, format_viewers_notice(viewers))
-        elif cmd == "?":
-            await self._write_session(session, CONTROL_MENU_HELP)
-        elif cmd == "i":
-            await self._write_session(session, self._format_session_info(session))
-        elif cmd == "v":
-            await self._write_session(session, f"\r\n[OpenMux Server v{_OPENMUX_VERSION}]\r\n")
-        elif cmd == "p":
-            await run_power_menu(
+        return await _dispatch_control_command(
+            session,
+            cmd,
+            cm,
+            lambda text: self._write_session(session, text),
+            lambda: self._cmd_request_rw(session, cm),
+            lambda: self._cmd_force_rw(session, cm),
+            lambda: self._cmd_release_rw(session, cm),
+            lambda: run_power_menu(
                 cm,
                 session.port_name,
                 session.process.stdin,
@@ -752,11 +743,9 @@ class SshListenerAdapter(BaseGenericAdapter):
                 session.username,
                 self.auth_manager,
                 session.client_id,
-            )
-        elif cmd == ".":
-            await self._write_session(session, "\r\n[Disconnecting...]\r\n")
-            return True
-        return False
+            ),
+            lambda: self._format_session_info(session),
+        )
 
     async def _cmd_request_rw(self, session: SshSession, cm: Any) -> None:
         if session.listener.read_only:
@@ -1089,6 +1078,13 @@ class SshListenerAdapter(BaseGenericAdapter):
         return True
 
     async def _resolve_remote_by_origin(self, port_name: str, server_id: Optional[str]) -> Optional[str]:
+        """Resolve a port name to an unambiguous origin-matched entry.
+
+        ``server_id`` None matches any federated port, "local"/"localhost"
+        matches the local-only port, anything else must match the origin's
+        server id. Returns the port name only when exactly one entry
+        matches; ambiguity returns None.
+        """
         entries = []
         try:
             getter = getattr(self.main_port_manager, "get_port_list_with_federation", None)
@@ -1096,21 +1092,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                 entries = await asyncio.wait_for(getter(), timeout=1.0)
         except Exception:
             entries = []
-        matches = []
-        for entry in entries or []:
-            if entry.get("name") != port_name:
-                continue
-            origin = entry.get("origin_server_id")
-            if server_id is None:
-                if origin:
-                    matches.append(entry)
-                continue
-            if server_id.lower() in {"local", "localhost"}:
-                if origin:
-                    continue
-                matches.append(entry)
-            elif origin == server_id:
-                matches.append(entry)
+        matches = [e for e in (entries or []) if _origin_entry_matches(e, port_name, server_id)]
         if len(matches) == 1:
             return matches[0].get("name")
         return None

@@ -17,7 +17,7 @@ import asyncio
 import inspect
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from openmux.server.access_control import write_capacity
 from openmux.server.adapters.lifecycle import derive_port_readiness, port_is_alive
@@ -985,13 +985,7 @@ class PortManager:
             # and defaults to read-only - it must be explicitly promoted via
             # a FEDRW request arbitrated by the origin's own promote_client(),
             # never trusted unconditionally (issue #52).
-            client_has_write = False
-            client_mode = None
-            for client in getattr(port, "connected_clients", []):
-                if client.get("client_id") == client_id:
-                    client_mode = client.get("mode")
-                    client_has_write = client_mode == "read-write"
-                    break
+            client_has_write, client_mode = self._client_write_mode(port, client_id)
 
             if not client_has_write:
                 self.logger.warning("WRITE BLOCKED: client=%s mode=%s port=%s", client_id, client_mode or "unknown", port_name)
@@ -1035,6 +1029,19 @@ class PortManager:
                 return False
 
         return False
+
+    @staticmethod
+    def _client_write_mode(port: Any, client_id: str) -> Tuple[bool, Optional[str]]:
+        """Look up a client's stored access mode on a port.
+
+        Returns (has_write, mode): has_write is True when the client's mode
+        is read-write; mode is None when the client is not attached.
+        """
+        for client in getattr(port, "connected_clients", []):
+            if client.get("client_id") == client_id:
+                client_mode = client.get("mode")
+                return client_mode == "read-write", client_mode
+        return False, None
 
     def add_federation_buffering_hold(self, port_name: str) -> None:
         """Mark that a federation relay is consuming this port's output.

@@ -137,6 +137,24 @@ def _inject_remote_banner(body: bytes, node: str) -> bytes:
         return body
 
 
+def _conn_peer_host(writer: Any) -> Optional[str]:
+    """Best-effort peer host of a federation connection's writer (or None).
+
+    A closed or unavailable transport yields None; the caller then refuses
+    to build an upstream URL.
+    """
+    if writer is None:
+        return None
+    try:
+        p = writer.get_extra_info("peername")
+        if p:
+            return p[0]
+    except Exception:
+        # justification: heuristic peer lookup; refusing the upstream is the safe fallback
+        return None
+    return None
+
+
 def _resolve_upstream(adapter, node: str, tail: str, request: web.Request) -> Optional[str]:
     """Resolve upstream URL based solely on active federation connection.
 
@@ -158,15 +176,7 @@ def _resolve_upstream(adapter, node: str, tail: str, request: web.Request) -> Op
                 continue
         if not target:
             return None
-        w = target.get("writer")
-        peer = None
-        if w is not None:
-            try:
-                p = w.get_extra_info("peername")
-                if p:
-                    peer = p[0]
-            except Exception:
-                peer = None
+        peer = _conn_peer_host(target.get("writer"))
         if not peer:
             return None
         scheme = "https"

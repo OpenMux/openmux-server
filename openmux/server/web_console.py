@@ -2310,32 +2310,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if isinstance(c, dict) and c.get("connection_id") is not None
         }
 
-        # Build rport_map primarily from connections[].ports_registered
-        # Helper: add ports into map with de-dup by name
-        def _add_ports(target: Dict[str, list], key: str, ports_list: list) -> None:
-            if not key or not isinstance(ports_list, list):
-                return
-            bucket = target.setdefault(str(key), [])
-            seen = {rp.get("name") for rp in bucket if isinstance(rp, dict)}
-            for rp in ports_list:
-                if not isinstance(rp, dict):
-                    continue
-                nm = rp.get("name")
-                if not nm or nm in seen:
-                    continue
-                bucket.append(rp)
-                seen.add(nm)
-
-        rport_map: Dict[str, list] = {}
-        conns = (fed.get("connections") or []) if isinstance(fed, dict) else []
-        # Prefer the connection's own mpath_group key for grouping
-        for c in conns:
-            if not isinstance(c, dict):
-                continue
-            gk = c.get("mpath_group") or f"_single:{c.get('connection_id')}"
-            plist = c.get("ports_registered") or []
-            if plist:
-                _add_ports(rport_map, str(gk), plist)
+        rport_map = self._build_rport_map(fed)
         # No fallback: require explicit mapping via connections[].ports_registered
         # Extract convenience vars
         hb_interval = None
@@ -2383,6 +2358,39 @@ class WebConsoleAdapter(BaseGenericAdapter):
             motd=self.logged_in_motd,
         )
         return html_text.encode("utf-8")
+
+    @staticmethod
+    def _add_ports_to_map(target: Dict[str, list], key: str, ports_list: list) -> None:
+        """Add ports into ``target[key]``, de-duping by name (status rport map)."""
+        if not key or not isinstance(ports_list, list):
+            return
+        bucket = target.setdefault(str(key), [])
+        seen = {rp.get("name") for rp in bucket if isinstance(rp, dict)}
+        for rp in ports_list:
+            if not isinstance(rp, dict):
+                continue
+            nm = rp.get("name")
+            if not nm or nm in seen:
+                continue
+            bucket.append(rp)
+            seen.add(nm)
+
+    def _build_rport_map(self, fed: Dict[str, Any]) -> Dict[str, list]:
+        """Group registered ports by the connection's mpath group key.
+
+        Prefers each connection's own ``mpath_group``; single-connection
+        entries fall back to a ``_single:<connection_id>`` group.
+        """
+        rport_map: Dict[str, list] = {}
+        conns = (fed.get("connections") or []) if isinstance(fed, dict) else []
+        for c in conns:
+            if not isinstance(c, dict):
+                continue
+            gk = c.get("mpath_group") or f"_single:{c.get('connection_id')}"
+            plist = c.get("ports_registered") or []
+            if plist:
+                self._add_ports_to_map(rport_map, str(gk), plist)
+        return rport_map
 
     def _render_about(
         self,
@@ -3472,37 +3480,50 @@ class WebConsoleAdapter(BaseGenericAdapter):
             return
         nav_items: list[Dict[str, Any]] = []
         for entry in entries:
-            try:
-                if isinstance(entry, str):
-                    mod_name = entry
-                    enabled = True
-                    opts: Dict[str, Any] = {}
-                elif isinstance(entry, dict):
-                    mod_name = entry.get("module") or entry.get("name")
-                    enabled = entry.get("enabled", True)
-                    opts = entry
-                else:
-                    continue
-                if not enabled or not mod_name:
-                    continue
-                mod = importlib.import_module(str(mod_name))
-                # Allow plugin to register its routes
-                reg = getattr(mod, "register_plugin", None)
-                info = None
-                if callable(reg):
-                    try:
-                        info = reg(app, self, opts)
-                    except TypeError:
-                        # Backward-compat: register_plugin(app, adapter)
-                        info = reg(app, self)
-                if isinstance(info, dict):
-                    nav = info.get("nav")
-                    if isinstance(nav, list):
-                        nav_items.extend([n for n in nav if isinstance(n, dict)])
-                self.logger.info("Loaded web plugin: %s", mod_name)
-            except Exception as e:
-                self.logger.error("Error loading plugin %s: %s", entry, e, exc_info=True)
+            nav = self._load_one_plugin(app, entry)
+            if nav:
+                nav_items.extend(nav)
         self._plugin_nav = nav_items
+
+    def _load_one_plugin(self, app: web.Application, entry: Any) -> list:
+        """Import and register one web plugin; return its nav entries (or []).
+
+        A misbehaving plugin logs an error and is skipped; it never blocks
+        the remaining plugins or the console start.
+        """
+        try:
+            if isinstance(entry, str):
+                mod_name = entry
+                enabled = True
+                opts: Dict[str, Any] = {}
+            elif isinstance(entry, dict):
+                mod_name = entry.get("module") or entry.get("name")
+                enabled = entry.get("enabled", True)
+                opts = entry
+            else:
+                return []
+            if not enabled or not mod_name:
+                return []
+            mod = importlib.import_module(str(mod_name))
+            # Allow plugin to register its routes
+            reg = getattr(mod, "register_plugin", None)
+            info = None
+            if callable(reg):
+                try:
+                    info = reg(app, self, opts)
+                except TypeError:
+                    # Backward-compat: register_plugin(app, adapter)
+                    info = reg(app, self)
+            nav: list = []
+            if isinstance(info, dict):
+                nav_list = info.get("nav")
+                if isinstance(nav_list, list):
+                    nav = [n for n in nav_list if isinstance(n, dict)]
+            self.logger.info("Loaded web plugin: %s", mod_name)
+            return nav
+        except Exception as e:
+            self.logger.error("Error loading plugin %s: %s", entry, e, exc_info=True)
+            return []
 
     def _get_ports_snapshot(self):
         ports = []
@@ -3885,12 +3906,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         if isinstance(self._client_meta, dict):
             self._client_meta.pop(client_id, None)
 
-        for port_name, subscribers in list(self._meta_subscribers.items()):
-            if not isinstance(subscribers, set):
-                continue
-            subscribers.discard(client_id)
-            if not subscribers:
-                self._meta_subscribers.pop(port_name, None)
+        self._clear_meta_subscriber(client_id)
 
         manager = self.console_manager
         if manager is None or not detach_port:
@@ -3905,6 +3921,19 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 manager.unregister_client_channel(client_id)
         except Exception:
             self.logger.exception("Client cleanup failed for %s", client_id)
+
+    def _clear_meta_subscriber(self, client_id: str) -> None:
+        """Drop `client_id` from every port's meta-subscriber set.
+
+        Empty subscriber sets are pruned so the map does not accrue dead
+        keys.
+        """
+        for port_name, subscribers in list(self._meta_subscribers.items()):
+            if not isinstance(subscribers, set):
+                continue
+            subscribers.discard(client_id)
+            if not subscribers:
+                self._meta_subscribers.pop(port_name, None)
 
     # Client manager API used by ConsoleManager to forward data to clients
     async def send_data_to_client(self, client_id: str, data: bytes) -> bool:

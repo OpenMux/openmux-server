@@ -79,14 +79,22 @@ def _validate_serial_port(port: "SerialPortWrapper") -> None:
     if port.max_read_write_users not in WRITE_MODES:
         raise ValueError(f"max_read_write_users must be one of {list(WRITE_MODES)}, got {port.max_read_write_users!r}")
     for key in ("dtr", "rts"):
-        value = getattr(port, key)
-        if value is not None and not isinstance(value, bool) and value not in LINE_POLICY_VALUES:
-            raise ValueError(f"{key} must be none, on, off, presence-on, presence-off, or a boolean, got {value!r}")
+        _validate_line_policy_value(key, getattr(port, key))
     # The rtscts/managed-rts conflict is rejected authoritatively by
     # ConfigManager._validate_serial_ports_config; this keeps the port
     # self-contained when it is built directly (tests, adapters).
     if str(port.flow_control).strip().lower() == "rtscts" and resolve_line_policy(port.rts) != (None, None):
         raise ValueError("flow_control rtscts owns the RTS pin; remove rts (or set it to none) or use flow_control none")
+
+
+def _validate_line_policy_value(key: str, value: Any) -> None:
+    """Validate one signal-line policy value; raise on an unknown value.
+
+    Booleans (legacy shorthand) and the policy strings in
+    ``LINE_POLICY_VALUES`` are accepted; None leaves the line unmanaged.
+    """
+    if value is not None and not isinstance(value, bool) and value not in LINE_POLICY_VALUES:
+        raise ValueError(f"{key} must be none, on, off, presence-on, presence-off, or a boolean, got {value!r}")
 
 
 # Signal-line policy values (issue #63). Each line (dtr/rts) is a single select:
@@ -598,14 +606,7 @@ class SerialPortWrapper:
         finally:
             # Reset managed lines to their active level so a stale idle signal
             # (presence-* driving the line low) never lingers across a reconnect.
-            # Best-effort: this runs before the writer is dropped, so the
-            # transport is still available.
-            try:
-                for line in ("dtr", "rts"):
-                    active, _idle = self._line_policy(line)
-                    self._apply_line(line, active)
-            except Exception:
-                self.logger.error("Error resetting signal lines on %s", self.name, exc_info=True)
+            self._reset_signal_lines_sync()
             self._dtr_driven = None
             self._rts_driven = None
             self.is_connected = False
@@ -617,6 +618,20 @@ class SerialPortWrapper:
                     self._last_notified_connected = False
             except Exception:
                 self.logger.debug("Meta notify failed on serial disconnect", exc_info=True)
+
+    def _reset_signal_lines_sync(self) -> None:
+        """Reset managed signal lines to their active level (best-effort).
+
+        Called on disconnect so a stale idle signal (presence-* driving the
+        line low) never lingers across a reconnect. Runs before the writer
+        is dropped, so the transport is still available.
+        """
+        try:
+            for line in ("dtr", "rts"):
+                active, _idle = self._line_policy(line)
+                self._apply_line(line, active)
+        except Exception:
+            self.logger.error("Error resetting signal lines on %s", self.name, exc_info=True)
 
     # (health watchdog removed; rely on read loop exceptions and connection supervisor)
 

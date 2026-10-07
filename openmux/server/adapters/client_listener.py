@@ -203,20 +203,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             if isinstance(changes, dict):
                 # PDU power feed change (PDU feature): relay the new feed state as a
                 # visible in-terminal notice to every client attached to this console.
-                if changes.get("event") == "power_outlet_changed":
-                    outlet = changes.get("outlet")
-                    on = changes.get("on")
-                    all_lost = bool(changes.get("all_power_lost"))
-                    if all_lost:
-                        self._emit_notice_to_port_clients(
-                            port_name,
-                            "\r\n[POWER WARNING] all power feeds are now OFF for this console (" + str(outlet) + ")\r\n",
-                        )
-                    else:
-                        state_txt = "on" if on is True else ("off" if on is False else "unknown")
-                        self._emit_notice_to_port_clients(
-                            port_name, "\r\n[POWER] feed " + str(outlet) + " is now " + state_txt + "\r\n"
-                        )
+                if self._relay_power_outlet_change(port_name, changes):
                     return
                 # Down events: federated proxy disconnects, or any adapter reporting
                 # connected=False (e.g. serial_disconnected/tcp_disconnected).
@@ -254,6 +241,27 @@ class TcpServerAdapter(BaseGenericAdapter):
         except Exception:
             # justification: optional UI notification; port state is unchanged
             pass
+
+    def _relay_power_outlet_change(self, port_name: str, changes: Dict[str, Any]) -> bool:
+        """Relay a PDU power feed state change to the port's attached clients.
+
+        Returns True when the meta update was a power outlet change (the
+        caller should stop processing); False otherwise.
+        """
+        if changes.get("event") != "power_outlet_changed":
+            return False
+        outlet = changes.get("outlet")
+        on = changes.get("on")
+        all_lost = bool(changes.get("all_power_lost"))
+        if all_lost:
+            self._emit_notice_to_port_clients(
+                port_name,
+                "\r\n[POWER WARNING] all power feeds are now OFF for this console (" + str(outlet) + ")\r\n",
+            )
+        else:
+            state_txt = "on" if on is True else ("off" if on is False else "unknown")
+            self._emit_notice_to_port_clients(port_name, "\r\n[POWER] feed " + str(outlet) + " is now " + state_txt + "\r\n")
+        return True
 
     def set_auth_manager(self, auth_manager):
         """Attach authentication manager implementation.

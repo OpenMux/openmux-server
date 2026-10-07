@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
+
+from openmux import __version__ as _OPENMUX_VERSION
 
 AclEntry = Union[
     ipaddress.IPv4Address,
@@ -268,6 +270,70 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
     if not keep_going:
         return None, False
     return raw or None, True
+
+
+async def _cmd_disconnect(write_line: Callable[[str], Awaitable[None]]) -> bool:
+    """Control-menu ``.`` (disconnect): say goodbye, request the session close.
+
+    Shared by the telnet and SSH listeners; the write callback carries the
+    per-transport differences (raw StreamWriter vs. asyncssh process).
+    """
+    await write_line("\r\n[Disconnecting...]\r\n")
+    return True
+
+
+async def _dispatch_control_command(
+    session: Any,
+    cmd: str,
+    cm: Any,
+    write_line: Callable[[str], Awaitable[None]],
+    request_rw: Callable[[], Awaitable[None]],
+    force_rw: Callable[[], Awaitable[None]],
+    release_rw: Callable[[], Awaitable[None]],
+    power_menu: Callable[[], Awaitable[None]],
+    session_info: Callable[[], str],
+) -> bool:
+    """Shared control-menu dispatch for the telnet and SSH listeners.
+
+    ``write_line`` writes a line of text to the session; the other callbacks
+    are bound by the adapter (session, console manager, transport I/O).
+    Returns True to request the session close.
+    """
+    rw_handler = {"a": request_rw, "f": force_rw, "s": release_rw}.get(cmd)
+    if rw_handler is not None:
+        await rw_handler()
+    elif cmd == "w":
+        holders = cm.get_rw_holders_display(session.port_name) if cm else []
+        await write_line(format_rw_notice({"type": "rw_holders", "holders": holders}))
+    elif cmd == "u":
+        viewers = cm.get_viewers_display(session.port_name) if cm else []
+        await write_line(format_viewers_notice(viewers))
+    elif cmd == "?":
+        await write_line(CONTROL_MENU_HELP)
+    elif cmd == "i":
+        await write_line(session_info())
+    elif cmd == "v":
+        await write_line(f"\r\n[OpenMux Server v{_OPENMUX_VERSION}]\r\n")
+    elif cmd == "p":
+        await power_menu()
+    elif cmd == ".":
+        return await _cmd_disconnect(write_line)
+    return False
+
+
+def _origin_entry_matches(entry: Dict[str, Any], port_name: str, server_id: Optional[str]) -> bool:
+    """Whether a port-list entry matches ``port_name`` + the origin filter.
+
+    Shared by the telnet and SSH listeners' ``_resolve_remote_by_origin``.
+    """
+    if entry.get("name") != port_name:
+        return False
+    origin = entry.get("origin_server_id")
+    if server_id is None:
+        return bool(origin)
+    if server_id.lower() in {"local", "localhost"}:
+        return not origin
+    return origin == server_id
 
 
 def format_rw_notice(payload: Dict[str, Any]) -> str:

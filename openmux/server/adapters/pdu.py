@@ -1139,45 +1139,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         pdus_out: List[Dict[str, Any]] = []
         resolved_refs: Set[str] = set()
         for state in self.pdus.values():
-            outlets_out: List[Dict[str, Any]] = []
-            ordered_ids = sorted(state.readings.keys())
-            outlets_on = 0
-            total_watts: Optional[float] = None
-            for oid in ordered_ids:
-                reading = state.readings.get(oid)
-                if reading is None:
-                    continue
-                ref = f"{state.name}.{oid}"
-                resolved_refs.add(ref)
-                if reading.on is True:
-                    outlets_on += 1
-                    if reading.watts is not None:
-                        total_watts = (total_watts or 0.0) + reading.watts
-                mapped = self._mapped_ports_for_ref(ref)
-                entry: Dict[str, Any] = {
-                    "id": oid,
-                    "ref": ref,
-                    "description": state.annotations.get(oid, ""),
-                    "online": state.online,
-                    "off_impact": self.compute_off_impact(ref),
-                }
-                entry.update(reading.to_dict())
-                entry["mapped_ports"] = mapped
-                entry["any_mapped"] = bool(mapped)
-                outlets_out.append(entry)
-            pdus_out.append(
-                {
-                    "name": state.name,
-                    "description": state.description,
-                    "driver": state.driver_name,
-                    "online": state.online,
-                    "poll_interval": state.poll_interval,
-                    "outlets": outlets_out,
-                    "outlets_on": outlets_on,
-                    "outlet_count": len(outlets_out),
-                    "total_watts": total_watts,
-                }
-            )
+            pdus_out.append(self._pdu_snapshot_entry(state, resolved_refs))
         # Refs declared on console ports that resolve to nothing (renamed
         # PDU, typo, unknown outlet id) - surfaced for the consistency view.
         # Federated ports are skipped: their refs point at the origin node's
@@ -1197,6 +1159,49 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             "enabled": self.enabled,
             "pdus": pdus_out,
             "unresolved_refs": sorted(unresolved),
+        }
+
+    def _pdu_snapshot_entry(self, state: Any, resolved_refs: Set[str]) -> Dict[str, Any]:
+        """Build the snapshot entry for one PDU (ordered outlets + aggregates).
+
+        Adds every readable outlet's ref to ``resolved_refs`` so the caller
+        can report declared-but-unresolved refs.
+        """
+        outlets_out: List[Dict[str, Any]] = []
+        outlets_on = 0
+        total_watts: Optional[float] = None
+        for oid in sorted(state.readings.keys()):
+            reading = state.readings.get(oid)
+            if reading is None:
+                continue
+            ref = f"{state.name}.{oid}"
+            resolved_refs.add(ref)
+            if reading.on is True:
+                outlets_on += 1
+                if reading.watts is not None:
+                    total_watts = (total_watts or 0.0) + reading.watts
+            mapped = self._mapped_ports_for_ref(ref)
+            entry: Dict[str, Any] = {
+                "id": oid,
+                "ref": ref,
+                "description": state.annotations.get(oid, ""),
+                "online": state.online,
+                "off_impact": self.compute_off_impact(ref),
+            }
+            entry.update(reading.to_dict())
+            entry["mapped_ports"] = mapped
+            entry["any_mapped"] = bool(mapped)
+            outlets_out.append(entry)
+        return {
+            "name": state.name,
+            "description": state.description,
+            "driver": state.driver_name,
+            "online": state.online,
+            "poll_interval": state.poll_interval,
+            "outlets": outlets_out,
+            "outlets_on": outlets_on,
+            "outlet_count": len(outlets_out),
+            "total_watts": total_watts,
         }
 
     def port_power_payload(self, port_name: str) -> Optional[Dict[str, Any]]:

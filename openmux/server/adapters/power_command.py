@@ -241,6 +241,50 @@ def format_power_menu_line(ref: str, on: Optional[bool]) -> str:
     return "[unknown] " + ref
 
 
+async def _toggle_feeds(
+    console_manager: Any,
+    pdu: Any,
+    refs: List[str],
+    all_mode: bool,
+    username: Optional[str],
+    auth_manager: Any,
+    send_line: Callable[[str], Awaitable[None]],
+    client_id: Optional[str],
+    port_name: str,
+    entry_number: int = 0,
+) -> None:
+    """Toggle one feed by 1-based number, or every feed in all-direction mode.
+
+    Each feed flips relative to its current state (a number toggles that
+    feed; all-mode toggles every feed in the direction of the first one).
+    The live notice is flushed before returning, so the caller can
+    re-render the list immediately.
+    """
+    states = _feed_states(pdu, port_name)
+    if all_mode:
+        first = states.get(refs[0])
+        target = not (bool(first) if first is not None else False)
+        await _set_all_feeds_at(console_manager, pdu, refs, target, username, auth_manager, send_line, client_id, port_name)
+    else:
+        idx = entry_number
+        if 1 <= idx <= len(refs):
+            ref = refs[idx - 1]
+            state = states.get(ref)
+            target = not (bool(state) if state is not None else False)
+            await run_power_command(
+                console_manager,
+                "POWER " + ref + (" on" if target else " off"),
+                send_line,
+                username,
+                auth_manager,
+                client_id,
+                port_name,
+            )
+        else:
+            await send_line(f"POWER: number out of range (1-{len(refs)})")
+    await _flush_pending_notices()
+
+
 async def _set_all_feeds_at(
     console_manager: Any,
     pdu: Any,
@@ -334,30 +378,30 @@ async def run_power_menu(
             await send_line("[EXITING POWER]")
             return
         if entry in ("a", "all"):
-            first = states.get(refs[0])
-            target = not (bool(first) if first is not None else False)
-            await _set_all_feeds_at(
-                console_manager, pdu, refs, target, username, auth_manager, send_line, client_id, port_name
+            await _toggle_feeds(
+                console_manager,
+                pdu,
+                refs,
+                all_mode=True,
+                username=username,
+                auth_manager=auth_manager,
+                send_line=send_line,
+                client_id=client_id,
+                port_name=port_name,
             )
-            await _flush_pending_notices()
             continue
         if entry.isdigit():
-            idx = int(entry)
-            if 1 <= idx <= len(refs):
-                ref = refs[idx - 1]
-                state = states.get(ref)
-                target = not (bool(state) if state is not None else False)
-                await run_power_command(
-                    console_manager,
-                    "POWER " + ref + (" on" if target else " off"),
-                    send_line,
-                    username,
-                    auth_manager,
-                    client_id,
-                    port_name,
-                )
-                await _flush_pending_notices()
-            else:
-                await send_line(f"POWER: number out of range (1-{len(refs)})")
+            await _toggle_feeds(
+                console_manager,
+                pdu,
+                refs,
+                all_mode=False,
+                entry_number=int(entry),
+                username=username,
+                auth_manager=auth_manager,
+                send_line=send_line,
+                client_id=client_id,
+                port_name=port_name,
+            )
             continue
         await send_line("POWER: enter a feed number, 'a' for all, or Enter to exit")
