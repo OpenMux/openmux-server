@@ -18,7 +18,7 @@ model, and extension points. Key points:
 Use the existing `.venv` (`.venv/bin/python`, `.venv/bin/pytest`) rather than system Python.
 - Run full test suite: `make test` (or `pytest -v`)
 - Run a focused test file: `pytest -q tests/test_<name>.py`
-- Lint: `make lint` (ruff, syntax-error-only checks are hard failures, style is not)
+- Lint: `make lint` (ruff, syntax errors and unused imports are hard failures, style is not)
 - Format: `make format` (black + isort, line-length 127)
 - Start server for manual/browser testing: use the "Run OpenMux Server" task, or
   `.venv/bin/python -m openmux.server.main --config-dir config-local` (dev config). Never
