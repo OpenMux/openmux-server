@@ -490,8 +490,10 @@ class GenericAdapterFactory:
                 except Exception:
                     logger.warning("Adapter %s failed to accept security policy", adapter_name, exc_info=True)
 
-        # Create and attach port manager for dynamic lifecycle management
-        port_manager = DynamicPortManager(adapter)
+        # Create and attach port manager for dynamic lifecycle management.
+        # The constructor self-wires adapter.port_manager, so no binding is
+        # needed here.
+        DynamicPortManager(adapter)
 
         logger.debug("Adapter %s created with dynamic port management", adapter_name)
         return adapter

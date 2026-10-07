@@ -668,7 +668,6 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             # Use max(mpath_primary_stale_sec, heartbeat_interval * 2.5) to avoid
             # false UI "stale" during normal heartbeat gaps.
             stale_cut = None
-            effective_stale_sec = None
             try:
                 stale_sec = getattr(muxcon, "mpath_primary_stale_sec", None)
                 if not isinstance(stale_sec, (int, float)) or stale_sec <= 0:
@@ -683,11 +682,9 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
                     hb_window = hb_int * 2.5
                     if hb_window > eff:
                         eff = hb_window
-                effective_stale_sec = eff
                 stale_cut = now - eff
             except Exception:  # justification: stale cutoff compute best-effort
                 stale_cut = None
-                effective_stale_sec = None
             total_retx = 0
             total_tx_bytes = 0
             total_rx_bytes = 0
