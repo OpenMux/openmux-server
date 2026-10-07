@@ -416,22 +416,16 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip():
             return False
-        if "echo_delay" in entry:
-            ed = entry["echo_delay"]
-            if not isinstance(ed, (int, float)) or ed < 0:
+        # Optional tuning fields: each is checked against its type/range rule
+        # only when present.
+        for field, kind, minimum in (("echo_delay", (int, float), 0), ("buffer_size", int, 1), ("scrollback_size", int, 0)):
+            if field not in entry:
+                continue
+            val = entry[field]
+            if not isinstance(val, kind) or val < minimum:
                 return False
-        if "buffer_size" in entry:
-            bs = entry["buffer_size"]
-            if not isinstance(bs, int) or bs <= 0:
-                return False
-        if "sanitize_control" in entry:
-            sc = entry["sanitize_control"]
-            if not isinstance(sc, bool):
-                return False
-        if "scrollback_size" in entry:
-            sbs = entry["scrollback_size"]
-            if not isinstance(sbs, int) or sbs < 0:
-                return False
+        if "sanitize_control" in entry and not isinstance(entry["sanitize_control"], bool):
+            return False
         # Unified-only: reject legacy synonyms. Defense in depth (ticket #75
         # removed the serial runtime fallback); no code path reads either
         # variant anymore, and the schema already rejects both with an ERROR.

@@ -402,23 +402,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         if rtype not in ("power_query", "power_switch"):
             return None
         if rtype == "power_query":
-            feeds = []
-            ppl = None
-            if hasattr(self, "port_power_payload"):
-                try:
-                    ppl = self.port_power_payload(port_name)
-                except Exception:
-                    ppl = None
-            if isinstance(ppl, dict) and isinstance(ppl.get("feeds"), list):
-                feeds = [
-                    {"ref": str(f.get("ref")), "on": f.get("on"), "watts": f.get("watts")} for f in ppl.get("feeds") or []
-                ]
-            return {
-                "type": "power_feeds",
-                "feeds": feeds,
-                "feeds_total": len(feeds),
-                "state": (ppl or {}).get("state", "unknown"),
-            }
+            return self._power_query_response(port_name)
         # read-write / admin required to switch, same as the web POST path
         try:
             perm = self.auth_manager.get_user_permissions(username) if (self.auth_manager and username) else None
@@ -452,12 +436,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
                 "error": str(result.get("error", "switch failed")),
                 "impact": result.get("impact"),
             }
-        reading = result.get("reading") or {}
-        state_txt = "unknown"
-        if reading.get("on") is True:
-            state_txt = "on"
-        elif reading.get("on") is False:
-            state_txt = "off"
+        state_txt = self._power_state_text(result.get("reading") or {})
         return {
             "type": "power_switch",
             "ok": True,
@@ -466,6 +445,39 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             "state": state_txt,
             "impact": result.get("impact"),
         }
+
+    def _power_query_response(self, port_name: str) -> Dict[str, Any]:
+        """The response payload for one ``power_query`` frame.
+
+        Reads the live port-power payload (when present) down to the
+        ``{"ref", "on", "watts"}`` feed entries the menu renders, plus the
+        aggregate state; an unreadable payload yields an empty feed list
+        (state ``unknown``).
+        """
+        feeds = []
+        ppl = None
+        if hasattr(self, "port_power_payload"):
+            try:
+                ppl = self.port_power_payload(port_name)
+            except Exception:
+                ppl = None
+        if isinstance(ppl, dict) and isinstance(ppl.get("feeds"), list):
+            feeds = [{"ref": str(f.get("ref")), "on": f.get("on"), "watts": f.get("watts")} for f in ppl.get("feeds") or []]
+        return {
+            "type": "power_feeds",
+            "feeds": feeds,
+            "feeds_total": len(feeds),
+            "state": (ppl or {}).get("state", "unknown"),
+        }
+
+    @staticmethod
+    def _power_state_text(reading: Dict[str, Any]) -> str:
+        """Human state word (``on``/``off``/``unknown``) for one outlet reading."""
+        if reading.get("on") is True:
+            return "on"
+        if reading.get("on") is False:
+            return "off"
+        return "unknown"
 
     # --- lifecycle ---------------------------------------------------------
 

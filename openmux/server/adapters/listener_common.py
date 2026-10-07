@@ -336,6 +336,33 @@ def _origin_entry_matches(entry: Dict[str, Any], port_name: str, server_id: Opti
     return origin == server_id
 
 
+def _rw_denied_notice(payload: Dict[str, Any]) -> str:
+    """CRLF line for a refused read-write request (``ok`` is False).
+
+    Wording mirrors the CLI client rw_control refusal lines; only the
+    present ``reason`` and holder context pick the line.
+    """
+    reason = payload.get("reason")
+    if reason == "invalid_target":
+        # The named client_id is not (or no longer) a read-write holder:
+        # no slot moved (issue #61).
+        return "\r\n[Take refused: that user does not hold read-write access (check the id in the holders list)]\r\n"
+    if reason == "federation_denied":
+        return "\r\n[Take refused: the origin server did not grant the takeover]\r\n"
+    if reason == "promote_failed":
+        # Capacity refused the seat (e.g. an old client on a full port,
+        # or a port with no write slots) - "Take control" cannot help
+        # here, the slot simply has no room.
+        holders = payload.get("rw_holders") or []
+        if holders:
+            return "\r\n[Request denied: no free read-write seat (held by: " + ", ".join(holders) + ")]\r\n"
+        return "\r\n[Request denied: this port has no free read-write seat]\r\n"
+    holders = payload.get("rw_holders") or []
+    if holders:
+        return "\r\n[Read-write request denied (held by: " + ", ".join(holders) + ") - use Take control if needed]\r\n"
+    return "\r\n[Read-write is not available on this port]\r\n"
+
+
 def format_rw_notice(payload: Dict[str, Any]) -> str:
     """Render a read-write control payload as CRLF-terminated human text.
 
@@ -381,24 +408,7 @@ def format_rw_notice(payload: Dict[str, Any]) -> str:
     if ok and mode == "read-only":
         return "\r\n[Switched to read-only mode]\r\n"
     if not ok:
-        if reason == "invalid_target":
-            # The named client_id is not (or no longer) a read-write holder:
-            # no slot moved (issue #61).
-            return "\r\n[Take refused: that user does not hold read-write access (check the id in the holders list)]\r\n"
-        if reason == "federation_denied":
-            return "\r\n[Take refused: the origin server did not grant the takeover]\r\n"
-        if reason == "promote_failed":
-            # Capacity refused the seat (e.g. an old client on a full port,
-            # or a port with no write slots) - "Take control" cannot help
-            # here, the slot simply has no room.
-            holders = payload.get("rw_holders") or []
-            if holders:
-                return "\r\n[Request denied: no free read-write seat (held by: " + ", ".join(holders) + ")]\r\n"
-            return "\r\n[Request denied: this port has no free read-write seat]\r\n"
-        holders = payload.get("rw_holders") or []
-        if holders:
-            return "\r\n[Read-write request denied (held by: " + ", ".join(holders) + ") - use Take control if needed]\r\n"
-        return "\r\n[Read-write is not available on this port]\r\n"
+        return _rw_denied_notice(payload)
     return "\r\n[Access mode updated]\r\n"
 
 
