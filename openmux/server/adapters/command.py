@@ -1122,6 +1122,43 @@ class CommandPort:
             self.logger.error("Error restarting command port %s: %s", self.name, e, exc_info=True)
             return False
 
+    def _resolve_stopped_identity(self) -> str:
+        """Return the server identity used by the stopped prefix (ticket #74).
+
+        Resolves ``server.id`` from the config (loading it if not yet in
+        memory), falling back to the system hostname. Path-like ids are
+        simplified to their last segment. Returns ``''`` when nothing is
+        available; the caller then falls back to the port name alone.
+        """
+        try:
+            cfg_obj = None
+            try:
+                cfg_mgr = getattr(getattr(self.adapter, "main_port_manager", None), "config_manager", None)
+                if cfg_mgr:
+                    # Ensure config is loaded
+                    cfg_obj = getattr(cfg_mgr, "config", None)
+                    if cfg_obj is None:
+                        try:
+                            cfg_obj = cfg_mgr.load_config()
+                        except Exception:  # justification: identity lookup is best-effort; hostname fallback below
+                            cfg_obj = None
+            except Exception:  # justification: identity lookup is best-effort; hostname fallback below
+                cfg_obj = None
+            server_id = None
+            if isinstance(cfg_obj, dict):
+                server_id = get_server_id(cfg_obj.get("server"))
+            if not server_id:
+                try:
+                    server_id = socket.gethostname()
+                except Exception:  # justification: hostname lookup is best-effort; port name still renders
+                    server_id = ""
+            # simplify any path-like id to last segment
+            if "/" in server_id:
+                server_id = server_id.rsplit("/", 1)[-1]
+            return server_id or ""
+        except Exception:  # justification: prefix derivation best-effort; caller falls back to port name
+            return ""
+
     def _stopped_prefix(self) -> str:
         """Return standardized prefix for stopped status messages.
 
@@ -1133,32 +1170,7 @@ class CommandPort:
             str: Formatted prefix including trailing space.
         """
         try:
-            # server.id is the sole identity key (ticket #74); the shared
-            # resolver also covers the hostname fallback.
-            cfg_obj = None
-            try:
-                cfg_mgr = getattr(getattr(self.adapter, "main_port_manager", None), "config_manager", None)
-                if cfg_mgr:
-                    # Ensure config is loaded
-                    cfg_obj = getattr(cfg_mgr, "config", None)
-                    if cfg_obj is None:
-                        try:
-                            cfg_obj = cfg_mgr.load_config()
-                        except Exception:  # justification: prefix derivation is best-effort; fall back to hostname below
-                            cfg_obj = None
-            except Exception:  # justification: prefix derivation is best-effort; fall back to hostname below
-                cfg_obj = None
-            server_id = None
-            if isinstance(cfg_obj, dict):
-                server_id = get_server_id(cfg_obj.get("server"))
-            if not server_id:
-                try:
-                    server_id = socket.gethostname()
-                except Exception:  # justification: prefix derivation is best-effort; port name still renders
-                    server_id = ""
-            # simplify any path-like id to last segment
-            if "/" in server_id:
-                server_id = server_id.rsplit("/", 1)[-1]
+            server_id = self._resolve_stopped_identity()
             if not server_id:
                 return f"{self.name} "
             return f"{server_id}/{self.name} "

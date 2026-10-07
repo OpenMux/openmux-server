@@ -479,6 +479,22 @@ class SerialPortWrapper:
                 if self.auto_reconnect:
                     await asyncio.sleep(self.reconnect_delay)
 
+    def _log_device_missing(self) -> None:
+        """Log and report that the serial device is absent (rate-limited).
+
+        The warning repeats at most once per hour; misses in between log a
+        debug line instead. Also records the "device not found" status.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if self._last_missing_warn_ts is None or (now - self._last_missing_warn_ts) >= 3600:
+            self.logger.warning("Serial device %s does not exist", self.device)
+            self._last_missing_warn_ts = now
+        else:
+            self.logger.debug("Serial device %s still not found", self.device)
+        self._set_status_message(f"Serial device {self.device} not found", connected=False)
+
     async def _connect(self) -> bool:
         """Establish a new connection to the configured device.
 
@@ -488,15 +504,7 @@ class SerialPortWrapper:
         try:
             # Check if device exists
             if not os.path.exists(self.device):
-                import time as _time
-
-                now = _time.monotonic()
-                if self._last_missing_warn_ts is None or (now - self._last_missing_warn_ts) >= 3600:
-                    self.logger.warning("Serial device %s does not exist", self.device)
-                    self._last_missing_warn_ts = now
-                else:
-                    self.logger.debug("Serial device %s still not found", self.device)
-                self._set_status_message(f"Serial device {self.device} not found", connected=False)
+                self._log_device_missing()
                 return False
 
             # Check device type on POSIX systems

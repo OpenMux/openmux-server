@@ -432,7 +432,51 @@ class ConsoleManager:
         if is_federated and mode == "read-write":
             mode = "read-only"
 
-        # Add client to port; if read-write is full, fall back to read-only
+        mode = await self._attach_client_to_port(port, port_name, client_id, username, mode, is_federated, entitled_mode)
+        if mode is None:
+            return False, None, "port_full"
+
+        self.logger.info("Client %s (%s) connected to port %s in %s mode", username, client_id, port_name, mode)
+
+        # Update every already-attached viewer's presence badge; the new client's own
+        # channel isn't registered yet, so the caller sends it an initial snapshot itself
+        # (mirrors the existing initial client_mode frame sent on connect).
+        try:
+            await self.broadcast_presence(port_name)
+        except Exception:
+            self.logger.debug("broadcast_presence failed after connect for %s", port_name, exc_info=True)
+
+        return True, mode, None
+
+    async def _attach_client_to_port(
+        self,
+        port: Any,
+        port_name: str,
+        client_id: str,
+        username: str,
+        mode: str,
+        is_federated: bool,
+        entitled_mode: str,
+    ) -> Optional[str]:
+        """Attach a client to a port, falling back from read-write to read-only.
+
+        A denied read-write attach (slot full) retries once as read-only.
+        On a federated port (issue #52) the origin is the sole authority on
+        the shared read-write slot: a client entitled to the slot attaches
+        read-only first and is promoted only if the origin grants it.
+
+        Args:
+            port: Port object, used for the federated promotion request.
+            port_name: Target port name.
+            client_id: Client id to attach.
+            username: Authenticated username recorded with the attachment.
+            mode: Mode to attach in ("read-only" or "read-write").
+            is_federated: True when the port is a federated (remote_muxcon) proxy.
+            entitled_mode: Mode this user is entitled to (before demotion).
+
+        Returns:
+            Optional[str]: The mode attached in, or None when the port is full.
+        """
         success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
         if not success and mode == "read-write":
             mode = "read-only"
@@ -440,7 +484,7 @@ class ConsoleManager:
             success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
 
         if not success:
-            return False, None, "port_full"
+            return None
 
         # Map client to port
         self.client_port_map[client_id] = port_name
@@ -456,17 +500,7 @@ class ConsoleManager:
             if await self._request_federated_promotion(port, port_name, client_id):
                 mode = "read-write"
 
-        self.logger.info("Client %s (%s) connected to port %s in %s mode", username, client_id, port_name, mode)
-
-        # Update every already-attached viewer's presence badge; the new client's own
-        # channel isn't registered yet, so the caller sends it an initial snapshot itself
-        # (mirrors the existing initial client_mode frame sent on connect).
-        try:
-            await self.broadcast_presence(port_name)
-        except Exception:
-            self.logger.debug("broadcast_presence failed after connect for %s", port_name, exc_info=True)
-
-        return True, mode, None
+        return mode
 
     async def disconnect_client_from_port(self, client_id: str, port_name: str) -> bool:
         """Disconnect a client from a specific port.

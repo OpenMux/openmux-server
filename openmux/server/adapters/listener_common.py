@@ -195,6 +195,20 @@ CONTROL_MENU_HELP = (
 TAKE_TARGET_PROMPT = "[Take from holder (client_id, or Enter for latest): ]"
 
 
+async def _echo_bytes(writer: Any, data: bytes) -> None:
+    """Echo bytes to the session transport, absorbing a mid-prompt disconnect.
+
+    A failed write/drain (client left while typing) is swallowed on purpose:
+    the read loop sees the EOF and stops the prompt anyway.
+    """
+    writer.write(data)
+    try:
+        await writer.drain()
+    except Exception:
+        # justification: best-effort prompt echo; the client may have left mid-prompt
+        pass
+
+
 async def read_prompt_line(reader: Any, writer: Any, prompt: str) -> Tuple[Optional[str], bool]:
     """Prompt for one input line, echoing each typed byte as it arrives.
 
@@ -232,29 +246,14 @@ async def read_prompt_line(reader: Any, writer: Any, prompt: str) -> Tuple[Optio
             return line, False  # client left mid-prompt
         ch = data[:1]
         if ch in (b"\r", b"\n"):
-            writer.write(b"\r\n")
-            try:
-                await writer.drain()
-            except Exception:
-                # justification: best-effort prompt echo; the client may have left mid-prompt
-                pass
+            await _echo_bytes(writer, b"\r\n")
             return line, True
         if ch in (b"\x7f", b"\x08"):  # backspace: erase the echoed byte
-            writer.write(b"\b \b")
-            try:
-                await writer.drain()
-            except Exception:
-                # justification: best-effort prompt echo; the client may have left mid-prompt
-                pass
+            await _echo_bytes(writer, b"\b \b")
             if line:
                 line = line[:-1]
             continue
-        writer.write(ch)
-        try:
-            await writer.drain()
-        except Exception:
-            # justification: best-effort prompt echo; the client may have left mid-prompt
-            pass
+        await _echo_bytes(writer, ch)
         line += ch.decode("latin1", errors="ignore")
 
 
