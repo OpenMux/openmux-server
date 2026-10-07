@@ -18,7 +18,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from openmux.common.identity import get_server_id, get_server_label
 from openmux.server.access_control import capacity_to_wire, holder_id_short
@@ -924,32 +924,7 @@ class TcpServerAdapter(BaseGenericAdapter):
         self.logger.debug("Processing command from client %s: %s", client.client_id, command)
 
         if command.startswith("CONNECT:"):
-            # Formats supported:
-            #   CONNECT:<port_name>
-            #   CONNECT:<server_id>::<port_name>
-            parts = command.split(":", 1)
-            if len(parts) >= 2:
-                raw_target = parts[1].strip()
-                server_id = None
-                port_name = raw_target
-                # Parse composite identifier if present
-                if "::" in raw_target:
-                    try:
-                        sid, base = raw_target.split("::", 1)
-                        if sid and base:
-                            server_id, port_name = sid, base
-                    except ValueError:
-                        server_id = None
-                # If a server_id was provided, resolve to a unique port entry first
-                if server_id:
-                    resolved = await self._resolve_port_by_origin(port_name, server_id)
-                    if not resolved:
-                        await client.send_line("ERROR:CONNECT:Port not found for given server_id")
-                        return
-                    port_name = resolved
-                await self.handle_port_connection_request_text(client, port_name)
-            else:
-                await client.send_line("ERROR:Invalid CONNECT command format")
+            await self._handle_connect_command(client, command)
 
         elif command.startswith("LIST"):
             # List available ports
@@ -975,6 +950,37 @@ class TcpServerAdapter(BaseGenericAdapter):
                 await self.forward_data_to_port(client, data)
             else:
                 await client.send_line(f"ERROR:Unknown command: {command}")
+
+    async def _handle_connect_command(self, client: "ClientSession", command: str) -> None:
+        """Parse a CONNECT command and attach the client (or send an error line).
+
+        Supported formats: ``CONNECT:<port_name>`` or
+        ``CONNECT:<server_id>::<port_name>`` (the composite form resolves to a
+        unique port entry for that origin first).
+        """
+        parts = command.split(":", 1)
+        if len(parts) < 2:
+            await client.send_line("ERROR:Invalid CONNECT command format")
+            return
+        raw_target = parts[1].strip()
+        server_id = None
+        port_name = raw_target
+        # Parse composite identifier if present
+        if "::" in raw_target:
+            try:
+                sid, base = raw_target.split("::", 1)
+                if sid and base:
+                    server_id, port_name = sid, base
+            except ValueError:
+                server_id = None
+        # If a server_id was provided, resolve to a unique port entry first
+        if server_id:
+            resolved = await self._resolve_port_by_origin(port_name, server_id)
+            if not resolved:
+                await client.send_line("ERROR:CONNECT:Port not found for given server_id")
+                return
+            port_name = resolved
+        await self.handle_port_connection_request_text(client, port_name)
 
     async def handle_port_connection_request_text(self, client: "ClientSession", port_name: str):
         """Attempt port attachment for the client via text protocol.
@@ -1139,36 +1145,7 @@ class TcpServerAdapter(BaseGenericAdapter):
             ports = []
             timed_out = False
             if self.console_manager and hasattr(self.console_manager, "port_manager"):
-                pm = self.console_manager.port_manager
-
-                # Choose coroutine to call
-                async def gather():
-                    if hasattr(pm, "get_port_list_with_federation"):
-                        return await pm.get_port_list_with_federation()
-                    if hasattr(pm, "get_port_list"):
-                        return await pm.get_port_list()
-                    return []
-
-                try:
-                    ports = await asyncio.wait_for(gather(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    timed_out = True
-                    self.logger.warning("LIST: federation list timeout after 1.0s; falling back to basic snapshot")
-                    try:
-                        # Basic synchronous snapshot of current ports dict
-                        raw_ports = getattr(pm, "ports", {})
-                        for name, port in list(raw_ports.items()):
-                            try:
-                                info = port.get_status() if hasattr(port, "get_status") else {"name": name}
-                                if "name" not in info:
-                                    info["name"] = name
-                                ports.append(info)
-                            except Exception:
-                                self.logger.error("LIST: port get_status error", exc_info=True)
-                    except Exception as inner_e:
-                        self.logger.error("LIST fallback snapshot error: %s", inner_e, exc_info=True)
-                except Exception as inner_e:
-                    self.logger.error("PortManager listing error: %s", inner_e, exc_info=True)
+                ports, timed_out = await self._gather_port_list_for_client()
             elapsed_ms = int((time.time() - start_ts) * 1000)
             payload = {
                 "type": "PORT_LIST",
@@ -1185,6 +1162,45 @@ class TcpServerAdapter(BaseGenericAdapter):
         except Exception as e:
             self.logger.error("Error listing ports: %s", e, exc_info=True)
             await client.send_line("ERROR:LIST:Failed")
+
+    async def _gather_port_list_for_client(self) -> Tuple[List[Dict[str, Any]], bool]:
+        """Gather the port list for a LIST command, with a timeout fallback.
+
+        Prefers the federation-aware listing; on a 1.0s timeout it falls back
+        to a basic synchronous snapshot of the live ports dict so a slow or
+        wedged federation call never blocks the client. Returns
+        (ports, timed_out).
+        """
+        pm = self.console_manager.port_manager
+
+        async def gather():
+            if hasattr(pm, "get_port_list_with_federation"):
+                return await pm.get_port_list_with_federation()
+            if hasattr(pm, "get_port_list"):
+                return await pm.get_port_list()
+            return []
+
+        try:
+            return list(await asyncio.wait_for(gather(), timeout=1.0)), False
+        except asyncio.TimeoutError:
+            self.logger.warning("LIST: federation list timeout after 1.0s; falling back to basic snapshot")
+            ports: List[Dict[str, Any]] = []
+            try:
+                raw_ports = getattr(pm, "ports", {})
+                for name, port in list(raw_ports.items()):
+                    try:
+                        info = port.get_status() if hasattr(port, "get_status") else {"name": name}
+                        if "name" not in info:
+                            info["name"] = name
+                        ports.append(info)
+                    except Exception:
+                        self.logger.error("LIST: port get_status error", exc_info=True)
+            except Exception as inner_e:
+                self.logger.error("LIST fallback snapshot error: %s", inner_e, exc_info=True)
+            return ports, True
+        except Exception as inner_e:
+            self.logger.error("PortManager listing error: %s", inner_e, exc_info=True)
+            return [], False
 
     async def handle_port_disconnection_request_text(self, client: "ClientSession"):
         """Detach client from currently attached port (if any)."""
