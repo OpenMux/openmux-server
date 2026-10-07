@@ -1195,23 +1195,7 @@ class PortManager:
                         del port._scrollback[:excess]
 
                 # Fan out to per-client delivery queues (console/telnet clients)
-                if hasattr(port, "client_queues") and port.client_queues:
-                    for cid, q in list(port.client_queues.items()):
-                        try:
-                            q.put_nowait(data)
-                        except asyncio.QueueFull:
-                            try:
-                                q.get_nowait()
-                                q.put_nowait(data)
-                                port.dropped_chunks = getattr(port, "dropped_chunks", 0) + 1
-                                self.logger.debug("Queue full for %s:%s; dropped oldest chunk", port_name, cid)
-                            except Exception:
-                                self.logger.warning(
-                                    "Data queue contention for %s:%s; dropping data",
-                                    port_name,
-                                    cid,
-                                    exc_info=True,
-                                )
+                self._fan_out_to_client_queues(port, port_name, data)
 
                 # Maintain the shared queue. Fed while a client is attached,
                 # while a federation relay holds the port (issue #83 replaced
@@ -1254,6 +1238,31 @@ class PortManager:
                 return False
         self.logger.error("Port %s not found for data handling", port_name)
         return False
+
+    def _fan_out_to_client_queues(self, port: Any, port_name: str, data: bytes) -> None:
+        """Deliver one data chunk to every per-client queue on the port.
+
+        A full client queue drops its oldest chunk to keep the latest data
+        (with a ``dropped_chunks`` counter); a second failure drops the
+        chunk for that client only and warns.
+        """
+        if hasattr(port, "client_queues") and port.client_queues:
+            for cid, q in list(port.client_queues.items()):
+                try:
+                    q.put_nowait(data)
+                except asyncio.QueueFull:
+                    try:
+                        q.get_nowait()
+                        q.put_nowait(data)
+                        port.dropped_chunks = getattr(port, "dropped_chunks", 0) + 1
+                        self.logger.debug("Queue full for %s:%s; dropped oldest chunk", port_name, cid)
+                    except Exception:
+                        self.logger.warning(
+                            "Data queue contention for %s:%s; dropping data",
+                            port_name,
+                            cid,
+                            exc_info=True,
+                        )
 
     def get_scrollback(self, port_name: str) -> bytes:
         """Return the current scrollback buffer contents for a port.

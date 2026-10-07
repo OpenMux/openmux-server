@@ -543,14 +543,7 @@ async def _handle_ws_run_events(request: web.Request) -> web.StreamResponse:
 
     reader_task = asyncio.ensure_future(_read_operator_input())
     try:
-        for event in history:
-            await ws.send_str(json.dumps(event))
-        if queue is not None:
-            while True:
-                event = await queue.get()
-                await ws.send_str(json.dumps(event))
-                if event.get("event") == "action_finished":
-                    break
+        await _stream_run_events(ws, history, queue)
     finally:
         reader_task.cancel()
         with contextlib.suppress(Exception):
@@ -563,6 +556,23 @@ async def _handle_ws_run_events(request: web.Request) -> web.StreamResponse:
             # justification: shutdown cleanup; the transport may already be closed
             pass
     return ws
+
+
+async def _stream_run_events(ws: web.WebSocketResponse, history: list, queue: Optional[Any]) -> None:
+    """Send a run's event history, then its live queue until finished.
+
+    History replay covers late joiners (the run's recorded events in order);
+    a live queue keeps sending until the ``action_finished`` event arrives
+    (a finished run has no queue - history replay is then all there is).
+    """
+    for event in history:
+        await ws.send_str(json.dumps(event))
+    if queue is not None:
+        while True:
+            event = await queue.get()
+            await ws.send_str(json.dumps(event))
+            if event.get("event") == "action_finished":
+                break
 
 
 def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

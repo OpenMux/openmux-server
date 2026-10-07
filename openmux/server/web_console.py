@@ -3307,23 +3307,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
             # justification: heuristic client-ip lookup; the next source is tried, else the default
             pass
         try:
-            fwd = request.headers.get("Forwarded")
-            if fwd:
-                # Simple parse: look for for= value
-                # Example: Forwarded: for=192.0.2.60; proto=http; by=203.0.113.43
-                items = fwd.split(";")
-                for it in items:
-                    it = it.strip()
-                    if it.lower().startswith("for="):
-                        val = it[4:].strip().strip('"')
-                        # Remove possible brackets
-                        if val.startswith("[") and "]" in val:
-                            val = val[1 : val.find("]")]
-                        # Remove possible port suffix
-                        if ":" in val and val.count(":") == 1:
-                            host, _port = val.split(":", 1)
-                            return host
-                        return val
+            ip = self._forwarded_header_ip(request.headers.get("Forwarded"))
+            if ip:
+                return ip
         except Exception:
             # justification: heuristic client-ip lookup; the next source is tried, else the default
             pass
@@ -3340,6 +3326,31 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             # justification: heuristic client-ip lookup; the next source is tried, else the default
             pass
+        return None
+
+    @staticmethod
+    def _forwarded_header_ip(fwd: Optional[str]) -> Optional[str]:
+        """Host from a ``Forwarded:`` header's ``for=`` value, else None.
+
+        Simple parse (no full RFC 7239 handling): takes the ``for=`` item,
+        strips quotes, a possible IPv6 bracket, and a single ``:port`` suffix
+        (a value with more than one colon is treated as bracket-less IPv6).
+        """
+        if not fwd:
+            return None
+        items = fwd.split(";")
+        for it in items:
+            it = it.strip()
+            if it.lower().startswith("for="):
+                val = it[4:].strip().strip('"')
+                # Remove possible brackets
+                if val.startswith("[") and "]" in val:
+                    val = val[1 : val.find("]")]
+                # Remove possible port suffix
+                if ":" in val and val.count(":") == 1:
+                    host, _port = val.split(":", 1)
+                    return host
+                return val
         return None
 
     def _resolve_client_meta(self, client_id: Optional[str]) -> Dict[str, Any]:

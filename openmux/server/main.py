@@ -320,17 +320,7 @@ class OpenMuxServer:
 
                 # Set dependencies on all adapters before starting them to avoid races
                 for adapter in self.unified_adapters:
-                    if hasattr(adapter, "main_port_manager"):
-                        adapter.main_port_manager = self.port_manager
-                    if hasattr(adapter, "server_config"):
-                        adapter.server_config = full_config
-                    set_auth = getattr(adapter, "set_auth_manager", None)
-                    if callable(set_auth):
-                        set_auth(self.auth_manager)
-                    set_console = getattr(adapter, "set_console_manager", None)
-                    if callable(set_console):
-                        # Adapters that accept connections will register as client manager here (Option D)
-                        set_console(self.console_manager)
+                    self._wire_adapter_dependencies(adapter, full_config)
 
                 # Start all unified adapters
                 for adapter in self.unified_adapters:
@@ -353,6 +343,26 @@ class OpenMuxServer:
             import traceback
 
             traceback.print_exc()
+
+    def _wire_adapter_dependencies(self, adapter: Any, full_config: Dict[str, Any]) -> None:
+        """Set the cross-adapter dependencies on one adapter before start.
+
+        Wires the PortManager, the raw server config, the AuthManager and the
+        ConsoleManager (the latter also registers the adapter as a client
+        manager, Option D). Called for every unified adapter before start so
+        the wiring happens under a single code path (avoid race).
+        """
+        if hasattr(adapter, "main_port_manager"):
+            adapter.main_port_manager = self.port_manager
+        if hasattr(adapter, "server_config"):
+            adapter.server_config = full_config
+        set_auth = getattr(adapter, "set_auth_manager", None)
+        if callable(set_auth):
+            set_auth(self.auth_manager)
+        set_console = getattr(adapter, "set_console_manager", None)
+        if callable(set_console):
+            # Adapters that accept connections will register as client manager here (Option D)
+            set_console(self.console_manager)
 
     # ================= Control Socket (Unix domain) =================
 
@@ -1981,6 +1991,41 @@ def _setup_basic_logging(
         pass
 
 
+def _run_check_config(config_path: str, auth_config: Optional[str], security_config: Optional[str]) -> None:
+    """Run the strict --check-config schema pass and exit the process.
+
+    Derives the sidecar paths the same way ConfigManager does so the check
+    covers the same files the server would load. Exit codes: 0 clean,
+    1 schema violations, 2 schema problems.
+    """
+    from .config_validation import check_config_files
+
+    base_dir = os.path.dirname(os.path.abspath(config_path))
+    auth_path = auth_config or os.path.join(base_dir, "authentication.yaml")
+    security_path = security_config or os.path.join(base_dir, "security.yaml")
+    violations, problems = check_config_files(config_path, auth_path, security_path)
+    for line in violations + problems:
+        print(line)
+    if problems:
+        sys.exit(2)
+    if violations:
+        sys.exit(1)
+    print(f"Config validation OK: {config_path}, {auth_path}, {security_path}")
+    sys.exit(0)
+
+
+def _initial_log_level(args: Any, log_cfg: Dict[str, Any]) -> str:
+    """Initial log level: CLI -v wins, then config.logging.level, then WARNING."""
+    cli_level = None
+    if args.verbose >= 2:
+        cli_level = "DEBUG"
+    elif args.verbose == 1:
+        cli_level = "INFO"
+    lvl = log_cfg.get("level")
+    config_level = lvl.strip().upper() if isinstance(lvl, str) and lvl.strip() else None
+    return cli_level or config_level or "WARNING"
+
+
 def main():
     """Main entry point for the OpenMux server."""
     args = _parse_arguments()
@@ -1991,38 +2036,14 @@ def main():
     security_config = args.security_config
 
     # --check-config: strict schema pass over all three files and exit.
-    # Derive sidecar paths exactly like ConfigManager so the check covers
-    # the same files the server would load.
     if args.check_config:
-        from .config_validation import check_config_files
+        _run_check_config(config_path, auth_config, security_config)
 
-        base_dir = os.path.dirname(os.path.abspath(config_path))
-        auth_path = auth_config or os.path.join(base_dir, "authentication.yaml")
-        security_path = security_config or os.path.join(base_dir, "security.yaml")
-        violations, problems = check_config_files(config_path, auth_path, security_path)
-        for line in violations + problems:
-            print(line)
-        if problems:
-            sys.exit(2)
-        if violations:
-            sys.exit(1)
-        print(f"Config validation OK: {config_path}, {auth_path}, {security_path}")
-        sys.exit(0)
-
-    # Determine initial log level from CLI or config.logging.level
-    cli_level = None
-    if args.verbose >= 2:
-        cli_level = "DEBUG"
-    elif args.verbose == 1:
-        cli_level = "INFO"
-
-    # Pre-read the logging block (level, and file/log_dir handed to the server
-    # constructor so initial file handlers land in the configured location)
-    log_cfg = _read_logging_block(config_path)
-    lvl = log_cfg.get("level")
-    config_level = lvl.strip().upper() if isinstance(lvl, str) and lvl.strip() else None
-
-    initial_level = cli_level or config_level or "WARNING"
+    # Determine the initial log level (CLI -v wins, then config.logging
+    # .level, WARNING otherwise). The logging block pre-read also hands
+    # file/log_dir to the server constructor so initial file handlers land
+    # in the configured location.
+    initial_level = _initial_log_level(args, _read_logging_block(config_path))
     server = OpenMuxServer(
         config_path,
         auth_config_path=auth_config,
