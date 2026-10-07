@@ -497,8 +497,8 @@ class OpenMuxClient:
                         details.append(f"{clients} clients/{rw_cap} rw")
                     else:
                         details.append(f"{clients} clients")
-                # Compose origin in fixed order: [id=..., desc=..., hostname=...]
-                if origin_host or origin_id or origin_desc:
+                # Compose origin in fixed order: [id=..., desc=..., hostname=..., port=...]
+                if origin_host or origin_id or origin_desc or origin_port:
                     origin_fields = []
                     if origin_id:
                         origin_fields.append(f"id={origin_id}")
@@ -506,6 +506,8 @@ class OpenMuxClient:
                         origin_fields.append(f"desc={origin_desc}")
                     if origin_host:
                         origin_fields.append(f"hostname={origin_host}")
+                    if origin_port:
+                        origin_fields.append(f"port={origin_port}")
                     origin_label = f"[{', '.join(origin_fields)}]" if origin_fields else "[]"
                     if ftype:
                         details.append(f"origin={origin_label} ({ftype})")
