@@ -281,7 +281,6 @@ async def test_conserver_establish_full_flow(monkeypatch):
     group_r, group_w = _make_conserver_mock_streams(["ok", "ok", "[attached]"])
 
     async def fake_open(host, port, ssl=None):
-        conn = (MagicMock(), MagicMock())
         connections.append((host, port))
         if port == 782:
             return master_r, master_w

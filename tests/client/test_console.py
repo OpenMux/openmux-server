@@ -129,7 +129,6 @@ class TestConsoleUI:
         mock_write = MagicMock()
         mock_flush = MagicMock()
 
-        original_buffer = sys.stdout.buffer
         original_write = sys.stdout.buffer.write
         original_flush = sys.stdout.buffer.flush
 

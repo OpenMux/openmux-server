@@ -147,7 +147,6 @@ async def test_signed_v1e_bad_signature_rejected(monkeypatch):
 async def test_expired_v1e_rejected(monkeypatch):
     adapter = _make_adapter(0)
     assert await adapter.start()
-    port = int(adapter._http_site._server.sockets[0].getsockname()[1])
     try:
         priv = Ed25519PrivateKey.generate()
         kid = "k1"

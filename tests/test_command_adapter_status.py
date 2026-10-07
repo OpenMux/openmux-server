@@ -143,7 +143,6 @@ async def test_command_stop_clears_status(monkeypatch):
     pm = CapturingPortManager()
     adapter: Any = SimpleNamespace(main_port_manager=pm)
     port = CommandPort("cp-8", {"command": "echo"}, adapter)
-    pm_output: Dict[str, Any] = {}
     # Record meta pushes to verify the payload carries the cleared text.
     pushed: List[Dict[str, Any]] = []
 

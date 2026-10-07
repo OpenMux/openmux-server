@@ -128,7 +128,6 @@ class TestFireClientCountHook:
 
         monkeypatch.setattr(dl_mod.DataLogger, "get", classmethod(lambda cls: _DummyDataLogger()), raising=False)
         pm = PortManager([])
-        adapter = RecordingAdapter()
         port = RecordingPort()
         wrapper = SimpleNamespace(name="rec1", unified_port=port, connected_clients=[{"client_id": "c"}])
         pm._fire_client_count_hook(wrapper)

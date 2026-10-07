@@ -255,8 +255,6 @@ async def test_adapter_config_status_create_destroy_write(monkeypatch):
         async def create_port_dynamically(self, port_name, config, evt):
             # Directly call adapter.create_port but do not spawn real process
             # Monkeypatch CommandPort.start to avoid spawn
-            orig = CommandPort.start
-
             async def fake_start(self):
                 self.is_running = True
                 self.process_active = True

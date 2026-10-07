@@ -715,7 +715,7 @@ class TestClientManager:
         client_manager.console_manager.connect_client_to_port = AsyncMock(return_value=(False, None, "port_full"))
 
         # Mock asyncio.sleep
-        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch("asyncio.sleep", new_callable=AsyncMock):
             await client_manager._handle_control_menu(client)
 
         # Verify disconnect client was called once

@@ -3638,7 +3638,6 @@ async def test_save_and_load_federated_cache_preserves_status_message(tmp_path):
 
 def test_parse_port_status_frame():
     """`_parse_port_status_frame` returns (port, msg, readiness) for a valid payload, None on malformed."""
-    a = UnifiedMuxConAdapter("mx", {"muxcon": {}})
     parsed = UnifiedMuxConAdapter._parse_port_status_frame('PORT_STATUS:remote1\n{"status_message":"Connection refused"}')
     assert parsed == ("remote1", "Connection refused", "")
     # Readiness (issue #68): the additive field is surfaced when present.

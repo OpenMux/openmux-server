@@ -85,10 +85,8 @@ def test_logging_manager_initializes_root_and_components(tmp_path, monkeypatch):
     }
     orig_handlers = snapshot_root_handlers()
     try:
-        lm = LoggingManager(cfg)
+        LoggingManager(cfg)  # side effect: attaches the handlers asserted below
         root = logging.getLogger()
-        # Root has console and file handler
-        types = {type(h) for h in root.handlers}
         assert any(isinstance(h, TerminalStreamHandler) for h in root.handlers)
         assert any(h.__class__.__name__ == "RotatingFileHandler" for h in root.handlers)
         # Console formatter type is TerminalFormatter
@@ -144,7 +142,7 @@ def test_logging_manager_env_log_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENMUX_LOG_DIR", str(base))
     orig_handlers = snapshot_root_handlers()
     try:
-        lm = LoggingManager({"log_level": "INFO"})
+        LoggingManager({"log_level": "INFO"})  # side effect: attaches file handlers
         assert (base / "openmux.log").exists()
         assert (base / "openmux_server.log").exists()
     finally:
@@ -168,7 +166,7 @@ def test_logging_manager_console_only_when_dir_uncreatable(tmp_path, caplog, mon
     orig_handlers = snapshot_root_handlers()
     try:
         with caplog.at_level(logging.WARNING, logger=""):
-            lm = LoggingManager(cfg)
+            LoggingManager(cfg)  # side effect: attaches the console handler
         root = logging.getLogger()
         # The console handler is always present.
         assert any(isinstance(h, TerminalStreamHandler) for h in root.handlers)
