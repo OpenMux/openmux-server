@@ -6996,7 +6996,6 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                         existing = None
                 if existing is not None and hasattr(existing, "remote_port_name"):
                     # Update existing proxy in-place
-                    prev_conn = getattr(existing, "connection_id", None)
                     peer_key = self._derive_peer_key_from_conn_id(conn_id)
                     # Re-bind proxy to this new adapter instance so writes go over live connections
                     try:
