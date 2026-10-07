@@ -7020,7 +7020,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     # authoritative states on re-advertise, so replace (do not
                     # merge) what the POWER:STATE frames had recorded.
                     try:
-                        self._apply_power_meta_to_proxy(existing, metadata)
+                        await self._apply_power_meta_to_proxy(existing, metadata)
                     except Exception:
                         # justification: optional power detail; the port stays functional
                         pass
