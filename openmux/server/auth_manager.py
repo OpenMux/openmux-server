@@ -13,7 +13,7 @@ import hashlib
 import logging
 import secrets
 import time
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -699,26 +699,7 @@ class AuthManager:
             self.logger.warning("External auth denied: user '%s' not in allowed_users list", username)
             return False
 
-        helper = self._ext_auth_helper
-
-        if isinstance(helper, list) and helper:
-            # List config e.g. ["sudo", "/usr/local/bin/openmux_pam_helper"]
-            cmd = list(helper)
-            # Binary for existence check: last absolute path in the list
-            binary = next((c for c in reversed(cmd) if os.path.isabs(c)), cmd[-1])
-        elif isinstance(helper, str) and helper.strip():
-            # String config: the string itself is the binary to execute
-            cmd = [helper.strip()]
-            binary = helper.strip()
-        else:
-            # Auto-resolve from PATH then well-known location
-            found = shutil.which("openmux-pam-helper") or shutil.which("openmux_pam_helper")
-            binary = found or "/usr/local/bin/openmux_pam_helper"
-            cmd = [binary]
-
-        # Append service name as optional argument
-        if self._ext_auth_service:
-            cmd.append(self._ext_auth_service)
+        cmd, binary = self._resolve_ext_auth_command()
 
         if not os.path.isfile(binary) and not shutil.which(binary):
             self.logger.error("External auth helper not found: %s", binary)
@@ -767,6 +748,39 @@ class AuthManager:
         except Exception as e:
             self.logger.error("External auth helper error for user '%s': %s", username, e)
             return False
+
+    def _resolve_ext_auth_command(self) -> Tuple[List[str], str]:
+        """Resolve the external-auth helper command line and existence-check binary.
+
+        Resolution order: configured list (supports a leading ``sudo``),
+        configured string, PATH lookup, then the well-known location. The
+        configured service name is appended as the first argument. Returns
+        ``(cmd, binary)`` where ``binary`` is the path to check for existence.
+        """
+        import os
+        import shutil
+
+        helper = self._ext_auth_helper
+
+        if isinstance(helper, list) and helper:
+            # List config e.g. ["sudo", "/usr/local/bin/openmux_pam_helper"]
+            cmd = list(helper)
+            # Binary for existence check: last absolute path in the list
+            binary = next((c for c in reversed(cmd) if os.path.isabs(c)), cmd[-1])
+        elif isinstance(helper, str) and helper.strip():
+            # String config: the string itself is the binary to execute
+            cmd = [helper.strip()]
+            binary = helper.strip()
+        else:
+            # Auto-resolve from PATH then well-known location
+            found = shutil.which("openmux-pam-helper") or shutil.which("openmux_pam_helper")
+            binary = found or "/usr/local/bin/openmux_pam_helper"
+            cmd = [binary]
+
+        # Append service name as optional argument
+        if self._ext_auth_service:
+            cmd.append(self._ext_auth_service)
+        return cmd, binary
 
     def _resolve_external_groups(self, username: str) -> Set[str]:
         """Return the raw set of external group names known for a user.

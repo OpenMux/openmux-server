@@ -372,13 +372,20 @@ def _detect_removed_location_keys(config: Any) -> List[str]:
             found.append(f"{section}.{key}")
     mux = config.get("muxcon")
     if isinstance(mux, dict):
-        listeners = mux.get("listeners")
-        if isinstance(listeners, list):
-            for index, listener in enumerate(listeners):
-                if isinstance(listener, dict):
-                    for key in _REMOVED_LISTENER_KEYS:
-                        if key in listener:
-                            found.append(f"muxcon.listeners[{index}].{key}")
+        found.extend(_removed_listener_keys(mux))
+    return found
+
+
+def _removed_listener_keys(mux: Any) -> List[str]:
+    """Removed-key paths among ``muxcon.listeners[]`` entries (TLS era)."""
+    found: List[str] = []
+    listeners = mux.get("listeners")
+    if isinstance(listeners, list):
+        for index, listener in enumerate(listeners):
+            if isinstance(listener, dict):
+                for key in _REMOVED_LISTENER_KEYS:
+                    if key in listener:
+                        found.append(f"muxcon.listeners[{index}].{key}")
     return found
 
 
@@ -402,20 +409,7 @@ def absorb_removed_location_keys(config: Any, logger: Optional[Any] = None) -> L
     keys = removed_location_keys(config)
     if not isinstance(config, dict):
         return keys
-    for key in _REMOVED_LISTENER_KEYS:
-        mux = config.get("muxcon")
-        if isinstance(mux, dict) and isinstance(mux.get("listeners"), list):
-            for listener in mux["listeners"]:
-                if isinstance(listener, dict) and key in listener:
-                    del listener[key]
-    for section, key in _REMOVED_TOP_LEVEL:
-        sec = config.get(section)
-        if isinstance(sec, dict) and key in sec:
-            del sec[key]
-    for section, key in _REMOVED_IDENTITY_KEYS:
-        sec = config.get(section)
-        if isinstance(sec, dict) and key in sec:
-            del sec[key]
+    _strip_removed_location_keys(config)
     if logger is not None:
         identity_paths = {f"{section}.{key}" for section, key in _REMOVED_IDENTITY_KEYS}
         for path in keys:
@@ -433,3 +427,26 @@ def absorb_removed_location_keys(config: Any, logger: Optional[Any] = None) -> L
                 )
             logger.warning(message, path)
     return keys
+
+
+def _strip_removed_location_keys(config: Dict[str, Any]) -> None:
+    """Strip all removed location keys from ``config`` in place.
+
+    Covers the three key families tracked in
+    ``_REMOVED_TOP_LEVEL`` / ``_REMOVED_IDENTITY_KEYS``:
+    ``muxcon.listeners[].tls_dir`` / ``muxcon.listeners[].tls_known_peers_path`` and the old top-level/identity keys.
+    """
+    for key in _REMOVED_LISTENER_KEYS:
+        mux = config.get("muxcon")
+        if isinstance(mux, dict) and isinstance(mux.get("listeners"), list):
+            for listener in mux["listeners"]:
+                if isinstance(listener, dict) and key in listener:
+                    del listener[key]
+    for section, key in _REMOVED_TOP_LEVEL:
+        sec = config.get(section)
+        if isinstance(sec, dict) and key in sec:
+            del sec[key]
+    for section, key in _REMOVED_IDENTITY_KEYS:
+        sec = config.get(section)
+        if isinstance(sec, dict) and key in sec:
+            del sec[key]

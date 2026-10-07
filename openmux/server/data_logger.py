@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from ..common.fsutil import ensure_directory
 
@@ -519,7 +519,20 @@ class DataLogger:
         if cached is not None:
             return d in cached
         # Resolve from config (default to port->client traffic only)
-        allowed = {"in"}
+        allowed = self._resolve_direction_set(port_obj)
+        self._direction_cache[port_name] = allowed
+        return d in allowed
+
+    def _resolve_direction_set(self, port_obj: Optional[Any]) -> Set[str]:
+        """Resolve the allowed log directions for a port from its config.
+
+        Accepts the single-string ``log_direction`` or the list ``log_directions``
+        config keys (dict or attribute form) on the port (or its
+        ``unified_port``). Values are lower-cased and limited to
+        ``{in, out}``; an empty/invalid value falls back to the default
+        ``{"in"}`` (port -> client traffic only).
+        """
+        allowed: Set[str] = {"in"}
         try:
             obj = port_obj
             if obj is not None and hasattr(obj, "unified_port"):
@@ -544,8 +557,7 @@ class DataLogger:
                     allowed = norm
         except Exception:
             self.logger.error("Error resolving direction filters for port", exc_info=True)
-        self._direction_cache[port_name] = allowed
-        return d in allowed
+        return allowed
 
     def record_meta(
         self,
