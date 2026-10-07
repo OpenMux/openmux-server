@@ -21,12 +21,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import asyncssh
 from cryptography.hazmat.primitives import serialization
 
-from openmux import __version__ as _OPENMUX_VERSION
-
 from ..locations import ssh_host_key_dir as _ssh_host_key_dir_default
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .listener_common import (
-    CONTROL_MENU_HELP,
     AclEntry,
     EscapeState,
     _dispatch_control_command,
@@ -34,7 +31,6 @@ from .listener_common import (
     compile_acl,
     feed_escape_byte,
     format_rw_notice,
-    format_viewers_notice,
     ip_allowed,
     parse_login,
     read_take_target,
