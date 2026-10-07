@@ -70,7 +70,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
         # Ensure required client dependency is present even for discovery mode.
         # Tests expect connect() to fail if the WebSocket/HTTP client import fails.
         try:
-            import aiohttp  # noqa: F401
+            import aiohttp
         except Exception as e:
             self.logger.error("aiohttp import failed: %s", e)
             return False
@@ -91,8 +91,6 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 self.username = self.basic_user
             return True
         try:
-            import aiohttp
-
             protocol = "wss" if self.use_tls else "ws"
             # Determine disambiguated path. Accept forms:
             #  - plain:               <name>              -> /ws/<name>
