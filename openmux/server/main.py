@@ -163,6 +163,9 @@ class OpenMuxServer:
         # Server state
         self.is_running = False
         self.shutdown_event = asyncio.Event()
+        # Names of unified adapters whose start attempt failed during boot
+        # (_initialize_unified_adapters). Used by _summary_adapter_count.
+        self._adapter_start_failed: set = set()
 
         # Control socket server (Unix domain) for local CLI control
         self._control_server = None
@@ -338,8 +341,10 @@ class OpenMuxServer:
                             self.logger.info("Started unified adapter: %s (%s)", adapter.name, adapter_type)
                         else:
                             self.logger.error("Failed to start unified adapter: %s", adapter.name)
+                            self._adapter_start_failed.add(adapter.name)
                     except Exception as e:
                         self.logger.error("Error starting unified adapter %s: %s", adapter.name, e, exc_info=True)
+                        self._adapter_start_failed.add(adapter.name)
             else:
                 self.logger.info("No unified adapters configured")
 
@@ -629,53 +634,21 @@ class OpenMuxServer:
 
         return started_count
 
-    async def _start_all_adapters(self):
-        """Start all configured adapters with proper sequencing.
+    def _summary_adapter_count(self) -> int:
+        """Report startup result without re-calling start().
 
-        Returns:
-            int: Number of connection endpoints started.
+        Adapters were already started (or attempted) by
+        ``_initialize_unified_adapters()``; this only summarizes that outcome.
+        Returns 0 when every unified adapter start attempt failed; the number
+        that came up otherwise.
         """
-        # Determine unified adapters that expose connection endpoints
-        from .adapters.base_adapter import AdapterCapability
-
-        connection_unified_adapters = []
-        port_unified_adapters = []
-
-        if self.unified_adapters:
-            for adapter in self.unified_adapters:
-                if AdapterCapability.ACCEPTS_CONNECTIONS in adapter.get_capabilities():
-                    connection_unified_adapters.append(adapter)
-                else:
-                    port_unified_adapters.append(adapter)
-
-        total_started = 0
-
-        # Start unified connection endpoints (if any)
-        if connection_unified_adapters:
-            self.logger.info("Starting %s connection endpoints...", len(connection_unified_adapters))
-            for adapter in connection_unified_adapters:
-                try:
-                    if adapter.is_running:
-                        self.logger.info("Connection endpoint already running: %s", adapter.name)
-                        total_started += 1
-                    elif await adapter.start():
-                        self.logger.info("Started connection endpoint: %s", adapter.name)
-                        total_started += 1
-                    else:
-                        self.logger.error("Failed to start connection endpoint: %s", adapter.name)
-                except Exception as e:
-                    self.logger.error("Error starting connection endpoint %s: %s", adapter.name, e, exc_info=True)
-
-        # Legacy connection adapters removed; nothing else to start here
-
-        # Port unified adapters are already started in _initialize_unified_adapters
-
-        if total_started == 0 and not connection_unified_adapters:
-            self.logger.error("No connection endpoints started successfully")
+        total = len(self.unified_adapters or [])
+        if total and total == len(self._adapter_start_failed):
+            self.logger.error("No unified adapters started")
             return 0
-
-        self.logger.info("Started %s connection endpoints", total_started)
-        return total_started
+        running = sum(1 for a in (self.unified_adapters or []) if a.is_running)
+        self.logger.info("Started %s/%s unified adapters", running, total)
+        return running
 
     async def _run_server_loop(self):
         """Run the main server loop until shutdown."""
@@ -702,8 +675,12 @@ class OpenMuxServer:
             if not self._create_and_configure_adapters():
                 return False
 
-            # Start all adapters
-            started_count = await self._start_all_adapters()
+            # Summarize adapter startup (all start attempts happened inside
+            # _initialize_unified_adapters above; re-calling start() here
+            # would race with already-bound sockets and re-trigger the same
+            # code paths twice, which is why the old _start_all_adapters
+            # loop existed only to log "already running".)
+            started_count = self._summary_adapter_count()
             if started_count == 0:
                 return False
 

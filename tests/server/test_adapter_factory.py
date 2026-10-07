@@ -21,7 +21,7 @@ class DummyAdapter(BaseGenericAdapter):
         # Accept both unified and legacy styles for tests
         return isinstance(config, dict)
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         self.started = True
         return True
 

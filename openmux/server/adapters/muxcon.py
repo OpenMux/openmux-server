@@ -2150,7 +2150,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             self.logger.warning("MuxCon: could not read server identity from config; using defaults", exc_info=True)
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         """Start listeners, initiators, and background loops.
 
         Returns:
@@ -2399,7 +2399,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         keys_before = len(self._auth_pubkeys)
         self._load_public_keys(effective)
 
-        self.is_running = True
+        self._set_running(True)
         summary = {
             "listeners": listeners_summary,
             "initiators": initiators_summary,

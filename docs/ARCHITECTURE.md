@@ -36,7 +36,7 @@ Note:
 ## 3. Core Components & Responsibilities
 | Component | Responsibility | Key Methods / Notes |
 |-----------|---------------|---------------------|
-| `OpenMuxServer` | Orchestration & lifecycle | `start()`, `_initialize_unified_adapters()`, `_start_all_adapters()`, `shutdown()` |
+| `OpenMuxServer` | Orchestration & lifecycle | `start()`, `_initialize_unified_adapters()`, `_summary_adapter_count()`, `shutdown()` |
 | `ConfigManager` | Load & expose YAML config | `load_config()`, getters (server host/port, auth, web) |
 | `AuthManager` | User/API key auth state | `update_config()` (on reload) |
 Note on configuration reloads: Hot-reload of port configuration is supported via a SIGHUP signal handler only; there is no HTTP reload endpoint. The server validates the on-disk config and reconciles affected adapters incrementally.
@@ -117,7 +117,7 @@ During shutdown the inverse order is applied implicitly: connection adapters sto
 5. Implement `validate_config` to quickly fail invalid user config.
 6. Define `get_capabilities()` (include `PROVIDES_PORTS` and/or `ACCEPTS_CONNECTIONS` as appropriate).
 7. Implement port lifecycle methods if providing ports.
-8. Ensure `start()` sets `is_running = True` after successful initialization; call `await self.load_configured_ports()` if ports are defined statically.
+8. Implement `_do_start()` and return the success flag; the base `start()` wraps it and sets `is_running` from the result. Call `await self.load_configured_ports()` if ports are defined statically. Do not set `is_running` in the start path; set it to `False` in `stop()`.
 9. (Optional) Provide `get_status_info()` returning a dict with fields used in logging (e.g. endpoint, clients, ports, type) for better monitoring.
 
 ---
@@ -159,9 +159,8 @@ class MyAdapter(BaseGenericAdapter):
             entries = self.config.get("my_ports", []) or self.config.get("ports", [])
         return {item["name"]: item for item in entries}
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         await self.load_configured_ports()
-        self.is_running = True
         return True
 
     async def stop(self) -> None:
@@ -257,24 +256,22 @@ This chapter expands the earlier summaries (Sections 1, 5, 11) into a definitive
       * Each instantiation wraps list sections into dicts if needed and attaches a fresh `DynamicPortManager(adapter)` (setting `adapter.port_manager`).
     - After collection: `self.port_manager.set_unified_adapters(self.unified_adapters)` integrates them.
     - Sets `adapter.main_port_manager = self.port_manager` (back‑reference) where attribute exists.
-    - Sequentially `await adapter.start()` for each unified adapter:
+    - Sequentially `await adapter.start()` for each unified adapter. `start()` is a fixed base‑class wrapper that calls the subclass’s `_do_start()` and sets `is_running` from the result, so the flag can never disagree with the boolean a caller observes.
       * Adapter typically: validates internal config, calls `load_configured_ports()` (iterates `get_port_configurations()` map) → each port creation delegates to `DynamicPortManager.create_port_dynamically()` → invokes adapter `create_port()`.
-      * On success sets `adapter.is_running = True`.
-    - Failures logged; startup continues (partial availability is allowed).
+    - On a failed start the adapter name is recorded in `self._adapter_start_failed`; startup continues (partial availability is allowed).
 
 ### 15.6 Deciding Connection Adapter Path
 13. `_create_and_configure_adapters()` determines connection endpoints purely from unified adapters:
     - Scans unified adapters for `AdapterCapability.ACCEPTS_CONNECTIONS`.
     - Injects dependencies: auth / console managers (port manager is already referenced via `main_port_manager`).
+    - Does not call `start()`. Start happened in step 12; this is reporting only.
 
-### 15.7 Starting Connection Endpoints
-14. `_start_all_adapters()` orchestration:
-    a. Partition unified adapters: connection vs port‑only.
-    b. If connection‑capable unified adapters exist: ensure each is running (start if not already started in step 12).
-15. Count of successfully started connection adapters logged; zero triggers error condition and aborts startup (returns False → overall start fails).
+### 15.7 Startup Summary
+14. `_summary_adapter_count()` reports the outcome of step 12 without re‑calling `start()`. It returns the number of adapters that are running; 0 when every unified adapter start attempt failed (and logs “No unified adapters started”).
+15. `start()` treats 0 as fatal and returns False; otherwise proceeds to status logging and the steady‑state loop.
 
 ### 15.8 Readiness & Status Logging
-16. `self.is_running = True` set after at least one connection adapter (unified) is active.
+16. `self.is_running = True` set after step 14 reports at least one adapter up.
 17. `_log_server_status()` builds a categorized view:
     - Unified connection adapters (if any) with endpoint + client counts.
     - Legacy connection adapters (else) with host:port.

@@ -516,7 +516,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             del self.ports[port_name]
             self.logger.info("Destroyed loopback port: %s", port_name)
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         """Create and start configured loopback ports."""
         # Create loopback ports directly from configuration
         success = await self._create_loopback_ports_from_config()
@@ -527,7 +527,6 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         else:
             self.logger.error("Failed to start loopback adapter %s", self.name)
 
-        self.is_running = success
         return success
 
     async def _create_loopback_ports_from_config(self) -> bool:

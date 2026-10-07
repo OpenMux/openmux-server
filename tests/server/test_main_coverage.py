@@ -48,9 +48,8 @@ class FakeAdapter(BaseGenericAdapter):
     def get_capabilities(self) -> Set[AdapterCapability]:
         return set(self._capabilities)
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         self._started += 1
-        self.is_running = self._start_ok
         return self._start_ok
 
     async def stop(self) -> None:
@@ -423,7 +422,13 @@ async def test_initialize_unified_adapters_success(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_all_adapters_with_mixed_states(tmp_path):
+async def test_summary_adapter_count_no_double_start(tmp_path):
+    """The startup summary must report without re-calling adapter.start().
+
+    The old _start_all_adapters loop re-iterated every adapter and skipped
+    the ones already running; that double pass is gone. The summary counts
+    the adapters _initialize_unified_adapters already attempted.
+    """
     cfg_path = write_temp_config(tmp_path)
     srv = OpenMuxServer(cfg_path, log_level="INFO")
 
@@ -431,11 +436,28 @@ async def test_start_all_adapters_with_mixed_states(tmp_path):
     a2 = FakeAdapter("a2", capabilities={AdapterCapability.ACCEPTS_CONNECTIONS}, is_running=True)
     a3 = FakeAdapter("a3", capabilities={AdapterCapability.PROVIDES_PORTS}, is_running=True)
     srv.unified_adapters = cast(Any, [a1, a2, a3])
+    # Simulate one failed start attempt
+    srv._adapter_start_failed.add("a1")
 
-    started = await srv._start_all_adapters()
-    # Only connection endpoints count; a1 started, a2 already running
+    started = srv._summary_adapter_count()
+    # a2, a3 are running; start was not re-attempted for any of them
     assert started == 2
-    assert a1._started == 1
+    assert a1._started == 0
+    assert a2._started == 0
+    assert a3._started == 0
+
+
+@pytest.mark.asyncio
+async def test_summary_adapter_count_all_failed_returns_zero(tmp_path):
+    cfg_path = write_temp_config(tmp_path)
+    srv = OpenMuxServer(cfg_path, log_level="INFO")
+
+    a1 = FakeAdapter("a1", capabilities={AdapterCapability.PROVIDES_PORTS}, start_ok=False)
+    a2 = FakeAdapter("a2", capabilities={AdapterCapability.PROVIDES_PORTS}, start_ok=False)
+    srv.unified_adapters = cast(Any, [a1, a2])
+    srv._adapter_start_failed.update(["a1", "a2"])
+
+    assert srv._summary_adapter_count() == 0
 
 
 @pytest.mark.asyncio

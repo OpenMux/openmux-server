@@ -949,7 +949,7 @@ class SerialAdapter(BaseGenericAdapter):
             cfg["description"] = f"Serial port {cfg.get('name') or 'unknown'}"
         return SerialPortWrapper(cfg, self.logger, meta_notify=self._make_notifier())
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         """Start all configured serial ports.
 
         Returns:
@@ -962,7 +962,6 @@ class SerialAdapter(BaseGenericAdapter):
 
         if not self.serial_ports:
             self.logger.warning("No ports configured for serial adapter %s", self.name)
-            self.is_running = True
             return True
 
         success_count = 0
@@ -985,7 +984,6 @@ class SerialAdapter(BaseGenericAdapter):
                 self.logger.error("Failed to start serial port %s: %s", port_name, e, exc_info=True)
 
         if success_count > 0:
-            self.is_running = True
             self.logger.info("Serial adapter %s started with %s/%s ports", self.name, success_count, len(self.serial_ports))
             return True
         else:

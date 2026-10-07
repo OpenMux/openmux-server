@@ -32,6 +32,17 @@ Changes since v1.0.3 (2026-09-17).
   federated outlets (it has no console session to anchor the relay on). No
   config change is required.
 
+- **Disabled `client_listener` and `power:` adapters now report status
+  `disabled` (not `stopped`).** An adapter that is present in config but
+  turned off (`enabled: false`) reports `disabled` in its `get_status_info()`
+  and the server status banner, instead of `stopped`. The running-state
+  contract is now enforced by the base adapter class: `start()` wraps the
+  subclass's `_do_start()` and sets `is_running` from the result, so the flag
+  can never be out of sync with the start outcome (a disabled adapter reports
+  startup as a success and is "up but disabled"). Boot no longer re-walks
+  adapters to start ones that are already running; startup failure that aborts
+  boot is now based on the real start results.
+
 - **Power outlet switching is scoped to console groups.** A `read-write` user
   may now switch an outlet only if the user can open every console the outlet
   feeds, using the same console-access rules as attach time

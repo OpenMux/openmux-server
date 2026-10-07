@@ -271,7 +271,7 @@ class TcpServerAdapter(BaseGenericAdapter):
         """
         self.auth_manager = auth_manager
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         """Start listening server and begin accepting clients.
 
         Returns:
@@ -280,13 +280,11 @@ class TcpServerAdapter(BaseGenericAdapter):
         # Respect explicit enable/disable flag. When disabled, skip binding but
         # report success so overall server startup isn't treated as a failure.
         if hasattr(self, "enabled") and not self.enabled:
-            # Keep is_running False to reflect disabled/stopped state
             self.logger.info("Client listener '%s' is disabled via configuration; skipping bind", self.name)
             return True
         try:
             self.server = await asyncio.start_server(self.handle_client_connection, self.host, self.port)
 
-            self.is_running = True
             self.logger.info("TCP server started on %s:%s", self.host, self.port)
 
             # Start serving
@@ -1360,10 +1358,22 @@ class TcpServerAdapter(BaseGenericAdapter):
                     await self.disconnect_client_from_port(self.clients[client_id])
 
     def get_status_info(self) -> Dict[str, Any]:
-        """Return structured adapter status snapshot."""
+        """Return structured adapter status snapshot.
+
+        When the adapter is enabled=False in config, start reports success
+        and is_running stays True; this method then surfaces the state as
+        "disabled" rather than "running".
+        """
+        enabled = getattr(self, "enabled", True)
+        if self.is_running and enabled:
+            status = "running"
+        elif self.is_running:
+            status = "disabled"
+        else:
+            status = "stopped"
         return {
             "type": self.get_adapter_type(),
-            "status": "running" if self.is_running else "stopped",
+            "status": status,
             "endpoint": f"{self.host}:{self.port}",
             "clients": f"{len(self.clients)} connected",
             "details": {

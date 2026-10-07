@@ -458,7 +458,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
 
     # --- lifecycle ---------------------------------------------------------
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         """Build PDU state, run initial reads, start per-PDU poll tasks.
 
         A PDU that is unreachable at start does not fail adapter startup;
@@ -467,7 +467,6 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         section = self._effective_section(self.config)
         for pdu_cfg in section.get("pdus") or []:
             await self._build_pdu(pdu_cfg)
-        self.is_running = self.enabled
         if not self.enabled:
             self.logger.info("Power management is disabled by configuration")
             return True
@@ -1360,12 +1359,23 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
     # --- status -------------------------------------------------------------
 
     def get_status_info(self) -> Dict[str, Any]:
-        """Return standardized adapter status dict (power-flavored)."""
+        """Return standardized adapter status dict (power-flavored).
+
+        When the adapter is enabled=False in config, start reports success
+        and is_running stays True; this method then surfaces the state as
+        "disabled" rather than "running".
+        """
+        if self.is_running and self.enabled:
+            status = "running"
+        elif self.is_running:
+            status = "disabled"
+        else:
+            status = "stopped"
         pdus = sorted(self.pdus.keys())
         online = [name for name in pdus if self.pdus[name].online is True]
         return {
             "type": self.get_adapter_type(),
-            "status": "running" if self.is_running else "stopped",
+            "status": status,
             "ports": f"{len(pdus)} pdus",
             "details": {
                 "enabled": self.enabled,

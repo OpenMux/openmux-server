@@ -1425,7 +1425,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.debug(f"Configured command port: {port_name} -> {port_config.get('command', 'N/A')}")
         return port_configs
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         """Start adapter by creating all configured command ports.
 
         Returns:
@@ -1434,7 +1434,6 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             success = await self.load_configured_ports()
             if success:
-                self.is_running = True
                 self.logger.info("Command adapter %s started with %s ports", self.name, len(self.ports))
             return success
         except Exception as e:

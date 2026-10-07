@@ -624,7 +624,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         """Return adapter type identifier."""
         return "tcp_initiator"
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         self.logger.info("Starting TCP initiator adapter %s", self.name)
         ports_config = self.get_port_configurations()
         if not ports_config:
@@ -647,8 +647,6 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             success_count,
             len(ports_config),
         )
-        if success_count > 0:
-            self.is_running = True
         return success_count > 0
 
     async def stop(self) -> None:

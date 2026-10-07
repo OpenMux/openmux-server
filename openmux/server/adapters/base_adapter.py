@@ -55,11 +55,25 @@ class BaseGenericAdapter(ABC):
         self.name = name
         self.config = config
         self.capabilities = self.get_capabilities()
+        # Running state. The base start() sets this from the start result
+        # (via _set_running); stop() implementations clear it. Subclass start
+        # bodies must NOT assign it themselves, so the flag always matches the
+        # return value callers observe.
         self.is_running = False
         # Set by DynamicPortManager when adapter is registered for dynamic ports.
         self.port_manager: Optional["DynamicPortManager"] = None
         # Reference to the unified/global port manager; provided after construction.
         self.main_port_manager: Optional[Any] = None
+
+    def _set_running(self, running: bool) -> None:
+        """Record a start result in ``is_running``.
+
+        Called by the base ``start()`` with the return value of
+        ``_do_start()``. This keeps the running state in sync with what every
+        start caller observes. ``stop()`` implementations set ``is_running``
+        to ``False`` directly.
+        """
+        self.is_running = bool(running)
 
     def get_adapter_type(self) -> str:
         """Return adapter type identifier.
@@ -82,16 +96,35 @@ class BaseGenericAdapter(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     async def start(self) -> bool:
-        """Start adapter resources.
+        """Start adapter resources and set ``is_running`` from the result.
 
-        For inbound adapters this may open listening sockets; for outbound
-        adapters it may initiate connections; for port-providing adapters it
-        may create initial ports.
+        Subclasses implement the actual startup in ``_do_start``. This wrapper
+        is the single place where ``is_running`` is set after a start attempt,
+        so the flag always matches the result every caller observes.
 
         Returns:
             True if startup succeeded, otherwise False.
+        """
+        try:
+            ok = await self._do_start()
+        except Exception:
+            self._set_running(False)
+            raise
+        self._set_running(bool(ok))
+        return bool(ok)
+
+    @abstractmethod
+    async def _do_start(self) -> bool:
+        """Adapter-specific startup implementation.
+
+        Subclass method that used to be ``start``. The base ``start`` wrapper
+        is the only place ``is_running`` is set after a start attempt, so
+        subclasses must NOT override ``start`` itself -- they implement
+        ``_do_start`` and return the success flag only. On a disabled (not
+        configured) adapter return True so the server treats "disabled on
+        purpose" as a healthy state; ``get_status_info`` then reports the
+        adapter as ``disabled`` rather than ``running``.
         """
         raise NotImplementedError
 

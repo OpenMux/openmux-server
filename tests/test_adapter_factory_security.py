@@ -14,7 +14,7 @@ class DummyAdapter(BaseGenericAdapter):
     def get_adapter_type(self) -> str:
         return "dummy"
 
-    async def start(self):  # pragma: no cover - start isn't exercised in tests
+    async def _do_start(self):  # pragma: no cover - start isn't exercised in tests
         self.is_running = True
         return True
 

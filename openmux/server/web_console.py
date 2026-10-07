@@ -1900,7 +1900,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
     def set_auth_manager(self, auth_manager):
         self.auth_manager = auth_manager
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         try:
             # Prepare templates and assets
             try:
@@ -1999,7 +1999,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
                 self._started_monotonic = time.monotonic()
                 self._started_wall = time.time()
-                self.is_running = True
                 self.logger.info(
                     "WebConsole HTTPS on https://%s:%s (primary); HTTP redirect on http://%s:%s",
                     self.host,
@@ -2027,7 +2026,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
                 self._started_monotonic = time.monotonic()
                 self._started_wall = time.time()
-                self.is_running = True
                 scheme = "https" if ssl_ctx else "http"
                 self.logger.info("WebConsole listening on %s://%s:%s", scheme, self.host, self.port)
                 return True
@@ -2036,7 +2034,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             return False
 
     async def stop(self) -> None:
-        self.is_running = False
+        self._set_running(False)
         try:
             # Close HTTP server
             # New dual-server cleanup first

@@ -9,8 +9,7 @@ class _MiniLoopbackAdapter(BaseGenericAdapter):
     def get_capabilities(self):
         return {AdapterCapability.PROVIDES_PORTS}
 
-    async def start(self) -> bool:
-        self.is_running = True
+    async def _do_start(self) -> bool:
         self.port_manager = DynamicPortManager(self)
         await self.load_configured_ports()
         return True

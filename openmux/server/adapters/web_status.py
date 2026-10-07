@@ -123,7 +123,7 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Inject optional auth manager dependency."""
         self.auth_manager = auth_manager
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         """Start HTTP server listener.
 
         Returns:
@@ -131,7 +131,6 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         try:
             self.server = await asyncio.start_server(self._handle_client_connection, self.host, self.port)
-            self.is_running = True
             await self.server.start_serving()
             self.logger.info("WebStatus HTTP server listening on %s:%s", self.host, self.port)
             return True

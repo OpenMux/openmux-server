@@ -321,10 +321,9 @@ class SshListenerAdapter(BaseGenericAdapter):
                             return False
         return True
 
-    async def start(self) -> bool:
+    async def _do_start(self) -> bool:
         if not self.listeners:
             self.logger.info("SSH listener adapter has no entries; nothing to bind")
-            self.is_running = True
             return True
         if not self.console_manager:
             self.logger.error("SSH listener adapter requires a console manager reference")
@@ -341,7 +340,6 @@ class SshListenerAdapter(BaseGenericAdapter):
                 continue
             if not await self._start_single_listener(spec):
                 success = False
-        self.is_running = success
         return success
 
     def _ensure_host_key(self) -> Any:
@@ -474,7 +472,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                 self.logger.info("SSH listener '%s' disabled via configuration", spec.name)
 
         self.listeners = [specs_by_name[n] for n in sorted(specs_by_name.keys())]
-        self.is_running = True
+        self._set_running(True)
 
         summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
         self.logger.info(
