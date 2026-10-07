@@ -9,7 +9,9 @@ from . import get_web_adapter
 
 
 async def _handle_view(request: web.Request) -> web.StreamResponse:
-    adapter = get_web_adapter(request)
+    # Presence check only: the view renders host facts and uses the
+    # request's username, not the adapter instance itself.
+    get_web_adapter(request)
     username = request.get("username")
     if not username:
         raise web.HTTPUnauthorized()

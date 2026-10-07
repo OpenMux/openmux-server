@@ -397,7 +397,7 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
         # Load incoming config and validate structure as dict
         try:
             payload = await request.json()
-        except Exception as e:
+        except Exception:
             adapter.logger.warning("Invalid JSON body for config apply", exc_info=True)
             return web.json_response({"error": True, "message": "Invalid JSON"}, status=400)
         if not isinstance(payload, dict):

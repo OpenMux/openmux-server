@@ -17,7 +17,6 @@ Usage:
 """
 import argparse
 import asyncio
-import os
 import signal
 import subprocess
 import sys
@@ -139,7 +138,6 @@ async def main_async(args) -> int:
     # Start server process
     python = _which_python()
     cfg = args.server_config
-    env = os.environ.copy()
     cmd = [python, "-m", "openmux.server.main", "-c", cfg]
     _log(f"[server] starting: {cmd}")
     server = subprocess.Popen(
