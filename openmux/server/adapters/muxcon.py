@@ -1129,31 +1129,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         regular POWER:STATE frame. metadata.power absent (older origin) is a
         no-op: the cached feed list stays valid.
         """
-        feeds = getattr(metadata, "power", None)
-        if not isinstance(feeds, list):
-            return
-        origin = getattr(metadata, "origin_server", None)
-        origin_id = getattr(origin, "server_id", None)
-        refs: List[str] = []
-        states: Dict[str, Optional[bool]] = {}
-        for f in feeds:
-            if not isinstance(f, dict):
-                continue
-            r = f.get("ref")
-            if not isinstance(r, str) or not r:
-                continue
-            on = f.get("on")
-            if on is not True and on is not False:
-                on = None
-            # A fresh advertisement carries local refs ("<pdu>.<id>"); qualify
-            # them with the origin's server id ("origin::<ref>"). An
-            # already-prefixed entry (defensive: a future origin advertising
-            # in the global form, or a stale re-advertise) is kept as-is so
-            # the refresh never double-prefixes (outlet federation).
-            if split_remote_ref(r) is None and isinstance(origin_id, str) and origin_id:
-                r = remote_ref(origin_id, r)
-            refs.append(r)
-            states[r] = on
+        refs, states = self._normalize_power_feed_meta(metadata)
         if not refs:
             return
         old_states = getattr(proxy, "_feed_states", None)
@@ -1196,6 +1172,39 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # A feed removed on the origin stops being shown; no event needed for
         # removal (the badge/menu re-render from the refreshed list).
         self.logger.debug("Refreshed power feeds for %s from re-advertise: %s", proxy.remote_port_name, refs)
+
+    @staticmethod
+    def _normalize_power_feed_meta(metadata: Any) -> Tuple[List[str], Dict[str, Optional[bool]]]:
+        """(qual-ref, on-state) per feed from a metadata power list.
+
+        Keeps only dict entries with a non-empty string ref; on-state is
+        True/False or None (unknown). A fresh advertisement carries local
+        refs ("<pdu>.<id>"); they are qualified with the origin's server id
+        ("origin::<ref>"). An already-prefixed entry (defensive: a future
+        origin advertising in the global form, or a stale re-advertise) is
+        kept as-is so the refresh never double-prefixes (outlet federation).
+        """
+        feeds = getattr(metadata, "power", None)
+        if not isinstance(feeds, list):
+            return [], {}
+        origin = getattr(metadata, "origin_server", None)
+        origin_id = getattr(origin, "server_id", None)
+        refs: List[str] = []
+        states: Dict[str, Optional[bool]] = {}
+        for f in feeds:
+            if not isinstance(f, dict):
+                continue
+            r = f.get("ref")
+            if not isinstance(r, str) or not r:
+                continue
+            on = f.get("on")
+            if on is not True and on is not False:
+                on = None
+            if split_remote_ref(r) is None and isinstance(origin_id, str) and origin_id:
+                r = remote_ref(origin_id, r)
+            refs.append(r)
+            states[r] = on
+        return refs, states
 
     # --- PDU power switch relay (outlet federation) -------------------------
 
@@ -1311,45 +1320,23 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         PduAdapter.set_outlet with the fed pseudo-client as the audit user.
         """
         writer_for_result = writer
-        try:
-            lines = payload.split("\n", 1)
-            header = lines[0]
-            body = json.loads(lines[1]) if len(lines) > 1 and lines[1].strip() else {}
-        except Exception:
-            self.logger.debug("[%s] Malformed POWER:SWITCH frame", conn_id)
+        parsed = self._parse_power_switch_frame(conn_id, payload)
+        if parsed is None:
             return
-        try:
-            rest = header[len("POWER:SWITCH:") :]
-            port_name, sid_str = rest.split(":", 1)
-            sid = int(sid_str)
-        except Exception:
-            self.logger.debug("[%s] Malformed POWER:SWITCH header: %s", conn_id, payload[:120])
-            return
+        port_name, sid, body = parsed
 
         def _refuse(error: str) -> None:
             """Queue a POWER:RESULT ok-False reply to the requesting path."""
             self._send_power_result(conn_id, sid, False, error, writer_for_result)
 
         peer_key = self._derive_peer_key_from_conn_id(conn_id)
-        # Anchor guard, same shape as FEDRW: the named stream must be a real
-        # origin-side session for exactly this port (anti-spoof).
-        if self._local_session_map.get(peer_key, {}).get(sid) != port_name:
-            self.logger.warning("[%s] POWER:SWITCH for unmapped stream sid=%s port=%s; refusing", conn_id, sid, port_name)
-            _refuse("no open console session to anchor the switch on")
-            return
-        pm = getattr(self, "main_port_manager", None)
-        port_obj = pm.get_port(port_name) if pm is not None and hasattr(pm, "get_port") else None
-        if port_obj is None:
-            _refuse("unknown port " + str(port_name))
-            return
         fed_id = "fed:" + peer_key + ":" + str(sid)
-        mode = None
-        for c in getattr(port_obj, "connected_clients", None) or []:
-            if isinstance(c, dict) and c.get("client_id") == fed_id:
-                mode = c.get("mode")
-                break
-        if mode != "read-write":
-            _refuse("console session is not read-write; switch it from a read-write session")
+        # Anchor guard, same shape as FEDRW: the named stream must be a real
+        # origin-side session, the port must exist, and that session must be
+        # read-write (anti-spoof). On failure it sends the typed refusal and
+        # returns None; on success it returns the verified port object.
+        port_obj = await self._power_switch_anchor_ok(conn_id, peer_key, sid, port_name, fed_id, _refuse)
+        if port_obj is None:
             return
         ref = body.get("ref")
         on = body.get("on")
@@ -1383,6 +1370,58 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # The reply rides the requesting connection's writer (single-path and
         # multipath share the same receive writer; seq stays per-connection).
         self._send_power_result(conn_id, sid, True, None, writer_for_result, on=bool(reading.get("on")))
+
+    async def _power_switch_anchor_ok(
+        self, conn_id: str, peer_key: str, sid: int, port_name: str, fed_id: str, refuse
+    ) -> Optional[Any]:
+        """Verify the console-session anchor for one POWER:SWITCH frame.
+
+        The named stream must map to exactly this port on this peer (anti-spoof),
+        the port must exist, and the fed: pseudo-client for that stream on the
+        port must be read-write. Each failing check sends its typed refusal via
+        ``refuse`` and returns None; a fully verified frame returns the port
+        object so the caller can proceed to the outlet switch.
+        """
+        if self._local_session_map.get(peer_key, {}).get(sid) != port_name:
+            self.logger.warning("[%s] POWER:SWITCH for unmapped stream sid=%s port=%s; refusing", conn_id, sid, port_name)
+            refuse("no open console session to anchor the switch on")
+            return None
+        pm = getattr(self, "main_port_manager", None)
+        port_obj = pm.get_port(port_name) if pm is not None and hasattr(pm, "get_port") else None
+        if port_obj is None:
+            refuse("unknown port " + str(port_name))
+            return None
+        mode = None
+        for c in getattr(port_obj, "connected_clients", None) or []:
+            if isinstance(c, dict) and c.get("client_id") == fed_id:
+                mode = c.get("mode")
+                break
+        if mode != "read-write":
+            refuse("console session is not read-write; switch it from a read-write session")
+            return None
+        return port_obj
+
+    def _parse_power_switch_frame(self, conn_id: str, payload: str) -> Optional[Tuple[str, int, Dict[str, Any]]]:
+        """(port_name, sid, body) from a POWER:SWITCH payload, else None.
+
+        Malformed payloads log a debug line and return None; the caller
+        then drops the frame without a reply (the peer times out itself).
+        """
+        try:
+            lines = payload.split("\n", 1)
+            header = lines[0]
+            body = json.loads(lines[1]) if len(lines) > 1 and lines[1].strip() else {}
+        except Exception:
+            self.logger.debug("[%s] Malformed POWER:SWITCH frame", conn_id)
+            return None
+        try:
+            rest = header[len("POWER:SWITCH:") :]
+            port_name, sid_str = rest.split(":", 1)
+            sid = int(sid_str)
+        except Exception:
+            self.logger.debug("[%s] Malformed POWER:SWITCH header: %s", conn_id, payload[:120])
+            return None
+        return port_name, sid, body
 
     def _send_power_result(
         self,
@@ -1959,37 +1998,49 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             self._auth_pubkeys[kid] = pub
                     self.logger.info("MuxCon adapter imported %d public key(s) from AuthManager (compat)", len(imported))
             # Import per-key filter metadata similarly when not locally configured
-            if (not getattr(self, "_key_filters", None)) and auth_manager and hasattr(auth_manager, "get_public_keys_for_use"):
-                records = auth_manager.get_public_keys_for_use("muxcon") or []
-                kf: Dict[str, Dict[str, Any]] = {}
-                for rec in records:
-                    try:
-                        kid = str(rec.get("key_id")) if rec.get("key_id") is not None else None
-                        if not kid:
-                            continue
-                        adv = rec.get("advertise_filters") or {}
-                        acc = rec.get("accept_filters") or {}
-
-                        def _norm(d: Dict[str, Any]) -> Dict[str, List[str]]:
-                            if not isinstance(d, dict):
-                                return {}
-                            return {
-                                "include": list(d.get("include") or []),
-                                "exclude": list(d.get("exclude") or []),
-                                "adapter_include": list(d.get("adapter_include") or []),
-                                "adapter_exclude": list(d.get("adapter_exclude") or []),
-                                "server_include": list(d.get("server_include") or []),
-                                "server_exclude": list(d.get("server_exclude") or []),
-                            }
-
-                        kf[kid] = {"advertise_filters": _norm(adv), "accept_filters": _norm(acc)}
-                    except Exception:
-                        continue
+            if not getattr(self, "_key_filters", None):
+                kf = self._import_key_filters_compat(auth_manager)
                 if kf:
                     self._key_filters = kf
         except Exception:
             # justification: best-effort filter parse; the old filter mapping stays in force
             pass
+
+    def _import_key_filters_compat(self, auth_manager: Any) -> Dict[str, Dict[str, Any]]:
+        """Per-key filter metadata imported from AuthManager (compat path).
+
+        Only consulted when no local ``muxcon.public_keys`` filter config is
+        present; returns {} when nothing importable is found or a record
+        cannot be parsed (best-effort, mirrors the pre-import behavior).
+        """
+        if not (auth_manager and hasattr(auth_manager, "get_public_keys_for_use")):
+            return {}
+        records = auth_manager.get_public_keys_for_use("muxcon") or []
+        kf: Dict[str, Dict[str, Any]] = {}
+
+        def _norm(d: Dict[str, Any]) -> Dict[str, List[str]]:
+            if not isinstance(d, dict):
+                return {}
+            return {
+                "include": list(d.get("include") or []),
+                "exclude": list(d.get("exclude") or []),
+                "adapter_include": list(d.get("adapter_include") or []),
+                "adapter_exclude": list(d.get("adapter_exclude") or []),
+                "server_include": list(d.get("server_include") or []),
+                "server_exclude": list(d.get("server_exclude") or []),
+            }
+
+        for rec in records:
+            try:
+                kid = str(rec.get("key_id")) if rec.get("key_id") is not None else None
+                if not kid:
+                    continue
+                adv = rec.get("advertise_filters") or {}
+                acc = rec.get("accept_filters") or {}
+                kf[kid] = {"advertise_filters": _norm(adv), "accept_filters": _norm(acc)}
+            except Exception:
+                continue
+        return kf
 
     def _apply_per_connection_filters(self, conn_id: str, key_id: Optional[str]) -> None:
         """Apply per-key muxcon filters to a specific connection if available.
@@ -2528,6 +2579,29 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             "unchanged": [f"{h}:{p}" for h, p in unchanged],
         }
 
+    async def _close_listeners_and_connections(self) -> None:
+        """Close every server listener, then every active connection writer.
+
+        Both close paths are best-effort: a failing listener close or a stalled
+        per-writer drain is logged and skipped so one bad transport cannot wedge
+        the rest of shutdown.
+        """
+        for srv in list(self._servers.values()):
+            try:
+                srv.close()
+                await srv.wait_closed()
+            except Exception:  # justification: TOFU known_peers read optional; proceed with empty mapping
+                pass
+        self._servers.clear()
+        for conn_id, conn in list(self.connections.items()):
+            writer = conn.get("writer")
+            if writer:
+                try:
+                    await _await_writer_closed(writer)
+                except Exception:  # justification: shutdown close is best-effort
+                    pass
+            self.connections.pop(conn_id, None)
+
     async def stop(self) -> None:
         """Stop adapter: cancel tasks, close listeners, and active connections."""
         try:
@@ -2544,12 +2618,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # local ports so a restart does not leak half-open federation
             # viewers (issue #54).
             try:
-                peer_keys = set(self._local_session_map) | set(self._session_map) | {pk for (pk, _sid) in self._pump_tasks}
-                for pk in list(peer_keys):
-                    try:
-                        await self._cleanup_peer_local_sessions(pk)
-                    except Exception:
-                        self.logger.debug("Shutdown local session cleanup failed for %s", pk, exc_info=True)
+                for pk in sorted(
+                    set(self._local_session_map) | set(self._session_map) | {pk for (pk, _sid) in self._pump_tasks}
+                ):
+                    await self._shutdown_peer_local_sessions(pk)
             except Exception:
                 # justification: shutdown cleanup; per-peer failures are already logged
                 pass
@@ -2560,24 +2632,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await asyncio.gather(*self._initiator_tasks.values(), return_exceptions=True)
             self._initiator_tasks.clear()
 
-            # Close servers
-            for srv in list(self._servers.values()):
-                try:
-                    srv.close()
-                    await srv.wait_closed()
-                except Exception:  # justification: TOFU known_peers read optional; proceed with empty mapping
-                    pass
-            self._servers.clear()
-
-            # Close connections
-            for conn_id, conn in list(self.connections.items()):
-                writer = conn.get("writer")
-                if writer:
-                    try:
-                        await _await_writer_closed(writer)
-                    except Exception:  # justification: shutdown close is best-effort
-                        pass
-                self.connections.pop(conn_id, None)
+            # Close listeners and connections (best-effort per transport)
+            await self._close_listeners_and_connections()
 
             # Stop cache cleanup loop
             try:
@@ -2594,6 +2650,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.info("Unified MuxCon adapter stopped")
         except Exception as e:
             self.logger.error("Error stopping Unified MuxCon adapter: %s", e, exc_info=True)
+
+    async def _shutdown_peer_local_sessions(self, peer_key: str) -> None:
+        """Cleanup one peer's local session state at shutdown (best-effort)."""
+        try:
+            await self._cleanup_peer_local_sessions(peer_key)
+        except Exception:
+            self.logger.debug("Shutdown local session cleanup failed for %s", peer_key, exc_info=True)
 
     async def _heartbeat_loop(self):
         """Send periodic heartbeats and detect timeouts.
@@ -4626,80 +4689,101 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                             self._peer_proxies[peer_key] = {}
                         if pname in self._peer_proxies[peer_key]:
                             continue
-                        # Build minimal PortMetadata-like object
-                        from ...common.federation_types import (
-                            FederationType,
-                            PortMetadata,
-                            ServerInfo,
-                            ServerType,
-                        )
-
-                        origin_id = rec.get("origin_server_id") or "remote"
-                        server_info = ServerInfo(
-                            server_id=str(origin_id),
-                            hostname="remote",
-                            port=0,
-                            server_type=ServerType.LEAF,
-                            description="",
-                        )
-                        metadata = PortMetadata(
-                            name=pname,
-                            original_name=pname,
-                            description=rec.get("description", f"Remote port {pname}"),
-                            adapter_type="remote_muxcon",
-                            origin_server=server_info,
-                            server_chain=[server_info],
-                            status=("connected" if rec.get("connected") else "disconnected"),
-                            max_rw_users=rec.get("max_rw_users", 1),
-                            federation_type=FederationType.PULL,
-                            serial_config=rec.get("serial_config"),
-                            line_status=rec.get("line_status"),
-                            read_write_groups=rec.get("read_write_groups") or None,
-                            read_only_groups=rec.get("read_only_groups") or None,
-                            # Offline reason (issue #62): restored from cache.
-                            status_message=rec.get("status_message") or None,
-                            # Readiness (issue #68): restored from cache.
-                            readiness=rec.get("readiness") or None,
-                            # Power feeds (outlet federation): restored from cache so
-                            # an offline peer's last-reported feed states survive a cold
-                            # start. RemotePortProxy.__init__ derives its ref list and
-                            # state cache from this field.
-                            power=rec.get("power") if isinstance(rec.get("power"), list) else None,
-                        )
-                        proxy = self.RemotePortProxy(self, peer_key, pname, metadata)
-                        proxy.is_connected = bool(rec.get("connected", False))
-                        # Offline cache: the fresh process has no live muxcon link to
-                        # this origin yet, and no one will set link_reason until a
-                        # path is established and then lost, so set it here to keep
-                        # the banner accurate right after a cold start (issue #62).
-                        if not proxy.is_connected:
-                            proxy.link_reason = f"MuxCon link to {origin_id} is down"
-                        try:
-                            proxy.last_seen = float(rec.get("last_seen", 0) or 0)
-                        except Exception:
-                            # justification: optional status detail; the proxy stays registered
-                            pass
-                        # Register with PortManager if available (via the normal
-                        # registration path so the data callback gets installed -
-                        # see issue #56)
-                        if hasattr(self, "main_port_manager") and self.main_port_manager:
-                            pm = self.main_port_manager
-                            try:
-                                # Avoid duplicates by checking via API if present
-                                existing = None
-                                try:
-                                    existing = pm.get_port(pname) if hasattr(pm, "get_port") else None
-                                except Exception:
-                                    existing = None
-                                if existing is None:
-                                    await pm.register_federated_port(metadata, proxy)
-                            except Exception:
-                                getattr(pm, "ports", {})[pname] = proxy
-                        self._peer_proxies[peer_key][pname] = proxy
+                        await self._load_cached_port(peer_key, pname, rec)
                     except Exception:
                         continue
         except Exception:
             self.logger.error("muxcon: failed to load federated cache", exc_info=True)
+
+    async def _load_cached_port(self, peer_key: str, pname: str, rec: Dict[str, Any]) -> None:
+        """Build, fill and register one proxy for a cached peer port.
+
+        Restores the connection state, the offline reason (issue #62) and the
+        last-seen stamp, then registers through PortManager so the data
+        callback is installed (issue #56); a failed registration falls back to
+        a bare ports-dict entry so the placeholder is not lost.
+        """
+        metadata, origin_id = self._cached_port_metadata(pname, rec)
+        proxy = self.RemotePortProxy(self, peer_key, pname, metadata)
+        proxy.is_connected = bool(rec.get("connected", False))
+        # Offline cache: the fresh process has no live muxcon link to
+        # this origin yet, and no one will set link_reason until a
+        # path is established and then lost, so set it here to keep
+        # the banner accurate right after a cold start (issue #62).
+        if not proxy.is_connected:
+            proxy.link_reason = f"MuxCon link to {origin_id} is down"
+        try:
+            proxy.last_seen = float(rec.get("last_seen", 0) or 0)
+        except Exception:
+            # justification: optional status detail; the proxy stays registered
+            pass
+        # Register with PortManager if available (via the normal
+        # registration path so the data callback gets installed -
+        # see issue #56)
+        if hasattr(self, "main_port_manager") and self.main_port_manager:
+            pm = self.main_port_manager
+            try:
+                # Avoid duplicates by checking via API if present
+                existing = None
+                try:
+                    existing = pm.get_port(pname) if hasattr(pm, "get_port") else None
+                except Exception:
+                    existing = None
+                if existing is None:
+                    await pm.register_federated_port(metadata, proxy)
+            except Exception:
+                getattr(pm, "ports", {})[pname] = proxy
+        self._peer_proxies[peer_key][pname] = proxy
+
+    @staticmethod
+    def _cached_port_metadata(pname: str, rec: Dict[str, Any]) -> Tuple[Any, str]:
+        """Build the (PortMetadata, origin_id) for one cached peer port.
+
+        Minimal remote-port metadata restored from the offline cache so a
+        cold start recovers connection state, readiness (issue #68), offline
+        reason (issue #62) and power feeds (outlet federation, so an
+        offline peer's last-reported feed states survive).
+        """
+        from ...common.federation_types import (
+            FederationType,
+            PortMetadata,
+            ServerInfo,
+            ServerType,
+        )
+
+        origin_id = rec.get("origin_server_id") or "remote"
+        server_info = ServerInfo(
+            server_id=str(origin_id),
+            hostname="remote",
+            port=0,
+            server_type=ServerType.LEAF,
+            description="",
+        )
+        metadata = PortMetadata(
+            name=pname,
+            original_name=pname,
+            description=rec.get("description", f"Remote port {pname}"),
+            adapter_type="remote_muxcon",
+            origin_server=server_info,
+            server_chain=[server_info],
+            status=("connected" if rec.get("connected") else "disconnected"),
+            max_rw_users=rec.get("max_rw_users", 1),
+            federation_type=FederationType.PULL,
+            serial_config=rec.get("serial_config"),
+            line_status=rec.get("line_status"),
+            read_write_groups=rec.get("read_write_groups") or None,
+            read_only_groups=rec.get("read_only_groups") or None,
+            # Offline reason (issue #62): restored from cache.
+            status_message=rec.get("status_message") or None,
+            # Readiness (issue #68): restored from cache.
+            readiness=rec.get("readiness") or None,
+            # Power feeds (outlet federation): restored from cache so
+            # an offline peer's last-reported feed states survive a cold
+            # start. RemotePortProxy.__init__ derives its ref list and
+            # state cache from this field.
+            power=rec.get("power") if isinstance(rec.get("power"), list) else None,
+        )
+        return metadata, origin_id
 
     async def _maybe_advertise_local_ports(self, conn_id: str) -> None:
         """Advertise local ports once when allowed.
@@ -5086,14 +5170,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # Exclude precedence
         if self._match_any(name, name_exc) or self._match_any(atype, adapter_exc):
             if self.logger.isEnabledFor(logging.DEBUG):
-                reason = None
-                pat = self._first_match(name, name_exc)
-                if pat:
-                    reason = f"name excluded by '{pat}'"
-                else:
-                    pat = self._first_match(atype, adapter_exc)
-                    if pat:
-                        reason = f"adapter excluded by '{pat}'"
+                reason = self._adv_exclude_reason(name, atype, name_exc, adapter_exc)
                 self.logger.debug("[%s] ACC DROP name='%s' adapter='%s' reason=%s", conn_id, name, atype, reason)
             return False
         if sid and self._match_any(sid, server_exc):
@@ -5115,14 +5192,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         inc_adapter = not adapter_inc or self._match_any(atype, adapter_inc)
         inc_server = not server_inc or (sid and self._match_any(sid, server_inc))
         if not (inc_name and inc_adapter and inc_server) and self.logger.isEnabledFor(logging.DEBUG):
-            parts = []
-            if not inc_name:
-                parts.append("name not in include")
-            if not inc_adapter:
-                parts.append("adapter not in include")
-            if not inc_server:
-                parts.append("server not in include")
-            self.logger.debug(f"[{conn_id}] ACC DROP name='{name}' adapter='{atype}' reason={'; '.join(parts)}")
+            reason = self._adv_include_reason(inc_name, inc_adapter, inc_server)
+            self.logger.debug(f"[{conn_id}] ACC DROP name='{name}' adapter='{atype}' reason={reason}")
         return bool(inc_name and inc_adapter and inc_server)
 
     async def _process_control_command(self, conn_id: str, writer: asyncio.StreamWriter, payload: str):
@@ -6859,19 +6930,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 and not self._stop_event.is_set()
             ):
                 try:
-                    if not hasattr(self, "main_port_manager") or not self.main_port_manager:
-                        await asyncio.sleep(0.2)
+                    data = await self._pump_next_chunk(port_name, can_await_queue)
+                    if data is None:
+                        # No chunk right now. With the async read the next
+                        # put_nowait wakes us; the poll-read path sleeps to
+                        # avoid a busy loop (sleep lives in the helper).
                         continue
-                    if can_await_queue:
-                        data = await self.main_port_manager.get_port_data_async(port_name)
-                    else:
-                        data = await self.main_port_manager.get_port_data(port_name)
-                    if not data:
-                        # No chunk right now. With the async read we are
-                        # already blocked in the queue and the next
-                        # put_nowait wakes us; the poll read sleeps instead
-                        # to avoid a busy loop.
-                        await asyncio.sleep(0.05)
                     else:
                         self.logger.debug("[%s] PUMP local->%s sid=%s bytes=%s", peer_key, port_name, stream_id, len(data))
                         await self._send_data_mpath(peer_key, stream_id, data)
@@ -6882,21 +6946,53 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     self.logger.debug("Pump error for %s on %s:%s: %s", port_name, peer_key, stream_id, e, exc_info=True)
                     await asyncio.sleep(0.1)
         finally:
-            if held and pm is not None:
-                try:
-                    pm.remove_federation_buffering_hold(port_name)
-                except Exception:
-                    self.logger.debug("Failed to remove federation buffering hold for %s", port_name, exc_info=True)
-            # Cleanup mapping on exit, but only if we still own the slot: a
-            # replacement pump or an in-flight teardown may own it now, and
-            # popping would delete the new session's mapping (issue #54).
+            await self._end_local_pump_cleanup(peer_key, stream_id, port_name, held, pm)
+
+    async def _end_local_pump_cleanup(self, peer_key: str, stream_id: int, port_name: str, held: bool, pm: Any) -> None:
+        """Release this pump's held resources on exit.
+
+        Removes the federation buffering hold, if active, and - only when this
+        pump task still owns the slot - clears the local session mapping and
+        the pump task entry. A replacement pump or an in-flight teardown may
+        own the slot now, and popping would drop the new session's state
+        (issue #54).
+        """
+        if held and pm is not None:
             try:
-                if self._pump_tasks.get((peer_key, stream_id)) is asyncio.current_task():
-                    if peer_key in self._local_session_map:
-                        self._local_session_map[peer_key].pop(stream_id, None)
-                    self._pump_tasks.pop((peer_key, stream_id), None)
-            except Exception:  # justification: local session map cleanup is best-effort on pump exit
-                pass
+                pm.remove_federation_buffering_hold(port_name)
+            except Exception:
+                self.logger.debug("Failed to remove federation buffering hold for %s", port_name, exc_info=True)
+        # Only clear the mapping when we still own the slot (issue #54).
+        try:
+            if self._pump_tasks.get((peer_key, stream_id)) is asyncio.current_task():
+                if peer_key in self._local_session_map:
+                    self._local_session_map[peer_key].pop(stream_id, None)
+                self._pump_tasks.pop((peer_key, stream_id), None)
+        except Exception:  # justification: local session map cleanup is best-effort on pump exit
+            pass
+
+    async def _pump_next_chunk(self, port_name: str, can_await_queue: bool) -> Optional[bytes]:
+        """Wait for the next data chunk for a local pump, else None.
+
+        Uses the manager's async queue read when available (woken by each
+        put_nowait) and falls back to a non-blocking poll read otherwise. An
+        empty read sleeps a short pause before returning None for BOTH paths:
+        the async read can return None synchronously when port.data_queue.get
+        is unavailable (e.g. a port without a data_queue), and without the
+        sleep the pump loop busy-spins and starves the event loop. No manager
+        sleeps longer. None is the "no chunk yet" answer.
+        """
+        if not hasattr(self, "main_port_manager") or not self.main_port_manager:
+            await asyncio.sleep(0.2)
+            return None
+        if can_await_queue:
+            data = await self.main_port_manager.get_port_data_async(port_name)
+        else:
+            data = await self.main_port_manager.get_port_data(port_name)
+        if not data:
+            await asyncio.sleep(0.05)
+            return None
+        return data
 
     async def _register_remote_port_from_dict(self, conn_id: str, pd: Dict[str, Any]):
         """Create/register a RemotePortProxy for a federated port definition.
