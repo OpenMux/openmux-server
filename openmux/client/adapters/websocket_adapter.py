@@ -91,7 +91,6 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 self.username = self.basic_user
             return True
         try:
-            protocol = "wss" if self.use_tls else "ws"
             # Determine disambiguated path. Accept forms:
             #  - plain:               <name>              -> /ws/<name>
             #  - composite string:    <sid>::<name>       -> /ws/<sid>/<name>
