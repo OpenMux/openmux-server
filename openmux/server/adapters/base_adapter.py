@@ -167,10 +167,10 @@ class BaseGenericAdapter(ABC):
         # Get port configurations from adapter-specific config
         port_configs = self.get_port_configurations()
 
-        for port_name, port_config in port_configs.items():
-            # Use same dynamic creation function for load-time ports
-            from .lifecycle import PortLifecycleEvent
+        # Use same dynamic creation function for load-time ports
+        from .lifecycle import PortLifecycleEvent
 
+        for port_name, port_config in port_configs.items():
             created = await self.port_manager.create_port_dynamically(port_name, port_config, PortLifecycleEvent.PORT_CREATED)
             success &= created
 
