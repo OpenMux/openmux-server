@@ -40,39 +40,42 @@ class TelnetIacStripper:
         """Remove telnet IAC command sequences from *data*."""
         out = bytearray()
         for b in data:
-            if self._iac_state == "data":
-                if b == _IAC:
-                    self._iac_state = "iac"
-                else:
-                    out.append(b)
-
-            elif self._iac_state == "iac":
-                if b == _IAC:
-                    out.append(_IAC)  # IAC IAC → literal 0xFF
-                    self._iac_state = "data"
-                elif b == _SB:
-                    self._iac_state = "subneg"
-                elif b in _OPTION_CMDS:
-                    self._iac_state = "iac_option"  # consume one more byte
-                else:
-                    self._iac_state = "data"  # single-byte command, consumed
-
-            elif self._iac_state == "iac_option":
-                # Option byte after WILL/WONT/DO/DONT — discard
-                self._iac_state = "data"
-
-            elif self._iac_state == "subneg":
-                if b == _IAC:
-                    self._iac_state = "subneg_iac"
-                # else: subneg payload byte, discard
-
-            elif self._iac_state == "subneg_iac":
-                if b == _SE:
-                    self._iac_state = "data"  # end of subnegotiation
-                else:
-                    self._iac_state = "subneg"  # IAC within subneg data
-
+            self._strip_one_byte(out, b)
         return bytes(out)
+
+    def _strip_one_byte(self, out: bytearray, b: int) -> None:
+        """Feed one byte into the IAC state machine, appending to *out*."""
+        if self._iac_state == "data":
+            if b == _IAC:
+                self._iac_state = "iac"
+            else:
+                out.append(b)
+        elif self._iac_state == "iac":
+            self._strip_iac_command_byte(out, b)
+        elif self._iac_state == "iac_option":
+            # Option byte after WILL/WONT/DO/DONT — discard
+            self._iac_state = "data"
+        elif self._iac_state == "subneg":
+            if b == _IAC:
+                self._iac_state = "subneg_iac"
+            # else: subneg payload byte, discard
+        elif self._iac_state == "subneg_iac":
+            if b == _SE:
+                self._iac_state = "data"  # end of subnegotiation
+            else:
+                self._iac_state = "subneg"  # IAC within subneg data
+
+    def _strip_iac_command_byte(self, out: bytearray, b: int) -> None:
+        """Handle the byte right after an IAC escape (state ``iac``)."""
+        if b == _IAC:
+            out.append(_IAC)  # IAC IAC → literal 0xFF
+            self._iac_state = "data"
+        elif b == _SB:
+            self._iac_state = "subneg"
+        elif b in _OPTION_CMDS:
+            self._iac_state = "iac_option"  # consume one more byte
+        else:
+            self._iac_state = "data"  # single-byte command, consumed
 
 
 class PlainHandler(TcpProtocolHandler):

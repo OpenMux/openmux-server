@@ -545,35 +545,41 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         1. Dict containing key ``tcp_initiator_ports`` with a list of port dicts.
         2. Top-level list of port dicts (legacy style).
         """
-        from .protocols import PROTOCOL_HANDLERS
-
         cfg = config.get("tcp_initiator_ports", config)
         if not isinstance(cfg, list):
             return False
         for item in cfg:
-            if not isinstance(item, dict):
+            if not cls._validate_tcp_item(item):
                 return False
-            if not item.get("name"):
+        return True
+
+    @staticmethod
+    def _validate_tcp_item(item: Any) -> bool:
+        """Whether one ``tcp_initiator_ports[]`` entry is structurally valid.
+
+        Checks the required fields, the optional scrollback size, the
+        write-slot capacity token, and the protocol sub-key (delegated to the
+        protocol handler).
+        """
+        from .protocols import PROTOCOL_HANDLERS
+
+        if not isinstance(item, dict):
+            return False
+        if not item.get("name") or not item.get("host") or not item.get("port"):
+            return False
+        if "scrollback_size" in item:
+            sbs = item["scrollback_size"]
+            if not isinstance(sbs, int) or sbs < 0:
                 return False
-            if not item.get("host"):
-                return False
-            if not item.get("port"):
-                return False
-            if "scrollback_size" in item:
-                sbs = item["scrollback_size"]
-                if not isinstance(sbs, int) or sbs < 0:
-                    return False
-            # Write-slot capacity (issue #59/#60): hard error so typos fail fast.
-            if not _valid_write_mode(item):
-                return False
-            # Delegate to the protocol handler for a protocol sub-key (default: plain).
-            prot = item.get("protocol", {})
-            ptype = (prot.get("type", "") or "plain").lower()
-            handler_cls = PROTOCOL_HANDLERS.get(ptype)
-            if handler_cls is not None:
-                problems = handler_cls.validate_config(item)
-                if problems:
-                    return False
+        # Write-slot capacity (issue #59/#60): hard error so typos fail fast.
+        if not _valid_write_mode(item):
+            return False
+        # Delegate to the protocol handler for a protocol sub-key (default: plain).
+        prot = item.get("protocol", {})
+        ptype = (prot.get("type", "") or "plain").lower()
+        handler_cls = PROTOCOL_HANDLERS.get(ptype)
+        if handler_cls is not None and handler_cls.validate_config(item):
+            return False
         return True
 
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:

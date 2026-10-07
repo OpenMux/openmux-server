@@ -279,6 +279,28 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             else:
                 updated.append(name)
 
+        await self._rebuild_listeners(removed, updated, added, new_by_name)
+
+        summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
+        self.logger.info(
+            "Telnet listener adapter %s reconcile: +%s ~%s -%s unchanged=%s",
+            self.name,
+            len(added),
+            len(updated),
+            len(removed),
+            len(unchanged),
+        )
+        return summary
+
+    async def _rebuild_listeners(
+        self, removed: List[str], updated: List[str], added: List[str], new_by_name: Dict[str, Dict[str, Any]]
+    ) -> None:
+        """Stop removed/updated listeners, start added/updated, refresh state.
+
+        Stale listeners (removed + updated) stop first; the kept, added and
+        updated specs then rebuild ``self.listeners``. A spec that fails to
+        build on re-apply is skipped (the old listener already stopped).
+        """
         for name in removed + updated:
             await self._stop_single_listener(name)
 
@@ -295,17 +317,6 @@ class TelnetListenerAdapter(BaseGenericAdapter):
 
         self.listeners = [specs_by_name[n] for n in sorted(specs_by_name.keys())]
         self._set_running(True)
-
-        summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
-        self.logger.info(
-            "Telnet listener adapter %s reconcile: +%s ~%s -%s unchanged=%s",
-            self.name,
-            len(added),
-            len(updated),
-            len(removed),
-            len(unchanged),
-        )
-        return summary
 
     async def stop(self) -> None:
         self.is_running = False

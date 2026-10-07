@@ -646,14 +646,7 @@ class SerialPortWrapper:
                     # Reason for the drop (issue #62) so the banner can show it
                     self._set_status_message(f"Disconnected from {self.device}")
                     # Proactively mark down and notify before breaking, to update UI immediately
-                    try:
-                        # Mark state false immediately to reduce race window
-                        self.is_connected = False
-                        if self._meta_notify and self._last_notified_connected is not False:
-                            self._meta_notify(self.name, {"event": "serial_disconnected", "connected": False})
-                            self._last_notified_connected = False
-                    except Exception:
-                        self.logger.debug("Meta notify failed on empty read disconnect", exc_info=True)
+                    self._mark_disconnected("empty read")
                     break
 
                 # Forward data via callback (set by PortManager at registration)
@@ -682,15 +675,22 @@ class SerialPortWrapper:
                 # Reason for the drop (issue #62) so the banner can show it
                 self._set_status_message(f"Read error on {self.device}: {e}")
                 # Proactively notify disconnect on read error
-                try:
-                    # Mark state false immediately to reduce race window
-                    self.is_connected = False
-                    if self._meta_notify and self._last_notified_connected is not False:
-                        self._meta_notify(self.name, {"event": "serial_disconnected", "connected": False})
-                        self._last_notified_connected = False
-                except Exception:
-                    self.logger.debug("Meta notify failed on read error", exc_info=True)
+                self._mark_disconnected("read error")
                 break
+
+    def _mark_disconnected(self, tag: str) -> None:
+        """Mark the port down and emit a one-shot serial_disconnected meta event.
+
+        Shared by the read loop's empty-read and read-error drop paths so the
+        connect-state flag and the (at-most-once) notification stay in sync.
+        """
+        try:
+            self.is_connected = False
+            if self._meta_notify and self._last_notified_connected is not False:
+                self._meta_notify(self.name, {"event": "serial_disconnected", "connected": False})
+                self._last_notified_connected = False
+        except Exception:
+            self.logger.debug(f"Meta notify failed on {tag} disconnect", exc_info=True)
 
     async def write_data(self, data: bytes) -> int:
         """Write a bytes payload to the device.

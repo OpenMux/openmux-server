@@ -317,26 +317,37 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             return False
         seen_names = set()
         for pdu in pdus:
-            if not isinstance(pdu, dict):
+            if not cls._validate_pdu_entry(pdu):
                 return False
-            pname = pdu.get("name")
-            if not isinstance(pname, str) or not _valid_ref_token(pname):
+            # Duplicate names are a conflict regardless of the rest of the entry.
+            if pdu.get("name") in seen_names:
                 return False
-            if pname in seen_names:
-                return False
-            seen_names.add(pname)
-            driver = pdu.get("driver")
-            if not isinstance(driver, str) or driver not in DRIVERS:
-                return False
-            try:
-                _as_poll_interval(pdu.get("poll_interval"))
-            except ValueError:
-                return False
-            try:
-                _driver_options(pdu)
-                _parse_annotations(pdu.get("outlets"))
-            except (TypeError, ValueError):
-                return False
+            seen_names.add(pdu.get("name"))
+        return True
+
+    @staticmethod
+    def _validate_pdu_entry(pdu: Any) -> bool:
+        """Whether one ``pdus[]`` entry is structurally valid.
+
+        Returns False for non-dict entries, invalid names, unknown or
+        unparsable drivers, bad poll intervals, or malformed
+        driver-options/annotations. Name duplication is checked by the
+        caller (``validate_config``).
+        """
+        if not isinstance(pdu, dict):
+            return False
+        pname = pdu.get("name")
+        if not isinstance(pname, str) or not _valid_ref_token(pname):
+            return False
+        driver = pdu.get("driver")
+        if not isinstance(driver, str) or driver not in DRIVERS:
+            return False
+        try:
+            _as_poll_interval(pdu.get("poll_interval"))
+            _driver_options(pdu)
+            _parse_annotations(pdu.get("outlets"))
+        except (TypeError, ValueError):
+            return False
         return True
 
     def get_capabilities(self) -> Set[AdapterCapability]:
@@ -637,24 +648,13 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         # method locally.
         if split_remote_ref(ref) is not None:
             return await self._relay_power_switch(ref, bool(on), client_id=client_id)
-        try:
-            pdu_name, outlet_id = self._parse_ref(ref)
-        except ValueError as exc:
-            return {
-                "ok": False,
-                "error": str(exc),
-                "impact": {"change": "off" if not on else "on", "losing_power": [], "staying_up": []},
-            }
-        if self.enabled is False:
-            return {"ok": False, "error": "power management is disabled", "impact": self._empty_impact(on)}
-        # Bare-ref fallback: a fed port advertising unprefixed feeds (an older
-        # origin, or a stray config) is still classified by the declaring port.
-        origin_id = self._remote_origin_for_ref(ref)
-        if origin_id:
+        pdu_name, outlet_id, state, error, is_remote = self._resolve_outlet_state(ref)
+        if is_remote:
+            # The ref resolves to a remote node's PDU (bare or qualified);
+            # the origin applies the switch.
             return await self._relay_power_switch(ref, bool(on), client_id=client_id)
-        state = self.pdus.get(pdu_name)
         if state is None:
-            return {"ok": False, "error": f"PDU {pdu_name} is not configured", "impact": self._empty_impact(on)}
+            return {"ok": False, "error": error, "impact": self._empty_impact(on)}
         impact = self._empty_impact(on)
         if not on:
             impact = self.compute_off_impact(ref, local_ref=True)
@@ -675,6 +675,31 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             self._emit_outlet_change(pdu_name, outlet_id, prev.on if prev else None, reading.on)
         self._audit_control(ref, bool(on), user, client_id, impact)
         return {"ok": True, "reading": reading.to_dict(), "impact": impact}
+
+    def _resolve_outlet_state(self, ref: str) -> Tuple[Optional[str], Optional[str], Optional[Any], Optional[str], bool]:
+        """Resolve the local PDU state for a ref, or a pre-flight refusal.
+
+        Returns ``(pdu_name, outlet_id, state, error, is_remote)``. On
+        success the identifiers and the PDU state are set (error None,
+        is_remote False). A remote-owned ref (bare or qualified) returns
+        (None, None, None, None, True) - the caller relays it to the owning
+        node. Unparseable refs or disabled/missing PDUs return identifiers
+        None plus the error (is_remote False).
+        """
+        try:
+            pdu_name, outlet_id = self._parse_ref(ref)
+        except ValueError as exc:
+            return None, None, None, str(exc), False
+        if self.enabled is False:
+            return None, None, None, "power management is disabled", False
+        # Bare-ref fallback: a fed port advertising unprefixed feeds (an older
+        # origin, or a stray config) is still classified by the declaring port.
+        if self._remote_origin_for_ref(ref):
+            return None, None, None, None, True
+        state = self.pdus.get(pdu_name)
+        if state is None:
+            return None, None, None, f"PDU {pdu_name} is not configured", False
+        return pdu_name, outlet_id, state, None, False
 
     def _find_muxcon_adapter(self) -> Optional[Any]:
         """The active muxcon adapter, or None (outlet federation relay path)."""
@@ -1223,21 +1248,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         feeds_on = 0
         known = 0
         for ref in feeds:
-            watts = None
-            if remote:
-                on = remote_states.get(ref)
-            else:
-                on = self._outlet_on_state(ref)
-                try:
-                    pdu_name, outlet_id = self._parse_ref(ref)
-                except ValueError:
-                    pdu_name, outlet_id = None, None
-                if pdu_name is not None:
-                    state = self.pdus.get(pdu_name)
-                    if state is not None:
-                        reading = state.readings.get(outlet_id)
-                        if reading is not None:
-                            watts = reading.watts
+            on, watts = self._feed_on_watts(ref, remote, remote_states)
             feed_out.append({"ref": ref, "on": on, "watts": watts})
             if on is True:
                 feeds_on += 1
@@ -1260,6 +1271,29 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             "state": state,
             "all_power_lost": state == "none",
         }
+
+    def _feed_on_watts(self, ref: str, remote: bool, remote_states: Dict[str, Any]) -> Tuple[Any, Optional[float]]:
+        """(on-state, watts) for one feed of a port's power summary.
+
+        Remote (federated) feeds use the origin's last-reported on-state and
+        have no watts (this node does not see origin telemetry). Local feeds
+        read the live PDU reading for the watts figure.
+        """
+        if remote:
+            return remote_states.get(ref), None
+        on = self._outlet_on_state(ref)
+        watts: Optional[float] = None
+        try:
+            pdu_name, outlet_id = self._parse_ref(ref)
+        except ValueError:
+            pdu_name, outlet_id = None, None
+        if pdu_name is not None:
+            pstate = self.pdus.get(pdu_name)
+            if pstate is not None:
+                reading = pstate.readings.get(outlet_id)
+                if reading is not None:
+                    watts = reading.watts
+        return on, watts
 
     # --- soft reload ------------------------------------------------------------
 
