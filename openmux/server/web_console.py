@@ -195,43 +195,32 @@ def _about_server_info(adapter, ports_snapshot: Optional[list] = None) -> Dict[s
 
 def _assemble_status_payload(adapter, preloaded_ports: Optional[list[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Collect status/federation/multipath snapshots for UI rendering."""
-
     _log = getattr(adapter, "logger", None)
     data: Dict[str, Any] = {}
-    try:
-        data["status"] = adapter._build_status_adapter_snapshot()  # type: ignore[attr-defined]
-    except Exception as exc:
-        data["status"] = {}
-        if _log:
-            _log.warning("status snapshot failed: %s", exc)
+    data["status"] = _safe_snapshot(adapter, _log, "status snapshot", adapter._build_status_adapter_snapshot, {})
     if preloaded_ports is None:
-        try:
-            data["ports"] = adapter._get_ports_snapshot()
-        except Exception as exc:
-            data["ports"] = []
-            if _log:
-                _log.warning("ports snapshot failed: %s", exc)
+        data["ports"] = _safe_snapshot(adapter, _log, "ports snapshot", adapter._get_ports_snapshot, [])
     else:
         data["ports"] = preloaded_ports
-    try:
-        data["federation"] = adapter._gather_federation_overview()  # type: ignore[attr-defined]
-    except Exception as exc:
-        data["federation"] = {}
-        if _log:
-            _log.warning("federation overview failed: %s", exc)
-    try:
-        data["multipath"] = adapter._gather_multipath_overview()  # type: ignore[attr-defined]
-    except Exception as exc:
-        data["multipath"] = {}
-        if _log:
-            _log.warning("multipath overview failed: %s", exc)
-    try:
-        data["web_clients"] = adapter._gather_web_clients()  # type: ignore[attr-defined]
-    except Exception as exc:
-        data["web_clients"] = []
-        if _log:
-            _log.warning("web clients listing failed: %s", exc)
+    data["federation"] = _safe_snapshot(adapter, _log, "federation overview", adapter._gather_federation_overview, {})
+    data["multipath"] = _safe_snapshot(adapter, _log, "multipath overview", adapter._gather_multipath_overview, {})
+    data["web_clients"] = _safe_snapshot(adapter, _log, "web clients listing", adapter._gather_web_clients, [])
     return data
+
+
+def _safe_snapshot(adapter, log, label: str, fn, default: Any) -> Any:
+    """Call one status snapshot method, falling back to ``default`` on error.
+
+    A broken snapshot section must not take down the rest of the page, so each
+    method is isolated: on any exception the warning is logged (under *label*)
+    and the section default is returned.
+    """
+    try:
+        return fn()
+    except Exception as exc:
+        if log:
+            log.warning("%s failed: %s", label, exc)
+        return default
 
 
 def _port_device_value(port: Dict[str, Any]) -> str:
@@ -571,6 +560,48 @@ async def handle_console(request: web.Request) -> web.Response:
     return web.Response(body=body, content_type="text/html")
 
 
+def _read_port_log(
+    adapter, port_name: str, tail: int
+) -> Tuple[list, Optional[str], Optional[Path], Optional[int], Optional[float]]:
+    """Read the tail of a port's data log for the /logs page.
+
+    Returns ``(lines, error, path, size, mtime)``; ``error`` is set when the
+    log file is missing or unreadable, ``lines`` is best-effort. An empty
+    *port_name* yields the "select a port" error with no file access.
+    """
+    log_lines: list[str] = []
+    log_error: Optional[str] = None
+    log_path: Optional[Path] = None
+    log_size: Optional[int] = None
+    log_mtime: Optional[float] = None
+    if port_name:
+        try:
+            pm = getattr(adapter.console_manager, "port_manager", None) if adapter.console_manager else None
+            port_obj = safe_get_port(pm, port_name) if pm else None
+        except Exception:
+            port_obj = None
+        try:
+            logger = DataLogger.get()
+            log_path = logger.get_log_path(port_name, port_obj)
+            if log_path is not None and log_path.exists():
+                try:
+                    log_lines = [_sanitize_log_line(line) for line in _tail_file(log_path, tail)]
+                except Exception:
+                    log_lines = []
+                    log_error = "Failed to read log file."
+                stat = log_path.stat()
+                log_size = stat.st_size
+                log_mtime = stat.st_mtime
+            else:
+                log_error = "No log file found for this port."
+        except Exception as exc:
+            adapter.logger.error("/logs read error for %s: %s", port_name, exc, exc_info=True)
+            log_error = "Unable to resolve log path for this port."
+    else:
+        log_error = "Select a port to view logs."
+    return log_lines, log_error, log_path, log_size, log_mtime
+
+
 async def handle_logs(request: web.Request) -> web.Response:
     adapter = _get_adapter(request)
     try:
@@ -598,37 +629,7 @@ async def handle_logs(request: web.Request) -> web.Response:
             tail = 200
         tail = max(10, min(2000, tail))
 
-        log_lines: list[str] = []
-        log_error: Optional[str] = None
-        log_path: Optional[Path] = None
-        log_size: Optional[int] = None
-        log_mtime: Optional[float] = None
-
-        if port_name:
-            try:
-                pm = getattr(adapter.console_manager, "port_manager", None) if adapter.console_manager else None
-                port_obj = safe_get_port(pm, port_name) if pm else None
-            except Exception:
-                port_obj = None
-            try:
-                logger = DataLogger.get()
-                log_path = logger.get_log_path(port_name, port_obj)
-                if log_path is not None and log_path.exists():
-                    try:
-                        log_lines = [_sanitize_log_line(line) for line in _tail_file(log_path, tail)]
-                    except Exception:
-                        log_lines = []
-                        log_error = "Failed to read log file."
-                    stat = log_path.stat()
-                    log_size = stat.st_size
-                    log_mtime = stat.st_mtime
-                else:
-                    log_error = "No log file found for this port."
-            except Exception as exc:
-                adapter.logger.error("/logs read error for %s: %s", port_name, exc, exc_info=True)
-                log_error = "Unable to resolve log path for this port."
-        else:
-            log_error = "Select a port to view logs."
+        log_lines, log_error, log_path, log_size, log_mtime = _read_port_log(adapter, port_name, tail)
 
         if hasattr(adapter, "_render_logs"):
             body = adapter._render_logs(
@@ -1912,48 +1913,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             app = web.Application(middlewares=[auth_middleware])
             app[ADAPTER_APP_KEY] = self
 
-            # --- Routes ---
-            # Static files at /static/
-            try:
-                # Ensure static dir exists
-                Path(self.static_dir).mkdir(parents=True, exist_ok=True)
-                app.router.add_static("/static/", self.static_dir, follow_symlinks=True)
-            except Exception as e:
-                self.logger.warning("Failed to add static route: %s", e)
-
-            app.router.add_get("/", handle_index)
-            if self.enable_ui:
-                app.router.add_get("/index.html", handle_index)
-                app.router.add_get("/console", handle_console)
-                app.router.add_get("/logs", handle_logs)
-                app.router.add_get("/logs/{port_name}", handle_logs)
-                app.router.add_get("/status", handle_status)
-                app.router.add_get("/about", handle_about)
-                # Power (PDU) pages are core: registered always so a soft
-                # reload of the `power:` section needs no restart; the
-                # handlers reply 404 when no PDU adapter is active.
-                app.router.add_get("/power", _power_monitor._handle_power_list)
-                app.router.add_get(r"/power/{pdu_name}", _power_monitor._handle_power_detail, name="power_detail")
-            # Login/logout
-            app.router.add_get("/login", handle_login)
-            app.router.add_post("/login", handle_login)
-            app.router.add_get("/logout", handle_logout)
-            app.router.add_get("/api/ports", handle_api_ports)
-            app.router.add_post("/api/reload", handle_api_reload)
-            # Power (PDU) API + live socket routes are core: registered always
-            # so a soft reload of the `power:` section needs no restart; the
-            # handlers reply 404 when no PDU adapter is active.
-            app.router.add_get("/api/power", _power_monitor._handle_api_power)
-            app.router.add_post(r"/api/power/outlets/{outlet_ref:.+}", _power_monitor._handle_set_outlet)
-            app.router.add_get("/ws/power", _power_monitor._handle_ws_power)
-            app.router.add_get("/api/csrf", self._handle_api_csrf)
-            app.router.add_get("/ws/{port_name}", handle_ws)
-            app.router.add_get("/ws/{server_id}/{port_name}", handle_ws_fqpn)
-            # Health/Probe endpoints
-            if self.enable_probes:
-                app.router.add_get("/healthz", handle_healthz)
-                app.router.add_get("/livez", handle_livez)
-                app.router.add_get("/readyz", handle_readyz)
+            self._register_routes(app)
 
             # Load optional web plugins
             try:
@@ -2032,6 +1992,57 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception as e:
             self.logger.error("Failed to start WebConsole: %s", e, exc_info=True)
             return False
+
+    def _register_routes(self, app: web.Application) -> None:
+        """Register all HTTP routes on the console app.
+
+        Static assets, the UI pages (when ``enable_ui``), login/API and
+        websocket routes, the power (PDU) routes, and the health probes.
+        The power routes are always registered so a soft reload of the
+        ``power:`` section needs no restart (handlers reply 404 when no PDU
+        adapter is active).
+        """
+        # Static files at /static/
+        try:
+            # Ensure static dir exists
+            Path(self.static_dir).mkdir(parents=True, exist_ok=True)
+            app.router.add_static("/static/", self.static_dir, follow_symlinks=True)
+        except Exception as e:
+            self.logger.warning("Failed to add static route: %s", e)
+
+        app.router.add_get("/", handle_index)
+        if self.enable_ui:
+            app.router.add_get("/index.html", handle_index)
+            app.router.add_get("/console", handle_console)
+            app.router.add_get("/logs", handle_logs)
+            app.router.add_get("/logs/{port_name}", handle_logs)
+            app.router.add_get("/status", handle_status)
+            app.router.add_get("/about", handle_about)
+            # Power (PDU) pages are core: registered always so a soft
+            # reload of the `power:` section needs no restart; the
+            # handlers reply 404 when no PDU adapter is active.
+            app.router.add_get("/power", _power_monitor._handle_power_list)
+            app.router.add_get(r"/power/{pdu_name}", _power_monitor._handle_power_detail, name="power_detail")
+        # Login/logout
+        app.router.add_get("/login", handle_login)
+        app.router.add_post("/login", handle_login)
+        app.router.add_get("/logout", handle_logout)
+        app.router.add_get("/api/ports", handle_api_ports)
+        app.router.add_post("/api/reload", handle_api_reload)
+        # Power (PDU) API + live socket routes are core: registered always
+        # so a soft reload of the `power:` section needs no restart; the
+        # handlers reply 404 when no PDU adapter is active.
+        app.router.add_get("/api/power", _power_monitor._handle_api_power)
+        app.router.add_post(r"/api/power/outlets/{outlet_ref:.+}", _power_monitor._handle_set_outlet)
+        app.router.add_get("/ws/power", _power_monitor._handle_ws_power)
+        app.router.add_get("/api/csrf", self._handle_api_csrf)
+        app.router.add_get("/ws/{port_name}", handle_ws)
+        app.router.add_get("/ws/{server_id}/{port_name}", handle_ws_fqpn)
+        # Health/Probe endpoints
+        if self.enable_probes:
+            app.router.add_get("/healthz", handle_healthz)
+            app.router.add_get("/livez", handle_livez)
+            app.router.add_get("/readyz", handle_readyz)
 
     async def stop(self) -> None:
         self._set_running(False)
@@ -2131,39 +2142,48 @@ class WebConsoleAdapter(BaseGenericAdapter):
             self.logger.warning("static_dir does not exist: %s", self.static_dir)
 
         # Attempt to set up Jinja2 if available and directory exists
+        self._setup_jinja_env()
+
+    def _setup_jinja_env(self) -> None:
+        """Build the Jinja2 environment for the configured template dir.
+
+        Sets ``self._jinja_env`` (with the ``fmt_ts`` filter registered) on
+        success; when the template dir is missing or jinja2 is unavailable
+        the env stays None and an error is logged at startup.
+        """
         try:
             from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
 
             tdir = Path(self.template_dir)
-            if tdir.is_dir():
-                self._jinja_env = Environment(
-                    loader=FileSystemLoader(str(tdir)),
-                    autoescape=select_autoescape(["html", "xml"]),
-                    enable_async=False,
-                )
-
-                # Register handy filters
-                def _fmt_ts(value):
-                    try:
-                        if value is None or value == "":
-                            return ""
-                        v = float(value)
-                        # Accept values in ms as well
-                        if v > 1_000_000_000_000:
-                            v = v / 1000.0
-                        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v))
-                    except Exception:
-                        return str(value)
-
-                try:
-                    self._jinja_env.filters["fmt_ts"] = _fmt_ts
-                except Exception:
-                    # justification: optional template filter; the default formatting applies
-                    pass
-                self.logger.info("WebConsole templates enabled: %s", tdir)
-            else:
+            if not tdir.is_dir():
                 self._jinja_env = None
                 self.logger.error("WebConsole templates disabled: template_dir missing or not a directory: %s", tdir)
+                return
+            self._jinja_env = Environment(
+                loader=FileSystemLoader(str(tdir)),
+                autoescape=select_autoescape(["html", "xml"]),
+                enable_async=False,
+            )
+
+            # Register handy filters
+            def _fmt_ts(value):
+                try:
+                    if value is None or value == "":
+                        return ""
+                    v = float(value)
+                    # Accept values in ms as well
+                    if v > 1_000_000_000_000:
+                        v = v / 1000.0
+                    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v))
+                except Exception:
+                    return str(value)
+
+            try:
+                self._jinja_env.filters["fmt_ts"] = _fmt_ts
+            except Exception:
+                # justification: optional template filter; the default formatting applies
+                pass
+            self.logger.info("WebConsole templates enabled: %s", tdir)
         except Exception:
             # jinja2 not installed or couldn't initialize
             self._jinja_env = None
@@ -2551,36 +2571,45 @@ class WebConsoleAdapter(BaseGenericAdapter):
             except Exception:
                 immediate = False
 
-            now = time.time()
-            if immediate:
-                # Force broadcast now and update debounce timestamp
-                self._meta_debounce[port_name] = now
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._broadcast_meta(port_name, changes))
-                except Exception:
-                    # justification: optional debounced meta push; the next event retries
-                    pass
-                return
+            self._schedule_meta_broadcast(port_name, changes, immediate)
+        except Exception:
+            # justification: best-effort meta push; the next event retries
+            pass
 
-            last = float(self._meta_debounce.get(port_name, 0) or 0)
-            if (now - last) < float(self._meta_min_interval or 0):
-                # too soon; schedule after remaining interval
-                delay = max(0.0, float(self._meta_min_interval or 0) - (now - last))
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.call_later(delay, lambda: asyncio.create_task(self._broadcast_meta(port_name)))
-                except Exception:
-                    # justification: best-effort meta push; the next event retries
-                    pass
-                return
+    def _schedule_meta_broadcast(self, port_name: str, changes: Optional[Dict[str, Any]], immediate: bool) -> None:
+        """Broadcast a meta update now, or schedule a debounced one.
+
+        ``immediate`` bypasses the ``_meta_min_interval`` debounce (used for
+        connection-state flips so the UI reacts instantly); otherwise a
+        broadcast inside the interval is delayed to the remaining time and
+        the debounce timestamp is advanced either way.
+        """
+        now = time.time()
+        if immediate:
+            # Force broadcast now and update debounce timestamp
             self._meta_debounce[port_name] = now
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._broadcast_meta(port_name))
+                loop.create_task(self._broadcast_meta(port_name, changes))
+            except Exception:
+                # justification: optional debounced meta push; the next event retries
+                pass
+            return
+        last = float(self._meta_debounce.get(port_name, 0) or 0)
+        if (now - last) < float(self._meta_min_interval or 0):
+            # too soon; schedule after remaining interval
+            delay = max(0.0, float(self._meta_min_interval or 0) - (now - last))
+            try:
+                loop = asyncio.get_running_loop()
+                loop.call_later(delay, lambda: asyncio.create_task(self._broadcast_meta(port_name)))
             except Exception:
                 # justification: best-effort meta push; the next event retries
                 pass
+            return
+        self._meta_debounce[port_name] = now
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._broadcast_meta(port_name))
         except Exception:
             # justification: best-effort meta push; the next event retries
             pass
@@ -3338,35 +3367,52 @@ class WebConsoleAdapter(BaseGenericAdapter):
             pass
         # Try console manager mapping to identify manager and pull IPs from TCP listener
         try:
-            cm = self.console_manager
-            if cm and hasattr(cm, "client_to_manager"):
-                mgr = cm.client_to_manager.get(client_id)
-                if mgr is not None:
-                    # If it looks like the TCP server adapter, try to get address
-                    atype_fn = getattr(mgr, "get_adapter_type", None)
-                    atype = atype_fn() if callable(atype_fn) else None
-                    if str(atype).lower() in ("client_listener", "tcp", "tcp_server"):
-                        try:
-                            # TcpServerAdapter maintains clients dict with sessions having .address
-                            clients = getattr(mgr, "clients", {}) or {}
-                            sess = clients.get(client_id)
-                            if sess is not None:
-                                addr = getattr(sess, "address", None)
-                                if addr:
-                                    meta["ip"] = addr
-                                meta["type"] = "tcp"
-                                return meta
-                        except Exception:
-                            # justification: heuristic lookup; the next source is tried
-                            pass
-                    # Otherwise, assume manager is this (web_console) or another ws-capable manager
-                    meta["type"] = meta.get("type") or ("websocket" if str(client_id).startswith("ws:") else None)
+            if self._meta_from_manager(client_id, meta):
+                return meta
         except Exception:
             # justification: optional client metadata; empty meta is the safe answer
             pass
         if "type" not in meta:
             meta["type"] = "websocket" if str(client_id).startswith("ws:") else None
         return meta
+
+    def _meta_from_manager(self, client_id: str, meta: Dict[str, Any]) -> bool:
+        """Resolve meta from the console manager owning *client_id*.
+
+        For a TCP-flavored manager (client_listener/tcp/tcp_server), reads the
+        session address into ``meta`` (type ``tcp`` + ip) and returns True so
+        the caller stops resolving. Otherwise sets a fallback ``type`` (the
+        websocket/None default) and returns False. A missing manager or a
+        session lookup error leaves ``meta`` for the caller's fallback.
+        """
+        cm = self.console_manager
+        if not cm or not hasattr(cm, "client_to_manager"):
+            return False
+        mgr = cm.client_to_manager.get(client_id)
+        if mgr is None:
+            return False
+        # If it looks like the TCP server adapter, try to get address
+        atype_fn = getattr(mgr, "get_adapter_type", None)
+        atype = atype_fn() if callable(atype_fn) else None
+        if str(atype).lower() not in ("client_listener", "tcp", "tcp_server"):
+            # Otherwise, assume manager is this (web_console) or another ws-capable manager
+            meta["type"] = meta.get("type") or ("websocket" if str(client_id).startswith("ws:") else None)
+            return False
+        try:
+            # TcpServerAdapter maintains clients dict with sessions having .address
+            clients = getattr(mgr, "clients", {}) or {}
+            sess = clients.get(client_id)
+        except Exception:
+            # justification: heuristic lookup; the next source is tried
+            return False
+        if sess is None:
+            meta["type"] = meta.get("type") or ("websocket" if str(client_id).startswith("ws:") else None)
+            return False
+        addr = getattr(sess, "address", None)
+        if addr:
+            meta["ip"] = addr
+        meta["type"] = "tcp"
+        return True
 
     def _render_login(
         self,

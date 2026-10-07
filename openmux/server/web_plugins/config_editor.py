@@ -386,6 +386,36 @@ async def _handle_data(request: web.Request) -> web.StreamResponse:
     )
 
 
+async def _load_apply_payload(request: web.Request, adapter) -> Any:
+    """Parse an apply request body into a config dict.
+
+    Returns the JSON body when it is an object, otherwise an aiohttp error
+    response (invalid JSON / non-object body) that the handler replies with
+    as-is.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        adapter.logger.warning("Invalid JSON body for config apply", exc_info=True)
+        return web.json_response({"error": True, "message": "Invalid JSON"}, status=400)
+    if not isinstance(payload, dict):
+        adapter.logger.warning("Config apply: body must be a JSON object (got %s)", type(payload).__name__)
+        return web.json_response({"error": True, "message": "Body must be a JSON object"}, status=400)
+    return payload
+
+
+def _log_validation_failure(adapter, err: Optional[str], exc: Optional[Exception]) -> None:
+    """Log a config validation failure (traceback when one was raised)."""
+    try:
+        if exc is not None:
+            adapter.logger.exception("Config validation failed: %s", err or "<no message>")
+        else:
+            adapter.logger.error("Config validation failed: %s", err or "<no message>")
+    except Exception:
+        # justification: logging failure must not change the request outcome
+        pass
+
+
 async def _handle_apply(request: web.Request) -> web.StreamResponse:
     adapter = get_web_adapter(request)
     try:
@@ -395,14 +425,10 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
             raise web.HTTPForbidden(text="CSRF")
 
         # Load incoming config and validate structure as dict
-        try:
-            payload = await request.json()
-        except Exception:
-            adapter.logger.warning("Invalid JSON body for config apply", exc_info=True)
-            return web.json_response({"error": True, "message": "Invalid JSON"}, status=400)
+        payload = await _load_apply_payload(request, adapter)
         if not isinstance(payload, dict):
-            adapter.logger.warning("Config apply: body must be a JSON object (got %s)", type(payload).__name__)
-            return web.json_response({"error": True, "message": "Body must be a JSON object"}, status=400)
+            # _load_apply_payload answers with an error response for bad bodies
+            return payload  # type: ignore[return-value]
 
         # Access ConfigManager
         cm = _find_config_manager(adapter)
@@ -417,14 +443,7 @@ async def _handle_apply(request: web.Request) -> web.StreamResponse:
         # Validate before saving
         ok, err, exc = _validate_payload(payload, cm)
         if not ok:
-            try:
-                if exc is not None:
-                    adapter.logger.exception("Config validation failed: %s", err or "<no message>")
-                else:
-                    adapter.logger.error("Config validation failed: %s", err or "<no message>")
-            except Exception:
-                # justification: logging failure must not change the request outcome
-                pass
+            _log_validation_failure(adapter, err, exc)
             return web.json_response({"error": True, "message": err or "Validation failed"}, status=400)
 
         disallowed = _enforce_writable_sections(cm, payload)
