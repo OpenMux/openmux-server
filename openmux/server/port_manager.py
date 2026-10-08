@@ -749,72 +749,92 @@ class PortManager:
         # First try legacy ports
         if port_name in self.ports:
             port = self.ports[port_name]
-
-            # Find and remove client
+            # Find and remove client, then run the shared teardown.
             for i, client in enumerate(port.connected_clients):
                 if client["client_id"] == client_id:
                     port.connected_clients.pop(i)
-                    if hasattr(port, "client_queues"):
-                        port.client_queues.pop(client_id, None)
-                    self.logger.debug("Removed client %s from port %s", client_id, port_name)
-                    # Lifecycle event: client disconnected
-                    try:
-                        DataLogger.get().record_meta(
-                            port_name=port_name,
-                            event="client_disconnected",
-                            client_id=str(client_id),
-                            meta=None,
-                            port_obj=port,
-                        )
-                    except Exception:
-                        self.logger.debug(
-                            "DataLogger lifecycle record failed for %s (client_disconnected)",
-                            port_name,
-                            exc_info=True,
-                        )
-                    # Close remote stream for federated ports
-                    try:
-                        if hasattr(port, "remote_port_name") and hasattr(port, "close_stream_for_client"):
-                            close_fn = getattr(port, "close_stream_for_client", None)
-                            if close_fn:
-                                await close_fn(client_id)
-                    except Exception as e:
-                        self.logger.warning("Failed to close remote stream for %s: %s", port_name, e, exc_info=True)
-                    # Notify meta listeners (client disconnected)
-                    try:
-                        self.notify_meta_updated(port_name, {"event": "client_disconnected", "client_id": str(client_id)})
-                    except Exception:
-                        # justification: optional notification; UI event delivery is best-effort
-                        pass
-
-                    # If this is a federated port and no more clients are connected,
-                    # send a :C: command to close the federation session
-                    try:
-                        if (
-                            hasattr(port, "metadata")
-                            and hasattr(
-                                getattr(port, "metadata", None),
-                                "origin_server",
-                            )
-                            and len(port.connected_clients) == 0
-                        ):
-                            self.logger.info("No more clients connected to federated port %s, closing session", port_name)
-                            await self._close_federation_session(port_name, port)
-                    except AttributeError:
-                        # Not a federated port, skip session cleanup
-                        self.logger.error(
-                            "Federated session cleanup attribute error for %s",
-                            port_name,
-                            exc_info=True,
-                        )
-                    # Fire the adapter client-count hook on the canonical
-                    # remove path (issue #63) - mirrors the add path above.
-                    self._fire_client_count_hook(port)
-
+                    await self._finalize_legacy_client_removal(port, port_name, client_id)
                     return True
             return False
 
-        # Then try unified adapter ports - use the wrapper from the ports dict
+        # Then try unified adapter ports via the wrapper from the ports dict.
+        return await self._remove_unified_port_client(port_name, client_id)
+
+    async def _finalize_legacy_client_removal(self, port: Any, port_name: str, client_id: str) -> None:
+        """Post-removal teardown for a legacy port client (best-effort).
+
+        Drops the per-client queue entry, records the disconnect lifecycle
+        event, closes the federated remote stream if present, notifies meta
+        listeners, closes the federation session when the last client is gone,
+        and fires the adapter client-count hook (issue #63, mirrors the add
+        path). Every step is isolated so one failure does not skip the others.
+        """
+        if hasattr(port, "client_queues"):
+            port.client_queues.pop(client_id, None)
+        self.logger.debug("Removed client %s from port %s", client_id, port_name)
+        # Lifecycle event: client disconnected
+        try:
+            DataLogger.get().record_meta(
+                port_name=port_name,
+                event="client_disconnected",
+                client_id=str(client_id),
+                meta=None,
+                port_obj=port,
+            )
+        except Exception:
+            self.logger.debug(
+                "DataLogger lifecycle record failed for %s (client_disconnected)",
+                port_name,
+                exc_info=True,
+            )
+        # Close remote stream for federated ports
+        await self._close_legacy_remote_stream(port, port_name, client_id)
+        # Notify meta listeners (client disconnected)
+        try:
+            self.notify_meta_updated(port_name, {"event": "client_disconnected", "client_id": str(client_id)})
+        except Exception:
+            # justification: optional notification; UI event delivery is best-effort
+            pass
+        # If this is a federated port and no more clients are connected,
+        # close the federation session.
+        await self._maybe_close_federation_session(port_name, port)
+        # Fire the adapter client-count hook on the canonical
+        # remove path (issue #63) - mirrors the add path above.
+        self._fire_client_count_hook(port)
+
+    async def _close_legacy_remote_stream(self, port: Any, port_name: str, client_id: str) -> None:
+        """Close the federated remote stream for a removed legacy client."""
+        try:
+            if hasattr(port, "remote_port_name") and hasattr(port, "close_stream_for_client"):
+                close_fn = getattr(port, "close_stream_for_client", None)
+                if close_fn:
+                    await close_fn(client_id)
+        except Exception as e:
+            self.logger.warning("Failed to close remote stream for %s: %s", port_name, e, exc_info=True)
+
+    async def _maybe_close_federation_session(self, port_name: str, port: Any) -> None:
+        """Close the federation session when the last client left a federated port."""
+        try:
+            if self._federated_port_empty(port):
+                self.logger.info("No more clients connected to federated port %s, closing session", port_name)
+                await self._close_federation_session(port_name, port)
+        except AttributeError:
+            # Not a federated port, skip session cleanup
+            self.logger.error(
+                "Federated session cleanup attribute error for %s",
+                port_name,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _federated_port_empty(port: Any) -> bool:
+        """True when the port is federated (metadata.origin_server) and fully drained."""
+        if not hasattr(port, "metadata"):
+            return False
+        return hasattr(getattr(port, "metadata", None), "origin_server") and len(port.connected_clients) == 0
+
+    async def _remove_unified_port_client(self, port_name: str, client_id: str) -> bool:
+        """Remove a client via the unified wrapper's method, if applicable."""
         wrapper_port = self.get_port(port_name)
         if wrapper_port and hasattr(wrapper_port, "unified_port"):
             # This is a unified port wrapper
@@ -822,22 +842,18 @@ class PortManager:
             self.logger.info(
                 f"Current connected_clients: {[c.get('client_id', 'unknown') for c in wrapper_port.connected_clients]}"
             )
-
             # Find and remove client using wrapper's method
             for client in wrapper_port.connected_clients:
                 if client["client_id"] == client_id:
                     wrapper_port.remove_client(client)
                     self.logger.debug("Removed client %s from unified port %s", client_id, port_name)
                     # The wrapper's remove_client fires the hook for the
-                    # underlying port; the legacy branch above fires it for
-                    # ports that bypass the wrapper. Both are idempotent on
-                    # equal counts, so the (defensive) re-fire here is safe.
+                    # underlying port; the legacy branch fires it for ports
+                    # that bypass the wrapper. Both are idempotent on equal
+                    # counts, so the (defensive) re-fire here is safe.
                     self._fire_client_count_hook(wrapper_port)
                     return True
-
             self.logger.warning("Client %s not found in unified port %s", client_id, port_name)
-            return False
-
         return False
 
     async def _close_federation_session(self, port_name: str, port):

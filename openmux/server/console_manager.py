@@ -739,62 +739,66 @@ class ConsoleManager:
         )
 
     async def _send_data_to_client(self, client_id: str, port_name: str, data: bytes) -> bool:
-        """Send data to a client through the registered client manager.
+        """Try mapped → multi-manager → legacy in order, returning on first success.
 
-        Args:
-            client_id: Target client identifier.
-            port_name: Source port name (used for logging only).
-            data: Payload to send.
-
-        Returns:
-            bool: True on success, False if no manager or send failed.
+        The mapped step returns ``None`` to signal "no routing info or the
+        cached manager threw" so the caller falls through; an explicit
+        ``True``/``False`` is returned as-is even on a failed mapped send.
         """
-        # Prefer explicit routing if we know the manager for this client id
+        ok = await self._send_via_mapped(client_id, port_name, data)
+        if ok is not None:
+            return ok
+        if await self._send_via_multi(client_id, data):
+            return True
+        return await self._send_via_legacy(client_id, port_name, data)
+
+    async def _send_via_mapped(self, client_id: str, port_name: str, data: bytes) -> Optional[bool]:
+        """Send through the per-client cached manager. ``None`` on no mapping or send throw."""
         mgr = self.client_to_manager.get(client_id)
-        if mgr is not None:
-            try:
-                if "loopback" in port_name:
-                    self.logger.debug("Data forwarder: About to call send_data_to_client (mapped)")
-                ok = await mgr.send_data_to_client(client_id, data)
-                if "loopback" in port_name:
-                    self.logger.debug("FORWARD TO CLIENT RESULT (mapped): %s", "Success" if ok else "Failed")
-                return ok
-            except Exception as e:
-                self.logger.warning("Client mapped manager send failed for %s: %s", client_id, e, exc_info=True)
-                # fall through to try other managers
+        if mgr is None:
+            return None
+        try:
+            if "loopback" in port_name:
+                self.logger.debug("Data forwarder: About to call send_data_to_client (mapped)")
+            ok = await mgr.send_data_to_client(client_id, data)
+            if "loopback" in port_name:
+                self.logger.debug("FORWARD TO CLIENT RESULT (mapped): %s", "Success" if ok else "Failed")
+            return ok
+        except Exception as e:
+            self.logger.warning("Client mapped manager send failed for %s: %s", client_id, e, exc_info=True)
+            return None
 
-        # Next, try all known client managers (multi-manager support)
+    async def _send_via_multi(self, client_id: str, data: bytes) -> bool:
+        """Try each known client manager; return True on first success."""
         any_success = False
-        if getattr(self, "client_managers", None):
-            for m in list(self.client_managers):
-                try:
-                    ok = await m.send_data_to_client(client_id, data)
-                    if ok:
-                        any_success = True
-                        # Cache mapping for future fast routing
-                        self.client_to_manager[client_id] = m
-                        break
-                except Exception as e:
-                    self.logger.debug("Manager %s send error: %s", getattr(m, "name", type(m).__name__), e)
-            if any_success:
-                return True
+        if not getattr(self, "client_managers", None):
+            return False
+        for m in list(self.client_managers):
+            try:
+                ok = await m.send_data_to_client(client_id, data)
+                if ok:
+                    any_success = True
+                    self.client_to_manager[client_id] = m
+                    break
+            except Exception as e:
+                self.logger.debug("Manager %s send error: %s", getattr(m, "name", type(m).__name__), e)
+        return any_success
 
-        # Back-compat: fall back to single manager if set
-        if not (hasattr(self, "client_manager") and self.client_manager):
+    async def _send_via_legacy(self, client_id: str, port_name: str, data: bytes) -> bool:
+        """Fall back to the single legacy single-manager (if set) and cache the mapping."""
+        if not hasattr(self, "client_manager") or not self.client_manager:
             self.logger.warning("No client manager available to forward data to client %s", client_id)
             return False
-
         if "loopback" in port_name:
             self.logger.debug("Data forwarder: About to call send_data_to_client (legacy)")
         success = await self.client_manager.send_data_to_client(client_id, data)
         if "loopback" in port_name:
             self.logger.debug("FORWARD TO CLIENT RESULT (legacy): %s", "Success" if success else "Failed")
-        # Cache mapping even for legacy path to reduce future lookups
         if success:
             try:
                 self.client_to_manager[client_id] = self.client_manager
             except Exception:
-                # justification: idempotent cache write; a failure just re-enters the fallback branch on the next send
+                # justification: idempotent cache write; failure re-enters fallback on next send
                 pass
         return success
 
