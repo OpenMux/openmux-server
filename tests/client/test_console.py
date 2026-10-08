@@ -796,3 +796,101 @@ class TestPowerMenu:
         assert "power (this console's feeds: number = toggle, a = all)" in help_text
         assert "playback" not in help_text
         assert "set number of playback lines" not in help_text
+
+    @pytest.mark.asyncio
+    async def test_handle_keyboard_input_read_only_reannounces_on_enter(self, capsys):
+        """Read-only mode: each Enter press re-announces the restriction, no send."""
+        ui, conn = _make_ui()
+        if not hasattr(conn, "send_data"):
+            conn.send_data = AsyncMock()
+        ui.is_running = True
+        ui._stdin_fd = None
+        ui.read_only_mode = True
+        ui.normalize_crlf = False
+        calls = {"n": 0}
+
+        def data_side_effect():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return True
+            ui.is_running = False
+            return False
+
+        async def sleep_passthrough(delay):
+            pass
+
+        mock_stdin = MagicMock()
+        mock_stdin.read.return_value = "\r"
+
+        with (
+            patch("sys.stdin", mock_stdin),
+            patch.object(ui, "_is_data_available", side_effect=data_side_effect),
+            patch("asyncio.sleep", sleep_passthrough),
+        ):
+            await ui._handle_keyboard_input()
+
+        assert "[WARNING: console is in read-only mode]" in capsys.readouterr().out
+        conn.send_data.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_keyboard_input_normalizes_crlf(self):
+        """With CRLF normalization on, a typed Enter is sent as LF."""
+        ui, conn = _make_ui()
+        if not hasattr(conn, "send_data"):
+            conn.send_data = AsyncMock()
+        ui.is_running = True
+        ui._stdin_fd = None
+        ui.normalize_crlf = True
+        calls = {"n": 0}
+
+        def data_side_effect():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return True
+            ui.is_running = False
+            return False
+
+        async def sleep_passthrough(delay):
+            pass
+
+        mock_stdin = MagicMock()
+        mock_stdin.read.return_value = "\r"
+
+        with (
+            patch("sys.stdin", mock_stdin),
+            patch.object(ui, "_is_data_available", side_effect=data_side_effect),
+            patch("asyncio.sleep", sleep_passthrough),
+        ):
+            await ui._handle_keyboard_input()
+
+        conn.send_data.assert_called_once_with(b"\n")
+
+    @pytest.mark.asyncio
+    async def test_handle_keyboard_input_stream_exclusive_skips_all_reads(self):
+        """While the power menu owns stdin, the forwarder neither probes nor reads."""
+        ui, conn = _make_ui()
+        if not hasattr(conn, "send_data"):
+            conn.send_data = AsyncMock()
+        ui.is_running = True
+        ui._stdin_fd = None
+        ui._stream_exclusive = True
+
+        async def sleep_passthrough(delay):
+            if ui.is_running:
+                ui.is_running = False
+
+        data_calls = []
+
+        def data_side_effect():
+            data_calls.append(1)
+            return True
+
+        with (
+            patch("sys.stdin", MagicMock(read=MagicMock(side_effect=AssertionError("stdin was read")))),
+            patch.object(ui, "_is_data_available", side_effect=data_side_effect),
+            patch("asyncio.sleep", sleep_passthrough),
+        ):
+            await ui._handle_keyboard_input()
+
+        conn.send_data.assert_not_called()
+        assert data_calls == []  # _is_data_available never consulted

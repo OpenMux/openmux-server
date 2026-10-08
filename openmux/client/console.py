@@ -24,7 +24,7 @@ import os
 import sys
 import termios
 import tty
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .adapters import BaseClientAdapter
 
@@ -420,46 +420,19 @@ class ConsoleUI:
                     if piece:
                         buf.extend(piece)
 
-                # Process escape sequences inline and build payload to send
-                payload = bytearray()
-                i = 0
-                while i < len(buf):
-                    b = buf[i : i + 1]
-                    # Try escape handler; it may consume statefully
-                    if await self._handle_escape_sequence(b):
-                        i += 1
-                        # Do not include this byte in payload
-                        continue
-                    payload.extend(b)
-                    i += 1
-                # Clear buffer after processing
-                buf.clear()
+                # Consume escape sequences in place; the remaining bytes are the payload
+                await self._drain_escape_bytes(buf)
 
                 # Decide when to flush: when payload exists and enough time has elapsed
                 now = asyncio.get_event_loop().time()
-                if payload:
-                    # Normalize CR to LF if enabled to ensure consistent newlines
-                    if self.normalize_crlf:
-                        if b"\r" in payload:
-                            payload = payload.replace(b"\r", b"\n")
-                    # Flush immediately if we see a newline to preserve interactivity
-                    should_flush = (now - last_send >= flush_interval) or (len(payload) >= max_chunk) or (b"\n" in payload)
-                else:
-                    should_flush = False
+                payload = self._prepare_payload_for_send(bytes(buf))
+                buf.clear()
+                should_flush = bool(payload) and (
+                    (now - last_send >= flush_interval) or (len(payload) >= max_chunk) or (b"\n" in payload)
+                )
 
-                if payload and should_flush:
-                    if not self.read_only_mode and self.connection.is_connected:
-                        if self._debug_input:
-                            self.logger.debug("send[chunk]: %s bytes", len(payload))
-                        await self.connection.send_data(bytes(payload))
-                        sent_now = True
-                        last_send = now
-                    elif self.read_only_mode and (b"\r" in payload or b"\n" in payload):
-                        # Re-announce the read-only restriction on every Enter press,
-                        # since the one-time startup/transition warning is easy to miss.
-                        sys.stdout.write("\r\n[WARNING: console is in read-only mode]\r\n")
-                        sys.stdout.flush()
-                        last_send = now
+                if should_flush:
+                    sent_now, last_send = await self._flush_payload(payload, now, last_send)
 
                 # If nothing to send, keep looping
                 if not sent_now:
@@ -468,6 +441,47 @@ class ConsoleUI:
         except Exception as e:
             self.logger.error("Error handling keyboard input: %s", e, exc_info=True)
             self.is_running = False
+
+    async def _drain_escape_bytes(self, buf: bytearray) -> None:
+        """Remove escape-sequence bytes from `buf` in place.
+
+        The byte is dropped when `_handle_escape_sequence` consumed it
+        (statefully); the remaining bytes in order form the flushable payload.
+        """
+        i = 0
+        while i < len(buf):
+            b = buf[i : i + 1]
+            # Try escape handler; it may consume statefully
+            if await self._handle_escape_sequence(b):
+                del buf[i : i + 1]
+                # Do not include this byte in payload
+                continue
+            i += 1
+
+    def _prepare_payload_for_send(self, payload: bytes) -> bytes:
+        """Normalize CR to LF if enabled, so newlines are consistent on the wire."""
+        if self.normalize_crlf and b"\r" in payload:
+            return payload.replace(b"\r", b"\n")
+        return payload
+
+    async def _flush_payload(self, payload: bytes, now: float, last_send: float) -> Tuple[bool, float]:
+        """Send `payload` (or re-announce the read-only restriction); return (sent, last_send).
+
+        `last_send` is updated only when something was sent or the read-only
+        warning fired, so the flush-interval timer restarts on those events.
+        """
+        if not self.read_only_mode and self.connection.is_connected:
+            if self._debug_input:
+                self.logger.debug("send[chunk]: %s bytes", len(payload))
+            await self.connection.send_data(bytes(payload))
+            return True, now
+        if self.read_only_mode and (b"\r" in payload or b"\n" in payload):
+            # Re-announce the read-only restriction on every Enter press,
+            # since the one-time startup/transition warning is easy to miss.
+            sys.stdout.write("\r\n[WARNING: console is in read-only mode]\r\n")
+            sys.stdout.flush()
+            return False, now
+        return False, last_send
 
     # Pending ESC completion removed
 

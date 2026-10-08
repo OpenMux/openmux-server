@@ -21,7 +21,7 @@ keep higher level orchestration straightforward.
 import asyncio
 import json
 import ssl
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from .base_adapter import BaseClientAdapter
 from .rw_control import format_control_response
@@ -180,78 +180,22 @@ class TcpClientAdapter(BaseClientAdapter):
             self.logger.error("Connection not established")
             return False
         try:
-            from cryptography.hazmat.primitives import serialization
-            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-            # Load private key
-            with open(private_key_path, "rb") as f:
-                key_data = f.read()
-            priv = None
-            passphrase = None
-            # Support environment variable passphrase if encrypted
-            import os
-
-            pw_env = os.environ.get("OPENMUX_PUBKEY_PASSPHRASE")
-            if pw_env:
-                passphrase = pw_env.encode()
-            try_formats = [
-                lambda: serialization.load_pem_private_key(key_data, password=passphrase),
-                lambda: serialization.load_ssh_private_key(key_data, password=passphrase),
-            ]
-            for loader in try_formats:
-                try:
-                    obj = loader()
-                    if isinstance(obj, Ed25519PrivateKey):
-                        priv = obj
-                        break
-                except Exception:
-                    continue
+            key_data = self._pubkey_read_key_file(private_key_path)
+            if key_data is None:
+                return False
+            passphrase = self._pubkey_passphrase()
+            priv = self._pubkey_load_private_key(key_data, passphrase)
             if priv is None:
                 self.logger.error("Failed to load Ed25519 private key")
                 return False
             init_cmd = f"AUTH:PK:INIT:{username}:{key_id}\n" if key_id else f"AUTH:PK:INIT:{username}\n"
             self.writer.write(init_cmd.encode())
             await self.writer.drain()
-            line = await self.reader.readline()
-            if not line.startswith(b"AUTH:PK:CHALLENGE:"):
-                self.logger.error(f"Unexpected challenge line: {line.decode(errors='ignore').strip()}")
+            chal_key_id, nonce_raw = await self._pubkey_read_challenge()
+            if nonce_raw is None:
                 return False
-            parts = line.decode(errors="ignore").strip().split(":")
-            # AUTH:PK:CHALLENGE:<key_id>:<nonce>
-            if len(parts) < 5:
-                self.logger.error("Malformed challenge response")
-                return False
-            chal_key_id = parts[3]
-            nonce_b64 = parts[4]
-            import base64
-
-            try:
-                nonce_raw = base64.b64decode(nonce_b64)
-            except Exception:
-                self.logger.error("Invalid nonce encoding")
-                return False
-            signature = priv.sign(nonce_raw)
-            sig_b64 = base64.b64encode(signature).decode()
-            resp = f"AUTH:PK:RESPONSE:{chal_key_id}:{sig_b64}\n"
-            self.writer.write(resp.encode())
-            await self.writer.drain()
-            # Read potentially multiple lines (some server variants may send a banner after success)
-            auth_ok = False
-            last_line: bytes = b""
-            for _ in range(3):  # read up to 3 lines defensively
-                final_line = await self.reader.readline()
-                if not final_line:
-                    break
-                last_line = final_line
-                if final_line.startswith(b"AUTH:SUCCESS"):
-                    auth_ok = True
-                    break
-                # Skip empty / banner lines
-                if final_line.strip() == b"":
-                    continue
-                # If we see an auth failure indicator, break early
-                if b"AUTH:FAILED" in final_line or b"Authentication failed" in final_line:
-                    break
+            await self._pubkey_send_response(chal_key_id, nonce_raw, priv)
+            auth_ok, last_line = await self._pubkey_read_result_lines()
             if auth_ok:
                 self.is_authenticated = True
                 self.username = username
@@ -270,6 +214,101 @@ class TcpClientAdapter(BaseClientAdapter):
         except Exception as e:
             self.logger.error("Public key authentication error: %s", e)
             return False
+
+    def _pubkey_read_key_file(self, private_key_path: str) -> Optional[bytes]:
+        """Read the raw key file bytes, or None when the file cannot be opened."""
+        try:
+            with open(private_key_path, "rb") as f:
+                return f.read()
+        except Exception as e:
+            self.logger.error("Key file not readable: %s", e)
+            return None
+
+    @staticmethod
+    def _pubkey_passphrase() -> Optional[bytes]:
+        """Passphrase from ``OPENMUX_PUBKEY_PASSPHRASE`` when set (encrypted keys)."""
+        import os
+
+        pw_env = os.environ.get("OPENMUX_PUBKEY_PASSPHRASE")
+        return pw_env.encode() if pw_env else None
+
+    @staticmethod
+    def _pubkey_load_private_key(key_data: bytes, passphrase: Optional[bytes]) -> Optional[Any]:
+        """Try PEM then OpenSSH loaders; return the key only if it is Ed25519."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        try_formats = [
+            lambda: serialization.load_pem_private_key(key_data, password=passphrase),
+            lambda: serialization.load_ssh_private_key(key_data, password=passphrase),
+        ]
+        for loader in try_formats:
+            try:
+                obj = loader()
+                if isinstance(obj, Ed25519PrivateKey):
+                    return obj
+            except Exception:
+                continue
+        return None
+
+    async def _pubkey_read_challenge(self) -> Tuple[Optional[str], Optional[bytes]]:
+        """Read + parse ``AUTH:PK:CHALLENGE:<key_id>:<nonce>``; nonce is the raw bytes.
+
+        Returns (None, None) on any validation failure (wrong prefix, not
+        enough parts, or an invalid nonce encoding).
+        """
+        import base64
+
+        line = await self.reader.readline()
+        if not line.startswith(b"AUTH:PK:CHALLENGE:"):
+            self.logger.error(f"Unexpected challenge line: {line.decode(errors='ignore').strip()}")
+            return None, None
+        parts = line.decode(errors="ignore").strip().split(":")
+        # AUTH:PK:CHALLENGE:<key_id>:<nonce>
+        if len(parts) < 5:
+            self.logger.error("Malformed challenge response")
+            return None, None
+        chal_key_id = parts[3]
+        nonce_b64 = parts[4]
+        try:
+            return chal_key_id, base64.b64decode(nonce_b64)
+        except Exception:
+            self.logger.error("Invalid nonce encoding")
+            return None, None
+
+    async def _pubkey_send_response(self, chal_key_id: str, nonce_raw: bytes, priv: Any) -> None:
+        """Sign the nonce and send ``AUTH:PK:RESPONSE:<key_id>:<sig_b64>``."""
+        import base64
+
+        signature = priv.sign(nonce_raw)
+        sig_b64 = base64.b64encode(signature).decode()
+        resp = f"AUTH:PK:RESPONSE:{chal_key_id}:{sig_b64}\n"
+        self.writer.write(resp.encode())
+        await self.writer.drain()
+
+    async def _pubkey_read_result_lines(self) -> Tuple[bool, bytes]:
+        """Read up to 3 response lines; return (auth_ok, last_line).
+
+        Skips blank/banner lines, stops on ``AUTH:SUCCESS``, and breaks early
+        on a failure indicator. Stream end (b"") stops the loop.
+        """
+        auth_ok = False
+        last_line = b""
+        for _ in range(3):  # read up to 3 lines defensively
+            final_line = await self.reader.readline()
+            if not final_line:
+                break
+            last_line = final_line
+            if final_line.startswith(b"AUTH:SUCCESS"):
+                auth_ok = True
+                break
+            # Skip empty / banner lines
+            if final_line.strip() == b"":
+                continue
+            # If we see an auth failure indicator, break early
+            if b"AUTH:FAILED" in final_line or b"Authentication failed" in final_line:
+                break
+        return auth_ok, last_line
 
     async def list_ports(self) -> List[Any]:
         """Retrieve the list of available port or resource identifiers.
