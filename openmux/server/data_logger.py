@@ -215,93 +215,119 @@ class DataLogger:
                 if path is None:
                     # Log dir is not writable (issue #42); already warned once.
                     continue
-                fmt = self._resolve_format_for_port(ev.port, port_obj)
-                # Cache open handles per-path
-                fh = self._files.get(str(path))
-                if fh is None:
-                    # Open in append text mode
-                    fh = open(path, "a", encoding="utf-8")
-                    self._files[str(path)] = fh
-
-                if fmt == "jsonl":
-                    # JSONL record with base64-safe hex plus ascii preview
-                    ascii_preview = "".join(chr(b) if 32 <= b <= 126 else "." for b in ev.data[:128])
-                    rec = {
-                        "ts": datetime.utcfromtimestamp(ev.ts).isoformat() + "Z",
-                        "port": ev.port,
-                        "dir": ev.direction,
-                        "size": ev.size,
-                        "client": ev.client_id,
-                        "hex": ev.data.hex(),
-                        "ascii": ascii_preview,
-                    }
-                    # For meta events, expose event name at top-level
-                    if ev.direction == "meta" and ev.meta and isinstance(ev.meta, dict):
-                        evt = ev.meta.get("event")
-                        if evt:
-                            rec["event"] = evt
-                    if ev.meta:
-                        rec["meta"] = ev.meta
-                    fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
-                    fh.flush()
+                fh = self._open_file_for(path)
+                if self._resolve_format_for_port(ev.port, port_obj) == "jsonl":
+                    self._write_jsonl_record(fh, ev)
                 else:
-                    # Line-oriented format: buffer until a newline is observed.
-                    key = str(path)
-                    buf = self._line_buffers.get(key)
-                    if buf is None:
-                        buf = bytearray()
-                        self._line_buffers[key] = buf
-                    if ev.direction == "meta":
-                        # Emit a single meta line immediately (no buffering)
-                        ts = datetime.utcfromtimestamp(ev.ts).strftime("%Y-%m-%dT%H:%M:%SZ")
-                        template = self._resolve_line_template_for_port(ev.port, port_obj)
-                        evt = None
-                        extras = ""
-                        try:
-                            if ev.meta and isinstance(ev.meta, dict):
-                                evt = ev.meta.get("event")
-                                extras = " ".join(f"{k}={v}" for k, v in ev.meta.items() if k != "event")
-                        except Exception:
-                            # justification: optional event metadata; the record still lands
-                            pass
-                        text = f"[event] {evt or 'meta'}" + (f" {extras}" if extras else "")
-                        line = template.format(
-                            ts=ts,
-                            port=ev.port,
-                            dir=ev.direction,
-                            client=(ev.client_id or ""),
-                            text=text,
-                        )
-                        fh.write(line + "\n")
-                        fh.flush()
-                    else:
-                        buf.extend(ev.data)
-                        while True:
-                            try:
-                                idx = buf.index(0x0A)  # '\n'
-                            except ValueError:
-                                break
-                            raw_line = bytes(buf[:idx])
-                            del buf[: idx + 1]
-                            if raw_line.endswith(b"\r"):
-                                raw_line = raw_line[:-1]
-                            text = raw_line.decode("utf-8", errors="replace")
-                            ts = datetime.utcfromtimestamp(ev.ts).strftime("%Y-%m-%dT%H:%M:%SZ")
-                            template = self._resolve_line_template_for_port(ev.port, port_obj)
-                            line = template.format(
-                                ts=ts,
-                                port=ev.port,
-                                dir=ev.direction,
-                                client=(ev.client_id or ""),
-                                text=text,
-                            )
-                            fh.write(line + "\n")
-                            fh.flush()
+                    self._write_line_record(fh, str(path), ev, port_obj)
             except Exception:
                 # Best-effort logging; log traceback then drop
                 self.logger.error("DataLogger writer loop error", exc_info=True)
             finally:
                 queue.task_done()
+
+    def _open_file_for(self, path: Path) -> Any:
+        """Return a write handle for `path`, opening in append text mode if absent.
+
+        Handles are cached per path string so the loop does not reopen per event.
+        """
+        fh = self._files.get(str(path))
+        if fh is None:
+            fh = open(path, "a", encoding="utf-8")
+            self._files[str(path)] = fh
+        return fh
+
+    def _write_jsonl_record(self, fh: Any, ev: Any) -> None:
+        """Write one JSONL record for `ev` to `fh`, then flush.
+
+        Emits hex plus an ascii preview; for `meta` events the event name is
+        lifted to a top-level `event` key.
+        """
+        # JSONL record with base64-safe hex plus ascii preview
+        ascii_preview = "".join(chr(b) if 32 <= b <= 126 else "." for b in ev.data[:128])
+        rec = {
+            "ts": datetime.utcfromtimestamp(ev.ts).isoformat() + "Z",
+            "port": ev.port,
+            "dir": ev.direction,
+            "size": ev.size,
+            "client": ev.client_id,
+            "hex": ev.data.hex(),
+            "ascii": ascii_preview,
+        }
+        # For meta events, expose event name at top-level
+        if ev.direction == "meta" and ev.meta and isinstance(ev.meta, dict):
+            evt = ev.meta.get("event")
+            if evt:
+                rec["event"] = evt
+        if ev.meta:
+            rec["meta"] = ev.meta
+        fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        fh.flush()
+
+    def _write_line_record(self, fh: Any, key: str, ev: Any, port_obj: Any) -> None:
+        """Write one line-oriented record for `ev`, buffering until a newline.
+
+        `meta` events emit a single line immediately (no buffering); data events
+        append to the per-path line buffer and flush every complete line.
+        """
+        # Line-oriented format: buffer until a newline is observed.
+        buf = self._line_buffers.get(key)
+        if buf is None:
+            buf = bytearray()
+            self._line_buffers[key] = buf
+        if ev.direction == "meta":
+            self._write_meta_line(fh, ev, port_obj)
+        else:
+            buf.extend(ev.data)
+            while True:
+                try:
+                    idx = buf.index(0x0A)  # '\n'
+                except ValueError:
+                    break
+                raw_line = bytes(buf[:idx])
+                del buf[: idx + 1]
+                if raw_line.endswith(b"\r"):
+                    raw_line = raw_line[:-1]
+                text = raw_line.decode("utf-8", errors="replace")
+                ts = datetime.utcfromtimestamp(ev.ts).strftime("%Y-%m-%dT%H:%M:%SZ")
+                template = self._resolve_line_template_for_port(ev.port, port_obj)
+                line = template.format(
+                    ts=ts,
+                    port=ev.port,
+                    dir=ev.direction,
+                    client=(ev.client_id or ""),
+                    text=text,
+                )
+                fh.write(line + "\n")
+                fh.flush()
+
+    def _write_meta_line(self, fh: Any, ev: Any, port_obj: Any) -> None:
+        """Emit a single `[event]` line for a `meta` event, then flush.
+
+        The `event` key is split from the remaining `k=v` metadata into the
+        line's `text` slot.
+        """
+        ts = datetime.utcfromtimestamp(ev.ts).strftime("%Y-%m-%dT%H:%M:%SZ")
+        template = self._resolve_line_template_for_port(ev.port, port_obj)
+        evt = None
+        extras = ""
+        try:
+            if ev.meta and isinstance(ev.meta, dict):
+                evt = ev.meta.get("event")
+                extras = " ".join(f"{k}={v}" for k, v in ev.meta.items() if k != "event")
+        except Exception:
+            # justification: optional event metadata; the record still lands
+            pass
+        text = f"[event] {evt or 'meta'}" + (f" {extras}" if extras else "")
+        line = template.format(
+            ts=ts,
+            port=ev.port,
+            dir=ev.direction,
+            client=(ev.client_id or ""),
+            text=text,
+        )
+        fh.write(line + "\n")
+        fh.flush()
 
     def _ensure_task(self) -> None:
         """Ensure the writer queue and task are bound to the running event loop.
