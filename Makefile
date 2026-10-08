@@ -275,8 +275,9 @@ test-coverage: venv-dev
 # Run linters
 lint: venv-dev
 	$(call print_status,"Running linters...")
-	@# Hard-fail gate (ruff): syntax errors, unused imports, bad imports, undefined names.
-	$(PYTHON_VENV) -m ruff check --select E9,F401,F63,F7,F82 openmux/
+	@# Hard-fail gate (ruff): syntax errors, unused imports, bad imports, undefined names,
+	@# unused local variables.
+	$(PYTHON_VENV) -m ruff check --select E9,F401,F63,F7,F82,F841 openmux/
 	@# Advisory style pass (flake8): findings are shown but never fail the build.
 	$(PYTHON_VENV) -m flake8 openmux/ --exit-zero
 	$(call print_success,"Linting completed")
@@ -309,7 +310,7 @@ format-check: venv-dev
 ci: venv-dev
 	$(call print_status,"Running CI checks...")
 	$(PYTHON_VENV) -m pytest -v --cov=openmux --cov-report=term-missing
-	$(PYTHON_VENV) -m ruff check --select E9,F401,F63,F7,F82 openmux/ tests/
+	$(PYTHON_VENV) -m ruff check --select E9,F401,F63,F7,F82,F841 openmux/ tests/
 	$(call print_success,"CI checks completed")
 	$(call print_success,"CI checks completed")
 
