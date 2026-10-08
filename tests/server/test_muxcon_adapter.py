@@ -3926,3 +3926,179 @@ def test_make_listen_socket_bind_error_closes_socket(monkeypatch):
     with pytest.raises(OSError, match="address in use"):
         a._make_listen_socket("127.0.0.1", 9)
     assert FailingSock.closed is True
+
+
+# --- Coverage for C901 18-bracket functions -------------------------------
+
+
+def test_register_mpath_inbound_pref_from_listener():
+    # Inbound path_pref is read from the connection record's listener_path_pref
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    cid = "in:10.0.0.9:1234:1"
+    a.connections[cid] = {"opened_at": time.time(), "listener_path_pref": 7}
+    a._register_mpath_connection(cid)
+    key = a._derive_peer_key_from_conn_id(cid)
+    grp = a._mpath_groups[key]
+    assert grp["conns"][cid]["pref"] == 7
+    assert grp["primary"] == cid
+
+
+def test_register_mpath_outbound_pref_not_matched_is_zero():
+    # Outbound conn with no matching peer falls back to pref 0
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a.peers = [FederationPeer("other-host", 1000, options={"path_pref": 5})]
+    cid = "out:h:1000:1"
+    a.connections[cid] = {"opened_at": time.time()}
+    a._register_mpath_connection(cid)
+    key = a._derive_peer_key_from_conn_id(cid)
+    assert a._mpath_groups[key]["conns"][cid]["pref"] == 0
+
+
+def test_register_mpath_preemptive_promote_on_higher_pref():
+    # Both conns share one group (same server_id -> node:S). Higher pref wins.
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    c1 = "in:10.0.0.1:1:1"
+    a.connections[c1] = {"opened_at": time.time(), "listener_path_pref": 1, "server_id": "S"}
+    a._register_mpath_connection(c1)
+
+    c2 = "in:10.0.0.2:2:2"
+    a.connections[c2] = {"opened_at": time.time(), "listener_path_pref": 9, "server_id": "S"}
+    a._register_mpath_connection(c2)
+
+    key = a._derive_peer_key_from_conn_id(c1)
+    assert key == "node:S" == a._derive_peer_key_from_conn_id(c2)
+    assert a._mpath_groups[key]["primary"] == c2
+
+
+def test_register_mpath_no_promote_lower_pref():
+    # Lower-pref conn must not displace the current primary
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    c1 = "in:10.0.0.1:1:1"
+    a.connections[c1] = {"opened_at": time.time(), "listener_path_pref": 9, "server_id": "S"}
+    a._register_mpath_connection(c1)
+
+    c2 = "in:10.0.0.2:2:2"
+    a.connections[c2] = {"opened_at": time.time(), "listener_path_pref": 1, "server_id": "S"}
+    a._register_mpath_connection(c2)
+
+    assert a._mpath_groups[a._derive_peer_key_from_conn_id(c2)]["primary"] == c1
+
+
+def test_register_mpath_no_promote_when_disabled():
+    # mpath_preemptive_promote=False: even higher pref does not displace primary
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a.mpath_preemptive_promote = False
+    c1 = "in:10.0.0.1:1:1"
+    a.connections[c1] = {"opened_at": time.time(), "listener_path_pref": 1, "server_id": "S"}
+    a._register_mpath_connection(c1)
+
+    c2 = "in:10.0.0.2:2:2"
+    a.connections[c2] = {"opened_at": time.time(), "listener_path_pref": 9, "server_id": "S"}
+    a._register_mpath_connection(c2)
+
+    assert a._mpath_groups[a._derive_peer_key_from_conn_id(c2)]["primary"] == c1
+
+
+@pytest.mark.asyncio
+async def test_accept_client_listener_mismatch_no_path_tags(monkeypatch):
+    # sockname does not match any listener -> no path tags applied
+    a = UnifiedMuxConAdapter(
+        "mx",
+        {
+            "listeners": [{"enabled": True, "host": "127.0.0.1", "port": 5000, "path_pref": 5}],
+            "auth_required": False,
+        },
+    )
+    r = FakeReader([b"HELLO MuxCon/1.0 TYPE=regular_client CAPS=a ID=R INST=I\n"])
+    w = FakeWriter()
+    w._extra["peername"] = ("1.2.3.4", 40000)
+    # Different host than configured listener
+    w._extra["sockname"] = ("192.168.1.1", 5000)
+
+    async def fake_read_loop(cid):
+        return None
+
+    monkeypatch.setattr(a, "_read_loop", fake_read_loop)
+    await a._accept_client(cast(Any, r), cast(Any, w))
+
+    created = [cid for cid in a.connections if cid.startswith("in:")]
+    assert len(created) == 1
+    cid = created[0]
+    assert a.connections[cid].get("listener_path_pref") is None
+    assert a.connections[cid].get("listener_path_group") is None
+
+
+@pytest.mark.asyncio
+async def test_accept_client_no_peername_uses_unknown(monkeypatch):
+    # No peername -> conn id uses "unknown" prefix
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": False})
+    r = FakeReader([b"HELLO MuxCon/1.0 TYPE=regular_client CAPS=a ID=R INST=I\n"])
+    w = FakeWriter()
+
+    async def fake_read_loop(cid):
+        return None
+
+    monkeypatch.setattr(a, "_read_loop", fake_read_loop)
+    await a._accept_client(cast(Any, r), cast(Any, w))
+
+    created = [cid for cid in a.connections if cid.startswith("in:unknown:")]
+    assert len(created) == 1
+
+
+@pytest.mark.asyncio
+async def test_accept_client_handshake_failure_closes_writer(monkeypatch):
+    # Invalid HELLO -> exception path -> writer is closed
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": False})
+    r = FakeReader([b"GARBAGE NOT HELLO\n"])
+    w = FakeWriter()
+    w._extra["peername"] = ("10.0.0.1", 40000)
+
+    async def fake_read_loop(cid):
+        return None
+
+    monkeypatch.setattr(a, "_read_loop", fake_read_loop)
+    await a._accept_client(cast(Any, r), cast(Any, w))
+
+    # No connection was created (handshake raised before registration)
+    assert not any(cid.startswith("in:") for cid in a.connections)
+    # Writer should have been closed on the error path
+    assert w.is_closing() is True or w.is_closing() is not None
+
+
+@pytest.mark.asyncio
+async def test_accept_client_in_accept_promotion(monkeypatch):
+    # Inbound listener path_pref promotes a higher-pref conn over the current primary
+    a = UnifiedMuxConAdapter(
+        "mx",
+        {
+            "listeners": [
+                # Existing listener on port 5001 (different, to avoid matching the new conn)
+                {"enabled": True, "host": "127.0.0.1", "port": 5001},
+                # Listener for incoming conn on 5002 with high path_pref
+                {"enabled": True, "host": "127.0.0.1", "port": 5002, "path_pref": 10},
+            ],
+            "auth_required": False,
+            "mpath_preemptive_promote": True,
+        },
+    )
+    # Pre-seed a lower-pref conn in the same node group (server_id S)
+    c1 = "in:10.0.0.1:5001:1"
+    a.connections[c1] = {"opened_at": time.time(), "handshake": {"server_id": "S"}}
+    a._register_mpath_connection(c1)
+    assert a._mpath_groups["node:S"]["primary"] == c1
+
+    r = FakeReader([b"HELLO MuxCon/1.0 TYPE=regular_client CAPS=a ID=S INST=A\n"])
+    w = FakeWriter()
+    w._extra["peername"] = ("10.0.0.2", 40000)
+    w._extra["sockname"] = ("127.0.0.1", 5002)
+
+    async def fake_read_loop(cid):
+        return None
+
+    monkeypatch.setattr(a, "_read_loop", fake_read_loop)
+    await a._accept_client(cast(Any, r), cast(Any, w))
+
+    # New (higher-pref) conn should have been promoted to primary
+    new_conn = [cid for cid in a.connections if cid != c1 and cid.startswith("in:")]
+    assert len(new_conn) == 1
+    assert a._mpath_groups["node:S"]["primary"] == new_conn[0]

@@ -3128,6 +3128,64 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         return {}
 
     # Connection handling
+    def _resolve_listener_path_for_sockname(self, sockname: Optional[Tuple[Any, ...]]) -> Tuple[Optional[Any], Optional[Any]]:
+        """Map a listening socket address to its configured path tags.
+
+        Returns ``(path_pref, path_group)`` for the first enabled listener whose
+        host and port match ``sockname``, or ``(None, None)`` if there is no
+        match. Best-effort: a malformed listener config yields ``(None, None)``.
+        """
+        path_pref = None
+        path_group = None
+        if not sockname:
+            return path_pref, path_group
+        lhost, lport = sockname[0], sockname[1]
+        try:
+            for lconf in self.listeners_conf:
+                if not lconf.get("enabled"):
+                    continue
+                lport_conf = lconf.get("port")
+                if lport_conf is None:
+                    continue
+                if lconf.get("host") in ("0.0.0.0", "::", lhost) and int(lport_conf) == int(lport):
+                    path_pref = lconf.get("path_pref")
+                    path_group = lconf.get("path_group")
+                    break
+        except Exception:  # justification: listener metadata mapping best-effort; proceed without path tags
+            pass
+        return path_pref, path_group
+
+    async def _annotate_and_promote_inbound(self, conn_id: str, path_pref: Optional[Any], path_group: Optional[Any]) -> None:
+        """Store listener path metadata on a new inbound connection.
+
+        If the connection already belongs to an mpath group and the incoming
+        ``path_pref`` beats the current primary (with preemptive promotion on),
+        the primary is swapped. All bookkeeping is best-effort and never raises.
+        """
+        if conn_id not in self.connections:
+            return
+        conn = self.connections[conn_id]
+        conn["listener_path_pref"] = path_pref
+        conn["listener_path_group"] = path_group
+        if path_pref is None:
+            return
+        try:
+            key = self._derive_peer_key_from_conn_id(conn_id)
+        except Exception:  # justification: optional multipath bookkeeping; skip promotion
+            return
+        grp = self._mpath_groups.get(key)
+        if not grp or conn_id not in grp.get("conns", {}):
+            return
+        grp["conns"][conn_id]["pref"] = int(path_pref)
+        if not (self.mpath_preemptive_promote and grp.get("primary") and grp.get("primary") != conn_id):
+            return
+        cur_meta = grp["conns"].get(grp["primary"]) or {}
+        new_pref = int(path_pref)
+        cur_pref = int(cur_meta.get("pref", 0))
+        if new_pref > cur_pref:
+            grp["primary"] = conn_id
+            self.logger.info(f"[MPATH] Inbound path_pref promoted {conn_id} for {key}")
+
     async def _accept_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Accept inbound connection and perform server-side handshake.
 
@@ -3139,23 +3197,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         peer = writer.get_extra_info("peername")
         sockname = writer.get_extra_info("sockname")
-        path_pref = None
-        path_group = None
-        if sockname:
-            lhost, lport = sockname[0], sockname[1]
-            try:
-                for lconf in self.listeners_conf:
-                    if not lconf.get("enabled"):
-                        continue
-                    lport_conf = lconf.get("port")
-                    if lport_conf is None:
-                        continue
-                    if lconf.get("host") in ("0.0.0.0", "::", lhost) and int(lport_conf) == int(lport):
-                        path_pref = lconf.get("path_pref")
-                        path_group = lconf.get("path_group")
-                        break
-            except Exception:  # justification: listener metadata mapping best-effort; proceed without path tags
-                pass
+        path_pref, path_group = self._resolve_listener_path_for_sockname(sockname)
         conn_id = f"in:{peer[0]}:{peer[1]}:{int(time.time())}" if peer else f"in:unknown:{int(time.time())}"
         self.logger.info(
             "Incoming MuxCon connection from %s -> %s local=%s path_pref=%s path_group=%s",
@@ -3167,38 +3209,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         )
         try:
             await self._perform_server_handshake(reader, writer, conn_id)
-            # Annotate connection with listener path metadata if available
             try:
-                if conn_id in self.connections:
-                    self.connections[conn_id]["listener_path_pref"] = path_pref
-                    self.connections[conn_id]["listener_path_group"] = path_group
-                    # Propagate inbound listener path_pref into mpath group if already registered
-                    try:
-                        if path_pref is not None:
-                            key = self._derive_peer_key_from_conn_id(conn_id)
-                            grp = self._mpath_groups.get(key)
-                            if grp and conn_id in grp.get("conns", {}):
-                                grp["conns"][conn_id]["pref"] = int(path_pref)
-                                # Optional immediate preemptive promotion if better than current
-                                if self.mpath_preemptive_promote and grp.get("primary") and grp.get("primary") != conn_id:
-                                    cur_meta = grp["conns"].get(grp["primary"]) or {}
-                                    new_pref = int(path_pref)
-                                    cur_pref = int(cur_meta.get("pref", 0))
-                                    if new_pref > cur_pref:
-                                        grp["primary"] = conn_id
-                                        self.logger.info(
-                                            f"[MPATH] Inbound path_pref promoted {conn_id} over {cur_meta and grp.get('primary')} for {key}"
-                                        )
-                    except Exception:
-                        pass
+                await self._annotate_and_promote_inbound(conn_id, path_pref, path_group)
             except Exception:  # justification: annotate listener path metadata best-effort; non-critical
                 pass
             # After handshake, if authenticated or auth not required, request remote ports
-            try:
-                if self._is_conn_authenticated(conn_id):
+            if self._is_conn_authenticated(conn_id):
+                try:
                     await self._request_remote_ports(conn_id)
-            except Exception as e:
-                self.logger.warning("Failed to request remote ports from inbound peer %s: %s", conn_id, e, exc_info=True)
+                except Exception as e:
+                    self.logger.warning("Failed to request remote ports from inbound peer %s: %s", conn_id, e, exc_info=True)
             # Start reader loop
             task = asyncio.create_task(self._read_loop(conn_id))
             self._tasks.append(task)
@@ -5710,6 +5730,69 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception as e:
             self.logger.debug("Rollover check failed for %s: %s", conn_id, e, exc_info=True)
 
+    def _mpath_derive_pref(self, conn_id: str) -> int:
+        """Derive a connection's path preference value.
+
+        Outbound connections take ``path_pref`` from the matching peer
+        configuration; inbound connections take it from the listener's
+        ``listener_path_pref``. Any lookup failure yields ``0``.
+        """
+        if conn_id.startswith("out:"):
+            try:
+                parts = conn_id.split(":")
+                if len(parts) >= 4:
+                    host = parts[1]
+                    port = int(parts[2])
+                    for peer in self.peers:
+                        if peer.host == host and peer.port == port:
+                            return int(peer.options.get("path_pref", 0))
+            except Exception:  # justification: preemptive promotion evaluation is advisory; ignore failures
+                pass
+            return 0
+        if conn_id.startswith("in:"):
+            try:
+                lpp = self.connections.get(conn_id, {}).get("listener_path_pref")
+                if lpp is not None:
+                    return int(lpp)
+            except Exception:
+                # justification: optional multipath bookkeeping; the default preference applies
+                pass
+        return 0
+
+    def _mpath_apply_promotion(self, grp: Dict[str, Any], key: str, conn_id: str) -> None:
+        """Preemptively promote ``conn_id`` to primary when it clearly wins.
+
+        With preemptive promotion on and a current primary, swap the primary to
+        the new connection if its preference is strictly higher. Best-effort:
+        failures are ignored so a malformed group cannot interrupt registration.
+        """
+        if not self.mpath_preemptive_promote:
+            return
+        current = grp.get("primary")
+        if not current or current == conn_id:
+            return
+        cur_meta = grp["conns"].get(current)
+        new_meta = grp["conns"].get(conn_id)
+        try:
+            cur_pref = int(cur_meta.get("pref", 0)) if cur_meta else 0
+            new_pref = int(new_meta.get("pref", 0)) if new_meta else 0
+        except Exception:  # justification: per-iteration evaluation should not abort failover loop
+            return
+        if new_pref > cur_pref:
+            grp["primary"] = conn_id
+            self.logger.info(
+                "[MPATH] Preemptive promote %s over %s (pref %s>%s) for %s", conn_id, current, new_pref, cur_pref, key
+            )
+
+    def _mpath_log_registered(self, conn_id: str, key: str, grp: Dict[str, Any]) -> None:
+        """Log a registration, falling back if the formatted message fails."""
+        try:
+            self.logger.debug(
+                f"[MPATH] Registered {conn_id} in group {key}; primary={grp.get('primary')} members={list(grp['conns'].keys())}"
+            )
+        except Exception:
+            self.logger.debug(f"Registered {conn_id} in multipath group {key} primary={grp.get('primary')}")
+
     def _register_mpath_connection(self, conn_id: str) -> None:
         """Register a connection in its multipath group and choose / update primary.
 
@@ -5728,73 +5811,21 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         key = self._derive_peer_key_from_conn_id(conn_id)
         grp = self._mpath_groups.setdefault(key, {"conns": OrderedDict(), "primary": None, "rr_index": 0})
-        opened_at = 0.0
         try:
             opened_at = float(self.connections.get(conn_id, {}).get("opened_at", 0.0))
         except Exception:  # justification: opened_at conversion is advisory; treat as 0.0
-            pass
-        # Derive path preference (outbound via peer config, inbound via listener)
-        pref = 0
-        if conn_id.startswith("out:"):
-            try:
-                parts = conn_id.split(":")
-                if len(parts) >= 4:
-                    host = parts[1]
-                    port = int(parts[2])
-                    for peer in self.peers:
-                        if peer.host == host and peer.port == port:
-                            pref = int(peer.options.get("path_pref", 0))
-                            break
-            except Exception:  # justification: preemptive promotion evaluation is advisory; ignore failures
-                pass
-        elif conn_id.startswith("in:"):
-            try:
-                lpp = self.connections.get(conn_id, {}).get("listener_path_pref")
-                if lpp is not None:
-                    pref = int(lpp)
-            except Exception:
-                # justification: optional multipath bookkeeping; the default preference applies
-                pass
+            opened_at = 0.0
+        pref = self._mpath_derive_pref(conn_id)
         now_ts = time.time()
         grp["conns"][conn_id] = {"opened_at": opened_at, "pref": pref, "last_seen": now_ts, "last_rx_seen": now_ts}
         # Choose primary if none set
         if not grp.get("primary"):
             grp["primary"] = conn_id
-            try:
-                self.logger.debug(
-                    f"[MPATH] Registered {conn_id} in group {key}; primary={grp.get('primary')} members={list(grp['conns'].keys())}"
-                )
-            except Exception:
-                self.logger.debug(f"Registered {conn_id} in multipath group {key} primary={grp.get('primary')}")
+            self._mpath_log_registered(conn_id, key, grp)
             return
-        # Preemptive promotion check: promote immediately if higher preference than current
-        if self.mpath_preemptive_promote:
-            current = grp.get("primary")
-            if current and current != conn_id:
-                cur_meta = grp["conns"].get(current)
-                new_meta = grp["conns"].get(conn_id)
-                try:
-                    cur_pref = int(cur_meta.get("pref", 0)) if cur_meta else 0
-                    new_pref = int(new_meta.get("pref", 0)) if new_meta else 0
-                    if new_pref > cur_pref:
-                        grp["primary"] = conn_id
-                        self.logger.info(
-                            "[MPATH] Preemptive promote %s over %s (pref %s>%s) for %s",
-                            conn_id,
-                            current,
-                            new_pref,
-                            cur_pref,
-                            key,
-                        )
-                except Exception:  # justification: per-iteration evaluation should not abort failover loop
-                    pass
-        try:
-            self.logger.debug(
-                f"[MPATH] Registered {conn_id} in group {key}; primary={grp.get('primary')} members={list(grp['conns'].keys())}"
-            )
-        except Exception:
-            self.logger.debug(f"Registered {conn_id} in multipath group {key} primary={grp.get('primary')}")
-        # Keep per-connection proxy view in sync
+        # Otherwise check preemptive promotion if enabled, then update proxy view
+        self._mpath_apply_promotion(grp, key, conn_id)
+        self._mpath_log_registered(conn_id, key, grp)
         try:
             self._refresh_conn_proxies()
         except Exception:
