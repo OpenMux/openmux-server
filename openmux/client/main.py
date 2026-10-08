@@ -15,6 +15,64 @@ from .console import ConsoleUI
 from .logging_manager import ClientLoggingManager, print_client_info
 
 
+def _candidate_config_paths() -> List[str]:
+    """Build the ordered list of default config paths to scan.
+
+    Order matches :func:`_discover_default_config_path`: current dir, XDG
+    config, macOS Application Support, home dotfiles, nested home dir and the
+    system locations. Uses only environment and cwd (no instance state).
+    """
+    names = [
+        "client",
+        "openmux_client",
+        "openmux-client",
+        ".client",
+        ".openmux_client",
+        ".openmux-client",
+    ]
+    candidates: List[str] = []
+
+    for d, bases in (
+        (os.getcwd(), names),
+        (
+            os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"), "openmux"),
+            ["client"],
+        ),
+        (os.path.join(os.path.expanduser("~"), "Library", "Application Support", "OpenMux"), ["client"]),
+        (os.path.expanduser("~"), [".openmux_client", ".openmux-client"]),
+        (os.path.join(os.path.expanduser("~"), ".openmux"), ["client"]),
+        ("/etc/openmux", ["client"]),
+        ("/usr/local/etc/openmux", ["client"]),
+    ):
+        for base in bases:
+            for ext in ("yaml", "yml", "json"):
+                candidates.append(os.path.join(d, f"{base}.{ext}"))
+    return candidates
+
+
+def _discover_default_config_path() -> Optional[str]:
+    """Locate a default client config file using common search paths.
+
+    Search order (first hit wins):
+        1. Environment `OPENMUX_CLIENT_CONFIG`
+        2. Current directory: `client.(yaml|yml|json)`, `openmux_client.*`, `openmux-client.*`, and dotfile variants
+        3. XDG config: `$XDG_CONFIG_HOME/openmux/client.*` or `~/.config/openmux/client.*`
+        4. macOS: `~/Library/Application Support/OpenMux/client.*`
+        5. Home dotfiles: `~/.openmux_client.*`, `~/.openmux-client.*`, `~/.openmux/client.*`
+        6. System: `/etc/openmux/client.*`, `/usr/local/etc/openmux/client.*`
+
+    Returns:
+        Path string if found else None.
+    """
+    env_path = os.environ.get("OPENMUX_CLIENT_CONFIG")
+    if env_path and os.path.exists(env_path):
+        return env_path
+    for p in _candidate_config_paths():
+        if os.path.exists(p):
+            return p
+    return None
+
+
 class OpenMuxClient:
     """Main client class for OpenMux"""
 
@@ -46,76 +104,6 @@ class OpenMuxClient:
         self.connections = {}
 
     # Client-side cache removed: always fetch live from server
-
-    def _discover_default_config_path(self) -> Optional[str]:
-        """Locate a default client config file using common search paths.
-
-        Search order (first hit wins):
-            1. Environment `OPENMUX_CLIENT_CONFIG`
-            2. Current directory: `client.(yaml|yml|json)`, `openmux_client.*`, `openmux-client.*`, and dotfile variants
-            3. XDG config: `$XDG_CONFIG_HOME/openmux/client.*` or `~/.config/openmux/client.*`
-            4. macOS: `~/Library/Application Support/OpenMux/client.*`
-            5. Home dotfiles: `~/.openmux_client.*`, `~/.openmux-client.*`, `~/.openmux/client.*`
-            6. System: `/etc/openmux/client.*`, `/usr/local/etc/openmux/client.*`
-
-        Returns:
-            Path string if found and readable else None.
-        """
-        env_path = os.environ.get("OPENMUX_CLIENT_CONFIG")
-        if env_path and os.path.exists(env_path):
-            return env_path
-
-        def candidates_in_dir(d: str, names: List[str]) -> List[str]:
-            paths: List[str] = []
-            for base in names:
-                for ext in ("yaml", "yml", "json"):
-                    paths.append(os.path.join(d, f"{base}.{ext}"))
-            return paths
-
-        names = [
-            "client",
-            "openmux_client",
-            "openmux-client",
-            ".client",
-            ".openmux_client",
-            ".openmux-client",
-        ]
-
-        # 2) Current directory
-        for p in candidates_in_dir(os.getcwd(), names):
-            if os.path.exists(p):
-                return p
-
-        # 3) XDG config
-        xdg_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-        xdg_dir = os.path.join(xdg_home, "openmux")
-        for p in candidates_in_dir(xdg_dir, ["client"]):
-            if os.path.exists(p):
-                return p
-
-        # 4) macOS Application Support
-        mac_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "OpenMux")
-        for p in candidates_in_dir(mac_dir, ["client"]):
-            if os.path.exists(p):
-                return p
-
-        # 5) Home dotfiles
-        home = os.path.expanduser("~")
-        for p in candidates_in_dir(home, [".openmux_client", ".openmux-client"]):
-            if os.path.exists(p):
-                return p
-        # Nested folder in home
-        for p in candidates_in_dir(os.path.join(home, ".openmux"), ["client"]):
-            if os.path.exists(p):
-                return p
-
-        # 6) System locations
-        for sysdir in ("/etc/openmux", "/usr/local/etc/openmux"):
-            for p in candidates_in_dir(sysdir, ["client"]):
-                if os.path.exists(p):
-                    return p
-
-        return None
 
     def _read_config_file(self, path: str) -> Dict[str, Any]:
         """Read a YAML or JSON config file safely.
@@ -198,7 +186,7 @@ class OpenMuxClient:
                 self.logger.error("Config path not found: %s", self.config_path)
         # 2) Env / default discovery
         if not path:
-            path = self._discover_default_config_path()
+            path = _discover_default_config_path()
 
         if path:
             loaded_config = self._read_config_file(path)
