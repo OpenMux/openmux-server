@@ -24,7 +24,7 @@ import os
 import sys
 import termios
 import tty
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .adapters import BaseClientAdapter
 
@@ -596,84 +596,112 @@ class ConsoleUI:
     async def _power_menu(self):
         """Interactive per-console power (PDU) menu.
 
-        Mirrors the telnet/SSH listeners' `p` item: it lists ONLY this console's
-        power feeds numbered one per line with an on/off tag; a number toggles
-        that feed, `a` toggles every feed, and Enter leaves (printing
-        `[EXITING POWER]`). Switches are a server round-trip via OMXCTRL power
-        frames (the server authorizes + switches). While the menu is open the
-        console is frozen (keyboard forwarding pauses) but the background read
-        loop keeps delivering server data; the menu waits for the reply the
-        adapter captures and for the stream to settle, so the live `[POWER]`
-        notice renders before the list re-renders.
+        Lists only this console's feeds with on/off tags; a number toggles
+        that feed, ``a`` toggles every feed, and Enter leaves. Switches are a
+        server round-trip; the menu waits for the reply and a settled stream.
+        """
+        port_name = await self._power_menu_feed_check()
+        if port_name is None:
+            return
+        self._stream_exclusive = True
+        try:
+            feeds = await self._power_menu_load_feeds(port_name)
+            if feeds is None:
+                return
+            while True:
+                feeds = await self._power_menu_handle_entry(port_name, feeds)
+                if feeds is None:
+                    return
+        finally:
+            self._stream_exclusive = False
+
+    async def _power_menu_feed_check(self) -> Optional[str]:
+        """Check power control is available + a port is attached.
+
+        Prints a notice and returns None when the connection lacks power
+        methods or no port is attached (the caller bails silently). On
+        success returns the attached port name so the menu knows what to
+        address.
         """
         conn = self.connection
         if not (hasattr(conn, "request_power_feeds") and hasattr(conn, "switch_power_outlet")):
             sys.stdout.write("\r\n[Power control is not supported by this connection]\r\n")
             sys.stdout.flush()
-            return
+            return None
         port_name = getattr(conn, "current_port", None) or getattr(conn, "port_name", None)
         if not port_name:
             sys.stdout.write("\r\n[Power needs an attached console (CONNECT first)]\r\n")
             sys.stdout.flush()
-            return
+            return None
+        return port_name
 
-        self._stream_exclusive = True
-        try:
-            if not await conn.request_power_feeds():
-                sys.stdout.write("\r\n[POWER: could not send the feed request]\r\n")
-                sys.stdout.flush()
-                return
-            reply = await self._await_power_reply()
-            if not reply:
-                if not conn.is_connected:
-                    sys.stdout.write("\r\n[POWER: server closed the connection]\r\n")
-                else:
-                    sys.stdout.write("\r\n[POWER: power management is not configured]\r\n")
-                sys.stdout.flush()
-                return
-            if reply.get("type") != "power_feeds" or not reply.get("ok", True):
-                sys.stdout.write("\r\n[POWER: " + str(reply.get("error") or "power management is not configured") + "]\r\n")
-                sys.stdout.flush()
-                return
-            feeds = reply.get("feeds") or []
-            if not feeds:
-                sys.stdout.write(f"\r\n[POWER: {port_name} has no power feeds]\r\n")
-                sys.stdout.flush()
-                await self._read_power_line("> ")
-                sys.stdout.write("\r\n[EXITING POWER]\r\n")
-                sys.stdout.flush()
-                return
+    async def _power_menu_load_feeds(self, port_name: str) -> Optional[List[Dict[str, Any]]]:
+        """Send feed request, wait for reply, validate.
 
-            sys.stdout.write(f"\r\nPOWER: feeds for {port_name}  (a number = toggle, a = all, Enter = exit)\r\n")
+        Returns the feeds list on success; returns None on any failure
+        (request failure, empty reply, wrong reply type, no feeds),
+        printing the appropriate notice in each case.
+        """
+        conn = self.connection
+        if not await conn.request_power_feeds():
+            sys.stdout.write("\r\n[POWER: could not send the feed request]\r\n")
             sys.stdout.flush()
-            while True:
-                for i, f in enumerate(feeds, 1):
-                    sys.stdout.write("%2d  %s\r\n" % (i, self._power_menu_line(f.get("ref"), f.get("on"))))
-                sys.stdout.flush()
-                entry = await self._read_power_line("> ")
-                if entry == "":
-                    sys.stdout.write("\r\n[EXITING POWER]\r\n")
-                    sys.stdout.flush()
-                    return
-                if entry in ("a", "all"):
-                    first = feeds[0].get("on")
-                    target = not bool(first)
-                    for f in feeds:
-                        await self._switch_power(feed=f, target=target, ref_after=f)
-                    continue
-                if entry.isdigit():
-                    idx = int(entry)
-                    if 1 <= idx <= len(feeds):
-                        f = feeds[idx - 1]
-                        await self._switch_power(feed=f, target=not bool(f.get("on")), ref_after=f)
-                    else:
-                        sys.stdout.write(f"\r\nPOWER: number out of range (1-{len(feeds)})\r\n")
-                        sys.stdout.flush()
-                    continue
-                sys.stdout.write("\r\nPOWER: enter a feed number, 'a' for all, or Enter to exit\r\n")
-                sys.stdout.flush()
-        finally:
-            self._stream_exclusive = False
+            return None
+        reply = await self._await_power_reply()
+        if not reply:
+            msg = (
+                "\r\n[POWER: server closed the connection]"
+                if not conn.is_connected
+                else "\r\n[POWER: power management is not configured]"
+            )
+            sys.stdout.write(msg + "\r\n")
+            sys.stdout.flush()
+            return None
+        if reply.get("type") != "power_feeds" or not reply.get("ok", True):
+            sys.stdout.write("\r\n[POWER: " + str(reply.get("error") or "power management is not configured") + "]\r\n")
+            sys.stdout.flush()
+            return None
+        feeds = reply.get("feeds") or []
+        if not feeds:
+            sys.stdout.write(f"\r\n[POWER: {port_name} has no power feeds]\r\n")
+            sys.stdout.flush()
+            await self._read_power_line("> ")
+            sys.stdout.write("\r\n[EXITING POWER]\r\n")
+            sys.stdout.flush()
+            return None
+        return feeds
+
+    async def _power_menu_handle_entry(self, port_name: str, feeds: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+        """Render the menu + handle one user entry.
+
+        Returns the updated feeds list to continue, or None to exit.
+        """
+        sys.stdout.write(f"\r\nPOWER: feeds for {port_name}  (a number = toggle, a = all, Enter = exit)\r\n")
+        for i, f in enumerate(feeds, 1):
+            sys.stdout.write("%2d  %s\r\n" % (i, self._power_menu_line(f.get("ref"), f.get("on"))))
+        sys.stdout.flush()
+        entry = await self._read_power_line("> ")
+        if entry == "":
+            sys.stdout.write("\r\n[EXITING POWER]\r\n")
+            sys.stdout.flush()
+            return None
+        if entry in ("a", "all"):
+            first = feeds[0].get("on")
+            target = not bool(first)
+            for f in feeds:
+                await self._switch_power(feed=f, target=target, ref_after=f)
+            return feeds
+        if entry.isdigit():
+            idx = int(entry)
+            if 1 <= idx <= len(feeds):
+                f = feeds[idx - 1]
+                await self._switch_power(feed=f, target=not bool(f.get("on")), ref_after=f)
+            else:
+                sys.stdout.write(f"\r\nPOWER: number out of range (1-{len(feeds)})\r\n")
+            return feeds
+        sys.stdout.write("\r\nPOWER: enter a feed number, 'a' for all, or Enter to exit\r\n")
+        sys.stdout.flush()
+        return feeds
 
     async def _switch_power(self, feed: Dict[str, Any], target: bool, ref_after: Optional[Dict[str, Any]] = None) -> None:
         """Toggle one console feed to `target`; show the reply's state.

@@ -363,25 +363,17 @@ class OpenMuxClient:
             self.logger.error("Failed to connect to %s:%s", host, port)
             return None
 
-        # Authenticate (priority: api key > pubkey > username/password)
-        if adapter_type == "websocket":
-            # Websocket raw adapter authenticates during handshake (Basic Auth); skip explicit auth
-            auth_success = True
-        else:
-            if api_key:
-                auth_success = await connection.authenticate_with_key(api_key)
-            elif pubkey_path and username and hasattr(connection, "authenticate_with_pubkey"):
-                auth_success = await getattr(connection, "authenticate_with_pubkey")(username, pubkey_path, pubkey_id)
-            elif username and password:
-                auth_success = await connection.authenticate_with_password(username, password)
-            else:
-                if not username:
-                    username = input("Username: ")
-                if pubkey_path and hasattr(connection, "authenticate_with_pubkey"):
-                    auth_success = await getattr(connection, "authenticate_with_pubkey")(username, pubkey_path, pubkey_id)
-                else:
-                    password = getpass.getpass("Password: ")
-                    auth_success = await connection.authenticate_with_password(username, password)
+        # Authenticate (priority: api key > pubkey > username/password; the
+        # interactive prompts fall back inside the helper).
+        auth_success = await self._authenticate_adapter(
+            connection,
+            adapter_type,
+            api_key,
+            username,
+            password,
+            pubkey_path,
+            pubkey_id,
+        )
 
         if not auth_success:
             self.logger.error("Authentication failed")
@@ -393,6 +385,53 @@ class OpenMuxClient:
         self.connections[connection_id] = connection
 
         return connection
+
+    async def _authenticate_adapter(
+        self,
+        connection: BaseClientAdapter,
+        adapter_type: str,
+        api_key: Optional[str],
+        username: Optional[str],
+        password: Optional[str],
+        pubkey_path: Optional[str],
+        pubkey_id: Optional[str],
+    ) -> bool:
+        """Run the non-interactive auth attempts, else fall back to prompts.
+
+        Websocket adapters authenticate during the handshake (no explicit
+        auth). Otherwise tries api key, then pubkey (when a username is
+        present), then username/password; when none apply it defers to
+        _authenticate_interactively. Returns the success flag.
+        """
+        if adapter_type == "websocket":
+            # Websocket raw adapter authenticates during handshake (Basic Auth)
+            return True
+        if api_key:
+            return await connection.authenticate_with_key(api_key)
+        if pubkey_path and username and hasattr(connection, "authenticate_with_pubkey"):
+            return await getattr(connection, "authenticate_with_pubkey")(username, pubkey_path, pubkey_id)
+        if username and password:
+            return await connection.authenticate_with_password(username, password)
+        return await self._authenticate_interactively(connection, username, pubkey_path, pubkey_id)
+
+    async def _authenticate_interactively(
+        self,
+        connection: BaseClientAdapter,
+        username: Optional[str],
+        pubkey_path: Optional[str],
+        pubkey_id: Optional[str],
+    ) -> bool:
+        """Read missing credentials from the terminal and authenticate.
+
+        Prompts for a username when none was supplied, then prefers pubkey
+        auth when the adapter supports it and falls back to a password.
+        """
+        if not username:
+            username = input("Username: ")
+        if pubkey_path and hasattr(connection, "authenticate_with_pubkey"):
+            return await getattr(connection, "authenticate_with_pubkey")(username, pubkey_path, pubkey_id)
+        password = getpass.getpass("Password: ")
+        return await connection.authenticate_with_password(username, password)
 
     async def list_ports(self, connection: BaseClientAdapter):
         """Retrieve port list live and display rich metadata when available.
