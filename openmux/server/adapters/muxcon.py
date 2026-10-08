@@ -82,6 +82,7 @@ import base64
 import contextlib
 import fnmatch
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -4556,49 +4557,64 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         for peer_key, proxies in list((self._peer_proxies or {}).items()):
             for pname, proxy in list((proxies or {}).items()):
                 try:
-                    if getattr(proxy, "is_connected", True):
-                        continue
-                    last_seen = float(getattr(proxy, "last_seen", 0) or 0)
-                    if last_seen and (now - last_seen) > self.federated_cache_ttl_sec:
-                        # Remove from PortManager and internal maps
-                        try:
-                            if hasattr(self, "main_port_manager") and self.main_port_manager:
-                                pm = self.main_port_manager
-                                try:
-                                    if hasattr(pm, "unregister_federated_port"):
-                                        import asyncio
-                                        import inspect
-
-                                        fn = getattr(pm, "unregister_federated_port")
-                                        if inspect.iscoroutinefunction(fn):
-                                            try:
-                                                asyncio.create_task(fn(pname))
-                                            except Exception:
-                                                getattr(pm, "ports", {}).pop(pname, None)
-                                        else:
-                                            try:
-                                                fn(pname)
-                                            except Exception:
-                                                getattr(pm, "ports", {}).pop(pname, None)
-                                    else:
-                                        getattr(pm, "ports", {}).pop(pname, None)
-                                    try:
-                                        pm.notify_meta_updated(pname, {"event": "federated_port_unregistered_ttl"})
-                                    except Exception:
-                                        # justification: optional notification; UI event delivery is best-effort
-                                        pass
-                                except Exception:
-                                    getattr(pm, "ports", {}).pop(pname, None)
-                        except Exception:
-                            # justification: optional notification; UI event delivery is best-effort
-                            pass
-                        proxies.pop(pname, None)
-                        try:
-                            self._save_federated_cache()
-                        except Exception:
-                            self.logger.error("muxcon: failed to save federated cache", exc_info=True)
+                    self._purge_one_proxy(proxies, pname, proxy, now)
                 except Exception:
                     continue
+
+    def _purge_one_proxy(self, proxies: Dict[str, Any], pname: str, proxy: Any, now: float) -> None:
+        """Drop one cached proxy from the port manager + maps when its TTL has passed.
+
+        No-op while the proxy reports connected; a proxy with an empty
+        ``last_seen`` is never purged (no age to check against the TTL).
+        """
+        if getattr(proxy, "is_connected", True):
+            return
+        last_seen = float(getattr(proxy, "last_seen", 0) or 0)
+        if last_seen and (now - last_seen) > self.federated_cache_ttl_sec:
+            # Remove from PortManager and internal maps
+            self._unregister_federated_port_from_pm(pname)
+            proxies.pop(pname, None)
+            try:
+                self._save_federated_cache()
+            except Exception:
+                self.logger.error("muxcon: failed to save federated cache", exc_info=True)
+
+    def _unregister_federated_port_from_pm(self, pname: str) -> None:
+        """Drop a TTL-purged port from the port manager (best-effort).
+
+        Uses ``unregister_federated_port`` when available (sync or async),
+        falls back to a direct ``ports`` drop, then emits the
+        ``federated_port_unregistered_ttl`` meta event for the UI. Any failure is
+        swallowed here: the cache still drops the proxy in ``_purge_one_proxy``.
+        """
+        try:
+            if hasattr(self, "main_port_manager") and self.main_port_manager:
+                pm = self.main_port_manager
+                try:
+                    if hasattr(pm, "unregister_federated_port"):
+                        fn = getattr(pm, "unregister_federated_port")
+                        if inspect.iscoroutinefunction(fn):
+                            try:
+                                asyncio.create_task(fn(pname))
+                            except Exception:
+                                getattr(pm, "ports", {}).pop(pname, None)
+                        else:
+                            try:
+                                fn(pname)
+                            except Exception:
+                                getattr(pm, "ports", {}).pop(pname, None)
+                    else:
+                        getattr(pm, "ports", {}).pop(pname, None)
+                    try:
+                        pm.notify_meta_updated(pname, {"event": "federated_port_unregistered_ttl"})
+                    except Exception:
+                        # justification: optional notification; UI event delivery is best-effort
+                        pass
+                except Exception:
+                    getattr(pm, "ports", {}).pop(pname, None)
+        except Exception:
+            # justification: optional notification; UI event delivery is best-effort
+            pass
 
     def _save_federated_cache(self) -> None:
         """Persist cached federated proxies (minimal fields) to JSON file."""
@@ -6533,56 +6549,83 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # loses the race to the receiver's gap-flush backstop (~4s) and
             # the lost frame's bytes are discarded. The loop below adapts
             # rto to 2.5x RTT once a sample exists.
-            rto = max(0.15, self.retx_initial_ms / 1000.0)
+            rto = self._retx_initial_rto()
             while not self._stop_event.is_set():
                 now = time.time()
                 for peer_key, buf in list(self._peer_sendbuf.items()):
-                    for seq, (orig_cid, stream_id, data, ts) in list(buf.items()):
-                        if now - ts < rto:
-                            continue
-                        # resend via current primary
-                        cid = self._select_mpath_connection(peer_key)
-                        if not cid:
-                            continue
-                        conn = self.connections.get(cid)
-                        if not conn:
-                            continue
-                        writer = conn.get("writer")
-                        if not isinstance(writer, asyncio.StreamWriter):
-                            continue
-                        try:
-                            # reuse same sequence number for idempotency of ACK tracking
-                            frame = self.proto.create_data_frame(stream_id, seq, data)
-                            await self._send_protocol_frame(writer, frame)
-                            buf[seq] = (cid, stream_id, data, now)
-                            try:
-                                self._peer_retx_count[peer_key] = self._peer_retx_count.get(peer_key, 0) + 1
-                                self._peer_bytes_tx[peer_key] = self._peer_bytes_tx.get(peer_key, 0) + len(data)
-                            except Exception:
-                                # justification: optional metrics; the data path is unaffected
-                                pass
-                            self.logger.debug("[RETX] Resent seq=%s sid=%s via %s for %s", seq, stream_id, cid, peer_key)
-                        except Exception:
-                            # justification: optional metrics; the data path is unaffected
-                            pass
+                    await self._retx_scan_peer(peer_key, buf, now, rto)
                 # increase/decrease rto mildly based on HB
-                try:
-                    rtt_candidates = []
-                    for st in self._hb_state.values():
-                        if st.get("rtt_ms"):
-                            rtt_candidates.append(st["rtt_ms"])
-                    if rtt_candidates:
-                        avg_rtt = max(1, sum(rtt_candidates) // max(1, len(rtt_candidates))) / 1000.0
-                        rto = min(self.retx_max_ms / 1000.0, max(self.retx_initial_ms / 1000.0, avg_rtt * 2.5))
-                except Exception:
-                    # justification: optional retransmission tuning; the default rto stays
-                    pass
+                rto = self._retx_tune_rto(rto)
                 await asyncio.sleep(0.05)
         except asyncio.CancelledError:
             # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
             self.logger.debug("Retransmission loop error: %s", e, exc_info=True)
+
+    def _retx_initial_rto(self) -> float:
+        """Initial retransmission timeout (seconds) before any RTT sample exists.
+
+        Seeded from ``retx_initial_ms`` with a small floor: before the first
+        heartbeat RTT sample a too-long window loses the race to the receiver's
+        gap-flush backstop (~4s) and the lost frame's bytes are discarded.
+        """
+        return max(0.15, self.retx_initial_ms / 1000.0)
+
+    async def _retx_scan_peer(self, peer_key: str, buf: Dict[int, Any], now: float, rto: float) -> None:
+        """Resend every frame in a peer's send buffer that is older than the RTO.
+
+        Each resend goes via the current primary connection; the buffer entry is
+        refreshed (new cid + timestamp) after a successful send so ACK tracking
+        stays idempotent on the same sequence number.
+        """
+        for seq, (orig_cid, stream_id, data, ts) in list(buf.items()):
+            if now - ts < rto:
+                continue
+            # resend via current primary
+            cid = self._select_mpath_connection(peer_key)
+            if not cid:
+                continue
+            conn = self.connections.get(cid)
+            if not conn:
+                continue
+            writer = conn.get("writer")
+            if not isinstance(writer, asyncio.StreamWriter):
+                continue
+            try:
+                # reuse same sequence number for idempotency of ACK tracking
+                frame = self.proto.create_data_frame(stream_id, seq, data)
+                await self._send_protocol_frame(writer, frame)
+                buf[seq] = (cid, stream_id, data, now)
+                try:
+                    self._peer_retx_count[peer_key] = self._peer_retx_count.get(peer_key, 0) + 1
+                    self._peer_bytes_tx[peer_key] = self._peer_bytes_tx.get(peer_key, 0) + len(data)
+                except Exception:
+                    # justification: optional metrics; the data path is unaffected
+                    pass
+                self.logger.debug("[RETX] Resent seq=%s sid=%s via %s for %s", seq, stream_id, cid, peer_key)
+            except Exception:
+                # justification: optional metrics; the data path is unaffected
+                pass
+
+    def _retx_tune_rto(self, rto: float) -> float:
+        """Nudge the retransmission timeout toward 2.5x the average HB RTT.
+
+        Clamped to ``[retx_initial_ms, retx_max_ms]``. Falls back to the inbound
+        rto unchanged when there is no RTT sample or the tuning raises.
+        """
+        try:
+            rtt_candidates = []
+            for st in self._hb_state.values():
+                if st.get("rtt_ms"):
+                    rtt_candidates.append(st["rtt_ms"])
+            if rtt_candidates:
+                avg_rtt = max(1, sum(rtt_candidates) // max(1, len(rtt_candidates))) / 1000.0
+                rto = min(self.retx_max_ms / 1000.0, max(self.retx_initial_ms / 1000.0, avg_rtt * 2.5))
+        except Exception:
+            # justification: optional retransmission tuning; the default rto stays
+            pass
+        return rto
 
     async def _handle_ports_federated(self, conn_id: str, payload: str):
         """Handle a PORTS:FEDERATED control payload and register remote ports.
