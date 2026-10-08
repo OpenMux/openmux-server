@@ -459,55 +459,70 @@ class CommandPort:
         self.client_count = count
         self.logger.info("Client count changed for %s: %s -> %s", self.name, old, count)
         if old == 0 and count > 0:
-            # Cancel any pending idle-stop since a client re-appeared
-            try:
-                if self._idle_stop_task and not self._idle_stop_task.done():
-                    self._idle_stop_task.cancel()
-            except Exception:
-                # justification: idempotent task cancel
-                pass
-            # If configured for on-demand spawn, ensure the process is running now
-            if self.spawn_on_demand and (not self.process_active):
-                try:
-                    # Start synchronously in background; errors are logged within start()
-                    asyncio.create_task(self.start())
-                except Exception:
-                    self.logger.error("Failed to trigger on-demand start for %s", self.name, exc_info=True)
-            if (not self.process_active) and not self._stopped_notice_sent:
-                hint = "spawn" if getattr(self, "spawn_on_demand", False) else "respawn"
-                notice = f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
-                self._stopped_notice_sent = True
-                self._schedule_notice_emit(notice)
+            self._cancel_pending_idle_stop()
+            self._maybe_spawn_on_demand()
+            self._maybe_send_stopped_notice()
         elif old > 0 and count == 0:
             if not self.process_active:
                 self._stopped_notice_sent = False
-            # Schedule idle stop if configured
-            if self.idle_timeout_sec and self.idle_timeout_sec > 0:
-                # Guard: don't schedule multiple timers
-                if self._idle_stop_task is None or self._idle_stop_task.done():
+            self._schedule_idle_stop()
 
-                    async def _idle_stop_after_delay():
-                        try:
-                            await asyncio.sleep(self.idle_timeout_sec)
-                            # If still idle and process is active, stop it
-                            if self.client_count == 0 and self.is_running:
-                                self.logger.info(
-                                    "Idle timeout (%ss) reached for %s; stopping process", self.idle_timeout_sec, self.name
-                                )
-                                try:
-                                    await self.stop()
-                                except Exception:
-                                    self.logger.error("Error stopping %s after idle timeout", self.name, exc_info=True)
-                        except asyncio.CancelledError:
-                            # justification: task was cancelled on purpose; awaiting it observes the cancellation
-                            pass
-                        finally:
-                            self._idle_stop_task = None
+    def _cancel_pending_idle_stop(self) -> None:
+        """Cancel any pending idle-stop task since a client re-appeared."""
+        try:
+            if self._idle_stop_task and not self._idle_stop_task.done():
+                self._idle_stop_task.cancel()
+        except Exception:
+            # justification: idempotent task cancel
+            pass
 
-                    try:
-                        self._idle_stop_task = asyncio.create_task(_idle_stop_after_delay())
-                    except Exception:
-                        self.logger.error("Failed to schedule idle-stop task for %s", self.name, exc_info=True)
+    def _maybe_spawn_on_demand(self) -> None:
+        """Schedule an on-demand start of the process when no client is running it."""
+        if self.spawn_on_demand and (not self.process_active):
+            try:
+                # Start synchronously in background; errors are logged within start()
+                asyncio.create_task(self.start())
+            except Exception:
+                self.logger.error("Failed to trigger on-demand start for %s", self.name, exc_info=True)
+
+    def _maybe_send_stopped_notice(self) -> None:
+        """Enqueue a ``[OpenMux:PROCESS_NOT_RUNNING …]`` notice if still stopped."""
+        if (not self.process_active) and not self._stopped_notice_sent:
+            hint = "spawn" if getattr(self, "spawn_on_demand", False) else "respawn"
+            notice = f"\r\n[OpenMux:PROCESS_NOT_RUNNING {self._stopped_prefix()} – press Enter to {hint}]\r\n".encode()
+            self._stopped_notice_sent = True
+            self._schedule_notice_emit(notice)
+
+    def _schedule_idle_stop(self) -> None:
+        """Schedule an idle-stop timer if configured and not already pending."""
+        if self.idle_timeout_sec and self.idle_timeout_sec > 0:
+            # Guard: don't schedule multiple timers
+            if self._idle_stop_task is None or self._idle_stop_task.done():
+                try:
+                    self._idle_stop_task = asyncio.create_task(self._idle_stop_after_delay())
+                except Exception:
+                    self.logger.error("Failed to schedule idle-stop task for %s", self.name, exc_info=True)
+
+    async def _idle_stop_after_delay(self) -> None:
+        """Idle-stop task: after the delay, stop the process if still idle.
+
+        Runs as an ``asyncio.Task``; on completion or cancellation it clears
+        ``_idle_stop_task`` so a later idle window can re-arm the timer.
+        """
+        try:
+            await asyncio.sleep(self.idle_timeout_sec)
+            # If still idle and process is active, stop it
+            if self.client_count == 0 and self.is_running:
+                self.logger.info("Idle timeout (%ss) reached for %s; stopping process", self.idle_timeout_sec, self.name)
+                try:
+                    await self.stop()
+                except Exception:
+                    self.logger.error("Error stopping %s after idle timeout", self.name, exc_info=True)
+        except asyncio.CancelledError:
+            # justification: task was cancelled on purpose; awaiting it observes the cancellation
+            pass
+        finally:
+            self._idle_stop_task = None
 
     async def start(self) -> bool:
         """Spawn the configured process (if not already running).

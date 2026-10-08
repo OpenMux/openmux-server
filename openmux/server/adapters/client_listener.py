@@ -1000,68 +1000,98 @@ class TcpServerAdapter(BaseGenericAdapter):
                 success, mode, reason = await self.console_manager.connect_client_to_port(
                     client.client_id, port_name, client.username
                 )
-
                 if success:
-                    client.connected_port = port_name
-
-                    # Track client for this port
-                    if port_name not in self.port_clients:
-                        self.port_clients[port_name] = []
-                    self.port_clients[port_name].append(client.client_id)
-
-                    # Register explicit routing for this TCP client so console manager can
-                    # deliver broadcasts directly via this adapter in multi-manager setups
-                    try:
-                        if hasattr(self.console_manager, "register_client_channel"):
-                            self.console_manager.register_client_channel(client.client_id, self)
-                    except Exception:
-                        # justification: optional routing registration; delivery falls back to the manager broadcast loop
-                        pass
-
-                    # Get the actual access mode from console manager
-                    # The console manager just added the client, so we should be able to get the mode
-                    # Determine access mode from returned mode, fallback to querying if needed
-                    access_mode = "READ_ONLY"
-                    try:
-                        effective_mode = mode
-                        if not effective_mode and hasattr(self.console_manager, "get_client_mode"):
-                            effective_mode = self.console_manager.get_client_mode(client.client_id, port_name)
-                        if effective_mode == "read-write":
-                            access_mode = "READ_WRITE"
-                        elif effective_mode == "read-only":
-                            access_mode = "READ_ONLY"
-                    except Exception as e:
-                        self.logger.error("Error determining client mode: %s", e, exc_info=True)
-
-                    client.mode = "read-write" if access_mode == "READ_WRITE" else "read-only"
-                    await client.send_line(f"CONNECTED:{port_name}:{access_mode}")
-                    # If the target port (federated proxy or local serial/tcp_initiator
-                    # adapter) is currently disconnected, immediately inform the client
-                    # so they understand why no data flows yet.
-                    try:
-                        pm = getattr(self.console_manager, "port_manager", None)
-                        if pm:
-                            port_obj = safe_get_port(pm, port_name)
-                            is_up = resolve_port_connected_state(port_obj)
-                            if is_up is False:
-                                await client.send_raw_data(b"\r\n[Port disconnected on server]\r\n")
-                    except Exception:
-                        # justification: best-effort notice; the connect request proceeds
-                        pass
-                    self.logger.info("Client %s connected to port %s in %s mode", client.client_id, port_name, access_mode)
+                    await self._finish_tcp_connect(client, port_name, mode)
                 else:
-                    if reason == "denied_by_group_acl":
-                        await client.send_line(f"ERROR:CONNECT:Access denied to port {port_name}")
-                    elif reason == "no_permissions":
-                        await client.send_line("ERROR:CONNECT:No permissions assigned to this account")
-                    else:
-                        await client.send_line(f"ERROR:CONNECT:Cannot connect to port {port_name}")
+                    await self._send_connect_error(client, port_name, reason)
             else:
                 await client.send_line("ERROR:CONNECT:Console manager not available")
 
         except Exception as e:
             self.logger.error("Error connecting client to port %s: %s", port_name, e, exc_info=True)
             await client.send_line("ERROR:CONNECT:Connection error")
+
+    async def _finish_tcp_connect(self, client: "ClientSession", port_name: str, mode: Optional[str]) -> None:
+        """Finalize a successful text-protocol attach (tracking, routing, reply).
+
+        Records the client on the port, registers explicit routing, resolves the
+        access mode, sends the ``CONNECTED`` line, and warns when the target port
+        is currently disconnected.
+        """
+        client.connected_port = port_name
+
+        # Track client for this port
+        if port_name not in self.port_clients:
+            self.port_clients[port_name] = []
+        self.port_clients[port_name].append(client.client_id)
+
+        # Register explicit routing for this TCP client so console manager can
+        # deliver broadcasts directly via this adapter in multi-manager setups
+        self._register_tcp_routing(client)
+
+        # Determine access mode from returned mode, fallback to querying if needed
+        access_mode = self._tcp_access_mode(client, port_name, mode)
+        client.mode = "read-write" if access_mode == "READ_WRITE" else "read-only"
+        await client.send_line(f"CONNECTED:{port_name}:{access_mode}")
+
+        # If the target port (federated proxy or local serial/tcp_initiator
+        # adapter) is currently disconnected, immediately inform the client
+        # so they understand why no data flows yet.
+        await self._notify_port_disconnected(client, port_name)
+        self.logger.info("Client %s connected to port %s in %s mode", client.client_id, port_name, access_mode)
+
+    def _register_tcp_routing(self, client: "ClientSession") -> None:
+        """Register explicit client->manager routing for direct delivery (best-effort)."""
+        try:
+            if hasattr(self.console_manager, "register_client_channel"):
+                self.console_manager.register_client_channel(client.client_id, self)
+        except Exception:
+            # justification: optional routing registration; delivery falls back to the manager broadcast loop
+            pass
+
+    def _tcp_access_mode(self, client: "ClientSession", port_name: str, mode: Optional[str]) -> str:
+        """Resolve the wire access mode (``READ_WRITE``/``READ_ONLY``) for a fresh attach.
+
+        Prefers the console manager's returned ``mode``; falls back to querying
+        ``get_client_mode`` when it is empty. Any lookup error yields ``READ_ONLY``.
+        """
+        access_mode = "READ_ONLY"
+        try:
+            effective_mode = mode
+            if not effective_mode and hasattr(self.console_manager, "get_client_mode"):
+                effective_mode = self.console_manager.get_client_mode(client.client_id, port_name)
+            if effective_mode == "read-write":
+                access_mode = "READ_WRITE"
+            elif effective_mode == "read-only":
+                access_mode = "READ_ONLY"
+        except Exception as e:
+            self.logger.error("Error determining client mode: %s", e, exc_info=True)
+        return access_mode
+
+    async def _notify_port_disconnected(self, client: "ClientSession", port_name: str) -> None:
+        """Warn the client if the target port is currently disconnected (best-effort).
+
+        The connect request proceeds regardless of the outcome.
+        """
+        try:
+            pm = getattr(self.console_manager, "port_manager", None)
+            if pm:
+                port_obj = safe_get_port(pm, port_name)
+                is_up = resolve_port_connected_state(port_obj)
+                if is_up is False:
+                    await client.send_raw_data(b"\r\n[Port disconnected on server]\r\n")
+        except Exception:
+            # justification: best-effort notice; the connect request proceeds
+            pass
+
+    async def _send_connect_error(self, client: "ClientSession", port_name: str, reason: Optional[str]) -> None:
+        """Send the connect error line that matches the denial reason."""
+        if reason == "denied_by_group_acl":
+            await client.send_line(f"ERROR:CONNECT:Access denied to port {port_name}")
+        elif reason == "no_permissions":
+            await client.send_line("ERROR:CONNECT:No permissions assigned to this account")
+        else:
+            await client.send_line(f"ERROR:CONNECT:Cannot connect to port {port_name}")
 
     async def _resolve_port_by_origin(self, port_name: str, server_id: str) -> Optional[str]:
         """Resolve port uniquely by (origin_server_id, name) using PortManager listing.
