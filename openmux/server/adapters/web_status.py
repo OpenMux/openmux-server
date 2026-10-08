@@ -20,7 +20,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 
 from ..access_control import capacity_display_label
 from .base_adapter import AdapterCapability, BaseGenericAdapter
@@ -893,58 +893,82 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             await self._send_json(writer, 403, {"error": True, "message": "Fault injection disabled"})
             return
         try:
-            payload = json.loads(body.decode("utf-8")) if body else {}
+            action, conn_id, params = self._fault_payload_fields(body)
         except Exception:  # justification: invalid JSON is a client error; 400 without logging
             await self._send_json(writer, 400, {"error": True, "message": "Invalid JSON"})
             return
-        action = payload.get("action")
-        conn_id = payload.get("connection_id")
-        params = payload.get("params", {})
         if not action:
             await self._send_json(writer, 400, {"error": True, "message": "Missing action"})
             return
-        muxcon = None
-        if self.main_port_manager and hasattr(self.main_port_manager, "unified_adapters"):
-            for ad in getattr(self.main_port_manager, "unified_adapters", []) or []:
-                try:
-                    atype = ad.get_adapter_type()
-                    if str(atype).lower() == "muxcon":
-                        muxcon = ad
-                        break
-                except Exception:  # justification: adapter type detection best-effort
-                    pass
+        muxcon = self._find_muxcon_adapter()
         if muxcon is None:
             await self._send_json(writer, 503, {"error": True, "message": "Muxcon adapter not available"})
             return
         # Map action -> muxcon method names or inline effects
         result: Dict[str, Any] = {"action": action, "connection_id": conn_id}
         try:
-            if action == "list":
-                result["fault_states"] = getattr(muxcon, "_fault_state", {})
-            elif action == "freeze":  # stop reading from connection
-                ok = await self._invoke_muxcon_fault(muxcon, "freeze_connection", conn_id)
-                result["applied"] = ok
-            elif action == "unfreeze":
-                ok = await self._invoke_muxcon_fault(muxcon, "unfreeze_connection", conn_id)
-                result["applied"] = ok
-            elif action == "drop_heartbeats":
-                ok = await self._invoke_muxcon_fault(muxcon, "set_drop_heartbeats", conn_id, True)
-                result["applied"] = ok
-            elif action == "restore_heartbeats":
-                ok = await self._invoke_muxcon_fault(muxcon, "set_drop_heartbeats", conn_id, False)
-                result["applied"] = ok
-            elif action == "close_conn":
-                ok = await self._invoke_muxcon_fault(muxcon, "force_close_connection", conn_id, params.get("linger", 0))
-                result["applied"] = ok
-            elif action == "reset_conn":
-                ok = await self._invoke_muxcon_fault(muxcon, "force_reset_connection", conn_id)
-                result["applied"] = ok
-            else:
+            ok = await self._fault_apply_action(muxcon, action, conn_id, params, result)
+            if ok is None:
                 await self._send_json(writer, 400, {"error": True, "message": f"Unknown action {action}"})
                 return
             await self._send_json(writer, 200, result)
         except Exception as e:  # justification: API surfaces error to client; avoid duplicate server log
             await self._send_json(writer, 500, {"error": True, "message": str(e)})
+
+    async def _fault_apply_action(
+        self, muxcon: Any, action: str, conn_id: Optional[str], params: Dict[str, Any], result: Dict[str, Any]
+    ) -> Optional[bool]:
+        """Dispatch a fault action onto the muxcon adapter, filling ``result``.
+
+        Returns True when an effect was applied, False when the invocation
+        reported not-applied, and None for an unknown action (the caller
+        answers 400).
+        """
+        if action == "list":
+            result["fault_states"] = getattr(muxcon, "_fault_state", {})
+            return True
+        if action == "freeze":  # stop reading from connection
+            ok = await self._invoke_muxcon_fault(muxcon, "freeze_connection", conn_id)
+        elif action == "unfreeze":
+            ok = await self._invoke_muxcon_fault(muxcon, "unfreeze_connection", conn_id)
+        elif action == "drop_heartbeats":
+            ok = await self._invoke_muxcon_fault(muxcon, "set_drop_heartbeats", conn_id, True)
+        elif action == "restore_heartbeats":
+            ok = await self._invoke_muxcon_fault(muxcon, "set_drop_heartbeats", conn_id, False)
+        elif action == "close_conn":
+            ok = await self._invoke_muxcon_fault(muxcon, "force_close_connection", conn_id, params.get("linger", 0))
+        elif action == "reset_conn":
+            ok = await self._invoke_muxcon_fault(muxcon, "force_reset_connection", conn_id)
+        else:
+            return None
+        result["applied"] = ok
+        return ok
+
+    @staticmethod
+    def _fault_payload_fields(body: bytes) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
+        """Decode a fault POST body into (action, connection_id, params).
+
+        An empty body yields (None, None, {}). Raises on invalid JSON or a
+        non-object payload; the caller answers 400.
+        """
+        if not body:
+            return None, None, {}
+        payload = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("expected a JSON object")
+        return payload.get("action"), payload.get("connection_id"), payload.get("params", {})
+
+    def _find_muxcon_adapter(self) -> Optional[Any]:
+        """Return the registered muxcon adapter, or None when absent."""
+        if self.main_port_manager and hasattr(self.main_port_manager, "unified_adapters"):
+            for ad in getattr(self.main_port_manager, "unified_adapters", []) or []:
+                try:
+                    atype = ad.get_adapter_type()
+                    if str(atype).lower() == "muxcon":
+                        return ad
+                except Exception:  # justification: adapter type detection best-effort
+                    pass
+        return None
 
     async def _invoke_muxcon_fault(self, muxcon, method: str, conn_id: Optional[str], *args) -> bool:
         """Invoke a muxcon fault-injection helper safely.

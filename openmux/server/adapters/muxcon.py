@@ -3586,45 +3586,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             # Apply interface binding before bind
             if interface:
-                try:
-                    if sys.platform.startswith("linux"):
-                        SO_BINDTODEVICE = 25
-                        s.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, interface.encode() + b"\0")
-                    elif sys.platform == "darwin":
-                        try:
-                            if_index = socket.if_nametoindex(interface)
-                        except Exception:
-                            if_index = 0
-                        if if_index:
-                            try:
-                                if af == socket.AF_INET:
-                                    IP_BOUND_IF = 25
-                                    s.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, if_index)
-                                elif af == socket.AF_INET6:
-                                    IPV6_BOUND_IF = 125
-                                    s.setsockopt(socket.IPPROTO_IPV6, IPV6_BOUND_IF, if_index)
-                            except Exception:
-                                # justification: optional socket routing hint; the connection works without it
-                                pass
-                    else:
-                        try:
-                            if_index = socket.if_nametoindex(interface)
-                            if if_index:
-                                IP_BOUND_IF = 25
-                                s.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, if_index)
-                        except Exception:
-                            # justification: optional socket routing hint; the connection works without it
-                            pass
-                except Exception as e:
-                    self.logger.warning("Listener interface bind '%s' failed: %s", interface, e)
+                self._apply_interface_bind(s, af, interface)
 
             # Apply routing mark (Linux only)
             if fwmark is not None and sys.platform.startswith("linux"):
-                try:
-                    SO_MARK = 36
-                    s.setsockopt(socket.SOL_SOCKET, SO_MARK, fwmark)
-                except Exception as e:
-                    self.logger.warning("Listener fwmark %s failed: %s", fwmark, e)
+                self._apply_fwmark(s, fwmark)
 
             s.bind(sockaddr)
             s.listen()
@@ -3637,6 +3603,56 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 # justification: socket cleanup after a failed setup
                 pass
             raise
+
+    def _apply_interface_bind(self, s: socket.socket, af: int, interface: str) -> None:
+        """Bind the listening socket to `interface` (best-effort, per platform).
+
+        Linux uses SO_BINDTODEVICE; macOS/BSD use IP_BOUND_IF / IPV6_BOUND_IF
+        via the interface index; other platforms get the IP_BOUND_IF hint only.
+        """
+        try:
+            if sys.platform.startswith("linux"):
+                SO_BINDTODEVICE = 25
+                s.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, interface.encode() + b"\0")
+            elif sys.platform == "darwin":
+                self._apply_darwin_bound_if(s, af, interface)
+            else:
+                try:
+                    if_index = socket.if_nametoindex(interface)
+                    if if_index:
+                        IP_BOUND_IF = 25
+                        s.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, if_index)
+                except Exception:
+                    # justification: optional socket routing hint; the connection works without it
+                    pass
+        except Exception as e:
+            self.logger.warning("Listener interface bind '%s' failed: %s", interface, e)
+
+    def _apply_darwin_bound_if(self, s: socket.socket, af: int, interface: str) -> None:
+        """macOS/BSD interface bind via IP_BOUND_IF / IPV6_BOUND_IF when resolvable."""
+        try:
+            if_index = socket.if_nametoindex(interface)
+        except Exception:
+            if_index = 0
+        if if_index:
+            try:
+                if af == socket.AF_INET:
+                    IP_BOUND_IF = 25
+                    s.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, if_index)
+                elif af == socket.AF_INET6:
+                    IPV6_BOUND_IF = 125
+                    s.setsockopt(socket.IPPROTO_IPV6, IPV6_BOUND_IF, if_index)
+            except Exception:
+                # justification: optional socket routing hint; the connection works without it
+                pass
+
+    def _apply_fwmark(self, s: socket.socket, fwmark: int) -> None:
+        """Apply a routing mark (SO_MARK), best-effort; called on Linux only."""
+        try:
+            SO_MARK = 36
+            s.setsockopt(socket.SOL_SOCKET, SO_MARK, fwmark)
+        except Exception as e:
+            self.logger.warning("Listener fwmark %s failed: %s", fwmark, e)
 
     async def _perform_client_handshake(
         self,

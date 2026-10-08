@@ -3217,76 +3217,104 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 pm = None
             # Track which clients we have already included to avoid duplicates when combining with _client_meta
             seen_ids: set[str] = set()
-            for pname, port in (getattr(pm, "ports", {}) or {}).items():
-                try:
-                    cc = getattr(port, "connected_clients", []) or []
-                    for c in cc:
-                        try:
-                            cid = c.get("client_id") if isinstance(c, dict) else getattr(c, "client_id", None)
-                            username = c.get("username") if isinstance(c, dict) else getattr(c, "username", None)
-                            if cid:
-                                seen_ids.add(str(cid))
-                            meta = self._resolve_client_meta(cid)
-                            out.append(
-                                {
-                                    "client_id": cid,
-                                    "username": username,
-                                    "port": pname,
-                                    "type": meta.get("type"),
-                                    "ip": meta.get("ip"),
-                                }
-                            )
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
+            out.extend(self._gather_web_clients_from_ports(pm, seen_ids))
             # Fallback: also include any known websocket clients from _client_meta that are bound to a port,
             # in case the Port.connected_clients list doesn't expose them.
-            try:
-                for cid, meta in (self._client_meta or {}).items():
-                    try:
-                        if not isinstance(meta, dict):
-                            continue
-                        if cid in seen_ids:
-                            continue
-                        p = meta.get("port")
-                        if not p:
-                            continue
-                        out.append(
-                            {
-                                "client_id": cid,
-                                "username": meta.get("username"),
-                                "port": p,
-                                "type": meta.get("type", "websocket"),
-                                "ip": meta.get("ip"),
-                            }
-                        )
-                    except Exception:
-                        continue
-            except Exception:
-                # justification: optional enumeration; the list degrades gracefully
-                pass
+            out.extend(self._gather_web_clients_from_meta(seen_ids))
             # Also include active login sessions so a user "logged in" is visible even before attaching to a port
-            try:
-                for sid, sess in (self._sessions or {}).items():
-                    try:
-                        out.append(
-                            {
-                                "client_id": f"session:{str(sid)[:8]}",
-                                "username": sess.get("username"),
-                                "type": "session",
-                                "created": sess.get("created"),
-                                "last_seen": sess.get("last_seen"),
-                                "ip": sess.get("ip"),
-                            }
-                        )
-                    except Exception:
-                        continue
-            except Exception:
-                # justification: optional enumeration; the list degrades gracefully
-                pass
+            out.extend(self._gather_web_clients_from_sessions())
         except Exception:
             return out
+        return out
+
+    def _iter_clients_of(self, port: Any) -> List[Any]:
+        """Return the port's connected_clients list (empty when absent)."""
+        return getattr(port, "connected_clients", []) or []
+
+    def _web_client_entry(self, c: Any, pname: str, seen_ids: set) -> Dict[str, Any]:
+        """Build one entry from a connected-client record (dict or object form).
+
+        A present client_id is recorded in `seen_ids` for dedup against the
+        _client_meta fallback; records without an id are still listed with
+        `client_id` None (mirrors the pre-refactor behavior).
+        """
+        cid = c.get("client_id") if isinstance(c, dict) else getattr(c, "client_id", None)
+        username = c.get("username") if isinstance(c, dict) else getattr(c, "username", None)
+        if cid:
+            seen_ids.add(str(cid))
+        meta = self._resolve_client_meta(cid)
+        return {
+            "client_id": cid,
+            "username": username,
+            "port": pname,
+            "type": meta.get("type"),
+            "ip": meta.get("ip"),
+        }
+
+    def _gather_web_clients_from_ports(self, pm: Any, seen_ids: set) -> list[Dict[str, Any]]:
+        """Enumerate every port's connected_clients into client entries."""
+        out: list[Dict[str, Any]] = []
+        for pname, port in (getattr(pm, "ports", {}) or {}).items():
+            try:
+                for c in self._iter_clients_of(port):
+                    try:
+                        out.append(self._web_client_entry(c, pname, seen_ids))
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return out
+
+    def _gather_web_clients_from_meta(self, seen_ids: set) -> list[Dict[str, Any]]:
+        """Append _client_meta websocket clients not already seen and bound to a port."""
+        out: list[Dict[str, Any]] = []
+        try:
+            for cid, meta in (self._client_meta or {}).items():
+                try:
+                    if not isinstance(meta, dict):
+                        continue
+                    if cid in seen_ids:
+                        continue
+                    p = meta.get("port")
+                    if not p:
+                        continue
+                    out.append(
+                        {
+                            "client_id": cid,
+                            "username": meta.get("username"),
+                            "port": p,
+                            "type": meta.get("type", "websocket"),
+                            "ip": meta.get("ip"),
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            # justification: optional enumeration; the list degrades gracefully
+            pass
+        return out
+
+    def _gather_web_clients_from_sessions(self) -> list[Dict[str, Any]]:
+        """Append one entry per active login session (visible before port attach)."""
+        out: list[Dict[str, Any]] = []
+        try:
+            for sid, sess in (self._sessions or {}).items():
+                try:
+                    out.append(
+                        {
+                            "client_id": f"session:{str(sid)[:8]}",
+                            "username": sess.get("username"),
+                            "type": "session",
+                            "created": sess.get("created"),
+                            "last_seen": sess.get("last_seen"),
+                            "ip": sess.get("ip"),
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            # justification: optional enumeration; the list degrades gracefully
+            pass
         return out
 
     # --- Utility: IP extraction ---

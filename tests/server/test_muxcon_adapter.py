@@ -3806,3 +3806,123 @@ async def test_on_port_meta_for_status_relay_ignores_unrelated_events(monkeypatc
     # Non-dict payload -> no broadcast
     await a._on_port_meta_for_status_relay("local_p", None)
     assert broadcast_calls == []
+
+
+# ---------------------------------------------------------------------------
+# _make_listen_socket: darwin interface binding + bind-failure cleanup
+# ---------------------------------------------------------------------------
+
+
+def _dummy_sock_factory(holder):
+    class DummySock:
+        def __init__(self, af, st, pr):
+            self._opts = []
+            self._blocking = True
+            holder["s"] = self
+
+        def setsockopt(self, level, opt, val):
+            self._opts.append((level, opt, val))
+
+        def bind(self, sockaddr):
+            pass
+
+        def listen(self):
+            pass
+
+        def setblocking(self, b):
+            self._blocking = b
+
+        def fileno(self):
+            return 3
+
+        def close(self):
+            pass
+
+    def fake_socket(af, st, pr):
+        return DummySock(af, st, pr)
+
+    return fake_socket
+
+
+def test_make_listen_socket_interface_darwin_ipv4(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    monkeypatch.setattr(sys, "platform", "darwin")
+    holder = {}
+    monkeypatch.setattr(socket, "socket", _dummy_sock_factory(holder))
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda host, port, type: [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("0.0.0.0", 0))]
+    )
+    monkeypatch.setattr(socket, "if_nametoindex", lambda name: 7)
+    s = a._make_listen_socket("0.0.0.0", 0, interface="en0")
+    try:
+        bound = [o for o in holder["s"]._opts if o[0] == socket.IPPROTO_IP and o[1] == 25]
+        assert bound == [(socket.IPPROTO_IP, 25, 7)]
+    finally:
+        s.close()
+
+
+def test_make_listen_socket_interface_darwin_ipv6(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    monkeypatch.setattr(sys, "platform", "darwin")
+    holder = {}
+    monkeypatch.setattr(socket, "socket", _dummy_sock_factory(holder))
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda host, port, type: [(socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::", 0, 0, 0))]
+    )
+    monkeypatch.setattr(socket, "if_nametoindex", lambda name: 7)
+    s = a._make_listen_socket("::", 0, interface="en0")
+    try:
+        bound = [o for o in holder["s"]._opts if o[0] == socket.IPPROTO_IPV6 and o[1] == 125]
+        assert bound == [(socket.IPPROTO_IPV6, 125, 7)]
+    finally:
+        s.close()
+
+
+def test_make_listen_socket_interface_darwin_unknown_iface_skips(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    monkeypatch.setattr(sys, "platform", "darwin")
+    holder = {}
+    monkeypatch.setattr(socket, "socket", _dummy_sock_factory(holder))
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda host, port, type: [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("0.0.0.0", 0))]
+    )
+    monkeypatch.setattr(socket, "if_nametoindex", lambda name: 0)  # unknown interface
+    s = a._make_listen_socket("0.0.0.0", 0, interface="bogus")
+    try:
+        # Only SO_REUSEADDR was set; no IP_BOUND_IF attempt for a zero index.
+        assert [o[2] for o in holder["s"]._opts if o[0] == socket.IPPROTO_IP] == []
+    finally:
+        s.close()
+
+
+def test_make_listen_socket_bind_error_closes_socket(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+
+    class FailingSock:
+        closed = False
+
+        def __init__(self, af, st, pr):
+            pass
+
+        def setsockopt(self, level, opt, val):
+            pass
+
+        def bind(self, sockaddr):
+            raise OSError("address in use")
+
+        def listen(self):
+            raise AssertionError("listen must not be reached after a bind failure")
+
+        def setblocking(self, b):
+            pass
+
+        def close(self):
+            FailingSock.closed = True
+
+    monkeypatch.setattr(socket, "socket", lambda af, st, pr: FailingSock(af, st, pr))
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda host, port, type: [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 9))]
+    )
+    with pytest.raises(OSError, match="address in use"):
+        a._make_listen_socket("127.0.0.1", 9)
+    assert FailingSock.closed is True
