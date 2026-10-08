@@ -779,12 +779,7 @@ class CommandPort:
                         len(data) if data else 0,
                     )
                 if not data:
-                    if self._loop and self._pty_reader_added:
-                        try:
-                            self._loop.remove_reader(self._pty_master_fd)
-                        except Exception:  # justification: already removed or loop closing; safe to ignore
-                            pass
-                        self._pty_reader_added = False
+                    self._pty_reader_teardown()
                     self.process_active = False
                     return
                 try:
@@ -792,30 +787,45 @@ class CommandPort:
                 except Exception:  # justification: interception is best-effort; raw data still usable
                     pass
                 data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-
-                async def buffer_data(d: bytes):
-                    async with self._output_buffer_lock:
-                        self._output_buffer += d
-                        self._output_flush_event.clear()
-                        now2 = asyncio.get_event_loop().time()
-                        self._last_data_time = now2
-                        if not hasattr(self, "_first_data_time") or self._first_data_time is None:
-                            self._first_data_time = now2
-                        self._output_flush_event.set()
-
-                asyncio.create_task(buffer_data(data))
+                asyncio.create_task(self._pty_buffer_chunk(data))
         except OSError as e:
-            if self._loop and self._pty_reader_added:
-                try:
-                    self._loop.remove_reader(self._pty_master_fd)
-                except Exception:  # justification: remove_reader failure during OSError cleanup is non-critical
-                    pass
-                self._pty_reader_added = False
+            self._pty_reader_teardown()
             self.logger.debug("PTY reader closed for %s: %s", self.name, e)
             self.process_active = False
         except Exception as e:
             self.logger.error("Error in PTY reader callback for %s: %s", self.name, e, exc_info=True)
             self.process_active = False
+
+    def _pty_reader_teardown(self) -> None:
+        """Unhook the PTY readability callback from the event loop.
+
+        Called from the read loop on EOF and from the OSError path: removes
+        the reader registration (best-effort, so an already-removed fd or a
+        closing loop does not raise) and clears the registration flag.
+        """
+        if self._loop and self._pty_reader_added:
+            try:
+                self._loop.remove_reader(self._pty_master_fd)
+            except Exception:  # justification: already removed or loop closing; safe to ignore
+                pass
+            self._pty_reader_added = False
+
+    async def _pty_buffer_chunk(self, data: bytes) -> None:
+        """Append one drained PTY chunk to the shared output buffer.
+
+        Runs as a task scheduled from the (synchronous) read callback so the
+        lock-protected buffer mutation happens on the event loop. Marks the
+        first data time once, refreshes the last-data stamp, and re-arms the
+        flush event so the client pump wakes for the new bytes.
+        """
+        async with self._output_buffer_lock:
+            self._output_buffer += data
+            self._output_flush_event.clear()
+            now2 = asyncio.get_event_loop().time()
+            self._last_data_time = now2
+            if not hasattr(self, "_first_data_time") or self._first_data_time is None:
+                self._first_data_time = now2
+            self._output_flush_event.set()
 
     async def _stdout_reader_task(self):
         """Coroutine to read stdout from a pipe-based subprocess.

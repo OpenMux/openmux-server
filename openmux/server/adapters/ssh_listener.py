@@ -404,19 +404,73 @@ class SshListenerAdapter(BaseGenericAdapter):
             except Exception:
                 self.logger.warning("Error stopping SSH listener '%s'", name, exc_info=True)
 
-    async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
-        """Incrementally reconcile SSH listeners without disturbing unrelated sessions."""
+    def _listener_material_diff(
+        self, name: str, old_by_name: Dict[str, ListenerConfig], new_by_name: Dict[str, Dict[str, Any]]
+    ) -> Tuple[Optional[str], bool, bool]:
+        """Classify one common listener as (name, material_changed, enabled).
+
+        Rebuilds the listener spec from its new config entry and compares the
+        material fields (bind/host/target/rw/acl/enabled/auth) against the live
+        spec. Returns (None, ...) when the entry fails to build so the caller
+        skips it, else (name, True when any material field differs).
+        """
+        new_spec = self._build_listener(new_by_name[name])
+        if new_spec is None:
+            return None, False, False
+        material_changed = self._material_cfg(old_by_name[name]) != self._material_cfg(new_spec)
+        return name, material_changed, bool(new_spec.enabled)
+
+    def _material_cfg(self, spec: ListenerConfig) -> Dict[str, Any]:
+        """Material (restart-triggering) fields of a listener spec, as a dict."""
+        return {
+            "bind_host": spec.bind_host,
+            "bind_port": spec.bind_port,
+            "target": spec.target,
+            "read_only": spec.read_only,
+            "acl_raw": list(spec.acl_raw),
+            "enabled": spec.enabled,
+            "require_auth": spec.require_auth,
+        }
+
+    def _listeners_from_config(self, new_config: Any) -> Dict[str, Dict[str, Any]]:
+        """Normalize a reconcile config into ``{name: raw entry}``.
+
+        Accepts the wrapped ``{"ssh_listener": [...]}`` form, a bare list, or
+        anything else (treated as empty). Entries without a usable name key
+        are skipped silently.
+        """
         if isinstance(new_config, dict) and isinstance(new_config.get("ssh_listener"), list):
             items = list(new_config["ssh_listener"])
         elif isinstance(new_config, list):
             items = list(new_config)
         else:
             items = []
-
         new_by_name: Dict[str, Dict[str, Any]] = {}
         for entry in items:
             if isinstance(entry, dict) and entry.get("name"):
                 new_by_name[str(entry["name"])] = entry
+        return new_by_name
+
+    async def _restart_added_listeners(
+        self,
+        specs_by_name: Dict[str, ListenerConfig],
+        to_start: List[str],
+        new_by_name: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """Build + start listeners for the given added/updated names."""
+        for name in to_start:
+            spec = self._build_listener(new_by_name[name])
+            if spec is None:
+                continue
+            specs_by_name[name] = spec
+            if spec.enabled:
+                await self._start_single_listener(spec)
+            else:
+                self.logger.info("SSH listener '%s' disabled via configuration", spec.name)
+
+    async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
+        """Incrementally reconcile SSH listeners without disturbing unrelated sessions."""
+        new_by_name = self._listeners_from_config(new_config)
 
         old_by_name = {spec.name: spec for spec in self.listeners}
         old_names = set(old_by_name.keys())
@@ -425,27 +479,16 @@ class SshListenerAdapter(BaseGenericAdapter):
         added = sorted(new_names - old_names)
         common = sorted(old_names & new_names)
 
-        def _material_cfg(spec: ListenerConfig) -> Dict[str, Any]:
-            return {
-                "bind_host": spec.bind_host,
-                "bind_port": spec.bind_port,
-                "target": spec.target,
-                "read_only": spec.read_only,
-                "acl_raw": list(spec.acl_raw),
-                "enabled": spec.enabled,
-                "require_auth": spec.require_auth,
-            }
-
         updated: List[str] = []
         unchanged: List[str] = []
         for name in common:
-            new_spec = self._build_listener(new_by_name[name])
-            if new_spec is None:
+            name, material, _enabled = self._listener_material_diff(name, old_by_name, new_by_name)
+            if name is None:
                 continue
-            if _material_cfg(old_by_name[name]) == _material_cfg(new_spec):
-                unchanged.append(name)
-            else:
+            if material:
                 updated.append(name)
+            else:
+                unchanged.append(name)
 
         for name in removed + updated:
             await self._stop_single_listener(name)
@@ -457,15 +500,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                 self.logger.error("Failed to prepare SSH host key during reconcile: %s", exc, exc_info=True)
 
         specs_by_name = {spec.name: spec for spec in self.listeners if spec.name not in (removed + updated)}
-        for name in added + updated:
-            spec = self._build_listener(new_by_name[name])
-            if spec is None:
-                continue
-            specs_by_name[name] = spec
-            if spec.enabled:
-                await self._start_single_listener(spec)
-            else:
-                self.logger.info("SSH listener '%s' disabled via configuration", spec.name)
+        await self._restart_added_listeners(specs_by_name, added + updated, new_by_name)
 
         self.listeners = [specs_by_name[n] for n in sorted(specs_by_name.keys())]
         self._set_running(True)

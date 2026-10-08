@@ -5921,16 +5921,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
     def _select_mpath_connection(self, peer_key: str) -> Optional[str]:
         """Select (and possibly promote) the active connection for a peer group.
 
-        Implements both failover and (optionally) preemptive promotion logic. A
-        connection becomes ineligible if it has not been seen within the stale
-        window or has been *frozen* via fault injection. If the primary is
-        missing or stale the best successor is promoted based on preference and
-        open time. When ``mpath_preemptive_promote`` + ``best_pref`` strategy are
-        enabled a higher preference non‑stale path may replace the current
-        primary.
+        A connection is ineligible if it has not been seen within the stale
+        window or has been frozen via fault injection. If the primary is
+        missing or stale the best successor is promoted by preference and open
+        time; with mpath_preemptive_promote + best_pref a higher-preference
+        non-stale path may replace the current primary.
 
         Args:
-            peer_key: Multipath group key returned by
+            peer_key: Multipath group key. See
                 :meth:`_derive_peer_key_from_conn_id`.
 
         Returns:
@@ -5941,67 +5939,82 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         if not grp:
             return None
         now = time.time()
-        stale_cutoff = now - self.mpath_primary_stale_sec if self.mpath_primary_stale_sec > 0 else None
+        cutoff = now - self.mpath_primary_stale_sec if self.mpath_primary_stale_sec > 0 else None
         # Filter available (non-stale) connections
-        candidates = []
-        for cid, meta in grp["conns"].items():
-            ls = meta.get("last_rx_seen") or 0
-            stale = False
-            if stale_cutoff is not None and ls < stale_cutoff:
-                stale = True
-            # Exclude frozen connections from selection entirely (treat as stale)
-            if self._fault_state.get(cid, {}).get("frozen"):
-                stale = True
-            candidates.append((cid, meta, stale))
-        # Promote if current primary missing or stale
-        current = grp.get("primary")
-        if current:
-            meta = grp["conns"].get(current)
-            if not meta:
-                current = None
-            else:
-                ls = meta.get("last_rx_seen") or 0
-                if stale_cutoff is not None and ls < stale_cutoff:
-                    current = None
-                # Also demote if current is frozen
-                elif self._fault_state.get(current, {}).get("frozen"):
-                    current = None
+        candidates: List[Tuple[str, Dict[str, Any], bool]] = [
+            (cid, meta, self._mpath_conn_stale(meta, cid, cutoff)) for cid, meta in grp["conns"].items()
+        ]
+        current = self._mpath_clear_stale_primary(grp, cutoff)
         if not current:
-            # Choose highest preference non-stale first
-            non_stale = [c for c in candidates if not c[2]] or candidates
-            non_stale.sort(key=lambda x: (x[1].get("pref", 0), x[1].get("opened_at", 0)), reverse=True)
-            new_primary = non_stale[0][0] if non_stale else None
-            prev = grp.get("primary")
-            grp["primary"] = new_primary
-            if new_primary and new_primary != prev:
-                self.logger.info("[MPATH] Promoted %s as primary for %s", new_primary, peer_key)
-            return new_primary
-        # If current exists and preemptive enabled, consider higher preference non-stale candidate
+            return self._mpath_promote_primary(grp, candidates, peer_key)
         if self.mpath_preemptive_promote and self.mpath_strategy == "best_pref":
-            try:
-                cur_meta = grp["conns"].get(current)
-                cur_pref = int(cur_meta.get("pref", 0)) if cur_meta else 0
-                better = [c for c in candidates if not c[2] and int(c[1].get("pref", 0)) > cur_pref]
-                if better:
-                    # Pick best among better
-                    better.sort(key=lambda x: (int(x[1].get("pref", 0)), x[1].get("opened_at", 0)), reverse=True)
-                    new_best = better[0]
-                    new_id = new_best[0]
-                    new_pref = int(new_best[1].get("pref", 0))
-                    if new_id != current:
-                        grp["primary"] = new_id
-                        self.logger.info(
-                            "[MPATH] Preemptive promote %s over %s (pref %s>%s) for %s",
-                            new_id,
-                            current,
-                            new_pref,
-                            cur_pref,
-                            peer_key,
-                        )
-                        return new_id
-            except Exception:  # justification: local session map cleanup is best-effort on pump exit
-                pass
+            new_id = self._mpath_try_preempt(grp, candidates, current, peer_key)
+            if new_id:
+                return new_id
         return grp.get("primary")
+
+    def _mpath_conn_stale(self, meta: Dict[str, Any], cid: str, cutoff: Optional[float]) -> bool:
+        """True when the connection is frozen or past the stale cutoff."""
+        if cutoff is not None and ((meta.get("last_rx_seen") or 0) < cutoff):
+            return True
+        return bool(self._fault_state.get(cid, {}).get("frozen"))
+
+    def _mpath_clear_stale_primary(self, grp: Dict[str, Any], cutoff: Optional[float]) -> Optional[str]:
+        """Return the group's current primary, or None if it is missing/stale/frozen."""
+        current = grp.get("primary")
+        if not current:
+            return None
+        meta = grp["conns"].get(current)
+        if meta is None or self._mpath_conn_stale(meta, current, cutoff):
+            return None
+        return current
+
+    def _mpath_promote_primary(
+        self,
+        grp: Dict[str, Any],
+        candidates: List[Tuple[str, Dict[str, Any], bool]],
+        peer_key: str,
+    ) -> Optional[str]:
+        """Promote the best non-stale candidate (fall back to any) as primary."""
+        non_stale = [c for c in candidates if not c[2]] or list(candidates)
+        non_stale.sort(key=lambda c: (c[1].get("pref", 0), c[1].get("opened_at", 0)), reverse=True)
+        new_primary = non_stale[0][0] if non_stale else None
+        if new_primary and new_primary != grp.get("primary"):
+            self.logger.info("[MPATH] Promoted %s as primary for %s", new_primary, peer_key)
+        grp["primary"] = new_primary
+        return new_primary
+
+    def _mpath_try_preempt(
+        self,
+        grp: Dict[str, Any],
+        candidates: List[Tuple[str, Dict[str, Any], bool]],
+        current: str,
+        peer_key: str,
+    ) -> Optional[str]:
+        """Promote a higher-preference non-stale candidate over `current` if enabled."""
+        try:
+            cur_meta = grp["conns"].get(current)
+            cur_pref = int(cur_meta.get("pref", 0)) if cur_meta else 0
+            better = [c for c in candidates if (not c[2]) and (int(c[1].get("pref", 0)) > cur_pref)]
+            if not better:
+                return None
+            better.sort(key=lambda c: (int(c[1].get("pref", 0)), c[1].get("opened_at", 0)), reverse=True)
+            new_best = better[0]
+            new_id = new_best[0]
+            if new_id == current:
+                return None
+            grp["primary"] = new_id
+            self.logger.info(
+                "[MPATH] Preemptive promote %s over %s (pref %s>%s) for %s",
+                new_id,
+                current,
+                int(new_best[1].get("pref", 0)),
+                cur_pref,
+                peer_key,
+            )
+            return new_id
+        except Exception:  # justification: local session map cleanup is best-effort on pump exit
+            return None
 
     async def _mpath_failover_loop(self):
         """Background task periodically evaluating multipath primary health.
