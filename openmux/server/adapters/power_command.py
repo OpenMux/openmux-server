@@ -106,85 +106,111 @@ async def run_power_command(
         return False
     arg = parts[1] if len(parts) >= 2 else None
     verb = parts[2].lower() if len(parts) >= 3 else None
-
-    # Switch form: POWER <pdu>.<outlet> on|off
     if verb is not None:
-        if verb not in ("on", "off"):
-            await send_line("ERROR:POWER: target state must be 'on' or 'off'")
-            return False
-        if arg is None or "." not in arg:
-            await send_line("ERROR:POWER: switching needs a full outlet ref '<pdu>.<outlet>'")
-            return False
-        if not await _user_can_write(auth_manager, username):
-            await send_line("ERROR:POWER: insufficient permission (need read-write)")
-            return False
-        # Outlet federation: the group check below already refuses when the
-        # ref feeds a console this user cannot open (same wording as local).
-        # A ref owned by a federated node is not refused here: set_outlet
-        # relays the switch to the origin, where the anchor + coverage
-        # checks run for the consoles only that node can see.
-        blocked = pdu._power_blocked_ports(arg, username)
-        if blocked:
-            await send_line(
-                f"ERROR:POWER: {arg} feeds consoles outside your groups ({', '.join(blocked)}); switching it needs admin"
-            )
-            return False
-        on = verb == "on"
-        if not on:
-            impact = pdu.compute_off_impact(arg)
-            for losing in impact.get("losing_power") or []:
-                desc = losing.get("description") or ""
-                await send_line(
-                    "WARNING:POWER: removing all power to: " + str(losing.get("port")) + (" (" + desc + ")" if desc else "")
-                )
-            for staying in impact.get("staying_up") or []:
-                via = ", ".join(staying.get("via") or [])
-                await send_line("NOTE:POWER: " + str(staying.get("port")) + " stays up via " + (via or "other feed"))
-        try:
-            result = await pdu.set_outlet(arg, on, user=username, client_id=client_id)
-        except Exception as exc:
-            await send_line("ERROR:POWER: " + str(exc))
-            return False
-        if not result.get("ok"):
-            await send_line("ERROR:POWER: " + str(result.get("error", "switch failed")))
-            return False
-        reading = result.get("reading") or {}
-        state_txt = "on" if reading.get("on") else "off"
-        await send_line(f"POWER {arg} -> {state_txt}")
-        return True
+        return await _switch_outlet(pdu, send_line, arg, verb, username, auth_manager, client_id)
+    return await _list_power(pdu, send_line, arg)
 
-    # Listing / single-outlet form
-    snap = pdu.get_power_snapshot()
-    if arg is None:
-        for p in snap.get("pdus") or []:
-            online = "" if p.get("online") else " [OFFLINE]"
-            await send_line(
-                "PDU %s (%s)%s  %d/%d on"
-                % (p.get("name"), p.get("driver"), online, p.get("outlets_on"), p.get("outlet_count"))
-            )
-            for o in p.get("outlets") or []:
-                await send_line("  " + format_outlet_line(o))
-        unresolved = snap.get("unresolved_refs") or []
-        if unresolved:
-            await send_line("NOTE:POWER: unresolved feeds: " + ", ".join(unresolved))
+
+async def _switch_outlet(
+    pdu: Any,
+    send_line: Callable[[str], Awaitable[None]],
+    arg: Optional[str],
+    verb: str,
+    username: Optional[str],
+    auth_manager: Any,
+    client_id: Optional[str],
+) -> bool:
+    """Switch one outlet on/off; returns True when the switch succeeded."""
+    if verb not in ("on", "off"):
+        await send_line("ERROR:POWER: target state must be 'on' or 'off'")
         return False
+    if arg is None or "." not in arg:
+        await send_line("ERROR:POWER: switching needs a full outlet ref '<pdu>.<outlet>'")
+        return False
+    if not await _user_can_write(auth_manager, username):
+        await send_line("ERROR:POWER: insufficient permission (need read-write)")
+        return False
+    # Outlet federation: the group check below already refuses when the
+    # ref feeds a console this user cannot open (same wording as local).
+    # A ref owned by a federated node is not refused here: set_outlet
+    # relays the switch to the origin, where the anchor + coverage
+    # checks run for the consoles only that node can see.
+    blocked = pdu._power_blocked_ports(arg, username)
+    if blocked:
+        await send_line(
+            f"ERROR:POWER: {arg} feeds consoles outside your groups ({', '.join(blocked)}); switching it needs admin"
+        )
+        return False
+    on = verb == "on"
+    for line in _switch_outlet_off_warnings(pdu, arg) if not on else []:
+        await send_line(line)
+    try:
+        result = await pdu.set_outlet(arg, on, user=username, client_id=client_id)
+    except Exception as exc:
+        await send_line("ERROR:POWER: " + str(exc))
+        return False
+    if not result.get("ok"):
+        await send_line("ERROR:POWER: " + str(result.get("error", "switch failed")))
+        return False
+    reading = result.get("reading") or {}
+    state_txt = "on" if reading.get("on") else "off"
+    await send_line(f"POWER {arg} -> {state_txt}")
+    return True
 
-    # Arg is either a PDU name (list its outlets) or a full outlet ref (one line)
+
+def _switch_outlet_off_warnings(pdu: Any, arg: str) -> List[str]:
+    """The WARNING/NOTE lines for a switch-to-off, before the switch runs."""
+    impact = pdu.compute_off_impact(arg)
+    out: List[str] = []
+    for losing in impact.get("losing_power") or []:
+        desc = losing.get("description") or ""
+        out.append("WARNING:POWER: removing all power to: " + str(losing.get("port")) + (" (" + desc + ")" if desc else ""))
+    for staying in impact.get("staying_up") or []:
+        via = ", ".join(staying.get("via") or [])
+        out.append("NOTE:POWER: " + str(staying.get("port")) + " stays up via " + (via or "other feed"))
+    return out
+
+
+async def _list_power(pdu: Any, send_line: Callable[[str], Awaitable[None]], arg: Optional[str]) -> bool:
+    """The listing / single-outlet dispatch. Always returns False (no switch)."""
+    if arg is None:
+        return await _list_all_pdus(pdu, send_line)
+    return await _list_one_or_report_outlet(pdu, send_line, arg)
+
+
+async def _list_all_pdus(pdu: Any, send_line: Callable[[str], Awaitable[None]]) -> bool:
+    """Every PDU plus its outlets, then a NOTE when feeds are unresolved."""
+    snap = pdu.get_power_snapshot()
+    for p in snap.get("pdus") or []:
+        online = "" if p.get("online") else " [OFFLINE]"
+        await send_line(
+            "PDU %s (%s)%s  %d/%d on" % (p.get("name"), p.get("driver"), online, p.get("outlets_on"), p.get("outlet_count"))
+        )
+        for o in p.get("outlets") or []:
+            await send_line("  " + format_outlet_line(o))
+    unresolved = snap.get("unresolved_refs") or []
+    if unresolved:
+        await send_line("NOTE:POWER: unresolved feeds: " + ", ".join(unresolved))
+    return False
+
+
+async def _list_one_or_report_outlet(pdu: Any, send_line: Callable[[str], Awaitable[None]], arg: str) -> bool:
+    """Arg is either a PDU name (list its outlets) or a full outlet ref (one line)."""
+    snap = pdu.get_power_snapshot()
     pdus = {p.get("name"): p for p in snap.get("pdus") or []}
     if arg in pdus:
-        p = pdus[arg]
-        for o in p.get("outlets") or []:
+        for o in pdus[arg].get("outlets") or []:
             await send_line(format_outlet_line(o))
         return False
-    if "." in arg:
-        for p in snap.get("pdus") or []:
-            for o in p.get("outlets") or []:
-                if o.get("ref") == arg:
-                    await send_line(format_outlet_line(o))
-                    return False
-        await send_line("ERROR:POWER: unknown outlet: " + arg)
+    if "." not in arg:
+        await send_line("ERROR:POWER: unknown PDU: " + arg)
         return False
-    await send_line("ERROR:POWER: unknown PDU: " + arg)
+    for p in snap.get("pdus") or []:
+        for o in p.get("outlets") or []:
+            if o.get("ref") == arg:
+                await send_line(format_outlet_line(o))
+                return False
+    await send_line("ERROR:POWER: unknown outlet: " + arg)
     return False
 
 

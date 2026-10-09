@@ -589,3 +589,135 @@ async def test_power_menu_relayed_toggle_for_remote_feed():
     assert "[EXITING POWER]" in lines.lines
     # The cached state is only updated by the origin's POWER:STATE (not here).
     await pdu.stop()
+
+
+# ---------------------------------------------------------------------------
+# Coverage-first tests: branches of run_power_command not yet exercised by
+# the existing CLI-surface tests above. These pin the behavior of the
+# error / offline / unresolved / direct-call paths so the bracket-C901
+# refactor is provably behavior-preserving.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_power_command_not_configured_when_disabled():
+    """B1: pdu.enabled is False -> not-configured error (direct call)."""
+    from openmux.server.adapters.power_command import run_power_command
+
+    adapter, pdu, pm = await _started()
+    pdu.enabled = False
+    cm = pdu.console_manager
+    lines = _FakeClient()
+    await run_power_command(cm, "POWER", lines.send_line, "u1", adapter.auth_manager)
+    assert lines.lines == ["ERROR:POWER: power management is not configured"]
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_power_command_usage_when_too_long():
+    """B2: more than 3 tokens -> usage error."""
+    adapter, pdu, pm = await _started()
+    client = _FakeClient()
+    await adapter.process_client_command(client, "POWER rack1.1 on extra")
+    assert len(client.lines) == 1
+    assert "usage" in client.lines[0]
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_power_command_switch_requires_full_outlet_ref():
+    """B3: verb present but arg has no dot -> 'full outlet ref' error."""
+    adapter, pdu, pm = await _started()
+    client = _FakeClient()
+    await adapter.process_client_command(client, "POWER rack1 on")
+    assert client.lines == ["ERROR:POWER: switching needs a full outlet ref '<pdu>.<outlet>'"]
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_power_command_set_outlet_raises_returns_false():
+    """B4: set_outlet raises -> error line, return False."""
+    adapter, pdu, pm = await _started()
+    # Force a raise on a specific ref (keep the real set_outlet for other refs).
+    original = pdu.set_outlet
+
+    async def raising(ref, on, user=None, client_id=None):
+        if ref == "rack1.1":
+            raise RuntimeError("outlet exploded")
+        return await original(ref, on, user=user, client_id=client_id)
+
+    pdu.set_outlet = raising  # type: ignore[method-assign]
+    client = _FakeClient()
+    # On-switch avoids the off-impact NOTE line that would precede the error.
+    await adapter.process_client_command(client, "POWER rack1.1 on")
+    # B4 path: the raise is caught and surfaced as the single error line.
+    assert client.lines == ["ERROR:POWER: outlet exploded"]
+    # Sanity: a different ref still works through the original path.
+    await adapter.process_client_command(client, "POWER rack1.2 off")
+    assert client.lines[-1].startswith("POWER rack1.2 -> ")
+    pdu.set_outlet = original  # type: ignore[method-assign]
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_power_command_set_outlet_failure_return_false():
+    """B5: set_outlet returns ok=False -> error line, return False."""
+    from openmux.server.adapters.power_command import run_power_command
+
+    adapter, pdu, pm = await _started()
+
+    async def failing(ref, on, user=None, client_id=None):
+        return {"ok": False, "error": "switch failed: no response"}
+
+    orig = pdu.set_outlet
+    pdu.set_outlet = failing  # type: ignore[method-assign]
+    lines = _FakeClient()
+    # 'on' avoids the off-impact NOTE line that would precede the error.
+    ret = await run_power_command(pdu.console_manager, "POWER rack1.1 on", lines.send_line, "u1", adapter.auth_manager)
+    assert ret is False
+    assert lines.lines == ["ERROR:POWER: switch failed: no response"]
+    pdu.set_outlet = orig  # type: ignore[method-assign]
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_power_list_shows_offline_and_unresolved():
+    """B6a + B6b: [OFFLINE] line + unresolved feeds NOTE line."""
+    adapter, pdu, pm = await _started()
+    # Add a console port that references an unknown outlet -> unresolved
+    c2 = _FakePort("c2", power=["ghost.1"])
+    pm.ports["c2"] = c2
+    # Mark the real PDU offline
+    pdu.pdus["rack1"].online = False
+    client = _FakeClient()
+    await adapter.process_client_command(client, "POWER")
+    joined = "\n".join(client.lines)
+    assert "[OFFLINE]" in joined
+    assert "unresolved feeds: ghost.1" in joined
+    del pm.ports["c2"]
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_power_unknown_pdu_error():
+    """B7: bare token (no dot) that is not a PDU name -> 'unknown PDU'."""
+    adapter, pdu, pm = await _started()
+    client = _FakeClient()
+    await adapter.process_client_command(client, "POWER notapdu")
+    assert client.lines == ["ERROR:POWER: unknown PDU: notapdu"]
+    await pdu.stop()
+
+
+@pytest.mark.asyncio
+async def test_user_can_write_guard_none_and_raises():
+    """B8: _user_can_write with auth=None/username=None and auth raising."""
+    from openmux.server.adapters.power_command import _user_can_write
+
+    assert await _user_can_write(None, "u1") is False  # auth None
+    assert await _user_can_write(object(), None) is False  # username None
+
+    class _Explodes:
+        def get_user_permissions(self, u):
+            raise RuntimeError("nope")
+
+    assert await _user_can_write(_Explodes(), "u1") is False  # raises
