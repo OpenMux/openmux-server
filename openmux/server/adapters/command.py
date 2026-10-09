@@ -1028,84 +1028,110 @@ class CommandPort:
             self.state = PortState.DESTROYING
             self.logger.info("Stopping command port %s", self.name)
             # Cancel any pending idle-stop task first
-            try:
-                if self._idle_stop_task and not self._idle_stop_task.done():
-                    self._idle_stop_task.cancel()
-            except Exception:
-                # justification: idempotent task cancel
-                pass
-            self._idle_stop_task = None
-
+            self._cancel_idle_stop_task()
             if self._monitor_task:
                 self._monitor_task.cancel()
                 self._monitor_task = None
-            if self._pty_master_fd is not None:
-                if self._loop and self._pty_reader_added:
-                    try:
-                        self._loop.remove_reader(self._pty_master_fd)
-                    except Exception:  # justification: reader may already be detached; safe to proceed
-                        pass
-                    self._pty_reader_added = False
-                # Close even when the reader already detached itself on EOF,
-                # so a dead process cannot leak its master fd (issue #63).
-                try:
-                    os.close(self._pty_master_fd)
-                except OSError:  # justification: fd may already be closed; ignore
-                    pass
-                self._pty_master_fd = None
+            self._close_pty_master()
             # Wake/stop output flusher if active
-            try:
-                if self._output_flush_event:
-                    self._output_flush_event.set()
-            except Exception:
-                # justification: idempotent flusher wake
-                pass
-            if self._output_flush_task:
-                self._output_flush_task.cancel()
-                self._output_flush_task = None
+            self._stop_output_flusher()
             if self._read_task:
                 self._read_task.cancel()
                 self._read_task = None
-            if self._writer and self.process and self.process.stdin:
-                try:
-                    self.process.stdin.close()
-                    if hasattr(self.process.stdin, "wait_closed"):
-                        await asyncio.wait_for(self.process.stdin.wait_closed(), timeout=1.0)
-                except Exception:  # justification: stdin close errors ignored during shutdown cleanup
-                    pass
-            if self.process:
-                try:
-                    if self.use_pty:
-                        try:
-                            pgid = os.getpgid(self.process.pid)
-                            os.killpg(pgid, signal.SIGTERM)
-                        except Exception:  # justification: fallback to terminate if killpg fails
-                            self.process.terminate()
-                except Exception:  # justification: process may already have exited; termination best-effort
-                    pass
+            await self._close_stdin()
+            self._terminate_process()
             self.logger.info("Command port %s stopped", self.name)
         except Exception as e:
             self.logger.error("Error stopping command port %s: %s", self.name, e, exc_info=True)
         finally:
-            # Lifecycle notice: warn clients still attached that the process
-            # was stopped (idle timeout, manual stop, adapter teardown).
-            _clients = self.client_count
-            self._writer = None
-            self.process = None
-            self.client_count = 0
-            # Allow the PROCESS_NOT_RUNNING notice to fire again on the next
-            # attach; otherwise a stop() would eat the banner for good.
-            self._stopped_notice_sent = False
-            if _clients > 0:
-                self._schedule_lifecycle_notice("PROCESS_STOPPED", "process was stopped")
-            # An intentional stop is a resting state, not a failure; clear the
-            # offline reason so the port does not show a stale exit code, and
-            # mark it connected again so the UI does not keep a stale banner.
-            self._set_status_message("")
-            self._set_connected(True)
-            self.is_running = False
-            self.process_active = False
-            self.state = PortState.CONFIGURED
+            self._reset_stop_state()
+
+    def _cancel_idle_stop_task(self) -> None:
+        """Cancel any pending idle-stop task (idempotent)."""
+        try:
+            if self._idle_stop_task and not self._idle_stop_task.done():
+                self._idle_stop_task.cancel()
+        except Exception:
+            # justification: idempotent task cancel
+            pass
+        self._idle_stop_task = None
+
+    def _close_pty_master(self) -> None:
+        """Detach the PTY loop reader and close the master fd."""
+        if self._pty_master_fd is None:
+            return
+        if self._loop and self._pty_reader_added:
+            try:
+                self._loop.remove_reader(self._pty_master_fd)
+            except Exception:  # justification: reader may already be detached; safe to proceed
+                pass
+            self._pty_reader_added = False
+        # Close even when the reader already detached itself on EOF,
+        # so a dead process cannot leak its master fd (issue #63).
+        try:
+            os.close(self._pty_master_fd)
+        except OSError:  # justification: fd may already be closed; ignore
+            pass
+        self._pty_master_fd = None
+
+    def _stop_output_flusher(self) -> None:
+        """Wake the output flusher and cancel its task if active."""
+        try:
+            if self._output_flush_event:
+                self._output_flush_event.set()
+        except Exception:
+            # justification: idempotent flusher wake
+            pass
+        if self._output_flush_task:
+            self._output_flush_task.cancel()
+            self._output_flush_task = None
+
+    async def _close_stdin(self) -> None:
+        """Close the process stdin (bounded wait for drain) during shutdown."""
+        if not (self._writer and self.process and self.process.stdin):
+            return
+        try:
+            self.process.stdin.close()
+            if hasattr(self.process.stdin, "wait_closed"):
+                await asyncio.wait_for(self.process.stdin.wait_closed(), timeout=1.0)
+        except Exception:  # justification: stdin close errors ignored during shutdown cleanup
+            pass
+
+    def _terminate_process(self) -> None:
+        """Terminate the child (process group for PTY ports) best-effort."""
+        if not self.process:
+            return
+        try:
+            if self.use_pty:
+                try:
+                    pgid = os.getpgid(self.process.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                except Exception:  # justification: fallback to terminate if killpg fails
+                    self.process.terminate()
+        except Exception:  # justification: process may already have exited; termination best-effort
+            pass
+
+    def _reset_stop_state(self) -> None:
+        """Reset runtime state to the configured baseline after a stop."""
+        # Lifecycle notice: warn clients still attached that the process
+        # was stopped (idle timeout, manual stop, adapter teardown).
+        _clients = self.client_count
+        self._writer = None
+        self.process = None
+        self.client_count = 0
+        # Allow the PROCESS_NOT_RUNNING notice to fire again on the next
+        # attach; otherwise a stop() would eat the banner for good.
+        self._stopped_notice_sent = False
+        if _clients > 0:
+            self._schedule_lifecycle_notice("PROCESS_STOPPED", "process was stopped")
+        # An intentional stop is a resting state, not a failure; clear the
+        # offline reason so the port does not show a stale exit code, and
+        # mark it connected again so the UI does not keep a stale banner.
+        self._set_status_message("")
+        self._set_connected(True)
+        self.is_running = False
+        self.process_active = False
+        self.state = PortState.CONFIGURED
 
     async def restart(self, force: bool = False) -> bool:
         """Manually restart the underlying process.
