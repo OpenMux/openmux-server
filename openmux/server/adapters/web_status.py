@@ -189,19 +189,31 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             reader: Stream reader.
             writer: Stream writer.
         """
-        # Parse request line
+        method_path = await self._parse_request_line(reader, writer)
+        if not method_path:
+            return
+        method, path = method_path
+        headers, body_bytes = await self._collect_headers_and_body(reader)
+        return await self._dispatch_http_endpoint(writer, method, path, headers, body_bytes)
+
+    async def _parse_request_line(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> Optional[Tuple[str, str]]:
+        """Read and split the HTTP request line; ``None`` on blank/400."""
         request_line = await reader.readline()
         if not request_line:
-            return
+            return None
         try:
             request_line = request_line.decode("utf-8", errors="ignore").strip()
             method, path, *_ = request_line.split(" ")
+            return method, path
         except Exception:  # justification: malformed request line is a client error; 400 without logging
             await self._send_http_error(writer, 400, "Bad Request")
-            return
+            return None
 
-        # Collect headers, detect content-length
-        headers = {}
+    async def _collect_headers_and_body(self, reader: asyncio.StreamReader) -> Tuple[Dict[str, str], bytes]:
+        """Read headers + the request body (content-length bounded)."""
+        headers: Dict[str, str] = {}
         content_length = 0
         while True:
             line = await reader.readline()
@@ -220,22 +232,25 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             content_length = int(headers.get("content-length", 0))
         except Exception:  # justification: non-integer content-length; treat as 0
             content_length = 0
-
         body_bytes = b""
         if content_length > 0:
             try:
                 body_bytes = await reader.readexactly(content_length)
             except Exception:  # justification: short read/disconnect; treat as empty body
                 body_bytes = b""
+        return headers, body_bytes
+
+    async def _dispatch_http_endpoint(
+        self, writer: asyncio.StreamWriter, method: str, path: str, headers: Dict[str, str], body_bytes: bytes
+    ) -> None:
+        """Route a parsed request to the matching API endpoint."""
         if not self.enable_http_api:
             await self._send_http_error(writer, 404, "Not Found")
             return
-
         # Basic CORS preflight handling (when enabled)
         if method == "OPTIONS":
             await self._send_cors_preflight_ok(writer, headers)
             return
-
         if method == "GET" and path == "/":
             # Simple landing listing endpoints
             await self._send_json(
