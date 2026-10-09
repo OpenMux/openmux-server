@@ -4102,3 +4102,162 @@ async def test_accept_client_in_accept_promotion(monkeypatch):
     new_conn = [cid for cid in a.connections if cid != c1 and cid.startswith("in:")]
     assert len(new_conn) == 1
     assert a._mpath_groups["node:S"]["primary"] == new_conn[0]
+
+
+# --- Coverage for C901 19-bracket: _connect_with_routing_options ----------
+
+
+class _RoutingSock:
+    """Socket fake capturing setsockopt/bind/connect side effects."""
+
+    def __init__(self, bind_raises: bool = False):
+        self._opts: List[List[Any]] = []
+        self.bind_calls: List[Any] = []
+        self.blocking = True
+        self.close_calls = 0
+        self._bind_raises = bind_raises
+
+    def setsockopt(self, level: int, opt: int, val) -> None:
+        self._opts.append([level, opt, val])
+
+    def bind(self, addr) -> None:
+        self.bind_calls.append(addr)
+        if self._bind_raises:
+            raise OSError("bind refused")
+
+    def setblocking(self, b: bool) -> None:
+        self.blocking = b
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+async def _stub_connect(
+    monkeypatch,
+    *,
+    platform: str,
+    family: int = socket.AF_INET,
+    bind_raises: bool = False,
+    if_index: Optional[int] = 1,
+    gai_ok: bool = True,
+    connect_fail: bool = False,
+):
+    """Stub getaddrinfo/socket/sock_connect/open_connection.
+
+    Returns ``(adapter, made_socks)`` so a test can inspect the setsockopt
+    side effects and confirm a failing connect closed the socket.
+    """
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    monkeypatch.setattr(sys, "platform", platform)
+
+    def fake_if_nametoindex(name):
+        if if_index is None:
+            raise OSError("no such interface")
+        return if_index
+
+    monkeypatch.setattr(socket, "if_nametoindex", fake_if_nametoindex)
+
+    made: List[_RoutingSock] = []
+
+    def make_sock(af, st, pr):
+        s = _RoutingSock(bind_raises=bind_raises)
+        made.append(s)
+        return s
+
+    monkeypatch.setattr(socket, "socket", make_sock)
+
+    sockaddr = ("127.0.0.1", 0) if family == socket.AF_INET else ("::1", 0, 0, 0)
+    gai = [(family, socket.SOCK_STREAM, 0, "", sockaddr)] if gai_ok else []
+
+    async def fake_gai(host, port, type=None):
+        return gai
+
+    loop = asyncio.get_event_loop()
+    monkeypatch.setattr(loop, "getaddrinfo", lambda *args, **kwargs: loop.create_task(fake_gai(*args, **kwargs)))
+
+    async def fake_sock_connect(sock, sockaddr):
+        if connect_fail:
+            raise OSError("connect refused")
+
+    monkeypatch.setattr(loop, "sock_connect", lambda sock, sockaddr: loop.create_task(fake_sock_connect(sock, sockaddr)))
+
+    async def fake_open_connection(**kwargs):
+        return cast(Any, FakeReader([])), cast(Any, FakeWriter())
+
+    monkeypatch.setattr(asyncio, "open_connection", lambda **kwargs: loop.create_task(fake_open_connection(**kwargs)))
+    return a, made
+
+
+@pytest.mark.asyncio
+async def test_connect_routing_linux_interface_and_fwmark(monkeypatch):
+    # Linux with interface + fwmark: both setsockopts are applied (SO_BINDTODEVICE, SO_MARK)
+    a, made = await _stub_connect(monkeypatch, platform="linux", bind_raises=False)
+    await a._connect_with_routing_options("h", 1, None, None, ("127.0.0.1", 0), interface="eth0", fwmark=7)
+    assert len(made) == 1
+    opts = {(lvl, opt) for lvl, opt, _ in made[0]._opts}
+    assert (socket.SOL_SOCKET, 25) in opts  # SO_BINDTODEVICE
+    assert (socket.SOL_SOCKET, 36) in opts  # SO_MARK
+
+
+@pytest.mark.asyncio
+async def test_connect_routing_darwin_ipv6_interface(monkeypatch):
+    # Darwin IPv6: IPV6_BOUND_IF setsockopt applied
+    a, made = await _stub_connect(monkeypatch, platform="darwin", family=socket.AF_INET6)
+    await a._connect_with_routing_options("h", 1, None, None, None, interface="lo0", fwmark=None)
+    assert len(made) == 1
+    opts = {(lvl, opt) for lvl, opt, _ in made[0]._opts}
+    assert (socket.IPPROTO_IPV6, 125) in opts  # IPV6_BOUND_IF
+
+
+@pytest.mark.asyncio
+async def test_connect_routing_darwin_unknown_interface_no_opt(monkeypatch):
+    # Darwin with an unknown interface: no routing setsockopt, but connect succeeds
+    a, made = await _stub_connect(monkeypatch, platform="darwin", if_index=None)
+    r, w = await a._connect_with_routing_options("h", 1, None, None, None, interface="nointf0", fwmark=None)
+    assert r is not None and w is not None
+    assert made[0]._opts == []
+
+
+@pytest.mark.asyncio
+async def test_connect_routing_generic_platform_interface(monkeypatch):
+    # Non-linux/darwin platform: generic IP_BOUND_IF attempt is applied
+    a, made = await _stub_connect(monkeypatch, platform="freebsd14")
+    r, w = await a._connect_with_routing_options("h", 1, None, None, None, interface="lo0", fwmark=None)
+    assert r is not None and w is not None
+    opts = {(lvl, opt) for lvl, opt, _ in made[0]._opts}
+    assert (socket.IPPROTO_IP, 25) in opts  # IP_BOUND_IF
+
+
+@pytest.mark.asyncio
+async def test_connect_routing_binds_local_addr(monkeypatch):
+    # local_addr triggers a bind before connect
+    a, made = await _stub_connect(monkeypatch, platform="linux")
+    await a._connect_with_routing_options("h", 1, None, None, ("127.0.0.2", 5555))
+    assert made[0].bind_calls == [("127.0.0.2", 5555)]
+
+
+@pytest.mark.asyncio
+async def test_connect_routing_local_bind_failure_is_warned(monkeypatch):
+    # A failing local bind is logged but does not abort the connect
+    a, made = await _stub_connect(monkeypatch, platform="linux", bind_raises=True)
+    r, w = await a._connect_with_routing_options("h", 1, None, None, ("127.0.0.2", 5555))
+    assert r is not None and w is not None
+    assert made[0].bind_calls  # bind was attempted and raised
+
+
+@pytest.mark.asyncio
+async def test_connect_routing_connect_failure_closes_socket(monkeypatch):
+    # A failing connect must close the socket and re-raise
+    a, made = await _stub_connect(monkeypatch, platform="linux", connect_fail=True)
+    with pytest.raises(OSError, match="connect refused"):
+        await a._connect_with_routing_options("h", 1, None, None, None)
+    assert made[0].close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_connect_routing_unresolvable_host_raises(monkeypatch):
+    # When getaddrinfo returns nothing, we raise an OSError naming the target
+    a, made = await _stub_connect(monkeypatch, platform="linux", gai_ok=False)
+    with pytest.raises(OSError, match="Name resolution failed for h:1"):
+        await a._connect_with_routing_options("h", 1, None, None, None)
+    assert made == []

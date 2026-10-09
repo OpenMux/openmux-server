@@ -3384,6 +3384,49 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
 
+    def _connect_local_bind(self, sock: socket.socket, local_addr: Optional[Tuple[str, int]]) -> None:
+        """Bind an outbound socket to a local address; failures only warn."""
+        if not local_addr:
+            return
+        try:
+            sock.bind(local_addr)
+        except Exception as e:
+            self.logger.warning("Local bind failed %s: %s", local_addr, e)
+
+    def _connect_apply_interface(self, sock: socket.socket, af: int, interface: str) -> None:
+        """Apply platform-specific interface binding to an outbound socket.
+
+        Linux uses SO_BINDTODEVICE; macOS uses IP_BOUND_IF / IPV6_BOUND_IF;
+        other platforms try a generic IP_BOUND_IF hint. Best-effort: a
+        routing hint that cannot be applied does not abort the connection.
+        """
+        try:
+            if sys.platform.startswith("linux"):
+                SO_BINDTODEVICE = 25  # not in Python stdlib constants
+                sock.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, interface.encode() + b"\0")
+            elif sys.platform == "darwin":
+                self._apply_darwin_bound_if(sock, af, interface)
+            else:
+                # Try generic if_nametoindex + IP_BOUND_IF if present
+                try:
+                    if_index = socket.if_nametoindex(interface)
+                    IP_BOUND_IF = 25
+                    sock.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, if_index)
+                except Exception:
+                    # justification: optional socket routing hint; the connection works without it
+                    pass
+        except Exception as e:
+            self.logger.warning("Failed to apply interface binding '%s': %s", interface, e)
+
+    def _connect_apply_fwmark(self, sock: socket.socket, fwmark: int) -> None:
+        """Apply a routing mark (SO_MARK) to an outbound socket; Linux only."""
+        try:
+            if sys.platform.startswith("linux"):
+                SO_MARK = 36  # from linux/include/uapi/linux/sol_socket.h
+                sock.setsockopt(socket.SOL_SOCKET, SO_MARK, fwmark)
+        except Exception as e:
+            self.logger.warning("Failed to apply fwmark %s: %s", fwmark, e)
+
     async def _connect_with_routing_options(
         self,
         host: str,
@@ -3410,58 +3453,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         sock = socket.socket(af, socktype, proto)
         try:
-            # Optional local bind
-            if local_addr:
-                try:
-                    sock.bind(local_addr)
-                except Exception as e:
-                    self.logger.warning("Local bind failed %s: %s", local_addr, e)
-
-            # Apply platform-specific options before connect
-            try:
-                if interface:
-                    if sys.platform.startswith("linux"):
-                        SO_BINDTODEVICE = 25  # not in Python stdlib constants
-                        sock.setsockopt(socket.SOL_SOCKET, SO_BINDTODEVICE, interface.encode() + b"\0")
-                    elif sys.platform == "darwin":
-                        # macOS: bind by interface index for IPv4/IPv6
-                        try:
-                            if_index = socket.if_nametoindex(interface)
-                        except Exception:
-                            if_index = 0
-                        if if_index:
-                            try:
-                                if af == socket.AF_INET:
-                                    IP_BOUND_IF = 25  # <netinet/in.h>
-                                    sock.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, if_index)
-                                elif af == socket.AF_INET6:
-                                    IPV6_BOUND_IF = 125  # <netinet6/in6.h>
-                                    sock.setsockopt(socket.IPPROTO_IPV6, IPV6_BOUND_IF, if_index)
-                            except Exception:
-                                # justification: optional socket routing hint; the connection works without it
-                                pass
-                    else:
-                        # Try generic if_nametoindex + IP_BOUND_IF if present
-                        try:
-                            if_index = socket.if_nametoindex(interface)
-                            IP_BOUND_IF = 25
-                            sock.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF, if_index)
-                        except Exception:
-                            # justification: optional socket routing hint; the connection works without it
-                            pass
-            except Exception as e:
-                self.logger.warning("Failed to apply interface binding '%s': %s", interface, e)
-
-            try:
-                if fwmark is not None:
-                    if sys.platform.startswith("linux"):
-                        SO_MARK = 36  # from linux/include/uapi/linux/sol_socket.h
-                        sock.setsockopt(socket.SOL_SOCKET, SO_MARK, fwmark)
-                    else:
-                        # Not supported on this platform; ignore
-                        pass
-            except Exception as e:
-                self.logger.warning("Failed to apply fwmark %s: %s", fwmark, e)
+            self._connect_local_bind(sock, local_addr)
+            if interface:
+                self._connect_apply_interface(sock, af, interface)
+            if fwmark is not None:
+                self._connect_apply_fwmark(sock, fwmark)
 
             sock.setblocking(False)
             await asyncio.get_event_loop().sock_connect(sock, sockaddr)
