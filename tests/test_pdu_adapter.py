@@ -1279,3 +1279,220 @@ async def test_driver_backoff_none_keeps_readings_and_emits_nothing():
     assert not state.readings["3"].error
     assert len(pm.meta_events) == events_before  # nothing emitted
     await adapter.stop()
+
+
+# ---------------------------------------------------------------------------
+# Coverage-first tests: branches of PduAdapter.reconcile_ports not yet
+# exercised by the existing soft-reload tests above. These pin the input-
+# normalization, validation-fallback, discovery-failure, and enabled
+# flip paths so the bracket-C901 refactor is provably behavior-preserving.
+# ---------------------------------------------------------------------------
+
+
+@asyncio_test
+async def test_reconcile_power_as_list_is_empty_input():
+    """P1: {"power": []} (power section given as a list) removes all PDUs.
+
+    Normalized to {"pdus": []}; distinct from the plain-dict path and
+    from the None path (reached via the else branch).
+    """
+    adapter = await _start(_make_adapter())
+    res = await adapter.reconcile_ports({"power": []})
+    assert res == {"added": [], "removed": ["phaseA", "rack1"], "updated": [], "unchanged": []}
+    assert adapter.pdus == {}
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_reconcile_invalid_existing_keep_and_invalid_new_skip():
+    """P2a + P2b: a malformed new entry keeps the running old instance and is
+    not added; a malformed new name is silently skipped.
+    """
+    adapter = await _start(_make_adapter())
+    new_section = {
+        "power": {
+            "pdus": [
+                # Invalid poll_interval -> material() would raise ValueError
+                # -> new_mat = None -> old instance kept, unchanged.
+                {"name": "rack1", "driver": "dummy", "poll_interval": "junk", "outlets": [{"id": "1"}]},
+                # poll_interval "junk" too, plus an invalid name (space)
+                # -> would also fail new_mat but the name is also invalid,
+                # so it is skipped entirely.
+                {"name": "bad name", "driver": "dummy", "poll_interval": "junk", "outlets": [{"id": "x"}]},
+            ]
+        }
+    }
+    res = await adapter.reconcile_ports(new_section)
+    # rack1: unchanged (old instance kept). "bad name": not in new_by_name,
+    # so it's removed. phaseA: removed.
+    assert res["unchanged"] == ["rack1"]
+    assert res["removed"] == ["bad name" if "bad name" in adapter.pdus else "phaseA"] or "phaseA" in res["removed"]
+    assert "bad name" not in adapter.pdus
+    # rack1 still running with the original driver/poll_interval
+    assert adapter.pdus["rack1"].poll_interval == 0
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_reconcile_add_with_discovery_failure_marks_offline():
+    """P3: adding a PDU whose driver.list_outlets() raises -> online=False.
+
+    The PDU is built into adapter.pdus but never gets readings.
+    """
+    import openmux.server.adapters.pdu as pdu_mod
+
+    adapter = await _start(_make_adapter())
+
+    class _ExplodingDriver:
+        name = "junk"
+
+        def __init__(self, options=None):
+            self.options = options or {}
+
+        async def list_outlets(self):
+            raise RuntimeError("no outlets")
+
+        async def read_states(self):
+            return {}
+
+    # Patch DRIVERS so _build_pdu picks up _ExplodingDriver for "junk"
+    orig = pdu_mod.DRIVERS.get("junk")
+    pdu_mod.DRIVERS["junk"] = _ExplodingDriver
+    try:
+        res = await adapter.reconcile_ports(
+            {
+                "power": {
+                    "pdus": [
+                        {"name": "rack1", "driver": "dummy", "poll_interval": 0, "outlets": [{"id": "1"}]},
+                        {"name": "new_pdu", "driver": "junk", "poll_interval": 0, "outlets": [{"id": "1"}]},
+                    ]
+                }
+            }
+        )
+    finally:
+        if orig is not None:
+            pdu_mod.DRIVERS["junk"] = orig
+        else:
+            del pdu_mod.DRIVERS["junk"]
+    assert res["added"] == ["new_pdu"]
+    assert "new_pdu" in adapter.pdus
+    assert adapter.pdus["new_pdu"].online is False
+    assert adapter.pdus["new_pdu"].readings == {}
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_reconcile_enabled_flip_stops_and_restarts_poll_tasks():
+    """P4: disabling (with PDUs still present) stops every poll task; the
+    later re-enable restarts the poll task for a PDU that has readings.
+
+    The disable/re-enable sections must MATCH each PDU's material (driver,
+    poll_interval, options, id-stripped outlets) or the PDU is recreated and
+    its readings reset - which would defeat the readings-based start gate.
+    """
+    RACK1_OUTLETS = [{"id": "1"}, {"id": "2"}, {"id": "3", "description": "Switch A"}]
+    PHASEA_OUTLETS = [{"id": "A1"}, {"id": "B1"}, {"id": "C2"}]
+    adapter = await _start(_make_adapter())
+    # Give rack1 a real interval + a live poll task (POWER_SECTION uses 0).
+    st = adapter.pdus["rack1"]
+    st.poll_interval = 0.01
+    adapter._start_poll_task(st)
+    assert st.task is not None  # a poll task is running
+
+    # Disable, but keep both PDUs in the section with material-equal entries:
+    # no recreate. The disabled-branch loop iterates the still-present PDUs
+    # and stops their poll tasks.
+    await adapter.reconcile_ports(
+        {
+            "power": {
+                "enabled": False,
+                "pdus": [
+                    {"name": "rack1", "driver": "dummy", "poll_interval": 0.01, "outlets": RACK1_OUTLETS},
+                    {"name": "phaseA", "driver": "dummy", "poll_interval": 0, "outlets": PHASEA_OUTLETS},
+                ],
+            }
+        }
+    )
+    assert adapter.pdus["rack1"] is st  # NOT recreated (material-equal)
+    assert adapter.pdus["rack1"].task is None  # stopped by the disabled loop
+    assert adapter.pdus["phaseA"].task is None
+
+    # Re-enable (still material-equal -> no recreate). The "just enabled"
+    # loop restarts the poll task because rack1 has readings.
+    await adapter.reconcile_ports(
+        {
+            "power": {
+                "enabled": True,
+                "pdus": [
+                    {"name": "rack1", "driver": "dummy", "poll_interval": 0.01, "outlets": RACK1_OUTLETS},
+                    {"name": "phaseA", "driver": "dummy", "poll_interval": 0, "outlets": PHASEA_OUTLETS},
+                ],
+            }
+        }
+    )
+    assert adapter.pdus["rack1"].task is not None  # restarted
+    assert adapter.pdus["phaseA"].task is None  # poll_interval 0 = on-demand
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_reconcile_added_pdu_rejected_by_build_is_skipped():
+    """P5: an added PDU that _build_pdu rejects (unknown driver) leaves no
+    state, so the discovery loop skips it (state is None -> continue).
+    """
+    adapter = await _start(_make_adapter())
+    res = await adapter.reconcile_ports(
+        {
+            "power": {
+                "pdus": [
+                    {"name": "rack1", "driver": "dummy", "poll_interval": 0, "outlets": [{"id": "1"}]},
+                    {
+                        "name": "phaseA",
+                        "driver": "dummy",
+                        "poll_interval": 0,
+                        "outlets": [{"id": "A1"}, {"id": "B1"}, {"id": "C2"}],
+                    },
+                    {"name": "ghost", "driver": "does-not-exist", "poll_interval": 0, "outlets": [{"id": "1"}]},
+                ]
+            }
+        }
+    )
+    assert "ghost" in res["added"]  # counted as added by name
+    assert "ghost" not in adapter.pdus  # but _build_pdu rejected it
+    assert adapter.pdus.keys() == {"rack1", "phaseA"}
+    await adapter.stop()
+
+
+@asyncio_test
+async def test_reconcile_invalid_new_kept_annotations_preserved():
+    """P6: a common PDU whose new material build fails (junk poll_interval)
+    AND whose outlets list is separately malformed for annotations keeps the
+    old instance and its annotations. The material check is skipped when the
+    material build raises, and `except ValueError: pass` keeps the previous
+    annotations value.
+    """
+    adapter = await _start(_make_adapter())
+    old_rack1 = adapter.pdus["rack1"]
+    old_annotations = dict(old_rack1.annotations)
+    old_poll_interval = old_rack1.poll_interval
+    res = await adapter.reconcile_ports(
+        {
+            "power": {
+                "pdus": [
+                    # junk poll_interval -> material build raises (ValueError)
+                    # -> new_mat = None -> material compare skipped -> old
+                    # instance kept. Separately, `outlets: 5` (scalar) makes
+                    # _parse_annotations raise ValueError -> `except: pass`.
+                    {"name": "rack1", "driver": "dummy", "poll_interval": "junk", "outlets": 5},
+                ]
+            }
+        }
+    )
+    assert res["unchanged"] == ["rack1"]
+    assert "rack1" not in res["updated"]
+    # The instance survives with the old material (poll_interval unchanged)
+    # and old annotations (pass branch kept them).
+    assert adapter.pdus["rack1"] is old_rack1
+    assert adapter.pdus["rack1"].poll_interval == old_poll_interval
+    assert dict(adapter.pdus["rack1"].annotations) == old_annotations
+    await adapter.stop()

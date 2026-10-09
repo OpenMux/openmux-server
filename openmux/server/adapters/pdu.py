@@ -1318,22 +1318,8 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         Returns:
             Summary dict: {added, removed, updated, unchanged}.
         """
-        if isinstance(new_config, dict) and isinstance(new_config.get("power"), (dict, list)):
-            section = new_config["power"]
-            if isinstance(section, list):
-                section = {"pdus": []}
-        elif isinstance(new_config, dict):
-            section = new_config
-        else:
-            section = {}
-        if "pdus" not in section and "enabled" not in section:
-            # main.py passes {} when the section is dropped: remove all PDUs
-            section = {"pdus": []}
-        if section is None:
-            section = {"pdus": []}
-        new_enabled = bool(section.get("enabled", True))
         old_enabled = self.enabled
-        self.enabled = new_enabled
+        new_enabled, section = self._reconcile_section(new_config)
 
         new_by_name: Dict[str, Dict[str, Any]] = {}
         for pdu in section.get("pdus") or []:
@@ -1346,6 +1332,45 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         added = sorted(new_names - old_names)
         common = sorted(old_names & new_names)
 
+        updated, unchanged = self._reconcile_common(new_by_name, common)
+        self._reconcile_remove(removed)
+        await self._reconcile_rebuild(added, updated, new_by_name, new_enabled)
+        self._reconcile_poll_flip(old_enabled, new_enabled)
+
+        return {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
+
+    def _reconcile_section(self, new_config: Any) -> Tuple[bool, Dict[str, Any]]:
+        """(new_enabled, section dict) after input normalization.
+
+        Accepts `{"power": <section>}` / a flat section dict / nothing. A
+        list-form section (`{"power": [...]}`) and a section without `pdus`
+        or `enabled` (main.py drops it as {}) both mean "remove all"
+        (`{"pdus": []}`). The `section is None` check is defensive: the guards
+        above always yield a dict, so it cannot fire - kept for parity with
+        the pre-extraction guard chain.
+        """
+        if isinstance(new_config, dict) and isinstance(new_config.get("power"), (dict, list)):
+            section = new_config["power"]
+            if isinstance(section, list):
+                section = {"pdus": []}
+        elif isinstance(new_config, dict):
+            section = new_config
+        else:
+            section = {}
+        if "pdus" not in section and "enabled" not in section:
+            # main.py passes {} when the section is dropped: remove all PDUs
+            section = {"pdus": []}
+        if section is None:
+            # Defensive: the guards above always yield a dict.
+            section = {"pdus": []}
+        new_enabled = bool(section.get("enabled", True))
+        self.enabled = new_enabled
+        return new_enabled, section
+
+    def _reconcile_common(self, new_by_name: Dict[str, Dict[str, Any]], common: List[str]) -> Tuple[List[str], List[str]]:
+        """(updated, unchanged): each common PDU is re-created (a material
+        change) or updated in place (description + annotations only).
+        """
         updated: List[str] = []
         unchanged: List[str] = []
         for pname in common:
@@ -1370,10 +1395,20 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
             except ValueError:
                 pass
             unchanged.append(pname)
+        return updated, unchanged
 
+    def _reconcile_remove(self, removed: List[str]) -> None:
+        """Drop removed PDUs and stop their poll tasks."""
         for pname in removed:
             state = self.pdus.pop(pname)
             self._stop_poll_task(state)
+
+    async def _reconcile_rebuild(
+        self, added: List[str], updated: List[str], new_by_name: Dict[str, Dict[str, Any]], new_enabled: bool
+    ) -> None:
+        """Rebuild added + materially-changed PDUs, and bring the live ones
+        online (best-effort) with a poll task when the feature is enabled.
+        """
         for pname in added + updated:
             await self._build_pdu(new_by_name[pname])
             state = self.pdus.get(pname)
@@ -1391,7 +1426,11 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
                 await self._refresh_readings(state)
                 self._start_poll_task(state)
 
-        # If the feature was just enabled, start polling for running PDUs
+    def _reconcile_poll_flip(self, old_enabled: bool, new_enabled: bool) -> None:
+        """Sync poll tasks to the enabled flag after a reconcile: a just-
+        enabled feature starts polling for PDUs that have readings; disabling
+        stops every poll task.
+        """
         if new_enabled and not old_enabled:
             for state in self.pdus.values():
                 if state.task is None and state.readings:
@@ -1399,8 +1438,6 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         elif not new_enabled:
             for state in self.pdus.values():
                 self._stop_poll_task(state)
-
-        return {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
 
     # --- status -------------------------------------------------------------
 
