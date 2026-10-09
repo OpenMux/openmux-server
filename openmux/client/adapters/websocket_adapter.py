@@ -24,7 +24,7 @@ Limitations:
 import asyncio
 import base64
 import json
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .base_adapter import BaseClientAdapter
 from .rw_control import format_control_response
@@ -91,73 +91,12 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 self.username = self.basic_user
             return True
         try:
-            # Determine disambiguated path. Accept forms:
-            #  - plain:               <name>              -> /ws/<name>
-            #  - composite string:    <sid>::<name>       -> /ws/<sid>/<name>
-            #  - explicit config:     origin_server_id + port_name
-            server_id: Optional[str] = None
-            port_name = self.port_name
-            if isinstance(self.origin_server_id, str) and self.origin_server_id:
-                server_id = self.origin_server_id
-            elif isinstance(port_name, str) and "::" in port_name:
-                try:
-                    sid, base = port_name.split("::", 1)
-                    if sid and base:
-                        server_id = sid
-                        port_name = base
-                except ValueError:
-                    # justification: heuristic parse of a federated port name; the plain name is kept
-                    pass
-            # Build path
-            if server_id:
-                path = f"/ws/{server_id}/{port_name}"
-            else:
-                path = f"{self.path_prefix.rstrip('/')}/{port_name}" if self.path_prefix else f"/ws/{port_name}"
-            if not path.startswith("/"):
-                path = "/" + path
-            # Request metadata push so we can surface port up/down notices in CLI
-            # Append ?meta=1 preserving simple path structure
-            if "?" not in path:
-                path = f"{path}?meta=1"
-            else:
-                # Defensive: ensure meta flag present
-                if "meta=" not in path:
-                    path = f"{path}&meta=1"
-            # aiohttp wants http/https scheme even for websockets; ws(s) accepted in recent versions but normalize
-            http_scheme = "https" if self.use_tls else "http"
-            base_url = f"{http_scheme}://{self.host}:{self.port}"  # e.g. http://host:port
-            url = f"{base_url}{path}"
-            headers = {}
-            if self.basic_user and self.basic_password:
-                token = base64.b64encode(f"{self.basic_user}:{self.basic_password}".encode("utf-8")).decode("ascii")
-                headers["Authorization"] = f"Basic {token}"
+            url, headers = self._build_ws_target()
             timeout = aiohttp.ClientTimeout(total=self.timeout)
             self.logger.info("Connecting (raw WS) to %s", url)
             session = aiohttp.ClientSession(timeout=timeout)
-            try:
-                self.websocket = await session.ws_connect(url, headers=headers)
-            except Exception:
-                await session.close()
-                raise
-            self._aiohttp_session = session  # store to close later
-            # If server immediately closed (e.g., invalid port), treat as failure
-            try:
-                if getattr(self.websocket, "closed", False):
-                    raise RuntimeError("websocket closed immediately")
-                # Also peek a message with a very short timeout; close/closing indicates failure
-                from aiohttp import WSMsgType
-
-                try:
-                    msg = await asyncio.wait_for(self.websocket.receive(), timeout=0.05)
-                    if msg and msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-                        raise RuntimeError("websocket closed on first receive")
-                except asyncio.TimeoutError:
-                    # justification: no handshake frame yet; the loop keeps waiting
-                    pass
-            except Exception:
-                await session.close()
-                self.websocket = None
-                self._aiohttp_session = None
+            self.websocket = await self._ws_handshake_session(session, url, headers)
+            if self.websocket is None:
                 self.is_connected = False
                 return False
             self.is_connected = True
@@ -167,6 +106,89 @@ class WebSocketClientAdapter(BaseClientAdapter):
         except Exception as e:
             self.logger.error("WebSocket connect failed: %s", e, exc_info=True)
             return False
+
+    def _build_ws_target(self) -> Tuple[str, Dict[str, str]]:
+        """Resolve the handshake target URL and header set.
+
+        Accept port forms: plain ``<name>``, composite ``<sid>::<name>``,
+        or explicit ``origin_server_id`` + ``port_name``. The explicit
+        origin config wins; the composite name is only split when it is
+        the sole source. The ``?meta=1`` flag is appended unless the path
+        already carries a query string (or the flag itself).
+
+        Returns:
+            (url, headers) pair for the handshake.
+        """
+        server_id: Optional[str] = None
+        port_name = self.port_name
+        if isinstance(self.origin_server_id, str) and self.origin_server_id:
+            server_id = self.origin_server_id
+        elif isinstance(port_name, str) and "::" in port_name:
+            try:
+                sid, base = port_name.split("::", 1)
+                if sid and base:
+                    server_id = sid
+                    port_name = base
+            except ValueError:
+                # justification: heuristic parse of a federated port name; the plain name is kept
+                pass
+        if server_id:
+            path = f"/ws/{server_id}/{port_name}"
+        else:
+            path = f"{self.path_prefix.rstrip('/')}/{port_name}" if self.path_prefix else f"/ws/{port_name}"
+        if not path.startswith("/"):
+            path = "/" + path
+        # Request metadata push so we can surface port up/down notices in CLI
+        if "?" not in path:
+            path = f"{path}?meta=1"
+        elif "meta=" not in path:
+            path = f"{path}&meta=1"
+        http_scheme = "https" if self.use_tls else "http"
+        base_url = f"{http_scheme}://{self.host}:{self.port}"
+        url = f"{base_url}{path}"
+        headers: Dict[str, str] = {}
+        if self.basic_user and self.basic_password:
+            token = base64.b64encode(f"{self.basic_user}:{self.basic_password}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {token}"
+        return url, headers
+
+    async def _ws_handshake_session(self, session, url: str, headers: Dict[str, str]):
+        """Open the WebSocket and verify the server is actually serving it.
+
+        On a connect error or an immediate close / close-on-first-receive the
+        session is closed and ``None`` is returned. Otherwise the (open)
+        ``websocket`` object is returned and stored on the adapter.
+
+        Returns:
+            The open websocket, or ``None`` when the handshake failed.
+        """
+        try:
+            ws = await session.ws_connect(url, headers=headers)
+        except Exception:
+            await session.close()
+            raise
+        self._aiohttp_session = session  # store to close later
+        self.websocket = ws
+        # If the server is immediately closed (e.g., invalid port)
+        try:
+            if getattr(self.websocket, "closed", False):
+                raise RuntimeError("websocket closed immediately")
+            # Also peek a message with a very short timeout; close/closing indicates failure
+            from aiohttp import WSMsgType
+
+            try:
+                msg = await asyncio.wait_for(self.websocket.receive(), timeout=0.05)
+                if msg and msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    raise RuntimeError("websocket closed on first receive")
+            except asyncio.TimeoutError:
+                # justification: no handshake frame yet; the loop keeps waiting
+                pass
+        except Exception:
+            await session.close()
+            self.websocket = None
+            self._aiohttp_session = None
+            return None
+        return self.websocket
 
     async def authenticate_with_password(self, username: str, password: str) -> bool:  # compatibility shim
         self.logger.debug("authenticate_with_password called - already authenticated via handshake")
