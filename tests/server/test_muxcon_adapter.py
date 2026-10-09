@@ -4639,3 +4639,98 @@ def test_init_auth_required_resolution():
     assert b._auth_required is True
 
 
+# ---------------------------------------------------------------------------
+# _heartbeat_loop: fault-injected connections are never sent to, and only a
+# STALE frozen connection is aged out (closed); a fresh one is not.
+
+
+def _hb_fault_stop_sleep(a, max_ticks):
+    """Stop the heartbeat loop after `max_ticks` iterations; returns orig_sleep."""
+    orig_sleep = asyncio.sleep
+    call = {"n": 0}
+
+    async def stopping_sleep(d):
+        await orig_sleep(0)
+        call["n"] += 1
+        if call["n"] >= max_ticks:
+            a._stop_event.set()
+
+    return asyncio.sleep, stopping_sleep, orig_sleep
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_loop_frozen_stale_connection_aged_out(monkeypatch):
+    import openmux.server.adapters.muxcon as muxmod
+
+    monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "heartbeat_interval": 0.1})
+    cid = "out:fz:1"
+    a.connections[cid] = {"writer": FakeWriter()}
+    a._fault_state[cid] = {"frozen": True}
+    # A stale frozen connection: it has already missed >= 3 heartbeats, so the
+    # next tick ages it out and closes it.
+    a._hb_state[cid] = {"last_req_ts": time.time() - 100.0, "last_ack_ts": 0.0, "missed": 2, "rtt_ms": None}
+
+    closed = {"n": 0}
+
+    async def fake_close(x):
+        closed["n"] += 1
+        assert x == cid
+
+    a._close_connection = fake_close  # type: ignore
+    orig_sleep, stopping_sleep, _ = _hb_fault_stop_sleep(a, 2)
+    monkeypatch.setattr(asyncio, "sleep", stopping_sleep)
+    await a._heartbeat_loop()
+    assert closed["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_loop_frozen_fresh_connection_not_closed(monkeypatch):
+    import openmux.server.adapters.muxcon as muxmod
+
+    monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "heartbeat_interval": 0.1})
+    cid = "out:fz2:1"
+    a.connections[cid] = {"writer": FakeWriter()}
+    a._fault_state[cid] = {"frozen": True}
+    # No recorded heartbeat: last_req_ts defaults to 0.0 (falsy), so the stale
+    # gate is false and the connection must NOT be aged out.
+    closed = {"n": 0}
+
+    async def fake_close(x):
+        closed["n"] += 1
+
+    a._close_connection = fake_close  # type: ignore
+    orig_sleep, stopping_sleep, _ = _hb_fault_stop_sleep(a, 2)
+    monkeypatch.setattr(asyncio, "sleep", stopping_sleep)
+    await a._heartbeat_loop()
+    assert closed["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_loop_drop_heartbeats_never_sends_or_closes(monkeypatch):
+    import openmux.server.adapters.muxcon as muxmod
+
+    monkeypatch.setattr(muxmod.asyncio, "StreamWriter", FakeWriter)
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "heartbeat_interval": 0.1})
+    cid = "out:dp:1"
+    w = FakeWriter()
+    a.connections[cid] = {"writer": w}
+    a._fault_state[cid] = {"drop_heartbeats": True}
+    a._hb_state[cid] = {"last_req_ts": time.time() - 100.0, "last_ack_ts": 0.0, "missed": 0, "rtt_ms": None}
+
+    closed = {"n": 0}
+
+    async def fake_close(x):
+        closed["n"] += 1
+
+    a._close_connection = fake_close  # type: ignore
+    # 4 sleeps = the initial 0.5s delay + 3 connection-processing ticks.
+    orig_sleep, stopping_sleep, _ = _hb_fault_stop_sleep(a, 4)
+    monkeypatch.setattr(asyncio, "sleep", stopping_sleep)
+    await a._heartbeat_loop()
+    # The drop fault must never send a heartbeat and never closes the conn.
+    assert bytes(w.buffer) == b""
+    assert closed["n"] == 0
+    # But it does age the missed counter as if heartbeats were being missed.
+    assert a._hb_state[cid]["missed"] == 3

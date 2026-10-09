@@ -2653,121 +2653,116 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.debug("Shutdown local session cleanup failed for %s", peer_key, exc_info=True)
 
     async def _heartbeat_loop(self):
-        """Send periodic heartbeats and detect timeouts.
-
-        Applies fault injection semantics (freeze/drop), updates multipath
-        last-seen metadata, and closes connections after consecutive misses.
-        """
+        """Send periodic heartbeats and detect timeouts (drives `_heartbeat_tick`)."""
         try:
-            # Small initial delay to avoid racing with startup
             await asyncio.sleep(0.5)
             while not self._stop_event.is_set():
                 try:
-                    if not self.connections:
-                        await asyncio.sleep(self.heartbeat_interval)
-                        continue
-                    now_ts = time.time()
-                    # Broadcast HB:REQ to all writers and check timeouts
-                    for cid, conn in list(self.connections.items()):
-                        # Treat frozen connections as fully suppressed (no heartbeats, allow stale aging)
-                        if self._fault_state.get(cid, {}).get("frozen"):
-                            # Do not update last_seen; let stale logic / failover handle promotion
-                            # Optionally increment missed count to accelerate teardown if desired
-                            st = self._hb_state.setdefault(
-                                cid,
-                                {
-                                    "last_req_ts": 0.0,
-                                    "last_ack_ts": 0.0,
-                                    "missed": 0,
-                                    "rtt_ms": None,
-                                },
-                            )
-                            # Artificially advance missed if already waiting too long
-                            if st.get("last_req_ts") and (now_ts - st["last_req_ts"]) > (self.heartbeat_interval * 2.5):
-                                st["missed"] = st.get("missed", 0) + 1
-                                if st["missed"] >= 3:
-                                    self.logger.warning("Heartbeat timeout (frozen) on %s; closing connection", cid)
-                                    await self._close_connection(cid)
-                            continue
-                        # Fault: drop heartbeats
-                        if self._fault_state.get(cid, {}).get("drop_heartbeats"):
-                            # Behave as if heartbeat was missed by not sending; let timeout logic increment misses
-                            st = self._hb_state.setdefault(
-                                cid,
-                                {
-                                    "last_req_ts": 0.0,
-                                    "last_ack_ts": 0.0,
-                                    "missed": 0,
-                                    "rtt_ms": None,
-                                },
-                            )
-                            # Artificially advance last_req_ts to drive timeout/miss progression
-                            if st.get("last_req_ts") and (now_ts - st["last_req_ts"]) > (self.heartbeat_interval * 2.5):
-                                st["missed"] = st.get("missed", 0) + 1
-                            continue
-                        try:
-                            w = conn.get("writer")
-                            if not w or w.is_closing():
-                                continue
-                            # Initialize heartbeat state if missing
-                            st = self._hb_state.setdefault(
-                                cid,
-                                {
-                                    "last_req_ts": 0.0,
-                                    "last_ack_ts": 0.0,
-                                    "missed": 0,
-                                    "rtt_ms": None,
-                                },
-                            )
-                            # Send HB:REQ with timestamp
-                            st["last_req_ts"] = now_ts
-                            hb_seq = self._next_frame_seq(cid)
-                            hb_req = self.proto.create_heartbeat_request(now_ts, hb_seq)
-                            await self._send_protocol_frame(w, hb_req)
-                            # Timeout detection (if previous REQ not acked within 2 intervals)
-                            try:
-                                if st["last_ack_ts"] < st["last_req_ts"] and (now_ts - st["last_req_ts"]) > (
-                                    self.heartbeat_interval * 2.5
-                                ):
-                                    st["missed"] += 1
-                                    # If too many misses, drop connection
-                                    if st["missed"] >= 3:
-                                        self.logger.warning("Heartbeat timeout on %s; closing connection", cid)
-                                        await self._close_connection(cid)
-                                        continue
-                            except Exception:  # justification: heartbeat state update for frozen connection optional
-                                pass
-                            # Update last_seen on outbound heartbeat (activity)
-                            try:
-                                self.connections[cid]["last_seen"] = now_ts
-                                # Also update multipath group entry last_seen so stale logic sees activity even if only heartbeats occur
-                                try:
-                                    key = self._derive_peer_key_from_conn_id(cid)
-                                    grp = self._mpath_groups.get(key)
-                                    if grp and cid in grp.get("conns", {}):
-                                        grp["conns"][cid]["last_seen"] = now_ts
-                                except Exception:  # justification: mpath group last_seen refresh best-effort
-                                    pass
-                            except Exception:  # justification: hb miss escalation optional; ignore
-                                pass
-                        except Exception as e:
-                            self.logger.debug("Heartbeat send failed for %s: %s", cid, e, exc_info=True)
-                    # After processing all connections, recompute proxy live-state for peers
-                    try:
-                        self._update_peer_proxies_live_state()
-                    except Exception:
-                        # justification: optional live-state recompute; the next event retries
-                        pass
-                    await asyncio.sleep(self.heartbeat_interval)
+                    await self._heartbeat_tick()
                 except asyncio.CancelledError:
                     break
-                except Exception:  # justification: failover loop scheduling optional; adapter still functions
+                except Exception:  # justification: one bad tick must not kill the loop
                     await asyncio.sleep(self.heartbeat_interval)
-        except asyncio.CancelledError:
-            # justification: loop exits on cancellation; nothing more to clean up
+        except asyncio.CancelledError:  # justification: loop exits on cancellation
             pass
         except Exception as e:
             self.logger.debug("Heartbeat loop exited with error: %s", e, exc_info=True)
+
+    async def _heartbeat_tick(self) -> None:
+        """One full heartbeat pass across all connections.
+
+        For each connection, dispatches to the frozen, drop-heartbeats, or
+        normal-sent path; then recomputes proxy live-state; finally sleeps for
+        ``heartbeat_interval``.
+        """
+        if not self.connections:
+            await asyncio.sleep(self.heartbeat_interval)
+            return
+        now_ts = time.time()
+        for cid, conn in list(self.connections.items()):
+            if self._fault_state.get(cid, {}).get("frozen"):
+                await self._hb_frozen_step(cid, now_ts)
+            elif self._fault_state.get(cid, {}).get("drop_heartbeats"):
+                self._hb_drop_step(cid, now_ts)
+            else:
+                await self._hb_send_step(cid, conn, now_ts)
+        self._hb_refresh_live_state()
+        await asyncio.sleep(self.heartbeat_interval)
+
+    def _hb_state_for(self, cid: str) -> Dict[str, Any]:
+        """The per-connection heartbeat state dict (created on first access)."""
+        return self._hb_state.setdefault(
+            cid,
+            {
+                "last_req_ts": 0.0,
+                "last_ack_ts": 0.0,
+                "missed": 0,
+                "rtt_ms": None,
+            },
+        )
+
+    async def _hb_frozen_step(self, cid: str, now_ts: float) -> None:
+        """Frozen fault: age a stale connection and close it after 3 misses."""
+        st = self._hb_state_for(cid)
+        if st.get("last_req_ts") and (now_ts - st["last_req_ts"]) > (self.heartbeat_interval * 2.5):
+            st["missed"] = st.get("missed", 0) + 1
+            if st["missed"] >= 3:
+                self.logger.warning("Heartbeat timeout (frozen) on %s; closing connection", cid)
+                await self._close_connection(cid)
+
+    def _hb_drop_step(self, cid: str, now_ts: float) -> None:
+        """Drop fault: silently age missed without sending or closing."""
+        st = self._hb_state_for(cid)
+        if st.get("last_req_ts") and (now_ts - st["last_req_ts"]) > (self.heartbeat_interval * 2.5):
+            st["missed"] = st.get("missed", 0) + 1
+
+    async def _hb_send_step(self, cid: str, conn: Dict[str, Any], now_ts: float) -> None:
+        """Normal path: send HB:REQ, check for an outstanding stale one, update last_seen."""
+        try:
+            w = conn.get("writer")
+            if not w or w.is_closing():
+                return
+            st = self._hb_state_for(cid)
+            st["last_req_ts"] = now_ts
+            hb_seq = self._next_frame_seq(cid)
+            hb_req = self.proto.create_heartbeat_request(now_ts, hb_seq)
+            await self._send_protocol_frame(w, hb_req)
+            await self._hb_check_timeout(cid, st, now_ts)
+            self._hb_bump_last_seen(cid, now_ts)
+        except Exception as e:
+            self.logger.debug("Heartbeat send failed for %s: %s", cid, e, exc_info=True)
+
+    async def _hb_check_timeout(self, cid: str, st: Dict[str, Any], now_ts: float) -> None:
+        """Close a connection if the last REQ was un-acked for more than 2.5 intervals, 3 times in a row."""
+        try:
+            if st["last_ack_ts"] < st["last_req_ts"] and (now_ts - st["last_req_ts"]) > (self.heartbeat_interval * 2.5):
+                st["missed"] += 1
+                if st["missed"] >= 3:
+                    self.logger.warning("Heartbeat timeout on %s; closing connection", cid)
+                    await self._close_connection(cid)
+        except Exception:  # justification: heartbeat state update for frozen connection is optional
+            pass
+
+    def _hb_bump_last_seen(self, cid: str, now_ts: float) -> None:
+        """Update last_seen on the connection and any multipath group that holds it."""
+        try:
+            self.connections[cid]["last_seen"] = now_ts
+            try:
+                key = self._derive_peer_key_from_conn_id(cid)
+                grp = self._mpath_groups.get(key)
+                if grp and cid in grp.get("conns", {}):
+                    grp["conns"][cid]["last_seen"] = now_ts
+            except Exception:  # justification: mpath group last_seen refresh best-effort
+                pass
+        except Exception:  # justification: hb last_seen refresh is cosmetic; skip on error
+            pass
+
+    def _hb_refresh_live_state(self) -> None:
+        """Recompute remote-proxy live-state after a full tick (best-effort)."""
+        try:
+            self._update_peer_proxies_live_state()
+        except Exception:  # justification: optional live-state recompute; the next event retries
+            pass
 
     @staticmethod
     def _resolve_verify_mode(peer: "FederationPeer") -> str:
