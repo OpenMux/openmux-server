@@ -4445,9 +4445,10 @@ async def test_ports_federated_non_prefix_line_is_ignored():
 
 
 @pytest.mark.asyncio
-async def test_ports_federated_malformed_json_line_aborts_batch():
-    # A broken JSON line is raised by the list-comprehension parse, so the
-    # outer handler aborts the whole batch (error-logged), registering none.
+async def test_ports_federated_malformed_json_line_skipped_batch_continues():
+    # A broken JSON line is warning-logged and skipped; the rest of the
+    # batch still registers. (Each line is parsed on its own, so one bad
+    # line must not abort the whole batch.)
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     a._acc_name_inc = ["*"]
     a.main_port_manager = FakePM()
@@ -4458,7 +4459,24 @@ async def test_ports_federated_malformed_json_line_aborts_batch():
     await a._handle_ports_federated(conn_id, payload)
 
     peer_key = a._derive_peer_key_from_conn_id(conn_id)
-    assert a._peer_proxies.get(peer_key, {}) == {}
+    assert list(a._peer_proxies.get(peer_key, {}).keys()) == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_ports_federated_non_object_line_skipped_batch_continues():
+    # A line that parses to a JSON scalar/list (not an object) is
+    # warning-logged and skipped; the batch still registers the good port.
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._acc_name_inc = ["*"]
+    a.main_port_manager = FakePM()
+    conn_id = "in:8.8.8.8:3:1"
+    _fed_conn(a, conn_id)
+
+    payload = "PORTS:FEDERATED:2\n[1,2,3]\n" + json.dumps(_fed_port("p1")) + "\nEND:PORTS"
+    await a._handle_ports_federated(conn_id, payload)
+
+    peer_key = a._derive_peer_key_from_conn_id(conn_id)
+    assert list(a._peer_proxies.get(peer_key, {}).keys()) == ["p1"]
 
 
 @pytest.mark.asyncio

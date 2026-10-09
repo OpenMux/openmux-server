@@ -6711,13 +6711,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             payload: Raw ASCII control payload body (already decoded).
         """
         try:
-            port_lines = self._ports_federated_payload_lines(payload)
-            if port_lines is None:
+            ports = self._ports_federated_payload_ports(payload)
+            if ports is None:
                 return
-            # Collect JSON lines until END:PORTS
-            import json
-
-            ports: List[Dict[str, Any]] = [json.loads(s) for s in port_lines]
 
             # Create and register proxies; collect seen names for removal diff
             peer_key = self._derive_peer_key_from_conn_id(conn_id)
@@ -6732,23 +6728,35 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception as e:
             self.logger.error("Error handling PORTS:FEDERATED: %s", e, exc_info=True)
 
-    def _ports_federated_payload_lines(self, payload: str) -> Optional[List[str]]:
-        """Split a PORTS:FEDERATED payload into its JSON body lines.
+    def _ports_federated_payload_ports(self, payload: str) -> Optional[List[Dict[str, Any]]]:
+        """Parse a PORTS:FEDERATED payload into its port dicts.
 
         Returns None when the payload does not start with the
         ``PORTS:FEDERATED:`` marker (not a ports frame at all). Body
-        lines run up to ``END:PORTS``; blank lines are dropped.
+        lines run up to ``END:PORTS``; blank lines are dropped. Each
+        line is parsed on its own so one malformed line is warning-
+        logged and skipped instead of aborting the whole batch.
         """
         lines = payload.split("\n")
         if not lines or not lines[0].startswith("PORTS:FEDERATED:"):
             return None
-        port_lines: List[str] = []
+        ports: List[Dict[str, Any]] = []
         for line in lines[1:]:
             if line.strip() == "END:PORTS":
                 break
-            if line.strip():
-                port_lines.append(line.strip())
-        return port_lines
+            if not line.strip():
+                continue
+            try:
+                parsed = json.loads(line.strip())
+            except Exception as e:
+                # Log with traceback; a malformed entry must not abort the batch
+                self.logger.warning(f"Failed to parse federated port line: {e}", exc_info=True)
+                continue
+            if isinstance(parsed, dict):
+                ports.append(parsed)
+            else:
+                self.logger.warning("Skipping non-object federated port line: %r", line.strip())
+        return ports
 
     async def _ports_federated_register_ports(self, conn_id: str, ports: List[Dict[str, Any]]) -> Set[str]:
         """Register each federated port dict (accept-filtered) and return the seen names.
