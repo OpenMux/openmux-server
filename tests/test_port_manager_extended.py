@@ -470,3 +470,90 @@ def test_wrapper_connected_reads_live_state():
     wrapper2 = pm2.get_port("live2")
     assert wrapper2 is not None
     assert wrapper2.get_status()["connected"] is True
+
+
+# --- Coverage for C901 19-bracket: add_client_to_port federated paths -----
+
+
+class _FederatedPort:
+    """Minimal federated proxy shape for the add_client_to_port branches."""
+
+    def __init__(self, is_connected: bool, open_raises: bool = False):
+        self.name = "fed1"
+        self.remote_port_name = "remote-side"
+        self.is_connected = is_connected
+        self.max_read_write_users = 1
+        self.connected_clients: List[Dict[str, Any]] = []
+        self.client_queues: Dict[str, Any] = {}
+        self.open_calls: List[str] = []
+        self._open_raises = open_raises
+
+    def open_stream_for_client(self, client_id: str):
+        if self._open_raises:
+            raise RuntimeError("open refused")
+        self.open_calls.append(client_id)
+        return 7
+
+
+class _RaisingIsConnected:
+    """Port whose is_connected property raises (status-check error branch)."""
+
+    def __init__(self):
+        self.name = "flaky"
+        self.remote_port_name = "remote-side"
+        self.max_read_write_users = 1
+        self.connected_clients: List[Dict[str, Any]] = []
+        self.client_queues: Dict[str, Any] = {}
+
+    @property
+    def is_connected(self) -> bool:
+        raise RuntimeError("status check exploded")
+
+
+@pytest.mark.asyncio
+async def test_add_client_federated_up_opens_stream(monkeypatch):
+    # Connected federated port: open_stream_for_client is called proactively
+    pm = PortManager([])
+    pm.ports["fed1"] = _FederatedPort(is_connected=True)
+    assert await pm.add_client_to_port("fed1", "c1", "alice") is True
+    port = pm.ports["fed1"]
+    assert port.open_calls == ["c1"]
+    assert len(port.connected_clients) == 1
+
+
+@pytest.mark.asyncio
+async def test_add_client_federated_down_defers_stream(monkeypatch):
+    # Down federated port: attach succeeds (meta-only), stream open is deferred
+    pm = PortManager([])
+    pm.ports["fed1"] = _FederatedPort(is_connected=False)
+    assert await pm.add_client_to_port("fed1", "c1", "alice") is True
+    port = pm.ports["fed1"]
+    assert port.open_calls == []
+    assert len(port.connected_clients) == 1
+
+
+@pytest.mark.asyncio
+async def test_add_client_federated_open_failure_warns_but_adds(monkeypatch):
+    # A failing proactive open is logged; the client is still attached
+    pm = PortManager([])
+    pm.ports["fed1"] = _FederatedPort(is_connected=True, open_raises=True)
+    assert await pm.add_client_to_port("fed1", "c1", "alice") is True
+    assert len(pm.ports["fed1"].connected_clients) == 1
+
+
+@pytest.mark.asyncio
+async def test_add_client_federated_status_check_error_still_adds(monkeypatch):
+    # An exploding is_connected check is logged; the add completes
+    pm = PortManager([])
+    pm.ports["flaky"] = _RaisingIsConnected()
+    assert await pm.add_client_to_port("flaky", "c1", "alice") is True
+    assert len(pm.ports["flaky"].connected_clients) == 1
+
+
+@pytest.mark.asyncio
+async def test_add_client_unknown_port_returns_false(monkeypatch):
+    # No legacy port and no unified adapter -> False
+    pm = PortManager([])
+    pm.set_unified_adapters([])
+    assert await pm.add_client_to_port("ghost", "c1", "alice") is False
+    assert "ghost" not in pm.ports

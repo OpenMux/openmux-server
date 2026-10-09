@@ -596,6 +596,117 @@ class PortManager:
                 exc_info=True,
             )
 
+    def _ensure_federated_meta_mode_allowed(self, port_name: str, client_id: str, username: str, port: Any) -> None:
+        """Log for a down federated proxy: attach is meta-only until reconnected.
+
+        Raises nothing; a status-check failure is logged as an error and the
+        attach proceeds (writes remain blocked by write_to_port anyway).
+        """
+        try:
+            if hasattr(port, "remote_port_name") and hasattr(port, "is_connected"):
+                is_up = bool(getattr(port, "is_connected"))
+                if not is_up:
+                    self.logger.info(
+                        "Allowing client %s (%s) on %s: federated connection down (meta-only attach)",
+                        username,
+                        client_id,
+                        port_name,
+                    )
+        except Exception:
+            self.logger.error(
+                "Error checking federated connection status for client %s on %s",
+                username,
+                port_name,
+                exc_info=True,
+            )
+
+    def _find_existing_client_idx(self, port: Any, client_id: str) -> Optional[int]:
+        """Index of an already-attached client_id, or None for a new seat."""
+        for i, existing in enumerate(port.connected_clients):
+            if existing.get("client_id") == client_id:
+                return i
+        return None
+
+    def _rw_counts(self, port: Any, client_id: str) -> Tuple[int, float]:
+        """(current read-write seats, capacity) excluding the caller's own seat.
+
+        The client being re-added does not count against its own seat.
+        """
+        capacity = write_capacity(port.max_read_write_users)
+        current_rw = sum(
+            1 for c in port.connected_clients if c.get("mode") == "read-write" and c.get("client_id") != client_id
+        )
+        return current_rw, capacity
+
+    def _attach_client_record(
+        self, port: Any, port_name: str, client_id: str, username: str, mode: str, existing_idx: Optional[int]
+    ) -> None:
+        """Add or update a client record (and per-client delivery queue)."""
+        client_info = {"client_id": client_id, "username": username, "mode": mode, "connected_at": time.time()}
+        if existing_idx is not None:
+            prior_mode = port.connected_clients[existing_idx].get("mode")
+            port.connected_clients[existing_idx] = client_info
+            # Keep the existing delivery queue: a live forwarding task may hold
+            # a reference to it, and replacing it here would orphan new data.
+            if hasattr(port, "client_queues") and client_id not in port.client_queues:
+                port.client_queues[client_id] = asyncio.Queue(maxsize=100)
+            self.logger.info(
+                f"Updated existing client {username} ({client_id}) on port {port_name} " f"to {mode} mode (was {prior_mode})"
+            )
+        else:
+            port.connected_clients.append(client_info)
+            if hasattr(port, "client_queues"):
+                port.client_queues[client_id] = asyncio.Queue(maxsize=100)
+            self.logger.info("Added client %s (%s) to port %s in %s mode", username, client_id, port_name, mode)
+
+    def _record_client_connected(self, port_name: str, port: Any, client_id: str, username: str, mode: str) -> None:
+        """Best-effort lifecycle record, meta notification and hook for an added client."""
+        try:
+            DataLogger.get().record_meta(
+                port_name=port_name,
+                event="client_connected",
+                client_id=str(client_id),
+                meta={"username": username, "mode": mode},
+                port_obj=port,
+            )
+        except Exception:
+            self.logger.debug(
+                "DataLogger lifecycle record failed for %s (client_connected)",
+                port_name,
+                exc_info=True,
+            )
+        try:
+            self.notify_meta_updated(port_name, {"event": "client_connected", "client_id": str(client_id)})
+        except Exception:
+            # justification: optional notification; UI event delivery is best-effort
+            pass
+        # Fire the adapter client-count hook on the canonical add path
+        # (issue #63): the wrapper's own add_client is never called here,
+        # so serial signal lines / command idle timeout / tcp-initiator
+        # disconnect-when-idle never fired without this. A federated
+        # proxy port has no hook, in which case this is a no-op.
+        self._fire_client_count_hook(port)
+
+    async def _proactive_remote_stream_open(self, port: Any, port_name: str, client_id: str) -> None:
+        """Open a federated remote stream for a just-added client.
+
+        When the federated connection is down the open is deferred until
+        reconnect; an open failure is logged (the client stays attached).
+        """
+        try:
+            if hasattr(port, "remote_port_name") and hasattr(port, "open_stream_for_client"):
+                if bool(getattr(port, "is_connected", False)):
+                    open_fn = getattr(port, "open_stream_for_client", None)
+                    if open_fn:
+                        await open_fn(client_id)
+                else:
+                    # Defer opening the remote stream until federation reconnects
+                    self.logger.info(
+                        "Deferring remote stream open for %s (client %s): federated connection down", port_name, client_id
+                    )
+        except Exception as e:
+            self.logger.warning("Failed to proactively open remote stream for %s: %s", port_name, e, exc_info=True)
+
     async def add_client_to_port(
         self,
         port_name: str,
@@ -626,33 +737,13 @@ class PortManager:
             # meta-only mode so UIs/CLI can remain open and display a warning
             # while waiting for the port to come back. Writes will still be
             # blocked by write_to_port() until the connection is re-established.
-            try:
-                if hasattr(port, "remote_port_name") and hasattr(port, "is_connected"):
-                    is_up = bool(getattr(port, "is_connected"))
-                    if not is_up:
-                        self.logger.info(
-                            "Allowing client %s (%s) on %s: federated connection down (meta-only attach)",
-                            username,
-                            client_id,
-                            port_name,
-                        )
-            except Exception:
-                self.logger.error(
-                    "Error checking federated connection status for client %s on %s",
-                    username,
-                    port_name,
-                    exc_info=True,
-                )
+            self._ensure_federated_meta_mode_allowed(port_name, client_id, username, port)
 
             # Re-adding a client_id that already has a record is an in-place
             # update (for example a re-OPEN of the same federated stream slot),
             # not a second seat: a duplicated record would skew read-write slot
             # accounting and presence display (issue #54).
-            existing_idx = None
-            for i, existing in enumerate(port.connected_clients):
-                if existing.get("client_id") == client_id:
-                    existing_idx = i
-                    break
+            existing_idx = self._find_existing_client_idx(port, client_id)
 
             # Enforce read-write slot capacity (issue #59: the port's
             # max_read_write_users mode = "none"/"one"/"multiple"); read-only
@@ -660,78 +751,15 @@ class PortManager:
             # read-write attach, including an admin's. The client being
             # (re-)added does not count against its own seat.
             if mode == "read-write":
-                capacity = write_capacity(port.max_read_write_users)
-                current_rw = sum(
-                    1 for c in port.connected_clients if c.get("mode") == "read-write" and c.get("client_id") != client_id
-                )
+                current_rw, capacity = self._rw_counts(port, client_id)
                 if current_rw >= capacity:
                     self.logger.warning("Port %s is at maximum read-write capacity (%s/%s)", port_name, current_rw, capacity)
                     return False
 
-            # Add client (the client object will be provided by the console manager)
-            client_info = {
-                "client_id": client_id,
-                "username": username,
-                "mode": mode,
-                "connected_at": time.time(),
-            }
-            if existing_idx is not None:
-                prior_mode = port.connected_clients[existing_idx].get("mode")
-                port.connected_clients[existing_idx] = client_info
-                # Keep the existing delivery queue: a live forwarding task may hold
-                # a reference to it, and replacing it here would orphan new data.
-                if hasattr(port, "client_queues") and client_id not in port.client_queues:
-                    port.client_queues[client_id] = asyncio.Queue(maxsize=100)
-                self.logger.info(
-                    f"Updated existing client {username} ({client_id}) on port {port_name} "
-                    f"to {mode} mode (was {prior_mode})"
-                )
-            else:
-                port.connected_clients.append(client_info)
-                if hasattr(port, "client_queues"):
-                    port.client_queues[client_id] = asyncio.Queue(maxsize=100)
-                self.logger.info("Added client %s (%s) to port %s in %s mode", username, client_id, port_name, mode)
-            # Lifecycle event: client connected
-            try:
-                DataLogger.get().record_meta(
-                    port_name=port_name,
-                    event="client_connected",
-                    client_id=str(client_id),
-                    meta={"username": username, "mode": mode},
-                    port_obj=port,
-                )
-            except Exception:
-                self.logger.debug(
-                    "DataLogger lifecycle record failed for %s (client_connected)",
-                    port_name,
-                    exc_info=True,
-                )
-            # Notify meta listeners (clients count, status, etc.)
-            try:
-                self.notify_meta_updated(port_name, {"event": "client_connected", "client_id": str(client_id)})
-            except Exception:
-                # justification: optional notification; UI event delivery is best-effort
-                pass
+            self._attach_client_record(port, port_name, client_id, username, mode, existing_idx)
+            self._record_client_connected(port_name, port, client_id, username, mode)
             # If this is a federated port (RemotePortProxy), proactively open stream when connected
-            try:
-                if hasattr(port, "remote_port_name") and hasattr(port, "open_stream_for_client"):
-                    if bool(getattr(port, "is_connected", False)):
-                        open_fn = getattr(port, "open_stream_for_client", None)
-                        if open_fn:
-                            await open_fn(client_id)
-                    else:
-                        # Defer opening the remote stream until federation reconnects
-                        self.logger.info(
-                            "Deferring remote stream open for %s (client %s): federated connection down", port_name, client_id
-                        )
-            except Exception as e:
-                self.logger.warning("Failed to proactively open remote stream for %s: %s", port_name, e, exc_info=True)
-            # Fire the adapter client-count hook on the canonical add path
-            # (issue #63): the wrapper's own add_client is never called here,
-            # so serial signal lines / command idle timeout / tcp-initiator
-            # disconnect-when-idle never fired without this. A federated
-            # proxy port has no hook, in which case this is a no-op.
-            self._fire_client_count_hook(port)
+            await self._proactive_remote_stream_open(port, port_name, client_id)
             return True
         # If not handled above and still not found, fail
         return False

@@ -1635,6 +1635,64 @@ def _find_config_file(config_path: str) -> str:
     sys.exit(1)
 
 
+async def _shutdown_coroutine(server, loop):
+    """Run server shutdown with timeout, cancel tasks, and stop the loop.
+
+    Scheduled via ``asyncio.run_coroutine_threadsafe`` from the signal
+    handler. On any error the loop is still stopped.
+    """
+    try:
+        # Run server shutdown with timeout
+        await asyncio.wait_for(server.shutdown(), timeout=5.0)
+
+        # Cancel remaining tasks
+        tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task() and not t.done()]
+        if tasks:
+            logging.info("Cancelling %s remaining tasks", len(tasks))
+            for task in tasks:
+                task.cancel()
+
+            try:
+                await asyncio.wait(tasks, timeout=2.0)
+            except asyncio.TimeoutError:
+                logging.warning("Some tasks did not cancel in time")
+
+        # Stop the event loop
+        loop.call_soon_threadsafe(loop.stop)
+
+    except Exception as e:
+        logging.error("Error during shutdown: %s", e, exc_info=True)
+        loop.call_soon_threadsafe(loop.stop)
+
+
+async def _soft_reload_coroutine(server):
+    """SIGHUP handler body: soft reload config, logging and adapters."""
+    try:
+        # Reload config (for logging level/paths and runtime settings)
+        server._reload_config_from_disk()
+        # Reconfigure logging (level and file paths) from config (issue #47)
+        try:
+            server._apply_logging_from_config()
+        except Exception:
+            logging.error("Unexpected error re-applying logging config", exc_info=True)
+        # Perform server soft reload
+        ctx = {"origin": "signal", "user": "signal", "remote": "local", "req_id": "sighup"}
+        res = await server.reload_adapters_soft(context=ctx)
+        logging.info("Soft reload completed: %s", res)
+    except Exception as e:
+        logging.error("Soft reload failed: %s", e, exc_info=True)
+
+
+async def _full_reload_coroutine(server):
+    """SIGUSR1 handler body: full adapter reload."""
+    try:
+        ctx = {"origin": "signal", "user": "signal", "remote": "local", "req_id": "sigusr1"}
+        res = await server.reload_adapters_full(context=ctx)
+        logging.info("Full reload completed: %s", res)
+    except Exception as e:
+        logging.error("Full reload failed: %s", e, exc_info=True)
+
+
 def _setup_shutdown_handlers(loop, server):
     """Set up signal handlers and shutdown event.
 
@@ -1649,73 +1707,17 @@ def _setup_shutdown_handlers(loop, server):
     def handle_shutdown_signal():
         logging.info("Shutdown signal received")
         shutdown_event.set()
-        asyncio.run_coroutine_threadsafe(shutdown_coroutine(), loop)
-
-    async def shutdown_coroutine():
-        try:
-            # Run server shutdown with timeout
-            await asyncio.wait_for(server.shutdown(), timeout=5.0)
-
-            # Cancel remaining tasks
-            tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task() and not t.done()]
-            if tasks:
-                logging.info("Cancelling %s remaining tasks", len(tasks))
-                for task in tasks:
-                    task.cancel()
-
-                try:
-                    await asyncio.wait(tasks, timeout=2.0)
-                except asyncio.TimeoutError:
-                    logging.warning("Some tasks did not cancel in time")
-
-            # Stop the event loop
-            loop.call_soon_threadsafe(loop.stop)
-
-        except Exception as e:
-            logging.error("Error during shutdown: %s", e, exc_info=True)
-            loop.call_soon_threadsafe(loop.stop)
-
-    # Ensure control socket is closed promptly on TERM/INT
-    async def close_control_socket():
-        try:
-            await server._stop_control_socket()
-        except Exception:
-            # justification: shutdown cleanup; the socket may already be closed
-            pass
+        asyncio.run_coroutine_threadsafe(_shutdown_coroutine(server, loop), loop)
 
     # Reload handler (SIGHUP): soft reload via server API and reconfigure logging
     def handle_reload_signal():
         logging.info("SIGHUP received: soft reload requested")
-        asyncio.run_coroutine_threadsafe(soft_reload_coroutine(), loop)
-
-    async def soft_reload_coroutine():
-        try:
-            # Reload config (for logging level/paths and runtime settings)
-            server._reload_config_from_disk()
-            # Reconfigure logging (level and file paths) from config (issue #47)
-            try:
-                server._apply_logging_from_config()
-            except Exception:
-                logging.error("Unexpected error re-applying logging config", exc_info=True)
-            # Perform server soft reload
-            ctx = {"origin": "signal", "user": "signal", "remote": "local", "req_id": "sighup"}
-            res = await server.reload_adapters_soft(context=ctx)
-            logging.info("Soft reload completed: %s", res)
-        except Exception as e:
-            logging.error("Soft reload failed: %s", e, exc_info=True)
+        asyncio.run_coroutine_threadsafe(_soft_reload_coroutine(server), loop)
 
     # Full reload handler (SIGUSR1)
     def handle_full_reload_signal():
         logging.info("SIGUSR1 received: full adapter reload requested")
-        asyncio.run_coroutine_threadsafe(full_reload_coroutine(), loop)
-
-    async def full_reload_coroutine():
-        try:
-            ctx = {"origin": "signal", "user": "signal", "remote": "local", "req_id": "sigusr1"}
-            res = await server.reload_adapters_full(context=ctx)
-            logging.info("Full reload completed: %s", res)
-        except Exception as e:
-            logging.error("Full reload failed: %s", e, exc_info=True)
+        asyncio.run_coroutine_threadsafe(_full_reload_coroutine(server), loop)
 
     # Register signal handlers
     for sig in (signal.SIGINT, signal.SIGTERM):
