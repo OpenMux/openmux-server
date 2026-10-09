@@ -81,6 +81,11 @@ class FakePM:
             }
         ]
 
+    def get_port(self, name):
+        # Mirrors PortManager.get_port; safe_get_port (used by the stale
+        # federation purge) requires the callable form.
+        return getattr(self, "ports", {}).get(name)
+
     async def register_federated_port(self, metadata, proxy):
         # Simulate PortManager storing the proxy
         self.ports[metadata.name] = proxy
@@ -4406,3 +4411,161 @@ class TestRekeyMpathConnection:
             a._derive_peer_key_from_conn_id = orig
         # group left untouched
         assert conn_id in a._mpath_groups["host:10.0.0.4"]["conns"]
+
+
+# --- C901 work, 21-bracket: _handle_ports_federated branch coverage ----------
+
+
+def _fed_conn(a: UnifiedMuxConAdapter, conn_id: str):
+    a.connections[conn_id] = {"writer": FakeWriter()}
+
+
+def _fed_payload(ports: List[Dict[str, Any]]) -> str:
+    body = "".join(json.dumps(p) + "\n" for p in ports)
+    return f"PORTS:FEDERATED:{len(ports)}\n" + body + "END:PORTS"
+
+
+def _fed_port(name: str, sid: str = "srv") -> Dict[str, Any]:
+    return {"name": name, "adapter_type": "loopback", "origin_server": {"server_id": sid}}
+
+
+@pytest.mark.asyncio
+async def test_ports_federated_non_prefix_line_is_ignored():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._acc_name_inc = ["*"]
+    a.main_port_manager = FakePM()
+    conn_id = "in:7.7.7.7:1:1"
+    _fed_conn(a, conn_id)
+
+    # Neither line is a PORTS:FEDERATED frame -> nothing registered.
+    await a._handle_ports_federated(conn_id, "DATA:1:hello\nEND:PORTS")
+
+    peer_key = a._derive_peer_key_from_conn_id(conn_id)
+    assert a._peer_proxies.get(peer_key, {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_ports_federated_malformed_json_line_aborts_batch():
+    # A broken JSON line is raised by the list-comprehension parse, so the
+    # outer handler aborts the whole batch (error-logged), registering none.
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._acc_name_inc = ["*"]
+    a.main_port_manager = FakePM()
+    conn_id = "in:8.8.8.8:2:1"
+    _fed_conn(a, conn_id)
+
+    payload = "PORTS:FEDERATED:2\n{not-json\n" + json.dumps(_fed_port("p1")) + "\nEND:PORTS"
+    await a._handle_ports_federated(conn_id, payload)
+
+    peer_key = a._derive_peer_key_from_conn_id(conn_id)
+    assert a._peer_proxies.get(peer_key, {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_ports_federated_per_port_register_failure_continues_batch(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._acc_name_inc = ["*"]
+    a.main_port_manager = FakePM()
+    conn_id = "in:9.9.9.9:3:1"
+    _fed_conn(a, conn_id)
+
+    orig = a._register_remote_port_from_dict
+
+    async def flaky(_conn_id: str, pd: Dict[str, Any]):
+        if str(pd.get("name")) == "bad":
+            raise RuntimeError("boom")
+        return await orig(_conn_id, pd)
+
+    monkeypatch.setattr(a, "_register_remote_port_from_dict", flaky)
+
+    payload = _fed_payload([_fed_port("bad"), _fed_port("good")])
+    await a._handle_ports_federated(conn_id, payload)
+
+    peer_key = a._derive_peer_key_from_conn_id(conn_id)
+    assert list(a._peer_proxies.get(peer_key, {}).keys()) == ["good"]
+
+
+@pytest.mark.asyncio
+async def test_ports_federated_stale_purge_via_pm_unregister_and_direct_pop(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._acc_name_inc = ["*"]
+    pm = FakePM()
+    a.main_port_manager = pm
+    conn_id = "in:11.0.0.1:4:1"
+    _fed_conn(a, conn_id)
+    peer_key = a._derive_peer_key_from_conn_id(conn_id)
+
+    await a._handle_ports_federated(conn_id, _fed_payload([_fed_port("p1"), _fed_port("p2")]))
+    p1_proxy = a._peer_proxies[peer_key]["p1"]
+    p2_proxy = a._peer_proxies[peer_key]["p2"]
+
+    unregistered = []
+
+    async def fake_unregister(name):
+        unregistered.append(name)
+        pm.ports.pop(name, None)
+
+    # p1 is the canonical port in pm.ports -> purged via the pm method.
+    # p2 is NOT in pm.ports (pop it away) -> purged via the direct .pop branch.
+    pm.unregister_federated_port = fake_unregister
+    pm.ports.pop("p2", None)
+
+    await a._handle_ports_federated(conn_id, _fed_payload([]))
+
+    assert a._peer_proxies.get(peer_key, {}) == {}
+    assert unregistered == ["p1"]
+    assert p1_proxy.is_connected is False
+    assert p2_proxy.is_connected is False
+
+
+@pytest.mark.asyncio
+async def test_ports_federated_per_port_filter_exclusion(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a.main_port_manager = FakePM()
+    conn_id = "in:12.0.0.1:5:1"
+    _fed_conn(a, conn_id)
+    # Per-connection accept filter: only "good" may register.
+    a._conn_filters[conn_id] = {"accept_filters": {"include": ["good"]}}
+
+    await a._handle_ports_federated(conn_id, _fed_payload([_fed_port("bad"), _fed_port("good")]))
+
+    peer_key = a._derive_peer_key_from_conn_id(conn_id)
+    assert list(a._peer_proxies.get(peer_key, {}).keys()) == ["good"]
+
+
+@pytest.mark.asyncio
+async def test_ports_federated_refresh_failure_is_non_fatal(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._acc_name_inc = ["*"]
+    a.main_port_manager = FakePM()
+    conn_id = "in:13.0.0.1:6:1"
+    _fed_conn(a, conn_id)
+
+    def boom() -> None:
+        raise RuntimeError("refresh-down")
+
+    monkeypatch.setattr(a, "_refresh_conn_proxies", boom)
+
+    # The registration must land despite the refresh failure.
+    await a._handle_ports_federated(conn_id, _fed_payload([_fed_port("p1")]))
+
+    peer_key = a._derive_peer_key_from_conn_id(conn_id)
+    assert list(a._peer_proxies.get(peer_key, {}).keys()) == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_ports_federated_outer_failure_is_non_fatal(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._acc_name_inc = ["*"]
+    a.main_port_manager = FakePM()
+    conn_id = "in:14.0.0.1:7:1"
+    _fed_conn(a, conn_id)
+
+    def bad_split(_lines):
+        raise RuntimeError("split-down")
+
+    monkeypatch.setattr(a, "_derive_peer_key_from_conn_id", bad_split)
+
+    # The outer try/except must swallow the failure silently.
+    await a._handle_ports_federated(conn_id, _fed_payload([_fed_port("p1")]))
+    assert a._peer_proxies == {}

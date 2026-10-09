@@ -6711,81 +6711,120 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             payload: Raw ASCII control payload body (already decoded).
         """
         try:
-            lines = payload.split("\n")
-            if not lines or not lines[0].startswith("PORTS:FEDERATED:"):
+            port_lines = self._ports_federated_payload_lines(payload)
+            if port_lines is None:
                 return
             # Collect JSON lines until END:PORTS
-            port_lines: List[str] = []
-            for line in lines[1:]:
-                if line.strip() == "END:PORTS":
-                    break
-                if line.strip():
-                    port_lines.append(line.strip())
             import json
 
             ports: List[Dict[str, Any]] = [json.loads(s) for s in port_lines]
 
             # Create and register proxies; collect seen names for removal diff
             peer_key = self._derive_peer_key_from_conn_id(conn_id)
-            seen_names: Set[str] = set()
-            for pd in ports:
-                try:
-                    # Apply accept filters (per-connection overrides honored)
-                    if not self._allow_accept_port_for_conn(conn_id, pd):
-                        continue
-                    name = pd.get("name") or pd.get("original_name")
-                    if isinstance(name, str):
-                        seen_names.add(name)
-                    await self._register_remote_port_from_dict(conn_id, pd)
-                except Exception as e:
-                    # Log with traceback; malformed entries should not abort whole batch
-                    self.logger.warning(f"Failed to register federated port {pd.get('name')}: {e}", exc_info=True)
+            seen_names = await self._ports_federated_register_ports(conn_id, ports)
             self.logger.info("[%s] Registered %s federated ports", conn_id, len(ports))
 
             # Remove proxies for this peer that are no longer advertised
             try:
-                peer_proxies = self._peer_proxies.get(peer_key, {})
-                stale = [pname for pname in list(peer_proxies.keys()) if pname not in seen_names]
-                for pname in stale:
-                    proxy = peer_proxies.pop(pname, None)
-                    if proxy is None:
-                        continue
-                    try:
-                        # Unregister from PortManager if this is the canonical registered port
-                        if hasattr(self, "main_port_manager") and self.main_port_manager:
-                            pm = self.main_port_manager
-                            pobj = safe_get_port(pm, pname)
-                            # Best-effort: ensure it's our proxy before removal
-                            if pobj is proxy:
-                                try:
-                                    # Use PortManager API if it exposes an unregister; else direct pop
-                                    if hasattr(pm, "unregister_federated_port"):
-                                        await pm.unregister_federated_port(pname)  # type: ignore[attr-defined]
-                                    else:
-                                        getattr(pm, "ports", {}).pop(pname, None)
-                                    self.logger.info("Unregistered stale federated port: %s", pname)
-                                except Exception:
-                                    getattr(pm, "ports", {}).pop(pname, None)
-                                    self.logger.info("Unregistered stale federated port: %s", pname)
-                    except Exception:
-                        # justification: best-effort stale unregistration; the remaining ports are untouched
-                        pass
-                    try:
-                        if hasattr(proxy, "disconnect"):
-                            await proxy.disconnect()
-                    except Exception:
-                        # justification: best-effort stale-proxy close; the port is already removed
-                        pass
-                # Proxies changed for this peer group; refresh per-connection mapping
-                try:
-                    self._refresh_conn_proxies()
-                except Exception:
-                    # justification: optional mapping rebuild; the previous mapping stays in effect
-                    pass
+                await self._ports_federated_purge_stale(peer_key, seen_names)
             except Exception as e:
                 self.logger.debug("Stale proxy purge failed for %s: %s", peer_key, e, exc_info=True)
         except Exception as e:
             self.logger.error("Error handling PORTS:FEDERATED: %s", e, exc_info=True)
+
+    def _ports_federated_payload_lines(self, payload: str) -> Optional[List[str]]:
+        """Split a PORTS:FEDERATED payload into its JSON body lines.
+
+        Returns None when the payload does not start with the
+        ``PORTS:FEDERATED:`` marker (not a ports frame at all). Body
+        lines run up to ``END:PORTS``; blank lines are dropped.
+        """
+        lines = payload.split("\n")
+        if not lines or not lines[0].startswith("PORTS:FEDERATED:"):
+            return None
+        port_lines: List[str] = []
+        for line in lines[1:]:
+            if line.strip() == "END:PORTS":
+                break
+            if line.strip():
+                port_lines.append(line.strip())
+        return port_lines
+
+    async def _ports_federated_register_ports(self, conn_id: str, ports: List[Dict[str, Any]]) -> Set[str]:
+        """Register each federated port dict (accept-filtered) and return the seen names.
+
+        A per-port registration failure is warning-logged and skipped;
+        the rest of the batch continues.
+        """
+        seen_names: Set[str] = set()
+        for pd in ports:
+            try:
+                # Apply accept filters (per-connection overrides honored)
+                if not self._allow_accept_port_for_conn(conn_id, pd):
+                    continue
+                name = pd.get("name") or pd.get("original_name")
+                if isinstance(name, str):
+                    seen_names.add(name)
+                await self._register_remote_port_from_dict(conn_id, pd)
+            except Exception as e:
+                # Log with traceback; malformed entries should not abort whole batch
+                self.logger.warning(f"Failed to register federated port {pd.get('name')}: {e}", exc_info=True)
+        return seen_names
+
+    async def _ports_federated_unregister_stale(self, pm: Any, pname: str, proxy: Any) -> None:
+        """Drop one stale proxy: deregister from the port manager, then close it.
+
+        Deregistration only happens when the proxy is the port manager's
+        canonical port for the name (the PortManager unregister API is
+        used when available, else a direct dict pop). The proxy close is
+        best-effort: the port is already removed.
+        """
+        try:
+            # Unregister from PortManager if this is the canonical registered port
+            pobj = safe_get_port(pm, pname)
+            # Best-effort: ensure it's our proxy before removal
+            if pobj is proxy:
+                try:
+                    # Use PortManager API if it exposes an unregister; else direct pop
+                    if hasattr(pm, "unregister_federated_port"):
+                        await pm.unregister_federated_port(pname)  # type: ignore[attr-defined]
+                    else:
+                        getattr(pm, "ports", {}).pop(pname, None)
+                    self.logger.info("Unregistered stale federated port: %s", pname)
+                except Exception:
+                    getattr(pm, "ports", {}).pop(pname, None)
+                    self.logger.info("Unregistered stale federated port: %s", pname)
+        except Exception:
+            # justification: best-effort stale unregistration; the remaining ports are untouched
+            pass
+        try:
+            if hasattr(proxy, "disconnect"):
+                await proxy.disconnect()
+        except Exception:
+            # justification: best-effort stale-proxy close; the port is already removed
+            pass
+
+    async def _ports_federated_purge_stale(self, peer_key: str, seen_names: Set[str]) -> None:
+        """Remove proxies for the peer that are no longer advertised.
+
+        After the removals the per-connection proxy mapping is rebuilt
+        (best-effort: the previous mapping stays in effect on failure).
+        """
+        peer_proxies = self._peer_proxies.get(peer_key, {})
+        stale = [pname for pname in list(peer_proxies.keys()) if pname not in seen_names]
+        pm = getattr(self, "main_port_manager", None)
+        for pname in stale:
+            proxy = peer_proxies.pop(pname, None)
+            if proxy is None:
+                continue
+            if pm:
+                await self._ports_federated_unregister_stale(pm, pname, proxy)
+        # Proxies changed for this peer group; refresh per-connection mapping
+        try:
+            self._refresh_conn_proxies()
+        except Exception:
+            # justification: optional mapping rebuild; the previous mapping stays in effect
+            pass
 
     async def _route_data_frame(self, conn_id: str, stream_id: int, data: bytes, seq: Optional[int] = None):
         """Route inbound DATA frame payload to a remote proxy or local port.
