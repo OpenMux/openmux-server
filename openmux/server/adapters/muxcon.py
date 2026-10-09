@@ -5842,12 +5842,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         try:
             new_key = self._derive_peer_key_from_conn_id(conn_id)
-            # Find current key containing conn_id
-            current_key = None
-            for k, grp in self._mpath_groups.items():
-                if conn_id in grp.get("conns", {}):
-                    current_key = k
-                    break
+            current_key = self._rekey_find_current_key(conn_id)
             if current_key == new_key or current_key is None:
                 return
             # Move metadata
@@ -5856,51 +5851,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 return
             # Cleanup old group if empty
             old_grp = self._mpath_groups.get(current_key)
-            if old_grp:
-                if old_grp.get("primary") == conn_id:
-                    # choose next primary
-                    old_grp["primary"] = next(iter(old_grp["conns"].keys()), None)
-                if not old_grp["conns"]:
-                    self._mpath_groups.pop(current_key, None)
-                    # Also migrate or clear peer-level state from old key
-                    try:
-                        # If new key already has sendbuf, merge; else move
-                        if current_key in self._peer_sendbuf:
-                            old_buf = self._peer_sendbuf.pop(current_key, {})
-                            if old_buf:
-                                self._peer_sendbuf.setdefault(new_key, {}).update(old_buf)
-                        # RX state: prefer existing new_key else move
-                        if current_key in self._peer_rx_state:
-                            rx_old = self._peer_rx_state.pop(current_key, None)
-                            if rx_old is not None and new_key not in self._peer_rx_state:
-                                self._peer_rx_state[new_key] = rx_old
-                        # TX seq: keep max to avoid reuse
-                        if current_key in self._peer_tx_seq:
-                            old_seq = self._peer_tx_seq.pop(current_key, 1)
-                            self._peer_tx_seq[new_key] = max(old_seq, self._peer_tx_seq.get(new_key, 1))
-                        # RETX count: accumulate into new key
-                        if current_key in self._peer_retx_count:
-                            prev = self._peer_retx_count.pop(current_key, 0)
-                            self._peer_retx_count[new_key] = prev + self._peer_retx_count.get(new_key, 0)
-                        # Stream-id allocator: keep max to avoid reusing an id
-                        # already handed out under the old peer key.
-                        if current_key in self._peer_next_stream_id:
-                            old_sid = self._peer_next_stream_id.pop(current_key, 0)
-                            self._peer_next_stream_id[new_key] = max(old_sid, self._peer_next_stream_id.get(new_key, 0))
-                    except Exception:
-                        # justification: optional stream-id rekey; the allocator keeps its max
-                        pass
+            self._rekey_cleanup_empty_group(old_grp, current_key, new_key, conn_id)
             # Insert into new group (merge if exists)
             new_grp = self._mpath_groups.setdefault(new_key, {"conns": OrderedDict(), "primary": None, "rr_index": 0})
             new_grp["conns"][conn_id] = meta
             if not new_grp.get("primary"):
                 new_grp["primary"] = conn_id
-            try:
-                self.logger.info(
-                    f"[MPATH] Rekey {conn_id} {current_key} -> {new_key} primary={new_grp.get('primary')} members={list(new_grp['conns'].keys())}"
-                )
-            except Exception:
-                self.logger.info(f"[MPATH] Rekey {conn_id} {current_key} -> {new_key} primary={new_grp.get('primary')}")
+            self._rekey_log_registration(conn_id, current_key, new_key, new_grp)
             # Update per-connection proxies mapping due to group change
             try:
                 self._refresh_conn_proxies()
@@ -5909,6 +5866,77 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 pass
         except Exception as e:
             self.logger.debug("Rekey failed for %s: %s", conn_id, e, exc_info=True)
+
+    def _rekey_find_current_key(self, conn_id: str) -> Optional[str]:
+        """Find the group key that currently contains a connection."""
+        for k, grp in self._mpath_groups.items():
+            if conn_id in grp.get("conns", {}):
+                return k
+        return None
+
+    def _rekey_cleanup_empty_group(
+        self, old_grp: Optional[Dict[str, Any]], current_key: str, new_key: str, conn_id: str
+    ) -> None:
+        """Fix up the old group after its rekeyed connection was removed.
+
+        If the group is now empty it is dropped and the peer-scoped DATA
+        state is migrated from ``current_key`` to ``new_key`` (merged so the
+        new identity's counters never lose their history). If the rekeyed
+        connection was the primary, a new primary is picked first.
+        """
+        if not old_grp:
+            return
+        if old_grp.get("primary") == conn_id:
+            # choose next primary
+            old_grp["primary"] = next(iter(old_grp["conns"].keys()), None)
+        if old_grp["conns"]:
+            return
+        self._mpath_groups.pop(current_key, None)
+        # Also migrate or clear peer-level state from old key
+        try:
+            self._rekey_migrate_peer_state(current_key, new_key)
+        except Exception:
+            # justification: optional stream-id rekey; the allocator keeps its max
+            pass
+
+    def _rekey_migrate_peer_state(self, old_key: str, new_key: str) -> None:
+        """Migrate peer-scoped DATA counters from an old key to a new key.
+
+        Send buffers merge into the new key; RX state keeps the new key's
+        copy when already present; TX seq and the stream-id allocator keep
+        the max to avoid reuse; RETX counts accumulate. Mirrors the
+        per-map merge/move rules of the pre-refactor inline block.
+        """
+        if old_key in self._peer_sendbuf:
+            old_buf = self._peer_sendbuf.pop(old_key, {})
+            if old_buf:
+                self._peer_sendbuf.setdefault(new_key, {}).update(old_buf)
+        # RX state: prefer existing new_key else move
+        if old_key in self._peer_rx_state:
+            rx_old = self._peer_rx_state.pop(old_key, None)
+            if rx_old is not None and new_key not in self._peer_rx_state:
+                self._peer_rx_state[new_key] = rx_old
+        # TX seq: keep max to avoid reuse
+        if old_key in self._peer_tx_seq:
+            old_seq = self._peer_tx_seq.pop(old_key, 1)
+            self._peer_tx_seq[new_key] = max(old_seq, self._peer_tx_seq.get(new_key, 1))
+        # RETX count: accumulate into new key
+        if old_key in self._peer_retx_count:
+            prev = self._peer_retx_count.pop(old_key, 0)
+            self._peer_retx_count[new_key] = prev + self._peer_retx_count.get(new_key, 0)
+        # Stream-id allocator: keep max to avoid reusing an id already handed out.
+        if old_key in self._peer_next_stream_id:
+            old_sid = self._peer_next_stream_id.pop(old_key, 0)
+            self._peer_next_stream_id[new_key] = max(old_sid, self._peer_next_stream_id.get(new_key, 0))
+
+    def _rekey_log_registration(self, conn_id: str, current_key: str, new_key: str, new_grp: Dict[str, Any]) -> None:
+        """Log the rekey with the new group's members, tolerating format errors."""
+        try:
+            self.logger.info(
+                f"[MPATH] Rekey {conn_id} {current_key} -> {new_key} primary={new_grp.get('primary')} members={list(new_grp['conns'].keys())}"
+            )
+        except Exception:
+            self.logger.info(f"[MPATH] Rekey {conn_id} {current_key} -> {new_key} primary={new_grp.get('primary')}")
 
     def _unregister_mpath_connection(self, conn_id: str) -> None:
         """Remove a connection from its multipath group and cleanup.

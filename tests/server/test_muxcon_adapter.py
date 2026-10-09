@@ -4261,3 +4261,148 @@ async def test_connect_routing_unresolvable_host_raises(monkeypatch):
     with pytest.raises(OSError, match="Name resolution failed for h:1"):
         await a._connect_with_routing_options("h", 1, None, None, None)
     assert made == []
+
+
+class TestRekeyMpathConnection:
+    """Branch coverage for _rekey_mpath_connection (rekey to a new group key)."""
+
+    def _new_conn(self, a, conn_id, *, handshake, in_groups):
+        a.connections[conn_id] = {"opened_at": time.time(), "handshake": handshake}
+        for key, (primary, members) in in_groups.items():
+            conns = OrderedDict()
+            for m, meta in members.items():
+                conns[m] = dict(meta if isinstance(meta, dict) else {"opened_at": time.time(), "pref": 0})
+            a._mpath_groups[key] = {"conns": conns, "primary": primary, "rr_index": 0}
+
+    def test_no_existing_group_is_a_noop(self, caplog):
+        a = UnifiedMuxConAdapter("mx", {"listeners": []})
+        conn_id = "in:10.0.0.9:4000:1"
+        a.connections[conn_id] = {"opened_at": time.time(), "handshake": {"server_id": "srvA"}}
+        a._rekey_mpath_connection(conn_id)
+        assert a._mpath_groups == {}
+
+    def test_same_new_key_is_a_noop(self, caplog):
+        a = UnifiedMuxConAdapter("mx", {"listeners": []})
+        conn_id = "in:10.0.0.9:4000:1"
+        a.connections[conn_id] = {"opened_at": time.time(), "handshake": {"server_id": "srvA"}}
+        key = a._derive_peer_key_from_conn_id(conn_id)
+        assert key == "node:srvA"
+        a._mpath_groups[key] = {
+            "conns": OrderedDict({conn_id: {"opened_at": 1.0, "pref": 0}}),
+            "primary": conn_id,
+            "rr_index": 0,
+        }
+        a._rekey_mpath_connection(conn_id)
+        # group untouched, still only member
+        assert list(a._mpath_groups[key]["conns"].keys()) == [conn_id]
+        assert a._mpath_groups[key]["primary"] == conn_id
+
+    def test_rekey_into_existing_group_keeps_its_primary(self, caplog):
+        a = UnifiedMuxConAdapter("mx", {"listeners": []})
+        c1 = "out:peer1:4000:1"  # already handshake identity srvA
+        c2 = "out:peer2:4000:2"
+        a.connections[c1] = {"opened_at": time.time(), "handshake": {"server_id": "srvA"}}
+        a.connections[c2] = {"opened_at": time.time(), "handshake": None}
+        # c1 registers first under the stable key
+        a._register_mpath_connection(c1)
+        # c2 registers pre-handshake under its host key
+        host_key = a._derive_peer_key_from_conn_id(c2)
+        assert host_key == "peer2:4000"
+        a._register_mpath_connection(c2)
+        assert c2 in a._mpath_groups[host_key]["conns"]
+        # handshake arrives -> rekey to the existing node group
+        a.connections[c2]["handshake"] = {"server_id": "srvA"}
+        a._rekey_mpath_connection(c2)
+        node_key = "node:srvA"
+        assert host_key not in a._mpath_groups
+        assert set(a._mpath_groups[node_key]["conns"]) == {c1, c2}
+        # existing primary (c1) must be kept; rekey only picks primary when empty
+        assert a._mpath_groups[node_key]["primary"] == c1
+
+    def test_rekey_with_multi_conn_old_group_repicks_primary(self, caplog):
+        a = UnifiedMuxConAdapter("mx", {"listeners": []})
+        moving = "in:10.0.0.7:4000:1"
+        stays = "in:10.0.0.7:4000:2"
+        a.connections[moving] = {"opened_at": time.time(), "handshake": {"server_id": "srvM"}}
+        a.connections[stays] = {"opened_at": time.time()}
+        host_key = "host:10.0.0.7"
+        a._mpath_groups[host_key] = {
+            "conns": OrderedDict({moving: {"opened_at": time.time()}, stays: {"opened_at": time.time()}}),
+            "primary": moving,
+            "rr_index": 0,
+        }
+        a._rekey_mpath_connection(moving)
+        assert stays in a._mpath_groups[host_key]["conns"]
+        assert a._mpath_groups[host_key]["primary"] == stays
+        assert moving not in a._mpath_groups.get(host_key, {}).get("conns", {})
+        assert moving in a._mpath_groups["node:srvM"]["conns"]
+
+    def test_rekey_merges_peer_state_into_existing_new_key(self, caplog):
+        a = UnifiedMuxConAdapter("mx", {"listeners": []})
+        c1 = "out:peer1:4000:1"
+        c2 = "out:peer2:4000:2"
+        # c1 is already identity-stable (registration lands it in node:srvR)
+        a.connections[c1] = {"opened_at": time.time(), "handshake": {"server_id": "srvR"}}
+        a.connections[c2] = {"opened_at": time.time(), "handshake": {"server_id": "srvR"}}
+        a._register_mpath_connection(c1)  # node:srvR, holds seed peer state under new key
+        node_key = "node:srvR"
+        assert node_key in a._mpath_groups
+        # seed the destination peer state
+        a._peer_sendbuf[node_key] = {11: (c1, 1, b"seed", time.time())}
+        a._peer_rx_state[node_key] = {"expected": 7, "buffer": {}}
+        a._peer_tx_seq[node_key] = 30
+        a._peer_retx_count[node_key] = 2
+        a._peer_next_stream_id[node_key] = 18
+        # c2 under its host key with its own peer state
+        c2_host = "host:10.0.0.2"
+        a._mpath_groups[c2_host] = {
+            "conns": OrderedDict({c2: {"opened_at": time.time()}}),
+            "primary": c2,
+            "rr_index": 0,
+        }
+        a._peer_sendbuf[c2_host] = {22: (c2, 2, b"move", time.time())}
+        a._peer_rx_state[c2_host] = {"expected": 90, "buffer": {}}
+        a._peer_tx_seq[c2_host] = 95
+        a._peer_retx_count[c2_host] = 4
+        a._peer_next_stream_id[c2_host] = 40
+
+        a._rekey_mpath_connection(c2)
+
+        assert c2_host not in a._mpath_groups
+        assert set(a._mpath_groups[node_key]["conns"]) == {c1, c2}
+        # sendbuf: old entries merged INTO the existing new-key buffer
+        assert set(a._peer_sendbuf[node_key]) == {11, 22}
+        # rx state: existing new-key state won, old not copied
+        assert a._peer_rx_state[node_key]["expected"] == 7
+        assert c2_host not in a._peer_rx_state
+        # tx seq: max(old, existing)
+        assert a._peer_tx_seq[node_key] == 95
+        assert c2_host not in a._peer_tx_seq
+        # retx: accumulated
+        assert a._peer_retx_count[node_key] == 6
+        assert c2_host not in a._peer_retx_count
+        # stream id: max(old, existing)
+        assert a._peer_next_stream_id[node_key] == 40
+        assert c2_host not in a._peer_next_stream_id
+
+    def test_rekey_with_derive_error_is_swallowed(self, caplog):
+        a = UnifiedMuxConAdapter("mx", {"listeners": []})
+        conn_id = "in:10.0.0.4:4000:1"
+        a.connections[conn_id] = {"opened_at": time.time(), "handshake": None}
+        a._mpath_groups["host:10.0.0.4"] = {
+            "conns": OrderedDict({conn_id: {"opened_at": time.time()}}),
+            "primary": conn_id,
+            "rr_index": 0,
+        }
+
+        def _boom(_cid):
+            raise RuntimeError("derive boom")
+
+        orig = a._derive_peer_key_from_conn_id
+        a._derive_peer_key_from_conn_id = _boom
+        try:
+            a._rekey_mpath_connection(conn_id)  # must not raise
+        finally:
+            a._derive_peer_key_from_conn_id = orig
+        # group left untouched
+        assert conn_id in a._mpath_groups["host:10.0.0.4"]["conns"]
