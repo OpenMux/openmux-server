@@ -300,61 +300,98 @@ class WebSocketClientAdapter(BaseClientAdapter):
         """Ask the server to switch one console power feed on or off."""
         return await self._send_control_frame({"type": "power_switch", "ref": ref, "on": on})
 
+    async def _ws_receive(self, timeout: Optional[float]) -> Any:
+        """Fetch the next websocket message, honoring an optional deadline.
+
+        A timeout propagates as `asyncio.TimeoutError` to the caller.
+        """
+        if timeout is not None:
+            return await asyncio.wait_for(self.websocket.receive(), timeout=timeout)
+        return await self.websocket.receive()
+
+    async def _ws_close_session(self) -> None:
+        """Close the aiohttp session (best-effort) after a read failure/close."""
+        if self._aiohttp_session:
+            try:
+                await self._aiohttp_session.close()
+            except Exception:
+                # justification: shutdown cleanup; the transport may already be closed
+                pass
+
+    def _ws_meta_reply(self, info: Dict[str, Any]) -> Union[str, bytes]:
+        """Render a meta frame against the tracked port-up state (`_port_up`).
+
+        First meta after connect: show a notice only when the port is
+        down. Later metas notify only on down/up transitions; stable
+        updates are swallowed (b"").
+        """
+        connected = bool(info.get("connected", False))
+        if self._port_up is None:
+            self._port_up = connected
+            if not connected:
+                return "\r\n[Port disconnected on server]\r\n"
+            return b""
+        if self._port_up is True and not connected:
+            self._port_up = False
+            return "\r\n[Port disconnected on server]\r\n"
+        if self._port_up is False and connected:
+            self._port_up = True
+            return "\r\n[Reconnected]\r\n"
+        return b""
+
+    def _ws_omxctrl_reply(self, data: str) -> Union[str, bytes]:
+        """Decode one OMXCTRL text frame; never leak the raw frame.
+
+        Power replies are stashed on `last_power_reply`; client_mode /
+        rw_holders frames go through `format_control_response`; meta
+        frames track the port-up state. Any decode failure swallows the
+        frame (returns b"") instead of showing raw JSON to the console.
+        """
+        try:
+            info = json.loads(data[len("OMXCTRL ") :])
+            if not isinstance(info, dict):
+                return b""
+            frame_type = info.get("type")
+            if frame_type in ("power_feeds", "power_switch"):
+                self.last_power_reply = info
+                return b""
+            if frame_type in ("client_mode", "rw_holders"):
+                _msg_type, message = format_control_response(self, info)
+                return message or b""
+            if frame_type == "meta":
+                return self._ws_meta_reply(info)
+            return b""
+        except Exception:
+            # If parsing fails, don't leak the raw control frame
+            return b""
+
     async def read_data(self, timeout: Optional[float] = None) -> Optional[Union[str, bytes]]:
+        """Read one console chunk, decoding OMXCTRL control frames.
+
+        Returns `b""` on timeout, on control-only traffic, and on
+        swallowed OMXCTRL frames; `None` on close or read failure
+        (which also marks the connection dropped and closes the
+        aiohttp session). Plain text and binary payloads pass through
+        unmodified.
+        """
         if not self.is_connected or not self.websocket:
             return None
         try:
-            if timeout is not None:
-                msg = await asyncio.wait_for(self.websocket.receive(), timeout=timeout)
-            else:
-                msg = await self.websocket.receive()
+            msg = await self._ws_receive(timeout)
             from aiohttp import WSMsgType
 
             if msg.type == WSMsgType.TEXT:
                 data = msg.data
                 # Intercept control/meta frames from server
                 if isinstance(data, str) and data.startswith("OMXCTRL "):
-                    try:
-                        payload = data[len("OMXCTRL ") :]
-                        info = json.loads(payload)
-                        if isinstance(info, dict) and info.get("type") in ("power_feeds", "power_switch"):
-                            self.last_power_reply = info
-                            return b""
-                        if isinstance(info, dict) and info.get("type") in ("client_mode", "rw_holders"):
-                            _msg_type, message = format_control_response(self, info)
-                            return message or b""
-                        if isinstance(info, dict) and info.get("type") == "meta":
-                            connected = bool(info.get("connected", False))
-                            # First meta after connect: show notice if down
-                            if self._port_up is None:
-                                self._port_up = connected
-                                if not connected:
-                                    return "\r\n[Port disconnected on server]\r\n"
-                                return b""  # suppress meta
-                            # Transition changes
-                            if self._port_up is True and not connected:
-                                self._port_up = False
-                                return "\r\n[Port disconnected on server]\r\n"
-                            if self._port_up is False and connected:
-                                self._port_up = True
-                                return "\r\n[Reconnected]\r\n"
-                        # For other meta updates, swallow
-                        return b""
-                    except Exception:
-                        # If parsing fails, don't leak the raw control frame
-                        return b""
+                    return self._ws_omxctrl_reply(data)
                 return data
             if msg.type == WSMsgType.BINARY:
                 return msg.data
             if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                 self.is_connected = False
                 # proactively close session if not already
-                if self._aiohttp_session:
-                    try:
-                        await self._aiohttp_session.close()
-                    except Exception:
-                        # justification: shutdown cleanup; the transport may already be closed
-                        pass
+                await self._ws_close_session()
                 return None
             # For ping/pong or other control frames, return empty to indicate no payload
             return b""
@@ -364,12 +401,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
         except Exception as e:
             self.logger.error("Read failed: %s", e, exc_info=True)
             self.is_connected = False
-            if self._aiohttp_session:
-                try:
-                    await self._aiohttp_session.close()
-                except Exception:
-                    # justification: shutdown cleanup; the transport may already be closed
-                    pass
+            await self._ws_close_session()
             return None
 
     async def close(self):
