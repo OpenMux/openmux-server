@@ -329,6 +329,59 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_adapter_reconcile_ports_malformed_input_removes_all(monkeypatch):
+    """A non-list / non-wrapper input means 'no ports' -> every port is removed.
+
+    Pins the input-normalization `else` branch: None, an empty dict, and a dict
+    without a `loopback_ports` list all normalize to an empty new set, so the
+    reconcile removes every currently-configured port and creates nothing.
+    """
+    for malformed in (None, {}, {"loopback_ports": "not-a-list"}, "just-a-string"):
+        adapter = LoopbackAdapter(
+            "loop",
+            {
+                "loopback_ports": [
+                    {"name": "a"},
+                    {"name": "b"},
+                ]
+            },
+        )
+
+        class PortA:
+            echo_delay = 0.0
+            buffer_size = 1024
+            sanitize_control = True
+            max_read_write_users = 1
+            scrollback_size = 0
+
+        adapter.ports["a"] = PortA()  # type: ignore[assignment]
+        adapter.ports["b"] = PortA()  # type: ignore[assignment]
+
+        destroyed: list = []
+        created: list = []
+
+        async def fake_destroy(name: str) -> None:
+            destroyed.append(name)
+            adapter.ports.pop(name, None)
+
+        async def fake_create(name: str, cfg: dict) -> None:
+            created.append(name)
+
+        monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+        monkeypatch.setattr(adapter, "create_port", fake_create)
+
+        summary = await adapter.reconcile_ports(malformed)
+        assert summary["removed"] == ["a", "b"]
+        assert summary["added"] == []
+        assert summary["updated"] == []
+        assert summary["unchanged"] == []
+        assert sorted(destroyed) == ["a", "b"]
+        assert created == []
+        # The in-memory snapshot collapses to the (empty) new set.
+        assert adapter.config["loopback_ports"] == []
+
+
+@pytest.mark.asyncio
 async def test_scrollback_size_from_config_is_replayable():
     """A loopback port with scrollback_size buffers echoed data for replay."""
     pm = PortManager([])

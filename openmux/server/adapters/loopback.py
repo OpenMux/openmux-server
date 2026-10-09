@@ -8,7 +8,7 @@ contracts without legacy-specific interfaces.
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
@@ -611,15 +611,7 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         Returns:
             Summary dict: {added, removed, updated, unchanged}.
         """
-        # Normalize new config to list of dicts
-        items: List[Dict[str, Any]] = []
-        if isinstance(new_config, dict) and isinstance(new_config.get("loopback_ports"), list):
-            items = list(new_config["loopback_ports"])  # shallow copy
-        elif isinstance(new_config, list):
-            items = list(new_config)
-        else:
-            items = []
-
+        items = self._reconcile_items(new_config)
         new_by_name: Dict[str, Dict[str, Any]] = {}
         for p in items:
             if isinstance(p, dict) and p.get("name"):
@@ -631,96 +623,10 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         added = sorted(new_names - old_names)
         common = sorted(old_names & new_names)
 
-        def _material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-            # Apply the same defaults as LoopbackPort.__init__ so comparison is
-            # apples-to-apples. Silent normalization (wire_to_mode) on both
-            # sides: the load path already logged legacy ints (issue #59).
-            mru = wire_to_mode(cfg.get("max_read_write_users", "one"))
-            return {
-                "echo_delay": cfg.get("echo_delay", 0.0),
-                "buffer_size": cfg.get("buffer_size", 1024),
-                "sanitize_control": bool(cfg.get("sanitize_control", True)),
-                "max_read_write_users": mru,
-                "scrollback_size": int(cfg.get("scrollback_size", 0)),
-            }
+        updated, unchanged = self._reconcile_common(common, new_by_name)
 
-        updated: List[str] = []
-        unchanged: List[str] = []
-        for n in common:
-            try:
-                port = self.ports[n]
-                # Build current cfg snapshot from port internals (best-effort)
-                old_cfg = {
-                    "echo_delay": getattr(port, "echo_delay", None),
-                    "buffer_size": getattr(port, "buffer_size", None),
-                    "sanitize_control": getattr(port, "sanitize_control", None),
-                    "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", None)),
-                    "scrollback_size": getattr(port, "scrollback_size", None),
-                }
-            except Exception:
-                old_cfg = {}
-            _new_mat = _material_cfg(new_by_name[n])
-            _untracked = set(_new_mat.keys()) - set(old_cfg.keys())
-            if _untracked:
-                self.logger.error(
-                    f"[BUG] reconcile_ports: _material_cfg has keys not tracked in old_cfg: "
-                    f"{sorted(_untracked)} — add them to old_cfg to ensure changes are detected."
-                )
-            if old_cfg == _new_mat:
-                # Optionally update description in-place
-                try:
-                    new_desc = new_by_name[n].get("description")
-                    if isinstance(new_desc, str) and new_desc:
-                        setattr(self.ports[n], "description", new_desc)
-                except Exception:
-                    # justification: in-place live update; the next reload retries
-                    pass
-                # In-place update for the RW/RO access-group lists. These are
-                # deliberately NOT in _material_cfg, so a groups-only change
-                # does not recreate the port; new lists apply on next connect.
-                try:
-                    new_rw = list(new_by_name[n].get("read_write_groups") or [])
-                    new_ro = list(new_by_name[n].get("read_only_groups") or [])
-                    _live_port = self.ports[n]
-                    if list(getattr(_live_port, "read_write_groups", None) or []) != new_rw:
-                        setattr(_live_port, "read_write_groups", new_rw)
-                    if list(getattr(_live_port, "read_only_groups", None) or []) != new_ro:
-                        setattr(_live_port, "read_only_groups", new_ro)
-                    # PDU power feeds (power section refs), same in-place
-                    # treatment: no port recreate, power adapter re-reads.
-                    new_power = [str(r) for r in (new_by_name[n].get("power") or [])]
-                    if list(getattr(_live_port, "power", None) or []) != new_power:
-                        setattr(_live_port, "power", new_power)
-                except Exception:
-                    # justification: in-place live update; the next reload retries
-                    pass
-                unchanged.append(n)
-            else:
-                updated.append(n)
-
-        # Apply removals/updates
-        for n in removed + updated:
-            try:
-                await self.destroy_port(n)
-            except Exception as e:
-                self.logger.error("Failed to destroy loopback port %s: %s", n, e, exc_info=True)
-
-        # Apply additions and re-creations
-        for n in added + updated:
-            cfg = new_by_name.get(n)
-            if not cfg:
-                continue
-            try:
-                await self.create_port(n, cfg)
-            except Exception as e:
-                self.logger.error("Failed to create loopback port %s: %s", n, e, exc_info=True)
-
-        # Update internal config snapshot
-        try:
-            self.config["loopback_ports"] = [new_by_name[k] for k in sorted(new_by_name.keys())]
-        except Exception:
-            # justification: optional snapshot; the authoritative config is on disk
-            pass
+        await self._reconcile_destroy_create(removed, added, updated, new_by_name)
+        self._reconcile_update_snapshot(new_by_name)
 
         summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
         self.logger.info(
@@ -732,3 +638,124 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             len(unchanged),
         )
         return summary
+
+    @staticmethod
+    def _reconcile_items(new_config: Any) -> List[Dict[str, Any]]:
+        """Normalize a reconcile input to a flat list of port dicts.
+
+        Accepts a wrapped dict ({"loopback_ports": [...]}) or a bare list;
+        anything else means "no ports" (empty list).
+        """
+        if isinstance(new_config, dict) and isinstance(new_config.get("loopback_ports"), list):
+            return list(new_config["loopback_ports"])  # shallow copy
+        if isinstance(new_config, list):
+            return list(new_config)
+        return []
+
+    def _material_cfg(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """The material (port-recreating) view of one port config.
+
+        Applies the same defaults as LoopbackPort.__init__ so old vs new
+        comparison is apples-to-apples. Silent normalization (wire_to_mode)
+        on both sides: the load path already logged legacy ints (issue #59).
+        Deliberately excludes description/access groups/power: those are
+        applied in-place without a port recreate.
+        """
+        mru = wire_to_mode(cfg.get("max_read_write_users", "one"))
+        return {
+            "echo_delay": cfg.get("echo_delay", 0.0),
+            "buffer_size": cfg.get("buffer_size", 1024),
+            "sanitize_control": bool(cfg.get("sanitize_control", True)),
+            "max_read_write_users": mru,
+            "scrollback_size": int(cfg.get("scrollback_size", 0)),
+        }
+
+    def _port_old_cfg(self, n: str) -> Dict[str, Any]:
+        """Current material cfg snapshot from the live port's internals."""
+        try:
+            port = self.ports[n]
+            return {
+                "echo_delay": getattr(port, "echo_delay", None),
+                "buffer_size": getattr(port, "buffer_size", None),
+                "sanitize_control": getattr(port, "sanitize_control", None),
+                "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", None)),
+                "scrollback_size": getattr(port, "scrollback_size", None),
+            }
+        except Exception:
+            return {}
+
+    def _reconcile_common(self, common: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+        """Split common ports into (updated, unchanged) and apply in-place fields."""
+        updated: List[str] = []
+        unchanged: List[str] = []
+        for n in common:
+            old_cfg = self._port_old_cfg(n)
+            new_mat = self._material_cfg(new_by_name[n])
+            untracked = set(new_mat.keys()) - set(old_cfg.keys())
+            if untracked:
+                self.logger.error(
+                    f"[BUG] reconcile_ports: _material_cfg has keys not tracked in old_cfg: "
+                    f"{sorted(untracked)} — add them to old_cfg to ensure changes are detected."
+                )
+            if old_cfg == new_mat:
+                self._apply_live_fields(n, new_by_name[n])
+                unchanged.append(n)
+            else:
+                updated.append(n)
+        return updated, unchanged
+
+    def _apply_live_fields(self, n: str, new_cfg: Dict[str, Any]) -> None:
+        """Apply the non-material fields of an unchanged port in-place.
+
+        Description, RW/RO access-group lists, and PDU power feeds update on the
+        live port without a recreate; each field is best-effort (the next
+        reload retries).
+        """
+        try:
+            new_desc = new_cfg.get("description")
+            if isinstance(new_desc, str) and new_desc:
+                setattr(self.ports[n], "description", new_desc)
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+        try:
+            live = self.ports[n]
+            new_rw = list(new_cfg.get("read_write_groups") or [])
+            new_ro = list(new_cfg.get("read_only_groups") or [])
+            if list(getattr(live, "read_write_groups", None) or []) != new_rw:
+                setattr(live, "read_write_groups", new_rw)
+            if list(getattr(live, "read_only_groups", None) or []) != new_ro:
+                setattr(live, "read_only_groups", new_ro)
+            # PDU power feeds (power section refs), same in-place treatment.
+            new_power = [str(r) for r in (new_cfg.get("power") or [])]
+            if list(getattr(live, "power", None) or []) != new_power:
+                setattr(live, "power", new_power)
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+
+    async def _reconcile_destroy_create(
+        self, removed: List[str], added: List[str], updated: List[str], new_by_name: Dict[str, Dict[str, Any]]
+    ) -> None:
+        """Destroy removed/updated ports, then create added/updated ones."""
+        for n in removed + updated:
+            try:
+                await self.destroy_port(n)
+            except Exception as e:
+                self.logger.error("Failed to destroy loopback port %s: %s", n, e, exc_info=True)
+        for n in added + updated:
+            cfg = new_by_name.get(n)
+            if not cfg:
+                continue
+            try:
+                await self.create_port(n, cfg)
+            except Exception as e:
+                self.logger.error("Failed to create loopback port %s: %s", n, e, exc_info=True)
+
+    def _reconcile_update_snapshot(self, new_by_name: Dict[str, Dict[str, Any]]) -> None:
+        """Replace the in-memory loopback_ports config snapshot."""
+        try:
+            self.config["loopback_ports"] = [new_by_name[k] for k in sorted(new_by_name.keys())]
+        except Exception:
+            # justification: optional snapshot; the authoritative config is on disk
+            pass
