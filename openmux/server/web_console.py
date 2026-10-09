@@ -707,104 +707,168 @@ async def handle_login(request: web.Request) -> web.Response:
     """Render login page (GET) or process login (POST)."""
     adapter = _get_adapter(request)
     if request.method == "POST":
-        try:
-            data = await request.post()
-            username = str(data.get("username", ""))
-            password = str(data.get("password", ""))
-            next_val = data.get("next") or request.rel_url.query.get("next") or "/"
-            next_url = str(next_val)
-        except Exception:
-            username = ""
-            password = ""
-            next_url = "/"
+        username, password, next_url = await _login_parse_form(request)
         safe_next = str(next_url or "/")
-        try:
-            client_ip = adapter._get_client_ip(request) if hasattr(adapter, "_get_client_ip") else None
-        except Exception:
-            client_ip = None
-
-        def _render_login_response(error: bool, message: Optional[str] = None) -> web.Response:
-            body = adapter._render_login(error=error, next_url=safe_next, message=message)
-            return web.Response(body=body, content_type="text/html")
-
+        client_ip = _login_client_ip(adapter, request)
         auth_manager = adapter.auth_manager
-        if (
-            auth_manager
-            and username
-            and hasattr(auth_manager, "is_user_locked")
-            and auth_manager.is_user_locked(username, client_ip)
-        ):
-            return _render_login_response(True, "Too many failed attempts for this account. Please try again later.")
-        ok = False
-        if auth_manager and username:
-            try:
-                ok = bool(auth_manager.authenticate(username, password))
-            except Exception:
-                ok = False
-        if ok:
-            # Verify the user has at least some permissions assigned.
-            # Authentication proves identity; a None permission means no access
-            # has been granted (e.g. external-auth user not in any mapped group).
-            try:
-                perms = adapter.auth_manager.get_user_permissions(username) if adapter.auth_manager else None
-            except Exception:
-                perms = None
-            if perms is None:
-                adapter.logger.warning(
-                    "Login denied for '%s': authenticated but no permissions assigned "
-                    "(check group membership or external_auth.default_permission)",
-                    username,
-                )
-                ok = False
+        if _login_is_locked(adapter, auth_manager, username, client_ip):
+            return _login_render_response(
+                adapter, safe_next, True, "Too many failed attempts for this account. Please try again later."
+            )
+        ok = _login_evaluate_ok(adapter, auth_manager, username, password)
         if ok:
             # Create session
-            sid = secrets.token_urlsafe(32)
-            now = time.time()
-            if auth_manager and hasattr(auth_manager, "clear_auth_failures"):
-                auth_manager.clear_auth_failures(username, client_ip)
-            adapter._sessions[sid] = {"username": username, "created": now, "last_seen": now, "ip": client_ip}
-            resp = web.HTTPFound(location=str(next_url))
-            cookie_kwargs = {
-                "httponly": True,
-                "secure": bool(getattr(adapter, "use_tls", False)),
-                "samesite": "Lax",
-                "max_age": adapter.session_ttl_seconds,
-                # Use root path for broad compatibility across base-path/proxy setups
-                # (Some proxies/base-path combinations may fail to send path-scoped cookies consistently)
-                "path": "/",
-            }
-            # Proactively clear any stale cookie variants to avoid the browser sending
-            # multiple cookies with the same name (root vs base-path scoped)
-            try:
-                bp = adapter._effective_base_path(request) or "/"
-            except Exception:
-                bp = "/"
-            for name in {adapter._session_cookie_name, "omx_session"}:
-                for p in {"/", bp}:
-                    try:
-                        resp.del_cookie(name, path=p)
-                    except Exception:
-                        # justification: best-effort cookie expiry
-                        pass
-            resp.set_cookie(adapter._session_cookie_name, sid, **cookie_kwargs)
-            raise resp
+            _login_clear_failures(auth_manager, username, client_ip)
+            raise _login_create_session(adapter, request, username, client_ip, next_url)
         # Failure -> show login page with message
-        if auth_manager and username and hasattr(auth_manager, "register_auth_failure"):
-            auth_manager.register_auth_failure(username, client_ip)
-        return _render_login_response(True)
+        _login_register_failure(auth_manager, username, client_ip)
+        return _login_render_response(adapter, safe_next, True)
 
     # GET: if already authenticated, bounce to next
+    redirect = _login_session_redirect(request, adapter)
+    if redirect is not None:
+        raise redirect
+    next_q = request.rel_url.query.get("next") or "/"
+    body = adapter._render_login(error=False, next_url=next_q)
+    return web.Response(body=body, content_type="text/html")
+
+
+def _login_render_response(
+    adapter: "WebConsoleAdapter", safe_next: str, error: bool, message: Optional[str] = None
+) -> web.Response:
+    """Render the login page with an optional error message."""
+    body = adapter._render_login(error=error, next_url=safe_next, message=message)
+    return web.Response(body=body, content_type="text/html")
+
+
+def _login_is_locked(adapter: "WebConsoleAdapter", auth_manager, username: str, client_ip: Optional[str]) -> bool:
+    """True when the account is rate-limit locked for this user/IP.
+
+    Mirrors the original short-circuit chain: without a manager or username
+    the check is False otherwise it delegates to ``is_user_locked`` (an
+    error there propagates, matching the pre-refactor handler).
+    """
+    if not (auth_manager and username):
+        return False
+    if not hasattr(auth_manager, "is_user_locked"):
+        return False
+    return bool(auth_manager.is_user_locked(username, client_ip))
+
+
+def _login_evaluate_ok(adapter: "WebConsoleAdapter", auth_manager, username: str, password: str) -> bool:
+    """Authenticate, then require that the user has at least some permission.
+
+    Authentication proves identity; a ``None`` permission means no access has
+    been granted (e.g. external-auth user not in any mapped group).
+    """
+    if not (auth_manager and username):
+        return False
+    try:
+        ok = bool(auth_manager.authenticate(username, password))
+    except Exception:
+        ok = False
+    if not ok:
+        return False
+    try:
+        perms = adapter.auth_manager.get_user_permissions(username) if adapter.auth_manager else None
+    except Exception:
+        perms = None
+    if perms is None:
+        adapter.logger.warning(
+            "Login denied for '%s': authenticated but no permissions assigned "
+            "(check group membership or external_auth.default_permission)",
+            username,
+        )
+        return False
+    return True
+
+
+def _login_session_redirect(request: web.Request, adapter: "WebConsoleAdapter") -> Optional[web.HTTPFound]:
+    """Return a redirect for an already-authenticated session, else ``None``.
+
+    Any lookup hiccup falls through to the login page (the fallback).
+    """
     try:
         sid = request.cookies.get(adapter._session_cookie_name)
         if sid and adapter._sessions.get(sid):
             nxt = request.rel_url.query.get("next") or "/"
-            raise web.HTTPFound(location=str(nxt))
+            return web.HTTPFound(location=str(nxt))
     except Exception:
         # justification: heuristic session check; the login page is the fallback
         pass
-    next_q = request.rel_url.query.get("next") or "/"
-    body = adapter._render_login(error=False, next_url=next_q)
-    return web.Response(body=body, content_type="text/html")
+    return None
+
+
+def _login_clear_failures(auth_manager, username: str, client_ip: Optional[str]) -> None:
+    """Record that these credentials just succeeded (rate-limit bookkeeping)."""
+    if auth_manager and hasattr(auth_manager, "clear_auth_failures"):
+        auth_manager.clear_auth_failures(username, client_ip)
+
+
+def _login_register_failure(auth_manager, username: str, client_ip: Optional[str]) -> None:
+    """Record a failed login attempt (rate-limit bookkeeping)."""
+    if auth_manager and username and hasattr(auth_manager, "register_auth_failure"):
+        auth_manager.register_auth_failure(username, client_ip)
+
+
+async def _login_parse_form(request: web.Request) -> Tuple[str, str, str]:
+    """Extract (username, password, next) from the POST form (or query).
+
+    On any parse failure the values fall back to the empty form with
+    ``next = '/'``.
+    """
+    try:
+        data = await request.post()
+        username = str(data.get("username", ""))
+        password = str(data.get("password", ""))
+        next_val = data.get("next") or request.rel_url.query.get("next") or "/"
+        return username, password, str(next_val)
+    except Exception:
+        return "", "", "/"
+
+
+def _login_client_ip(adapter: "WebConsoleAdapter", request: web.Request) -> Optional[str]:
+    """Resolve the client IP, ``None`` on absence or error."""
+    try:
+        return adapter._get_client_ip(request) if hasattr(adapter, "_get_client_ip") else None
+    except Exception:
+        return None
+
+
+def _login_create_session(
+    adapter: "WebConsoleAdapter", request: web.Request, username: str, client_ip: Optional[str], next_url: str
+) -> web.HTTPFound:
+    """Create the session record, set (and clear stale variants of) the
+    cookie, and build the redirect.
+
+    The cookie is set on the ``/`` path for broad compatibility across
+    base-path/proxy setups; stale root vs base-path scoped variants are
+    proactively cleared so the browser does not send duplicates.
+    """
+    sid = secrets.token_urlsafe(32)
+    now = time.time()
+    adapter._sessions[sid] = {"username": username, "created": now, "last_seen": now, "ip": client_ip}
+    resp = web.HTTPFound(location=str(next_url))
+    cookie_kwargs = {
+        "httponly": True,
+        "secure": bool(getattr(adapter, "use_tls", False)),
+        "samesite": "Lax",
+        "max_age": adapter.session_ttl_seconds,
+        "path": "/",
+    }
+    try:
+        bp = adapter._effective_base_path(request) or "/"
+    except Exception:
+        bp = "/"
+    for name in {adapter._session_cookie_name, "omx_session"}:
+        for p in {"/", bp}:
+            try:
+                resp.del_cookie(name, path=p)
+            except Exception:
+                # justification: best-effort cookie expiry
+                pass
+    resp.set_cookie(adapter._session_cookie_name, sid, **cookie_kwargs)
+    return resp
 
 
 async def handle_logout(request: web.Request) -> web.Response:
