@@ -867,3 +867,233 @@ async def test_power_frames_not_configured_reply_types():
     assert s_resp["type"] == "power_switch"
     assert s_resp["ok"] is False
     assert "not configured" in s_resp["error"]
+
+
+# --- C901 work, 21-bracket: _handle_control_frame branch coverage -----------
+
+
+class _PromoteFailureCm:
+    """Console manager whose promote/demote record calls and return a fixed flag."""
+
+    def __init__(self, clients, promote=True, demote=True):
+        self.promote_calls = []
+        self.demote_calls = []
+        self.promote_ok = promote
+        self.demote_ok = demote
+        self.holder_list = clients
+        self.client_to_manager = {}
+
+        class _Pm:
+            pass
+
+        _Pm.ports = {"p1": type("P", (), {"connected_clients": clients, "max_read_write_users": "one"})()}
+        self.port_manager = _Pm()
+
+    async def promote_client_to_read_write(self, client_id, port_name):
+        self.promote_calls.append((client_id, port_name))
+        return self.promote_ok
+
+    async def demote_client_to_read_only(self, client_id, port_name, notify_origin=True):
+        self.demote_calls.append((client_id, port_name, notify_origin))
+        return self.demote_ok
+
+
+@pytest.mark.asyncio
+async def test_release_rw_frame_demotes_via_console_manager():
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
+    client.username = "u"
+    client.connected_port = "p1"
+    cm = _PromoteFailureCm([])
+    adapter.set_console_manager(cm)
+
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "release_rw"}))
+
+    assert handled is True
+    assert cm.demote_calls == [("c1", "p1", True)]
+    resp = _last_ctrl_json(writer)
+    assert resp["type"] == "client_mode"
+    assert resp["ok"] is True
+
+
+class _NoPortCm:
+    """Console manager with a port manager that owns no `p1` port."""
+
+    def __init__(self):
+        self.client_to_manager = {}
+
+        class _Pm:
+            ports = {}
+
+        self.port_manager = _Pm()
+
+    async def promote_client_to_read_write(self, client_id, port_name):
+        return True
+
+
+@pytest.mark.asyncio
+async def test_promote_frame_grant_updates_client_mode():
+    # A successful promote reply grants read-write; the client's recorded
+    # mode follows the control response (final client_mode branch).
+    clients = [{"client_id": "A", "username": "alice", "mode": "read-write"}]
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
+    client.username = "u"
+    client.connected_port = "p1"
+    cm = _NoPortCm()
+    cm.port_manager.ports["p1"] = type("P", (), {"connected_clients": clients, "max_read_write_users": 2})()
+    adapter.set_console_manager(cm)
+    # Promote succeeds (returns True): the reply grants the mode and the
+    # client's recorded mode follows the response (final client_mode branch).
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "promote"}))
+
+    assert handled is True
+    resp = _last_ctrl_json(writer)
+    assert resp["type"] == "client_mode"
+    assert resp["ok"] is True
+    assert client.mode == "read-write"
+
+
+@pytest.mark.asyncio
+async def test_promote_frame_failure_carries_holders_and_capacity():
+    clients = [{"client_id": "A", "username": "alice", "mode": "read-write"}]
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
+    client.username = "u"
+    client.connected_port = "p1"
+    cm = _PromoteFailureCm(clients, promote=False)
+    adapter.set_console_manager(cm)
+
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "promote"}))
+
+    assert handled is True
+    assert cm.promote_calls == [("c1", "p1")]
+    resp = _last_ctrl_json(writer)
+    assert resp["ok"] is False
+    assert resp["rw_holders"] == ["[A] alice@unknown (rw)"]
+    assert resp["max_rw_users"] == 1  # wire capacity of the "one" mode
+
+
+@pytest.mark.asyncio
+async def test_query_rw_holders_frame_returns_holders():
+    clients = [
+        {"client_id": "A", "username": "alice", "mode": "read-write"},
+        {"client_id": "B", "username": "bob", "mode": "read-only"},
+    ]
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
+    client.username = "u"
+    client.connected_port = "p1"
+    adapter.set_console_manager(_PromoteFailureCm(clients))
+
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "query_rw_holders"}))
+
+    assert handled is True
+    resp = _last_ctrl_json(writer)
+    assert resp["type"] == "rw_holders"
+    assert resp["holders"] == ["[A] alice@unknown (rw)"]
+    assert resp["max_rw_users"] == 1  # wire capacity of the "one" mode
+
+
+@pytest.mark.asyncio
+async def test_unknown_control_type_is_swallowed():
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
+    client.username = "u"
+
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "bogus"}))
+
+    assert handled is True
+    assert bytes(writer.buffer) == b""
+
+
+@pytest.mark.asyncio
+async def test_malformed_control_json_is_swallowed():
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
+    client.username = "u"
+
+    handled = await adapter._handle_control_frame(client, CTRL_MARKER + b"{not json\n")
+
+    assert handled is True
+    assert bytes(writer.buffer) == b""
+
+
+@pytest.mark.asyncio
+async def test_non_dict_control_payload_is_swallowed():
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    writer = FakeWriter()
+    client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
+    client.username = "u"
+
+    handled = await adapter._handle_control_frame(client, _ctrl_frame([1, 2, 3]))
+
+    assert handled is True
+    assert bytes(writer.buffer) == b""
+
+
+@pytest.mark.asyncio
+async def test_power_switch_frame_with_configured_pdu_and_admin():
+    from openmux.server.adapters.pdu import PduAdapter
+
+    class _Cm:
+        client_to_manager = {}
+
+    cm = _Cm()
+
+    class _Pm:
+        ports = {}
+        unified_adapters = []
+
+    pm = _Pm()
+
+    # Dummy driver default outlets are "1".."8": ref "rack1.1" -> outlet "1".
+    pm._pdu = PduAdapter("power", {"power": {"pdus": [{"name": "rack1", "driver": "dummy", "poll_interval": 0}]}})
+    pm.unified_adapters.append(pm._pdu)
+    pm._pdu.main_port_manager = pm
+    pm.ports["c1"] = type("P", (), {"power": ["rack1.1", "rack1.2"], "name": "c1"})()
+    cm.port_manager = pm
+
+    class _Auth:
+        def get_user_permissions(self, username):
+            return "admin"
+
+    auth = _Auth()
+    pm._pdu.set_auth_manager(auth)
+
+    # Swap the auto-built dummy driver for a recorder: the frame must reach
+    # the driver with the ref, the on-state, the user and the audit id.
+    from openmux.server.adapters.power_drivers.api import OutletReading
+
+    class _RecDriver:
+        # Plain stand-in for the driver slot of the running PDU state: it
+        # only needs set_state (set_outlet reads no other driver member).
+        set_calls = []
+
+        async def set_state(self, outlet_id, on):
+            self.set_calls.append((outlet_id, on))
+            return OutletReading(on=on)
+
+    assert await pm._pdu.start() is True
+    pm._pdu.pdus["rack1"].driver = _RecDriver()
+
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    adapter.set_console_manager(cm)
+    client = _PowerFrameClient()
+
+    rec = pm._pdu.pdus["rack1"].driver
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "power_switch", "ref": "rack1.1", "on": True}))
+    assert handled is True
+    assert rec.set_calls == [("1", True)]
+    resp = _last_ctrl_json(client)
+    assert resp["type"] == "power_switch"
+    assert resp["ok"] is True
+    assert resp["on"] is True
+    assert resp["state"] == "on"
+    await pm._pdu.stop()

@@ -714,6 +714,130 @@ class TcpServerAdapter(BaseGenericAdapter):
             except Exception as e:
                 self.logger.error("Error writing chunk to port %s: %s", client.connected_port, e, exc_info=True)
 
+    def _ctrl_parse_request(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Decode one control frame into its JSON request dict.
+
+        `data` must start with `CTRL_MARKER` (the caller checked). Returns
+        None for a malformed body or a non-dict JSON value: both must be
+        swallowed rather than leaked to the port.
+        """
+        try:
+            line = data[len(CTRL_MARKER) :].split(b"\n", 1)[0]
+            req = json.loads(line.decode("utf-8", errors="ignore"))
+        except Exception:
+            return None
+        if not isinstance(req, dict):
+            return None
+        return req
+
+    async def _ctrl_power_reply(
+        self, port_name: str, req_type: str, req: Dict[str, Any], client: "ClientSession"
+    ) -> Dict[str, Any]:
+        """PDU power control from the console CLI (console.py `p` menu).
+
+        The PDU adapter owns the lookup, permission, group and audit logic;
+        the live [POWER] notice rides the existing port meta fan-out. When
+        no PDU adapter is configured, reply on the matching reply type so
+        the console menu (which filters its read path on these) can show it.
+        """
+        pdu = find_power_adapter(self.console_manager) if self.console_manager else None
+        if pdu is None:
+            if req_type == "power_query":
+                return {"type": "power_feeds", "ok": False, "error": "power management is not configured", "feeds": []}
+            return {"type": "power_switch", "ok": False, "error": "power management is not configured"}
+        return await pdu.handle_power_frame(
+            port_name, req, getattr(client, "username", None), client_id=getattr(client, "client_id", None)
+        ) or {
+            "type": "power_switch",
+            "ok": False,
+            "error": "power management is not configured",
+        }
+
+    async def _ctrl_promote_reply(self, client: "ClientSession", port_name: str) -> Dict[str, Any]:
+        """request_rw / promote: try to grant read-write on the port.
+
+        A refusal carries the current holder labels and, when the capacity
+        is determinable, the wire capacity value.
+        """
+        ok = await self.console_manager.promote_client_to_read_write(client.client_id, port_name)
+        resp: Dict[str, Any] = {
+            "type": "client_mode",
+            "ok": bool(ok),
+            "mode": "read-write" if ok else "read-only",
+        }
+        if not ok:
+            holders = self._rw_holders_for_port(port_name)
+            if holders:
+                resp["rw_holders"] = holders
+            max_rw = self._max_rw_users_for_port(port_name)
+            if max_rw is not None:
+                resp["max_rw_users"] = max_rw
+        return resp
+
+    async def _ctrl_force_reply(self, client: "ClientSession", port_name: str, req: Dict[str, Any]) -> Dict[str, Any]:
+        """force_promote: single write-slot takeover (issue #59 Part 2).
+
+        The frame name is kept for old clients; the target is optional
+        (default: the most recently attached holder). A named target
+        (issue #61) returns its victim's holder label in `takeover` so the
+        client can show "taken from <holder>".
+        """
+        target = req.get("client_id") if isinstance(req.get("client_id"), str) else None
+        ok, reason = await self.console_manager.take_write_slot(client.client_id, port_name, target)
+        resp: Dict[str, Any] = {
+            "type": "client_mode",
+            "ok": bool(ok),
+            "mode": "read-write" if ok else "read-only",
+        }
+        if reason and ok and reason.startswith("takeover from "):
+            resp["takeover"] = reason.removeprefix("takeover from ")
+        if reason:
+            resp["reason"] = reason
+        else:
+            max_rw = self._max_rw_users_for_port(port_name)
+            if max_rw is not None:
+                resp["max_rw_users"] = max_rw
+        return resp
+
+    async def _ctrl_holders_reply(self, port_name: str) -> Dict[str, Any]:
+        """query_rw_holders: the current holder labels plus wire capacity."""
+        resp: Dict[str, Any] = {"type": "rw_holders", "holders": self._rw_holders_for_port(port_name)}
+        max_rw = self._max_rw_users_for_port(port_name)
+        if max_rw is not None:
+            resp["max_rw_users"] = max_rw
+        return resp
+
+    async def _ctrl_dispatch(
+        self, client: "ClientSession", port_name: str, req_type: Any, req: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Pick the per-type control-frame handler and build its reply.
+
+        Returns None for an unknown `req_type` (the caller swallows the
+        frame and sends no reply).
+        """
+        if req_type in ("power_query", "power_switch"):
+            return await self._ctrl_power_reply(port_name, req_type, req, client)
+        if req_type in ("request_rw", "promote"):
+            return await self._ctrl_promote_reply(client, port_name)
+        if req_type == "release_rw":
+            await self.console_manager.demote_client_to_read_only(client.client_id, port_name)
+            return {"type": "client_mode", "ok": True, "mode": "read-only"}
+        if req_type == "force_promote":
+            return await self._ctrl_force_reply(client, port_name, req)
+        if req_type == "query_rw_holders":
+            return await self._ctrl_holders_reply(port_name)
+        return None
+
+    async def _ctrl_send_reply(self, client: "ClientSession", resp: Dict[str, Any]) -> None:
+        """Record the resulting access mode and best-effort send the reply frame."""
+        if resp.get("type") == "client_mode":
+            client.mode = resp.get("mode")  # power frames: no mode change
+        try:
+            await client.send_raw_data(CTRL_MARKER + json.dumps(resp, separators=(",", ":")).encode("utf-8") + b"\n")
+        except Exception:
+            # justification: best-effort control reply; the client tolerates a miss
+            pass
+
     async def _handle_control_frame(self, client: "ClientSession", data: bytes) -> bool:
         """Detect and process an out-of-band access-mode control frame.
 
@@ -734,92 +858,24 @@ class TcpServerAdapter(BaseGenericAdapter):
         if not data.startswith(CTRL_MARKER):
             return False
 
-        port_name = client.connected_port
-        try:
-            line = data[len(CTRL_MARKER) :].split(b"\n", 1)[0]
-            req = json.loads(line.decode("utf-8", errors="ignore"))
-        except Exception:
+        req = self._ctrl_parse_request(data)
+        if req is None:
             return True  # Malformed control frame; swallow rather than leak to the port
-        if not isinstance(req, dict):
-            return True
 
+        port_name = client.connected_port
         req_type = req.get("type")
-        resp: Dict[str, Any] = {"type": "client_mode"}
         try:
-            if req_type in ("power_query", "power_switch"):
-                # PDU power control from the console CLI (console.py `p` menu):
-                # feed list or one switch. The PDU adapter owns the lookup,
-                # permission, group and audit logic; the live [POWER] notice
-                # rides the existing port meta fan-out.
-                pdu = find_power_adapter(self.console_manager) if self.console_manager else None
-                if pdu is None:
-                    # Not configured: reply on the matching reply type so the
-                    # console menu (which filters its read path on these) can show it.
-                    if req_type == "power_query":
-                        resp = {"type": "power_feeds", "ok": False, "error": "power management is not configured", "feeds": []}
-                    else:
-                        resp = {"type": "power_switch", "ok": False, "error": "power management is not configured"}
-                else:
-                    resp = await pdu.handle_power_frame(
-                        port_name, req, getattr(client, "username", None), client_id=getattr(client, "client_id", None)
-                    ) or {
-                        "type": "power_switch",
-                        "ok": False,
-                        "error": "power management is not configured",
-                    }
-            elif req_type in ("request_rw", "promote"):
-                ok = await self.console_manager.promote_client_to_read_write(client.client_id, port_name)
-                resp["ok"] = bool(ok)
-                resp["mode"] = "read-write" if ok else "read-only"
-                if not ok:
-                    holders = self._rw_holders_for_port(port_name)
-                    if holders:
-                        resp["rw_holders"] = holders
-                    max_rw = self._max_rw_users_for_port(port_name)
-                    if max_rw is not None:
-                        resp["max_rw_users"] = max_rw
-            elif req_type == "release_rw":
-                await self.console_manager.demote_client_to_read_only(client.client_id, port_name)
-                resp["ok"] = True
-                resp["mode"] = "read-only"
-            elif req_type == "force_promote":
-                # Single write-slot takeover (issue #59 Part 2); the frame name
-                # is kept for old clients, the target is optional (default: the
-                # most recently attached holder). A named target (issue #61)
-                # returns its victim's holder label in `takeover` so the client
-                # can show "taken from <holder>".
-                target = req.get("client_id") if isinstance(req.get("client_id"), str) else None
-                ok, reason = await self.console_manager.take_write_slot(client.client_id, port_name, target)
-                resp["ok"] = bool(ok)
-                resp["mode"] = "read-write" if ok else "read-only"
-                if reason and ok and reason.startswith("takeover from "):
-                    resp["takeover"] = reason.removeprefix("takeover from ")
-                if reason:
-                    resp["reason"] = reason
-                else:
-                    max_rw = self._max_rw_users_for_port(port_name)
-                    if max_rw is not None:
-                        resp["max_rw_users"] = max_rw
-            elif req_type == "query_rw_holders":
-                resp = {"type": "rw_holders", "holders": self._rw_holders_for_port(port_name)}
-                max_rw = self._max_rw_users_for_port(port_name)
-                if max_rw is not None:
-                    resp["max_rw_users"] = max_rw
-            else:
-                return True  # Unknown control type; swallow to avoid leaking to the port
+            resp = await self._ctrl_dispatch(client, port_name, req_type, req)
         except Exception as e:
             self.logger.error(
                 "Error handling control frame '%s' for client %s: %s", req_type, client.client_id, e, exc_info=True
             )
             resp = {"type": "client_mode", "ok": False, "mode": client.mode or "read-only"}
 
-        if resp.get("type") == "client_mode":
-            client.mode = resp.get("mode")  # power frames: no mode change
-        try:
-            await client.send_raw_data(CTRL_MARKER + json.dumps(resp, separators=(",", ":")).encode("utf-8") + b"\n")
-        except Exception:
-            # justification: best-effort control reply; the client tolerates a miss
-            pass
+        if resp is None:
+            return True  # Unknown control type; swallow to avoid leaking to the port
+
+        await self._ctrl_send_reply(client, resp)
         return True
 
     def _connected_clients_for_port(self, port_name: Optional[str]) -> List[Dict[str, Any]]:
