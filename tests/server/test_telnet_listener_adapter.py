@@ -129,6 +129,109 @@ def test_validate_config_require_auth_bool():
     assert TelnetListenerAdapter.validate_config(bad) is False
 
 
+def test_validate_config_container_branches():
+    # Non-dict config is rejected outright.
+    assert TelnetListenerAdapter.validate_config(["t1"]) is False
+    # A config with no "telnet_listener" key is vacuously valid.
+    assert TelnetListenerAdapter.validate_config({}) is True
+    # A non-list `telnet_listener` value is rejected.
+    assert TelnetListenerAdapter.validate_config({"telnet_listener": {"name": "t1"}}) is False
+    # A non-dict entry is rejected.
+    assert TelnetListenerAdapter.validate_config({"telnet_listener": ["t1"]}) is False
+
+
+def test_validate_config_name_and_target_branches():
+    # A missing, non-str, or blank name is rejected.
+    assert TelnetListenerAdapter.validate_config({"telnet_listener": [{"bind_port": 2323, "target": "x"}]}) is False
+    assert TelnetListenerAdapter.validate_config({"telnet_listener": [{"name": 1, "bind_port": 2323, "target": "x"}]}) is False
+    assert (
+        TelnetListenerAdapter.validate_config({"telnet_listener": [{"name": "  ", "bind_port": 2323, "target": "x"}]}) is False
+    )
+    # A duplicate name is rejected.
+    dup = {
+        "telnet_listener": [{"name": "t1", "bind_port": 2323, "target": "x"}, {"name": "t1", "bind_port": 2324, "target": "y"}]
+    }
+    assert TelnetListenerAdapter.validate_config(dup) is False
+    # A missing, non-str, or blank target is rejected.
+    assert TelnetListenerAdapter.validate_config({"telnet_listener": [{"name": "t1", "bind_port": 2323}]}) is False
+    assert (
+        TelnetListenerAdapter.validate_config({"telnet_listener": [{"name": "t1", "bind_port": 2323, "target": 1}]}) is False
+    )
+    assert (
+        TelnetListenerAdapter.validate_config({"telnet_listener": [{"name": "t1", "bind_port": 2323, "target": " "}]}) is False
+    )
+
+
+def test_validate_config_port_and_host_branches():
+    # A bind_port that is not an int or out of range is rejected.
+    assert (
+        TelnetListenerAdapter.validate_config({"telnet_listener": [{"name": "t1", "bind_port": "abc", "target": "x"}]})
+        is False
+    )
+    assert TelnetListenerAdapter.validate_config({"telnet_listener": [{"name": "t1", "bind_port": 0, "target": "x"}]}) is False
+    assert (
+        TelnetListenerAdapter.validate_config({"telnet_listener": [{"name": "t1", "bind_port": None, "target": "x"}]}) is False
+    )
+    # A present but blank / non-str bind_host is rejected; a None bind_host is allowed.
+    assert (
+        TelnetListenerAdapter.validate_config(
+            {"telnet_listener": [{"name": "t1", "bind_port": 2323, "target": "x", "bind_host": " "}]}
+        )
+        is False
+    )
+    assert (
+        TelnetListenerAdapter.validate_config(
+            {"telnet_listener": [{"name": "t1", "bind_port": 2323, "target": "x", "bind_host": 1}]}
+        )
+        is False
+    )
+    assert (
+        TelnetListenerAdapter.validate_config(
+            {"telnet_listener": [{"name": "t1", "bind_port": 2323, "target": "x", "bind_host": None}]}
+        )
+        is True
+    )
+
+
+def test_validate_config_read_only_and_enabled_bools():
+    # read_only / enabled / require_auth, when present, must be bools.
+    for key in ("read_only", "enabled", "require_auth"):
+        bad = {"telnet_listener": [{"name": "t1", "bind_port": 2323, "target": "x", key: 1}]}
+        assert TelnetListenerAdapter.validate_config(bad) is False
+    ok = {
+        "telnet_listener": [
+            {"name": "t1", "bind_port": 2323, "target": "x", "read_only": False, "enabled": True, "require_auth": False}
+        ]
+    }
+    assert TelnetListenerAdapter.validate_config(ok) is True
+
+
+def test_validate_config_acl_branches():
+    # acl, when present, must be a list of valid IP / CIDR strings.
+    # (None acl is allowed; a non-list acl is rejected.)
+    assert (
+        TelnetListenerAdapter.validate_config(
+            {"telnet_listener": [{"name": "t1", "bind_port": 2323, "target": "x", "acl": "1.2.3.4"}]}
+        )
+        is False
+    )
+    assert (
+        TelnetListenerAdapter.validate_config(
+            {"telnet_listener": [{"name": "t1", "bind_port": 2323, "target": "x", "acl": None}]}
+        )
+        is True
+    )
+    # A non-str rule, a blank rule, or an invalid IP/CIDR is rejected.
+    for rule in (1, "  ", "not-an-ip", "10.0.0.0/33", "10.0.0.256"):
+        bad = {"telnet_listener": [{"name": "t1", "bind_port": 2323, "target": "x", "acl": [rule]}]}
+        assert TelnetListenerAdapter.validate_config(bad) is False
+    # A valid mix of single IPs and CIDRs passes.
+    ok = {
+        "telnet_listener": [{"name": "t1", "bind_port": 2323, "target": "x", "acl": ["10.0.0.1", "192.168.0.0/24", "::1/128"]}]
+    }
+    assert TelnetListenerAdapter.validate_config(ok) is True
+
+
 # ---------------------------------------------------------------------------
 # _run_login
 

@@ -11,7 +11,6 @@ interactive "shell" request is honored.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import os
 import uuid
@@ -36,6 +35,7 @@ from .listener_common import (
     read_take_target,
     render_port_list,
     resolve_server_label,
+    validate_listener_entries,
 )
 from .power_command import format_power_notice, run_power_menu
 
@@ -271,51 +271,7 @@ class SshListenerAdapter(BaseGenericAdapter):
             return True
         if not isinstance(entries, list):
             return False
-        seen_names = set()
-        for entry in entries:
-            if not isinstance(entry, dict):
-                return False
-            name = entry.get("name")
-            if not isinstance(name, str) or not name.strip():
-                return False
-            if name in seen_names:
-                return False
-            seen_names.add(name)
-            target = entry.get("target")
-            if not isinstance(target, str) or not target.strip():
-                return False
-            bind_port = entry.get("bind_port")
-            try:
-                port = int(bind_port)
-            except (TypeError, ValueError):
-                return False
-            if port < 1 or port > 65535:
-                return False
-            bind_host = entry.get("bind_host")
-            if bind_host is not None and (not isinstance(bind_host, str) or not bind_host.strip()):
-                return False
-            if "read_only" in entry and not isinstance(entry.get("read_only"), bool):
-                return False
-            if "enabled" in entry and not isinstance(entry.get("enabled"), bool):
-                return False
-            if "require_auth" in entry and not isinstance(entry.get("require_auth"), bool):
-                return False
-            if "acl" in entry:
-                acl = entry.get("acl")
-                if acl is not None and not isinstance(acl, list):
-                    return False
-                if isinstance(acl, list):
-                    for rule in acl:
-                        if not isinstance(rule, str) or not rule.strip():
-                            return False
-                        try:
-                            if "/" in rule:
-                                ipaddress.ip_network(rule, strict=False)
-                            else:
-                                ipaddress.ip_address(rule)
-                        except ValueError:
-                            return False
-        return True
+        return validate_listener_entries(entries, set())
 
     async def _do_start(self) -> bool:
         if not self.listeners:

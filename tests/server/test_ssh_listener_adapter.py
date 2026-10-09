@@ -195,6 +195,94 @@ def test_validate_config_requires_target_and_port():
     assert SshListenerAdapter.validate_config(bad_port) is False
 
 
+def test_validate_config_container_branches():
+    # Non-dict config is rejected outright.
+    assert SshListenerAdapter.validate_config(["s1"]) is False
+    # A config with no "ssh_listener" key is vacuously valid.
+    assert SshListenerAdapter.validate_config({}) is True
+    # A non-list `ssh_listener` value is rejected.
+    assert SshListenerAdapter.validate_config({"ssh_listener": {"name": "s1"}}) is False
+    # A non-dict entry is rejected.
+    assert SshListenerAdapter.validate_config({"ssh_listener": ["s1"]}) is False
+
+
+def test_validate_config_name_and_target_branches():
+    # A missing, non-str, or blank name is rejected.
+    assert SshListenerAdapter.validate_config({"ssh_listener": [{"bind_port": 2222, "target": "x"}]}) is False
+    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": 1, "bind_port": 2222, "target": "x"}]}) is False
+    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "  ", "bind_port": 2222, "target": "x"}]}) is False
+    # A duplicate name is rejected.
+    dup = {
+        "ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x"}, {"name": "s1", "bind_port": 2223, "target": "y"}]
+    }
+    assert SshListenerAdapter.validate_config(dup) is False
+    # A missing, non-str, or blank target is rejected.
+    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 2222}]}) is False
+    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": 1}]}) is False
+    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": " "}]}) is False
+
+
+def test_validate_config_port_and_host_branches():
+    # A bind_port that is not an int or out of range is rejected.
+    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": "abc", "target": "x"}]}) is False
+    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 0, "target": "x"}]}) is False
+    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": None, "target": "x"}]}) is False
+    # A present but blank / non-str bind_host is rejected; a None bind_host is allowed.
+    assert (
+        SshListenerAdapter.validate_config(
+            {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "bind_host": " "}]}
+        )
+        is False
+    )
+    assert (
+        SshListenerAdapter.validate_config(
+            {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "bind_host": 1}]}
+        )
+        is False
+    )
+    assert (
+        SshListenerAdapter.validate_config(
+            {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "bind_host": None}]}
+        )
+        is True
+    )
+
+
+def test_validate_config_read_only_and_enabled_bools():
+    # read_only / enabled / require_auth, when present, must be bools.
+    for key in ("read_only", "enabled", "require_auth"):
+        bad = {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", key: 1}]}
+        assert SshListenerAdapter.validate_config(bad) is False
+    ok = {
+        "ssh_listener": [
+            {"name": "s1", "bind_port": 2222, "target": "x", "read_only": False, "enabled": True, "require_auth": False}
+        ]
+    }
+    assert SshListenerAdapter.validate_config(ok) is True
+
+
+def test_validate_config_acl_branches():
+    # acl, when present, must be a list of valid IP / CIDR strings.
+    # (None acl is allowed; a non-list acl is rejected.)
+    assert (
+        SshListenerAdapter.validate_config(
+            {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "acl": "1.2.3.4"}]}
+        )
+        is False
+    )
+    assert (
+        SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "acl": None}]})
+        is True
+    )
+    # A non-str rule, a blank rule, or an invalid IP/CIDR is rejected.
+    for rule in (1, "  ", "not-an-ip", "10.0.0.0/33", "10.0.0.256"):
+        bad = {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "acl": [rule]}]}
+        assert SshListenerAdapter.validate_config(bad) is False
+    # A valid mix of single IPs and CIDRs passes.
+    ok = {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "acl": ["10.0.0.1", "192.168.0.0/24", "::1/128"]}]}
+    assert SshListenerAdapter.validate_config(ok) is True
+
+
 def test_build_listener_defaults_require_auth_true():
     adapter = SshListenerAdapter("s1", {"ssh_listener": []})
     spec = adapter._build_listener({"name": "s1", "bind_port": 2222, "target": "loopback1"})

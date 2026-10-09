@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from openmux import __version__ as _OPENMUX_VERSION
 
@@ -83,6 +83,94 @@ def ip_allowed(peer_ip: str, compiled_acl: List[AclEntry]) -> bool:
             if addr in rule:
                 return True
     return False
+
+
+def validate_listener_entries(entries: List[Any], seen_names: Set[str]) -> bool:
+    """Validate one SSH/Telnet listener entry list (shared by both adapters).
+
+    Both adapters' configs are shaped identically, so they share this single
+    validator (the only difference is the top-level section key, whose list the
+    caller passes as ``entries``). Returns True only when every entry passes;
+    ``seen_names`` is mutated to reject duplicate port names.
+    """
+    for entry in entries:
+        if not _valid_listener_entry(entry, seen_names):
+            return False
+    return True
+
+
+def _valid_listener_entry(entry: Any, seen_names: Set[str]) -> bool:
+    """True when one SSH/Telnet listener dict entry is well-formed."""
+    if not isinstance(entry, dict):
+        return False
+    if not _valid_listener_str_field(entry, "name"):
+        return False
+    if entry["name"] in seen_names:
+        return False
+    seen_names.add(entry["name"])
+    if not _valid_listener_str_field(entry, "target"):
+        return False
+    if not _valid_listener_port(entry.get("bind_port")):
+        return False
+    if not _valid_listener_bind_host(entry.get("bind_host")):
+        return False
+    if not _valid_listener_bool_flags(entry):
+        return False
+    if not _valid_listener_acl_optional(entry):
+        return False
+    return True
+
+
+def _valid_listener_str_field(entry: Dict[str, Any], key: str) -> bool:
+    """True when ``entry[key]`` is a non-empty string (name/target)."""
+    value = entry.get(key)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _valid_listener_bind_host(bind_host: Any) -> bool:
+    """True when ``bind_host`` is absent/None or a non-empty string."""
+    if bind_host is None:
+        return True
+    return isinstance(bind_host, str) and bool(bind_host.strip())
+
+
+def _valid_listener_port(bind_port: Any) -> bool:
+    """True when ``bind_port`` coerces to an int in 1-65535."""
+    try:
+        port = int(bind_port)
+    except (TypeError, ValueError):
+        return False
+    return 1 <= port <= 65535
+
+
+def _valid_listener_bool_flags(entry: Dict[str, Any]) -> bool:
+    """True when read_only/enabled/require_auth, if present, are all bools."""
+    for bool_key in ("read_only", "enabled", "require_auth"):
+        if bool_key in entry and not isinstance(entry[bool_key], bool):
+            return False
+    return True
+
+
+def _valid_listener_acl_optional(entry: Dict[str, Any]) -> bool:
+    """True when ``acl`` is absent or a list of valid IP / CIDR strings."""
+    if "acl" not in entry:
+        return True
+    acl = entry["acl"]
+    if acl is None:
+        return True
+    if not isinstance(acl, list):
+        return False
+    for rule in acl:
+        if not isinstance(rule, str) or not rule.strip():
+            return False
+        try:
+            if "/" in rule:
+                ipaddress.ip_network(rule, strict=False)
+            else:
+                ipaddress.ip_address(rule)
+        except ValueError:
+            return False
+    return True
 
 
 def render_port_list(entries: List[Dict[str, Any]], header: Optional[str] = None) -> bytes:
