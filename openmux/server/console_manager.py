@@ -1072,6 +1072,71 @@ class ConsoleManager:
         except Exception:
             self.logger.debug("DataLogger takeover record failed for %s", port_name, exc_info=True)
 
+    def _take_write_slot_port(self, taker_id: str, port_name: str) -> Tuple[Optional[Any], Optional[str]]:
+        """(port, reason): proceed when attached + port exists, else (None, reason)."""
+        if self.client_port_map.get(taker_id) != port_name:
+            return None, "not_attached"
+        try:
+            port = self.port_manager.get_port(port_name)
+        except Exception:
+            port = None
+        if port is None:
+            return None, "port_missing"
+        return port, None
+
+    def _take_write_slot_permissions(self, port: Any, taker_id: str, port_name: str) -> Optional[Tuple[str, str]]:
+        """(taker_username, permissions) for one takeover, or None if not entitled."""
+        taker_username = ""
+        for c in getattr(port, "connected_clients", []) or []:
+            if c.get("client_id") == taker_id:
+                taker_username = str(c.get("username") or "")
+                break
+        permissions: Optional[str] = None
+        if taker_username:
+            try:
+                permissions = self.auth_manager.get_user_permissions(taker_username)
+            except Exception:
+                permissions = None
+        if permissions is None:
+            permissions = self._client_permissions(port_name, taker_id)
+        if permissions is None:
+            return None
+        return taker_username, permissions
+
+    async def _take_write_slot_federated(
+        self, port: Any, taker_id: str, port_name: str, taker_username: str, target: Optional[str]
+    ) -> Tuple[bool, str]:
+        """Arbitrate a takeover on a federated port: the origin is the authority."""
+        try:
+            origin_mode = await port.take_write_slot_for_client(taker_id, target)
+        except Exception:
+            self.logger.debug("FEDRW TAKE request failed for %s on %s", taker_id, port_name, exc_info=True)
+            origin_mode = "read-only"
+        if origin_mode != "read-write":
+            return False, "federation_denied"
+        # The origin granted the takeover. Mirror it onto our LOCAL view of the
+        # taker: the origin's promote only reached the origin's
+        # "fed:<peer>:<sid>" pseudo-client, not this node's client record - and
+        # the local write path gates on that record, so without this line the
+        # taker would show read-write but stay blocked (WRITE BLOCKED) until
+        # reconnect. Safe order: the origin relays the victim's demotion
+        # (FEDRWACK, demoting the local mirror) BEFORE the taker's take-ack, in
+        # order on the same connection, so when this node promotes the taker
+        # the slot already looks free.
+        if not await self.promote_client_to_read_write(taker_id, port_name):
+            # The origin held the transfer, but the local record could not
+            # follow (the taker has no local seat, or the victim's demotion
+            # relay did not land here yet). Report the take as FAILED: a
+            # success the local write gate cannot honor would just reproduce
+            # the read-write-but-blocked state (the taker sees RW, every
+            # keystroke is WRITE BLOCKED until reconnect).
+            self.logger.warning(
+                f"Federated takeover granted by the origin, but mirroring it locally " f"failed for {taker_id} on {port_name}"
+            )
+            return False, "promote_failed"
+        self._log_takeover_audit(port, port_name, taker_id, taker_username, target or "(latest)")
+        return True, (self._takeover_success_reason(port, target) or "ok")
+
     async def take_write_slot(self, taker_id: str, port_name: str, target: Optional[str] = None) -> Tuple[bool, str]:
         """Take the port's write slot from another holder (issue #59 Part 2).
 
@@ -1123,83 +1188,44 @@ class ConsoleManager:
                 ``federation_denied``. ``no_holder`` applies to ``none``
                 ports and to named targets that match no holder.
         """
-        if self.client_port_map.get(taker_id) != port_name:
-            return False, "not_attached"
-        try:
-            port = self.port_manager.get_port(port_name)
-        except Exception:
-            port = None
+        port, reason = self._take_write_slot_port(taker_id, port_name)
         if port is None:
-            return False, "port_missing"
+            return False, (reason or "not_attached")
 
-        # The taker's username is the one attached here (identical for local
-        # and federated ports: both are added through connect_client_to_port).
-        taker_username = ""
-        for c in getattr(port, "connected_clients", []) or []:
-            if c.get("client_id") == taker_id:
-                taker_username = str(c.get("username") or "")
-                break
-        permissions: Optional[str] = None
-        try:
-            if taker_username:
-                permissions = self.auth_manager.get_user_permissions(taker_username)
-        except Exception:
-            permissions = None
-        if permissions is None:
-            permissions = self._client_permissions(port_name, taker_id)
-        if permissions is None:
+        # The taker's username + entitlement are resolved before the port mode
+        # gate and federation: the origin only sees a "federation:<peer>"
+        # pseudo-client there and cannot adjudicate our local user's
+        # group/permission standing (SEC-07: a read-only seat must not take the
+        # slot, local or not).
+        creds = self._take_write_slot_permissions(port, taker_id, port_name)
+        if creds is None:
             return False, "not_entitled"
-
-        # The entitlement check runs HERE - before federation - because the
-        # origin only sees a "federation:<peer>" pseudo-client there and
-        # cannot adjudicate our local user's group/permission standing.
-        # (SEC-07: a read-only seat must not take the slot, local or not.)
+        taker_username, permissions = creds
         entitled, deny_reason = self._taker_entitled(port, port_name, permissions, taker_username or taker_id)
         if not entitled:
             return False, (deny_reason or "not_entitled")
 
         # Federated port: the origin arbitrates (it sees every holder).
         if hasattr(port, "take_write_slot_for_client"):
-            try:
-                origin_mode = await port.take_write_slot_for_client(taker_id, target)
-            except Exception:
-                self.logger.debug("FEDRW TAKE request failed for %s on %s", taker_id, port_name, exc_info=True)
-                origin_mode = "read-only"
-            if origin_mode == "read-write":
-                # The origin granted the takeover. Mirror it onto our LOCAL
-                # view of the taker: the origin's promote only reached the
-                # origin's "fed:<peer>:<sid>" pseudo-client, not this node's
-                # client record - and the local write path gates on that
-                # record, so without this line the taker would show
-                # read-write but stay blocked (WRITE BLOCKED) until
-                # reconnect. Safe order: the origin relays the victim's
-                # demotion (FEDRWACK, demoting the local mirror) BEFORE the
-                # taker's take-ack, in order on the same connection, so when
-                # this node promotes the taker the slot already looks free.
-                if not await self.promote_client_to_read_write(taker_id, port_name):
-                    # The origin held the transfer, but the local record
-                    # could not follow (the taker has no local seat, or the
-                    # victim's demotion relay did not land here yet). Report
-                    # the take as FAILED: a success the local write gate
-                    # cannot honor would just reproduce the read-write-but-
-                    # blocked state (the taker sees RW, every keystroke is
-                    # WRITE BLOCKED until reconnect).
-                    self.logger.warning(
-                        f"Federated takeover granted by the origin, but mirroring it locally "
-                        f"failed for {taker_id} on {port_name}"
-                    )
-                    return False, "promote_failed"
-                self._log_takeover_audit(port, port_name, taker_id, taker_username, target or "(latest)")
-                return True, (self._takeover_success_reason(port, target) or "ok")
-            return False, "federation_denied"
+            return await self._take_write_slot_federated(port, taker_id, port_name, taker_username, target)
+        return await self._take_write_slot_local(port, port_name, taker_id, taker_username, target)
 
-        # Local port: the mode gate, then the targeted transfer.
+    async def _take_write_slot_local(
+        self, port: Any, port_name: str, taker_id: str, taker_username: str, target: Optional[str]
+    ) -> Tuple[bool, str]:
+        """Local (non-federated) takeover: the mode gate, then the transfer.
+
+        ``multiple`` gives everyone write (``already_rw`` when the taker has
+        it), ``none`` has no writer to take. For ``one`` ports, the targeted
+        transfer runs when a victim resolves; otherwise a no-target take
+        promotes into the EMPTY slot (a named target matching no holder is
+        refused - the named victim does not (or no longer) exist).
+        """
         mode = wire_to_mode(getattr(port, "max_read_write_users", "one"))
         if mode == "multiple":
             return (True, "already_rw") if self._is_client_rw(port, taker_id) else (False, "promote_failed")
         if mode == "none":
             return False, "no_holder"
-
         victim, reason = self._resolve_take_target(port, port_name, taker_id, target)
         if victim is not None:
             ok, take_reason = await self._take_slot_local(port, port_name, taker_id, taker_username, victim)
@@ -1209,10 +1235,6 @@ class ConsoleManager:
             # the taker's console can show "taken from <holder>"; the no-target
             # take keeps the plain "ok" reason (see _takeover_success_reason).
             return True, (self._takeover_success_reason(port, target) or "ok")
-        # No holder to demote. A no-target take takes the EMPTY slot: the
-        # taker becomes the writer directly (legacy force behavior). A named
-        # target that matched no holder is still refused - the named victim
-        # does not (or no longer) exist.
         if target is not None or reason != "no_holder":
             return False, (reason or "no_holder")
         if self._is_client_rw(port, taker_id):
