@@ -273,37 +273,12 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self.instance_id = str(_uuid.uuid4())
         self.proto = MuxConProtocolHandler()
         # Authentication (Ed25519) configuration
-        auth_cfg = effective_config.get("auth", {}) if isinstance(effective_config.get("auth"), dict) else effective_config
-        # Default-safe: require authentication unless explicitly disabled
-        self._auth_required: bool = bool(effective_config.get("auth_required", True))
-        # Allow alternate nested shape: { auth: { required: true, public_keys: [...], private_key: path, key_id: "peer1" } }
-        if isinstance(auth_cfg, dict) and "auth" in effective_config:
-            self._auth_required = bool(auth_cfg.get("required", self._auth_required))
         # Map of muxcon public keys configured under muxcon.public_keys
         self._auth_pubkeys: Dict[str, Ed25519PublicKey] = {}
         # Optional per-key muxcon filters loaded from muxcon.public_keys entries
         self._key_filters: Dict[str, Dict[str, Any]] = {}
         self._load_public_keys(effective_config)
-        self._auth_priv: Optional[Ed25519PrivateKey] = None
-        self._auth_key_id: Optional[str] = None
-        try:
-            priv_path = None
-            key_id_cfg = None
-            if isinstance(auth_cfg, dict):
-                priv_path = auth_cfg.get("private_key") or auth_cfg.get("private_key_path")
-                key_id_cfg = auth_cfg.get("key_id")
-            if not priv_path:
-                priv_path = effective_config.get("auth_private_key") or effective_config.get("auth_private_key_path")
-            if not key_id_cfg:
-                key_id_cfg = effective_config.get("auth_key_id")
-            if priv_path:
-                self._auth_priv = self._load_ed25519_private_key(os.path.expanduser(str(priv_path)))
-            if key_id_cfg:
-                self._auth_key_id = str(key_id_cfg)
-        except Exception as e:
-            self.logger.warning("Failed to load MuxCon auth config: %s", e, exc_info=True)
-            self._auth_priv = None
-            self._auth_key_id = None
+        self._init_auth(effective_config)
 
         # Multipath config
         self.mpath_primary_stale_sec = float(effective_config.get("mpath_primary_stale_sec", 10.0))
@@ -311,10 +286,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self.mpath_strategy = str(effective_config.get("mpath_strategy", "best_pref")).lower()
         self.mpath_preemptive_promote = bool(effective_config.get("mpath_preemptive_promote", True))
         # Drop completely idle neighbors after no heartbeat/activity for this TTL (seconds). 0/None disables.
-        try:
-            self.mpath_neighbor_idle_drop_sec = float(effective_config.get("mpath_neighbor_idle_drop_sec", 900.0))
-        except Exception:
-            self.mpath_neighbor_idle_drop_sec = 900.0
+        self.mpath_neighbor_idle_drop_sec = self._cfg_num(effective_config, "mpath_neighbor_idle_drop_sec", float, 900.0)
         # Sequences & state maps
         self._next_seq = 1
         self._wire_state: Dict[str, Dict[str, Any]] = {}
@@ -366,14 +338,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self._peer_bytes_tx: Dict[str, int] = {}
         self._peer_bytes_rx: Dict[str, int] = {}
         # Retransmission timers (ms)
-        try:
-            self.retx_initial_ms = int(effective_config.get("retx_initial_ms", 350))
-        except Exception:
-            self.retx_initial_ms = 350
-        try:
-            self.retx_max_ms = int(effective_config.get("retx_max_ms", 2000))
-        except Exception:
-            self.retx_max_ms = 2000
+        self.retx_initial_ms = self._cfg_num(effective_config, "retx_initial_ms", int, 350)
+        self.retx_max_ms = self._cfg_num(effective_config, "retx_max_ms", int, 2000)
         # A reorder gap older than this is considered permanent (the sender's
         # retransmission window, bounded by retx_max_ms, has long passed) and
         # is flushed: the missing seq is dropped and the buffered tail is
@@ -404,29 +370,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # it when the corresponding POWER:RESULT arrives. Resolved with a
         # dict: {"ok": True, "on": bool} or {"ok": False, "error": str}.
         self._power_switch_pending: Dict[Tuple[str, int], Tuple[str, "asyncio.Future"]] = {}
-        try:
-            self.power_switch_timeout = float(effective_config.get("power_switch_timeout_sec", 5.0))
-        except Exception:  # justification: invalid timeout value; safe default
-            self.power_switch_timeout = 5.0
+        self.power_switch_timeout = self._cfg_num(effective_config, "power_switch_timeout_sec", float, 5.0)
         # Tasks/shutdown
         self._tasks: List[asyncio.Task] = []
         self._stop_event = asyncio.Event()
-        try:
-            self.heartbeat_interval = float(effective_config.get("heartbeat_interval", 30))
-        except Exception:  # justification: malformed heartbeat interval; fall back to safe default
-            self.heartbeat_interval = 30.0
-        try:
-            self.shutdown_grace_timeout = float(effective_config.get("shutdown_grace_timeout_sec", 5.0))
-        except Exception:  # justification: invalid shutdown grace timeout; default preserves graceful behavior
-            self.shutdown_grace_timeout = 5.0
-        try:
-            self.context_idle_timeout = float(effective_config.get("context_idle_timeout_sec", 60.0))
-        except Exception:  # justification: invalid idle timeout; default ensures cleanup still occurs
-            self.context_idle_timeout = 60.0
-        try:
-            self.shutdown_ack_flush_ms = int(effective_config.get("shutdown_ack_flush_ms", 75))
-        except Exception:  # justification: non-integer flush ms; default avoids tight loop or long stalls
-            self.shutdown_ack_flush_ms = 75
+        self.heartbeat_interval = self._cfg_num(effective_config, "heartbeat_interval", float, 30.0)
+        self.shutdown_grace_timeout = self._cfg_num(effective_config, "shutdown_grace_timeout_sec", float, 5.0)
+        self.context_idle_timeout = self._cfg_num(effective_config, "context_idle_timeout_sec", float, 60.0)
+        self.shutdown_ack_flush_ms = self._cfg_num(effective_config, "shutdown_ack_flush_ms", int, 75)
         self._shutdown_state: Dict[str, Dict[str, Any]] = {}
         # Fault injection state (used by WebStatus /api/fault)
         self._fault_state = {}
@@ -446,14 +397,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         self._apply_federation_filters(effective_config)
 
         # Federated cache controls
-        try:
-            self.federated_cache_enabled = bool(effective_config.get("federated_cache_enabled", True))
-        except Exception:
-            self.federated_cache_enabled = True
-        try:
-            self.federated_cache_ttl_sec = float(effective_config.get("federated_cache_ttl_sec", 0.0))
-        except Exception:
-            self.federated_cache_ttl_sec = 0.0
+        self.federated_cache_enabled = self._cfg_num(effective_config, "federated_cache_enabled", bool, True)
+        self.federated_cache_ttl_sec = self._cfg_num(effective_config, "federated_cache_ttl_sec", float, 0.0)
         # Cache file is fixed next to the TOFU state; the old
         # `federated_cache_path` config key was removed.
         self.federated_cache_path = os.path.join(self._tls_dir, "federated_cache.json")
@@ -462,6 +407,54 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         # Per-connection filter overrides (set once a connection authenticates)
         self._conn_filters = {}
+
+    @staticmethod
+    def _cfg_num(effective_config: Dict[str, Any], key: str, cast: type, default: Any) -> Any:
+        """Parse one numeric config key with a safe fallback.
+
+        Casts ``effective_config[key]`` with ``cast``; on any failure (missing
+        value, bad type, or a value the cast rejects) the returned value is the
+        caller's ``default`` so a single malformed key cannot abort ``__init__``.
+        """
+        try:
+            return cast(effective_config.get(key, default))
+        except Exception:  # justification: invalid config value; safe default
+            return default
+
+    def _init_auth(self, effective_config: Dict[str, Any]) -> None:
+        """Resolve the Ed25519 auth config (mode, private key, key id).
+
+        Flat keys win over the legacy nested ``auth:`` shape; the private key is
+        loaded best-effort (a missing file is not fatal - authentication simply
+        has nothing to prove with it). Populates ``_auth_required``,
+        ``_auth_priv`` and ``_auth_key_id``.
+        """
+        auth_cfg = effective_config.get("auth")
+        # Default-safe: require authentication unless explicitly disabled.
+        self._auth_required = bool(effective_config.get("auth_required", True))
+        # The nested shape overrides the flat key when both are present.
+        if isinstance(auth_cfg, dict) and "auth" in effective_config:
+            self._auth_required = bool(auth_cfg.get("required", self._auth_required))
+        self._auth_priv: Optional[Ed25519PrivateKey] = None
+        self._auth_key_id: Optional[str] = None
+        try:
+            priv_path = None
+            key_id_cfg = None
+            if isinstance(auth_cfg, dict):
+                priv_path = auth_cfg.get("private_key") or auth_cfg.get("private_key_path")
+                key_id_cfg = auth_cfg.get("key_id")
+            if not priv_path:
+                priv_path = effective_config.get("auth_private_key") or effective_config.get("auth_private_key_path")
+            if not key_id_cfg:
+                key_id_cfg = effective_config.get("auth_key_id")
+            if priv_path:
+                self._auth_priv = self._load_ed25519_private_key(os.path.expanduser(str(priv_path)))
+            if key_id_cfg:
+                self._auth_key_id = str(key_id_cfg)
+        except Exception as e:
+            self.logger.warning("Failed to load MuxCon auth config: %s", e, exc_info=True)
+            self._auth_priv = None
+            self._auth_key_id = None
 
     @staticmethod
     def _normalize_listener_conf(lst: Dict[str, Any]) -> Dict[str, Any]:

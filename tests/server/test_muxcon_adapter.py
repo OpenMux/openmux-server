@@ -4587,3 +4587,55 @@ async def test_ports_federated_outer_failure_is_non_fatal(monkeypatch):
     # The outer try/except must swallow the failure silently.
     await a._handle_ports_federated(conn_id, _fed_payload([_fed_port("p1")]))
     assert a._peer_proxies == {}
+
+
+# ---------------------------------------------------------------------------
+# __init__: numeric config keys with invalid values fall back to defaults
+
+
+def test_init_invalid_config_values_fall_back_to_defaults():
+    a = UnifiedMuxConAdapter(
+        "mx",
+        {
+            "listeners": [],
+            "mpath_neighbor_idle_drop_sec": "junk",
+            "retx_initial_ms": "junk",
+            "retx_max_ms": "junk",
+            "power_switch_timeout_sec": "junk",
+            "heartbeat_interval": "junk",
+            "shutdown_grace_timeout_sec": "junk",
+            "context_idle_timeout_sec": "junk",
+            "shutdown_ack_flush_ms": "junk",
+            "federated_cache_enabled": "junk",
+            "federated_cache_ttl_sec": "junk",
+        },
+    )
+    assert a.mpath_neighbor_idle_drop_sec == 900.0
+    assert a.retx_initial_ms == 350
+    assert a.retx_max_ms == 2000
+    # gap_stuck_sec is derived from the (defaulted) retx_max_ms.
+    assert a.gap_stuck_sec == max(1.0, 2.0 * 2000 / 1000.0)
+    assert a.power_switch_timeout == 5.0
+    assert a.heartbeat_interval == 30.0
+    assert a.shutdown_grace_timeout == 5.0
+    assert a.context_idle_timeout == 60.0
+    assert a.shutdown_ack_flush_ms == 75
+    assert a.federated_cache_enabled is True
+    assert a.federated_cache_ttl_sec == 0.0
+    b = UnifiedMuxConAdapter("mx", {"listeners": [], "retx_max_ms": 5000})
+    assert b.retx_max_ms == 5000
+    assert b.gap_stuck_sec == 10.0
+
+
+def test_init_auth_required_resolution():
+    # Default: auth is required.
+    assert UnifiedMuxConAdapter("mx", {"listeners": []})._auth_required is True
+    # Flat key disables it.
+    assert UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": False})._auth_required is False
+    # Nested shape overrides the flat key.
+    a = UnifiedMuxConAdapter("mx", {"listeners": [], "auth_required": True, "auth": {"required": False}})
+    assert a._auth_required is False
+    b = UnifiedMuxConAdapter("mx", {"listeners": [], "auth": {"required": True}})
+    assert b._auth_required is True
+
+
