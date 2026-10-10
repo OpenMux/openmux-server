@@ -574,3 +574,198 @@ def test_main_entry_happy_path(monkeypatch, tmp_path):
         assert started.get("ok") is True
     finally:
         main_mod.OpenMuxServer = orig_cls
+
+
+# ---------------------------------------------------------------------------
+# Coverage-first tests: branches of OpenMuxServer._log_server_status not yet
+# exercised above. They pin the web_console (dual-port + single-port)
+# endpoint lines, the muxcon listeners loop (enabled + disabled + fallback
+# endpoint string), and the generic adapter endpoints-list / endpoint-string
+# / N-A fallbacks, so the bracket-C901 refactor is provably
+# behavior-preserving.
+# ---------------------------------------------------------------------------
+
+
+def _status_adapter(name: str, adapter_type: str, status_info: Dict[str, Any], is_running: bool = True) -> Any:
+    """A minimal adapter with the right type + status_info to hit one log path."""
+
+    class _A(FakeAdapter):
+        def __init__(self):
+            super().__init__(name, adapter_type=adapter_type, capabilities={
+                AdapterCapability.ACCEPTS_CONNECTIONS}, is_running=is_running)
+
+        def get_status_info(self):
+            return status_info
+
+    return _A()
+
+
+def _mk_server(tmp_path):
+    return OpenMuxServer(write_temp_config(tmp_path), log_level="INFO")
+
+
+@pytest.mark.asyncio
+async def test_log_status_web_console_dual_port(tmp_path, caplog):
+    """L1: web_console with tls + a distinct ssl_port logs an http + https line."""
+    srv = _mk_server(tmp_path)
+    wc = _status_adapter(
+        "wc",
+        "WebSocket",
+        {
+            "type": "WebSocket",
+            "endpoint": "127.0.0.1:8000",
+            "details": {
+                "host": "127.0.0.1",
+                "port": 8000,
+                "tls": True,
+                "ssl_port": 8443,
+                "http_redirect": True,
+            },
+        },
+    )
+    srv.unified_adapters = cast(Any, [wc])
+    srv.web_console = wc
+    srv._log_server_status()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "127.0.0.1:8000 (http redirect)" in messages
+    assert "127.0.0.1:8443 (https)" in messages
+
+
+@pytest.mark.asyncio
+async def test_log_status_web_console_single_port_http(tmp_path, caplog):
+    """L2: web_console without tls logs a single http line."""
+    srv = _mk_server(tmp_path)
+    wc = _status_adapter(
+        "wc",
+        "WebSocket",
+        {"type": "WebSocket", "endpoint": "127.0.0.1:8080",
+         "details": {"host": "127.0.0.1", "port": 8080, "tls": False}},
+    )
+    srv.unified_adapters = cast(Any, [wc])
+    srv.web_console = wc
+    srv._log_server_status()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "127.0.0.1:8080 (http)" in messages
+
+
+@pytest.mark.asyncio
+async def test_log_status_web_console_single_port_https(tmp_path, caplog):
+    """L2b: web_console with tls but no distinct ssl_port logs a single https line."""
+    srv = _mk_server(tmp_path)
+    wc = _status_adapter(
+        "wc",
+        "WebSocket",
+        {"type": "WebSocket", "endpoint": "127.0.0.1:8443",
+         "details": {"host": "127.0.0.1", "port": 8443, "tls": True}},
+    )
+    srv.unified_adapters = cast(Any, [wc])
+    srv.web_console = wc
+    srv._log_server_status()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "127.0.0.1:8443 (https)" in messages
+
+
+@pytest.mark.asyncio
+async def test_log_status_muxcon_listeners(tmp_path, caplog):
+    """L3: muxcon with listeners logs one line per enabled listener."""
+    srv = _mk_server(tmp_path)
+    mc = _status_adapter(
+        "mc",
+        "muxcon",
+        {
+            "type": "muxcon",
+            "endpoint": "10.0.0.1:9000",
+            "details": {
+                "listeners": [
+                    {"host": "10.0.0.1", "port": 9000, "use_tls": True, "enabled": True},
+                    {"host": "10.0.0.2", "port": 9001, "use_tls": False, "enabled": True},
+                    {"host": "10.0.0.3", "port": 9002, "enabled": False},
+                ],
+            },
+        },
+    )
+    srv.unified_adapters = cast(Any, [mc])
+    srv._log_server_status()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "10.0.0.1:9000 (tls)" in messages
+    assert "10.0.0.2:9001 (plain)" in messages
+    assert "10.0.0.3:9002 " not in messages  # disabled listener skipped
+
+
+@pytest.mark.asyncio
+async def test_log_status_muxcon_no_listeners_fallback(tmp_path, caplog):
+    """L4: muxcon with no structured listeners falls back to the endpoint string."""
+    srv = _mk_server(tmp_path)
+    mc = _status_adapter(
+        "mc",
+        "muxcon",
+        {"type": "muxcon", "endpoint": "10.0.0.1:9000, 10.0.0.2:9001", "details": {}},
+    )
+    srv.unified_adapters = cast(Any, [mc])
+    srv._log_server_status()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "10.0.0.1:9000" in messages
+    assert "10.0.0.2:9001" in messages
+
+
+@pytest.mark.asyncio
+async def test_log_status_generic_endpoints_list(tmp_path, caplog):
+    """L5: a generic adapter with a details.endpoints list logs one line each."""
+    srv = _mk_server(tmp_path)
+    g = _status_adapter(
+        "g",
+        "generic",
+        {"type": "generic", "endpoint": "N/A",
+         "details": {"endpoints": ["192.168.1.1:2000", "192.168.1.1:2001"]}},
+    )
+    srv.unified_adapters = cast(Any, [g])
+    srv._log_server_status()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "192.168.1.1:2000" in messages
+    assert "192.168.1.1:2001" in messages
+
+
+@pytest.mark.asyncio
+async def test_log_status_generic_endpoint_fallback(tmp_path, caplog):
+    """L6: a generic adapter with an endpoint string (no endpoints list) splits and logs each."""
+    srv = _mk_server(tmp_path)
+    g = _status_adapter(
+        "g",
+        "generic",
+        {"type": "generic", "endpoint": "3.3.3.3:1111, 4.4.4.4:2222", "details": {}},
+    )
+    srv.unified_adapters = cast(Any, [g])
+    srv._log_server_status()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "3.3.3.3:1111" in messages
+    assert "4.4.4.4:2222" in messages
+
+
+@pytest.mark.asyncio
+async def test_log_status_generic_na_fallback(tmp_path, caplog):
+    """L7: a generic adapter with no endpoints info at all falls back to 'N/A'."""
+    srv = _mk_server(tmp_path)
+    g = _status_adapter("g", "generic", {"type": "generic", "endpoint": "N/A", "details": {}})
+    srv.unified_adapters = cast(Any, [g])
+    srv._log_server_status()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "N/A" in messages
+
+
+@pytest.mark.asyncio
+async def test_log_status_generic_blank_endpoint_fallback(tmp_path, caplog):
+    """L7b: a generic adapter whose status_info has no endpoint key at all logs
+    the 'N/A' placeholder in the endpoint column (the endpoints_lines empty
+    fallback)."""
+    srv = _mk_server(tmp_path)
+    g = _status_adapter("g", "generic", {"type": "generic", "details": {}})
+    srv.unified_adapters = cast(Any, [g])
+    srv._log_server_status()
+    # Find the line for our adapter and assert the endpoint column is the
+    # 'N/A' placeholder (the f-string right-pads it to 25 chars).
+    for r in caplog.records:
+        msg = r.getMessage()
+        if "(generic" in msg and msg.lstrip().startswith("g "):
+            assert "N/A" in msg
+            return
+    raise AssertionError("no generic adapter log line found")

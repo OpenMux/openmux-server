@@ -719,77 +719,15 @@ class OpenMuxServer:
         # Check if we have unified connection endpoints
         from .adapters.base_adapter import AdapterCapability
 
-        connection_unified_adapters = []
-        port_unified_adapters = []
-
-        if self.unified_adapters:
-            for adapter in self.unified_adapters:
-                if AdapterCapability.ACCEPTS_CONNECTIONS in adapter.get_capabilities():
-                    connection_unified_adapters.append(adapter)
-                else:
-                    port_unified_adapters.append(adapter)
+        connection_unified_adapters, port_unified_adapters = self._status_split_unified_adapters(
+            AdapterCapability.ACCEPTS_CONNECTIONS
+        )
 
         # Show connection endpoints (unified)
         if connection_unified_adapters:
             self.logger.info("Connection Endpoints:")
             for adapter in connection_unified_adapters:
-                status_info = adapter.get_status_info()
-                status = "🟢 Running" if adapter.is_running else "🔴 Stopped"
-                adapter_type = str(status_info.get("type", adapter.get_adapter_type()))
-                details = status_info.get("details", {}) or {}
-
-                # Build per-line endpoints for readability
-                endpoints_lines: list[str] = []
-                atype_l = adapter_type.lower()
-
-                if adapter is self.web_console:
-                    host = details.get("host")
-                    port = details.get("port")
-                    tls = bool(details.get("tls"))
-                    ssl_port = details.get("ssl_port")
-                    http_redirect = bool(details.get("http_redirect", False))
-                    if tls and ssl_port and ssl_port != port:
-                        # Dual-port: one line for HTTP (redirect) and one for HTTPS
-                        try:
-                            endpoints_lines.append(f"{host}:{port} (http{' redirect' if http_redirect else ''})")
-                        except Exception:
-                            endpoints_lines.append(f"{details.get('host')}:{details.get('port')}")
-                        endpoints_lines.append(f"{host}:{ssl_port} (https)")
-                    else:
-                        scheme = "https" if tls else "http"
-                        endpoints_lines.append(f"{host}:{port} ({scheme})")
-                elif atype_l == "muxcon":
-                    listeners = details.get("listeners") or []
-                    for lst in listeners:
-                        try:
-                            if not lst.get("enabled", True):
-                                continue
-                            h = lst.get("host")
-                            p = lst.get("port")
-                            line = f"{h}:{p}" + (" (tls)" if lst.get("use_tls") else " (plain)")
-                            endpoints_lines.append(line)
-                        except Exception:
-                            continue
-                    # Fallback to comma-separated endpoint string if no structured listeners present
-                    if not endpoints_lines:
-                        ep = str(status_info.get("endpoint", "")).strip()
-                        if ep:
-                            endpoints_lines.extend([e.strip() for e in ep.split(",") if e.strip()])
-                else:
-                    # Generic adapters: prefer structured list in details.endpoints; else split endpoint string
-                    eps = details.get("endpoints")
-                    if isinstance(eps, list) and eps:
-                        endpoints_lines.extend([str(e) for e in eps])
-                    else:
-                        ep = str(status_info.get("endpoint", "")).strip()
-                        if ep:
-                            endpoints_lines.extend([e.strip() for e in ep.split(",") if e.strip()])
-
-                if not endpoints_lines:
-                    endpoints_lines = [status_info.get("endpoint", "N/A")]
-
-                for line in endpoints_lines:
-                    self.logger.info(f"  {adapter.name:15} ({adapter_type:15}) {line:25} {status}")
+                self._log_status_connection_line(adapter)
 
         # Show unified port adapters
         if port_unified_adapters:
@@ -809,6 +747,93 @@ class OpenMuxServer:
                     self.logger.info(f"  🔌 {plugin.name:20} (config: {plugin.config_section})")
 
         self.logger.info("=" * 60)
+
+    def _status_split_unified_adapters(self, accepts) -> Tuple[List[Any], List[Any]]:
+        """Split self.unified_adapters into (connection, port) adapters
+        by the ACCEPTS_CONNECTIONS capability.
+        """
+        connection_unified_adapters: List[Any] = []
+        port_unified_adapters: List[Any] = []
+        if self.unified_adapters:
+            for adapter in self.unified_adapters:
+                if accepts in adapter.get_capabilities():
+                    connection_unified_adapters.append(adapter)
+                else:
+                    port_unified_adapters.append(adapter)
+        return connection_unified_adapters, port_unified_adapters
+
+    def _log_status_connection_line(self, adapter: Any) -> None:
+        """Log the status + per-line endpoints for one connection adapter."""
+        status_info = adapter.get_status_info()
+        status = "🟢 Running" if adapter.is_running else "🔴 Stopped"
+        adapter_type = str(status_info.get("type", adapter.get_adapter_type()))
+        details = status_info.get("details", {}) or {}
+        endpoints_lines = self._status_endpoint_lines(adapter, adapter_type, status_info, details)
+        for line in endpoints_lines:
+            self.logger.info(f"  {adapter.name:15} ({adapter_type:15}) {line:25} {status}")
+
+    def _status_endpoint_lines(
+        self, adapter: Any, adapter_type: str, status_info: Dict[str, Any], details: Dict[str, Any]
+    ) -> List[str]:
+        """Build the per-line endpoint list for one connection adapter (web console, muxcon, or a generic adapter)."""
+        # Build per-line endpoints for readability
+        endpoints_lines: List[str] = []
+        atype_l = adapter_type.lower()
+
+        if adapter is self.web_console:
+            host = details.get("host")
+            port = details.get("port")
+            tls = bool(details.get("tls"))
+            ssl_port = details.get("ssl_port")
+            http_redirect = bool(details.get("http_redirect", False))
+            if tls and ssl_port and ssl_port != port:
+                # Dual-port: one line for HTTP (redirect) and one for HTTPS
+                try:
+                    endpoints_lines.append(f"{host}:{port} (http{' redirect' if http_redirect else ''})")
+                except Exception:
+                    endpoints_lines.append(f"{details.get('host')}:{details.get('port')}")
+                endpoints_lines.append(f"{host}:{ssl_port} (https)")
+            else:
+                scheme = "https" if tls else "http"
+                endpoints_lines.append(f"{host}:{port} ({scheme})")
+        elif atype_l == "muxcon":
+            endpoints_lines = self._status_muxcon_endpoint_lines(details, status_info)
+        else:
+            # Generic adapters: prefer structured list in details.endpoints; else split endpoint string
+            eps = details.get("endpoints")
+            if isinstance(eps, list) and eps:
+                endpoints_lines.extend([str(e) for e in eps])
+            else:
+                ep = str(status_info.get("endpoint", "")).strip()
+                if ep:
+                    endpoints_lines.extend([e.strip() for e in ep.split(",") if e.strip()])
+
+        if not endpoints_lines:
+            endpoints_lines = [status_info.get("endpoint", "N/A")]
+        return endpoints_lines
+
+    def _status_muxcon_endpoint_lines(self, details: Dict[str, Any], status_info: Dict[str, Any]) -> List[str]:
+        """The muxcon per-listener endpoint lines, with the endpoint-string
+        fallback when no structured listeners are present.
+        """
+        endpoints_lines: List[str] = []
+        listeners = details.get("listeners") or []
+        for lst in listeners:
+            try:
+                if not lst.get("enabled", True):
+                    continue
+                h = lst.get("host")
+                p = lst.get("port")
+                line = f"{h}:{p}" + (" (tls)" if lst.get("use_tls") else " (plain)")
+                endpoints_lines.append(line)
+            except Exception:
+                continue
+        # Fallback to comma-separated endpoint string if no structured listeners present
+        if not endpoints_lines:
+            ep = str(status_info.get("endpoint", "")).strip()
+            if ep:
+                endpoints_lines.extend([e.strip() for e in ep.split(",") if e.strip()])
+        return endpoints_lines
 
     async def _monitor_shutdown_event(self):
         """Monitor the shutdown event and trigger shutdown when set."""
