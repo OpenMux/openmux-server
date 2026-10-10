@@ -1135,16 +1135,7 @@ class SerialAdapter(BaseGenericAdapter):
         Returns:
             Summary dict with counts and details: {added, removed, updated, unchanged}.
         """
-        # Normalize incoming configuration to a list of dicts: a bare port
-        # list, or the wrapped {'serial_ports': [...]} form (the legacy
-        # 'ports' key is no longer created).
-        if isinstance(new_config, list):
-            new_ports_list = list(new_config)
-        elif isinstance(new_config, dict):
-            raw = new_config.get("serial_ports")
-            new_ports_list = list(raw) if isinstance(raw, list) else []
-        else:
-            new_ports_list = []
+        new_ports_list = self._reconcile_normalize(new_config)
 
         # Build index of new configs by name
         new_by_name: Dict[str, Dict[str, Any]] = {}
@@ -1159,135 +1150,12 @@ class SerialAdapter(BaseGenericAdapter):
         added = sorted(new_names - old_names)
         common = sorted(old_names & new_names)
 
-        # Determine which common ports have materially changed (require recreate)
-        def _material_config(port_cfg: Dict[str, Any]) -> Dict[str, Any]:
-            # Apply the same defaults the port constructor uses (the port
-            # fills absent keys from SERIAL_PORT_DEFAULTS) so the comparison
-            # is apples-to-apples when the port was built from a full dict.
-            mru = port_cfg.get("max_read_write_users")
-            # Normalize to the stored mode (issue #59) silently on both sides:
-            # the load path already emitted the deprecation line for legacy ints.
-            mru = wire_to_mode(mru)
-            return {
-                "device": port_cfg.get("device"),
-                "baudrate": port_cfg.get("baudrate", 9600),
-                "bytesize": port_cfg.get("bytesize", 8),
-                "parity": port_cfg.get("parity", "N"),
-                "stopbits": port_cfg.get("stopbits", 1),
-                "timeout": port_cfg.get("timeout", 1.0),
-                "flow_control": port_cfg.get("flow_control", "none"),
-                "dtr": port_cfg.get("dtr"),
-                "rts": port_cfg.get("rts"),
-                "max_read_write_users": mru,
-                "log_file": port_cfg.get("log_file"),
-                "log_format": port_cfg.get("log_format"),
-                "log_line_template": port_cfg.get("log_line_template"),
-                "log_direction": port_cfg.get("log_direction"),
-                "log_directions": port_cfg.get("log_directions"),
-                "scrollback_size": port_cfg.get("scrollback_size", 0),
-            }
-
-        # Keys on the port object that count as a material change (issue #65):
-        # the same fields the port builds from config. Reads go through the
-        # flat attributes the access ladder uses, so there is one place to look.
-        _material_keys = (
-            "device",
-            "baudrate",
-            "bytesize",
-            "parity",
-            "stopbits",
-            "timeout",
-            "flow_control",
-            "dtr",
-            "rts",
-            "max_read_write_users",
-            "log_file",
-            "log_format",
-            "log_line_template",
-            "log_direction",
-            "log_directions",
-            "scrollback_size",
-        )
-
-        updated: list[str] = []
-        unchanged: list[str] = []
-        for name in common:
-            old_cfg = {}
-            spw = None
-            try:
-                spw = self.serial_ports[name]
-                # Extract material fields from the running port's flat attrs
-                old_cfg = {key: getattr(spw, key, None) for key in _material_keys}
-                # Silent normalization (wire_to_mode) so a raw legacy int on
-                # either side compares equal to its migrated mode string (#59).
-                old_cfg["max_read_write_users"] = wire_to_mode(old_cfg["max_read_write_users"])
-            except Exception:
-                old_cfg = {}
-            new_cfg = _material_config(new_by_name[name])
-            _untracked = set(new_cfg.keys()) - set(old_cfg.keys())
-            if _untracked:
-                self.logger.error(
-                    f"[BUG] reconcile_ports: _material_config has keys not tracked in old_cfg: "
-                    f"{sorted(_untracked)} — add them to old_cfg to ensure changes are detected."
-                )
-            if old_cfg == new_cfg:
-                # Optionally update description in-place without restart
-                if spw is not None:
-                    try:
-                        desc = new_by_name[name].get("description")
-                        if isinstance(desc, str) and desc and desc != getattr(spw, "description", None):
-                            spw.description = desc
-                    except Exception:
-                        # justification: in-place live update; the next reload retries
-                        pass
-                    # In-place update for the RW/RO access-group lists. These
-                    # fields are deliberately NOT in _material_config, so a
-                    # groups-only change does not recreate the port; the new
-                    # lists take effect from the next connection attempt.
-                    try:
-                        new_rw = list(new_by_name[name].get("read_write_groups") or [])
-                        new_ro = list(new_by_name[name].get("read_only_groups") or [])
-                        if list(spw.read_write_groups or []) != new_rw:
-                            spw.read_write_groups = new_rw
-                        if list(spw.read_only_groups or []) != new_ro:
-                            spw.read_only_groups = new_ro
-                        # PDU power feeds (power section refs), same in-place
-                        # treatment: no port recreate, power adapter re-reads.
-                        new_power = [str(r) for r in (new_by_name[name].get("power") or [])]
-                        if list(getattr(spw, "power", None) or []) != new_power:
-                            spw.power = new_power
-                    except Exception:
-                        # justification: in-place live update; the next reload retries
-                        pass
-                unchanged.append(name)
-            else:
-                updated.append(name)
-
-        # Apply removals and updates (stop/unregister existing)
-        for name in removed + updated:
-            try:
-                await self.destroy_port(name)
-            except Exception as e:
-                self.logger.error("Failed to destroy serial port %s: %s", name, e, exc_info=True)
-
-        # Apply additions and re-creations
-        for name in added + updated:
-            cfg = new_by_name.get(name)
-            if not cfg:
-                continue
-            try:
-                await self.create_port(name, cfg)
-            except Exception as e:
-                self.logger.error("Failed to create serial port %s: %s", name, e, exc_info=True)
-
-        # Update adapter's config snapshot to reflect new state (canonical
-        # 'serial_ports' key, the same shape __init__ consumed).
-        try:
-            if isinstance(self.config, dict):
-                self.config["serial_ports"] = [new_by_name[n] for n in sorted(new_by_name.keys())]
-        except Exception:
-            # justification: optional snapshot; the authoritative config is on disk
-            pass
+        updated, unchanged = self._reconcile_common(common, new_by_name)
+        # Apply removals and updates (stop/unregister existing), then
+        # apply additions and re-creations.
+        await self._reconcile_destroy(removed + updated)
+        await self._reconcile_rebuild(added + updated, new_by_name)
+        self._reconcile_snapshot(new_by_name)
 
         summary = {
             "added": added,
@@ -1304,3 +1172,164 @@ class SerialAdapter(BaseGenericAdapter):
             len(unchanged),
         )
         return summary
+
+    # Keys on the port object that count as a material change (issue #65):
+    # the same fields the port builds from config. Reads go through the
+    # flat attributes the access ladder uses, so there is one place to look.
+    _material_keys = (
+        "device",
+        "baudrate",
+        "bytesize",
+        "parity",
+        "stopbits",
+        "timeout",
+        "flow_control",
+        "dtr",
+        "rts",
+        "max_read_write_users",
+        "log_file",
+        "log_format",
+        "log_line_template",
+        "log_direction",
+        "log_directions",
+        "scrollback_size",
+    )
+
+    def _reconcile_normalize(self, new_config: Any) -> List[Any]:
+        """Normalize incoming configuration to a list of port dicts.
+
+        Accepts a bare port list or the wrapped {'serial_ports': [...]}
+        form (the legacy 'ports' key is no longer created); anything else
+        means "no ports" ([]).
+        """
+        if isinstance(new_config, list):
+            return list(new_config)
+        if isinstance(new_config, dict):
+            raw = new_config.get("serial_ports")
+            return list(raw) if isinstance(raw, list) else []
+        return []
+
+    def _material_config(self, port_cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """Canonical material fields of a new port config.
+
+        Applies the same defaults the port constructor uses (the port
+        fills absent keys from SERIAL_PORT_DEFAULTS) so the comparison
+        is apples-to-apples when the port was built from a full dict.
+        """
+        # Apply the same defaults the port constructor uses (the port
+        # fills absent keys from SERIAL_PORT_DEFAULTS) so the comparison
+        # is apples-to-apples when the port was built from a full dict.
+        mru = port_cfg.get("max_read_write_users")
+        # Normalize to the stored mode (issue #59) silently on both sides:
+        # the load path already emitted the deprecation line for legacy ints.
+        mru = wire_to_mode(mru)
+        return {
+            "device": port_cfg.get("device"),
+            "baudrate": port_cfg.get("baudrate", 9600),
+            "bytesize": port_cfg.get("bytesize", 8),
+            "parity": port_cfg.get("parity", "N"),
+            "stopbits": port_cfg.get("stopbits", 1),
+            "timeout": port_cfg.get("timeout", 1.0),
+            "flow_control": port_cfg.get("flow_control", "none"),
+            "dtr": port_cfg.get("dtr"),
+            "rts": port_cfg.get("rts"),
+            "max_read_write_users": mru,
+            "log_file": port_cfg.get("log_file"),
+            "log_format": port_cfg.get("log_format"),
+            "log_line_template": port_cfg.get("log_line_template"),
+            "log_direction": port_cfg.get("log_direction"),
+            "log_directions": port_cfg.get("log_directions"),
+            "scrollback_size": port_cfg.get("scrollback_size", 0),
+        }
+
+    def _reconcile_common(self, common: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+        """Classify each common port as updated (material change)
+        or unchanged (in-place description / groups / power update).
+        """
+        updated: List[str] = []
+        unchanged: List[str] = []
+        for name in common:
+            spw = self.serial_ports.get(name)
+            old_cfg: Dict[str, Any] = {}
+            if spw is not None:
+                # Extract material fields from the running port's flat attrs
+                old_cfg = {key: getattr(spw, key, None) for key in self._material_keys}
+                # Silent normalization (wire_to_mode) so a raw legacy int on
+                # either side compares equal to its migrated mode string (#59).
+                old_cfg["max_read_write_users"] = wire_to_mode(old_cfg["max_read_write_users"])
+            new_cfg = self._material_config(new_by_name[name])
+            _untracked = set(new_cfg.keys()) - set(old_cfg.keys())
+            if _untracked:
+                self.logger.error(
+                    f"[BUG] reconcile_ports: _material_config has keys not tracked in old_cfg: "
+                    f"{sorted(_untracked)} — add them to old_cfg to ensure changes are detected."
+                )
+            if old_cfg == new_cfg:
+                self._reconcile_inplace_update(name, spw, new_by_name[name])
+                unchanged.append(name)
+            else:
+                updated.append(name)
+        return updated, unchanged
+
+    def _reconcile_inplace_update(self, name: str, spw: Optional[Any], cfg: Dict[str, Any]) -> None:
+        """In-place (no-recreate) updates for an unchanged port:
+        description, RW/RO access-group lists, and PDU power feeds.
+        """
+        if spw is None:
+            return
+        try:
+            desc = cfg.get("description")
+            if isinstance(desc, str) and desc and desc != getattr(spw, "description", None):
+                spw.description = desc
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+        # In-place update for the RW/RO access-group lists. These
+        # fields are deliberately NOT in _material_config, so a
+        # groups-only change does not recreate the port; the new
+        # lists take effect from the next connection attempt.
+        try:
+            new_rw = list(cfg.get("read_write_groups") or [])
+            new_ro = list(cfg.get("read_only_groups") or [])
+            if list(spw.read_write_groups or []) != new_rw:
+                spw.read_write_groups = new_rw
+            if list(spw.read_only_groups or []) != new_ro:
+                spw.read_only_groups = new_ro
+            # PDU power feeds (power section refs), same in-place
+            # treatment: no port recreate, power adapter re-reads.
+            new_power = [str(r) for r in (cfg.get("power") or [])]
+            if list(getattr(spw, "power", None) or []) != new_power:
+                spw.power = new_power
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+
+    async def _reconcile_destroy(self, names: List[str]) -> None:
+        """Stop/unregister the removed + materially-changed ports."""
+        for name in names:
+            try:
+                await self.destroy_port(name)
+            except Exception as e:
+                self.logger.error("Failed to destroy serial port %s: %s", name, e, exc_info=True)
+
+    async def _reconcile_rebuild(self, names: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> None:
+        """Create the added + re-created ports from the new config."""
+        for name in names:
+            cfg = new_by_name.get(name)
+            if not cfg:
+                continue
+            try:
+                await self.create_port(name, cfg)
+            except Exception as e:
+                self.logger.error("Failed to create serial port %s: %s", name, e, exc_info=True)
+
+    def _reconcile_snapshot(self, new_by_name: Dict[str, Dict[str, Any]]) -> None:
+        """Update the adapter config snapshot to the new state
+        (canonical 'serial_ports' key, the same shape __init__ consumed).
+        """
+        try:
+            if isinstance(self.config, dict):
+                self.config["serial_ports"] = [new_by_name[n] for n in sorted(new_by_name.keys())]
+        except Exception:
+            # justification: optional snapshot; the authoritative config is on disk
+            pass

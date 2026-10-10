@@ -465,3 +465,71 @@ async def test_reconcile_updates_canonical_snapshot_key():
     assert summary["updated"] == ["a"]
     assert adapter.config["serial_ports"] == [{"name": "a", "device": "/dev/ttyUSB0", "baudrate": 115200}]
     assert "ports" not in adapter.config
+
+
+# ---------------------------------------------------------------------------
+# Coverage-first tests: branches of SerialAdapter.reconcile_ports not yet
+# exercised by the existing soft-reload tests above. These pin the input-
+# normalization non-dict/non-list path and the power-feeds in-place update
+# so the bracket-C901 refactor is provably behavior-preserving.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconcile_non_dict_non_list_input_is_empty(monkeypatch):
+    """S1: reconcile_ports (anything other than a list or dict) behaves as
+    empty: existing ports are removed, none are added.
+    """
+    adapter = _make_adapter()
+    adapter.serial_ports["a"] = _make_spw(device="/dev/ttyUSB0")  # type: ignore
+    adapter.serial_ports["b"] = _make_spw(device="/dev/ttyUSB1")  # type: ignore
+
+    created: list[str] = []
+    destroyed: list[str] = []
+
+    async def fake_destroy(self, port_name):
+        destroyed.append(port_name)
+
+    async def fake_create(self, port_name, cfg):
+        created.append(port_name)
+
+    monkeypatch.setattr(SerialAdapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(SerialAdapter, "create_port", fake_create)
+
+    # None reaches the `else` branch -> new_ports_list = []. So 'a' and 'b'
+    # are both removed and nothing is added.
+    summary = await adapter.reconcile_ports(None)  # type: ignore[arg-type]
+
+    assert destroyed == ["a", "b"]
+    assert created == []
+    assert summary == {"added": [], "removed": ["a", "b"], "updated": [], "unchanged": []}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_updates_power_feeds_in_place(monkeypatch):
+    """S2: a `power` list change on an unchanged port updates in place and
+    does NOT destroy/create the port.
+    """
+    adapter = _make_adapter()
+    spw = _make_spw_with_groups(device="/dev/ttyUSB0", read_write_groups=[], read_only_groups=[])
+    spw.power = []  # type: ignore[attr-defined]
+    adapter.serial_ports["a"] = spw  # type: ignore
+
+    created: list[str] = []
+    destroyed: list[str] = []
+
+    async def fake_destroy(self, port_name):
+        destroyed.append(port_name)
+
+    async def fake_create(self, port_name, cfg):
+        created.append(port_name)
+
+    monkeypatch.setattr(SerialAdapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(SerialAdapter, "create_port", fake_create)
+    summary = await adapter.reconcile_ports(
+        {"serial_ports": [{"name": "a", "device": "/dev/ttyUSB0", "power": ["rack1.1"]}]},
+    )
+    assert summary == {"added": [], "removed": [], "updated": [], "unchanged": ["a"]}, f"power change is not material"
+    assert destroyed == []
+    assert created == []
+    assert list(adapter.serial_ports["a"].power) == ["rack1.1"]
