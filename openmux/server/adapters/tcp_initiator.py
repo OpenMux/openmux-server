@@ -22,7 +22,7 @@ Configuration (list-of-dicts under tcp_initiator_ports):
 
 import asyncio
 import logging
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
@@ -705,16 +705,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         Returns:
             Summary: {added, removed, updated, unchanged}.
         """
-        # Normalize
-        if isinstance(new_config, dict):
-            if isinstance(new_config.get("tcp_initiator_ports"), list):
-                items = list(new_config["tcp_initiator_ports"])  # shallow copy
-            else:
-                items = []
-        elif isinstance(new_config, list):
-            items = list(new_config)
-        else:
-            items = []
+        items = self._reconcile_normalize(new_config)
 
         new_by_name: Dict[str, Dict[str, Any]] = {}
         for p in items:
@@ -727,34 +718,64 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         added = sorted(new_names - old_names)
         common = sorted(old_names & new_names)
 
-        def _material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-            # Apply the same defaults as TcpInitiatorPort.__init__ so comparison is apples-to-apples
-            protocol_cfg = cfg.get("protocol", {})
-            protocol_type = (protocol_cfg.get("type", "") or "plain").lower()
-            _default_batching = protocol_type == "plain"
-            # Silent normalization (wire_to_mode) so a raw legacy int compares equal
-            # to its migrated mode string (issue #59/#60).
-            mru = wire_to_mode(cfg.get("max_read_write_users", 1))
-            return {
-                "host": cfg.get("host", ""),
-                "port": cfg.get("port", 0),
-                "use_tls": bool(cfg.get("use_tls", False)),
-                "ssl_verify": cfg.get("ssl_verify", True),
-                "timeout": cfg.get("timeout", 10.0),
-                "auto_reconnect": cfg.get("auto_reconnect", True),
-                "reconnect_delay": cfg.get("reconnect_delay", 5.0),
-                "max_read_write_users": mru,
-                "enable_batching": cfg.get("enable_batching", _default_batching),
-                "batch_size": cfg.get("batch_size", 1024),
-                "batch_timeout": cfg.get("batch_timeout", 0.015),
-                "enabled": bool(cfg.get("enabled", True)),
-                "connect_on_demand": bool(cfg.get("connect_on_demand", False)),
-                "disconnect_when_idle": bool(cfg.get("disconnect_when_idle", False)),
-                "idle_disconnect_delay": float(cfg.get("idle_disconnect_delay", 30.0)),
-                "protocol": protocol_cfg,
-                "scrollback_size": int(cfg.get("scrollback_size", 0)),
-            }
+        updated, unchanged = self._reconcile_common(common, new_by_name)
+        # Remove then recreate updated; remove deleted
+        await self._reconcile_destroy(removed + updated)
+        await self._reconcile_rebuild(added + updated, new_by_name)
+        self._reconcile_snapshot(new_by_name)
 
+        return {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
+
+    def _reconcile_normalize(self, new_config: Any) -> List[Any]:
+        """Normalize incoming configuration to a list of port dicts.
+
+        Accepts a dict with key 'tcp_initiator_ports' as list, or a direct
+        list of port dicts; anything else means "no ports" ([]).
+        """
+        if isinstance(new_config, dict):
+            if isinstance(new_config.get("tcp_initiator_ports"), list):
+                return list(new_config["tcp_initiator_ports"])  # shallow copy
+            return []
+        if isinstance(new_config, list):
+            return list(new_config)
+        return []
+
+    def _material_cfg(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """Canonical material fields of a new port config.
+
+        Applies the same defaults as TcpInitiatorPort.__init__ so
+        comparison is apples-to-apples.
+        """
+        protocol_cfg = cfg.get("protocol", {})
+        protocol_type = (protocol_cfg.get("type", "") or "plain").lower()
+        _default_batching = protocol_type == "plain"
+        # Silent normalization (wire_to_mode) so a raw legacy int compares equal
+        # to its migrated mode string (issue #59/#60).
+        mru = wire_to_mode(cfg.get("max_read_write_users", 1))
+        return {
+            "host": cfg.get("host", ""),
+            "port": cfg.get("port", 0),
+            "use_tls": bool(cfg.get("use_tls", False)),
+            "ssl_verify": cfg.get("ssl_verify", True),
+            "timeout": cfg.get("timeout", 10.0),
+            "auto_reconnect": cfg.get("auto_reconnect", True),
+            "reconnect_delay": cfg.get("reconnect_delay", 5.0),
+            "max_read_write_users": mru,
+            "enable_batching": cfg.get("enable_batching", _default_batching),
+            "batch_size": cfg.get("batch_size", 1024),
+            "batch_timeout": cfg.get("batch_timeout", 0.015),
+            "enabled": bool(cfg.get("enabled", True)),
+            "connect_on_demand": bool(cfg.get("connect_on_demand", False)),
+            "disconnect_when_idle": bool(cfg.get("disconnect_when_idle", False)),
+            "idle_disconnect_delay": float(cfg.get("idle_disconnect_delay", 30.0)),
+            "protocol": protocol_cfg,
+            "scrollback_size": int(cfg.get("scrollback_size", 0)),
+        }
+
+    def _reconcile_common(self, common: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+        """Classify each common port as updated (material change)
+        or unchanged (in-place description / groups / power update).
+        """
         updated: List[str] = []
         unchanged: List[str] = []
         for n in common:
@@ -762,6 +783,8 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             old_cfg: Dict[str, Any] = {}
             if port is not None:
                 try:
+                    # Note: the batching fields are stored under private names
+                    # in TcpInitiatorPort.
                     old_cfg = {
                         "host": getattr(port, "host", None),
                         "port": getattr(port, "port", None),
@@ -771,7 +794,6 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                         "auto_reconnect": getattr(port, "auto_reconnect", None),
                         "reconnect_delay": getattr(port, "reconnect_delay", None),
                         "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", 1)),
-                        # Note: these fields are stored under private names in TcpInitiatorPort
                         "enable_batching": getattr(port, "_batching_enabled", None),
                         "batch_size": getattr(port, "_batch_size", None),
                         "batch_timeout": getattr(port, "_batch_timeout", None),
@@ -784,7 +806,7 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                     }
                 except Exception:
                     old_cfg = {}
-            _new_mat = _material_cfg(new_by_name[n])
+            _new_mat = self._material_cfg(new_by_name[n])
             _untracked = set(_new_mat.keys()) - set(old_cfg.keys())
             if _untracked:
                 self.logger.error(
@@ -792,43 +814,55 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                     f"{sorted(_untracked)} — add them to old_cfg to ensure changes are detected."
                 )
             if old_cfg == _new_mat:
-                try:
-                    desc = new_by_name[n].get("description")
-                    if isinstance(desc, str) and desc:
-                        setattr(port, "description", desc)
-                except Exception:
-                    # justification: in-place live update; the next reload retries
-                    pass
-                # In-place update for the RW/RO access-group lists. These are
-                # deliberately NOT in _material_cfg, so a groups-only change
-                # does not recreate the port; new lists apply on next connect.
-                try:
-                    new_rw = list(new_by_name[n].get("read_write_groups") or [])
-                    new_ro = list(new_by_name[n].get("read_only_groups") or [])
-                    if list(getattr(port, "read_write_groups", None) or []) != new_rw:
-                        setattr(port, "read_write_groups", new_rw)
-                    if list(getattr(port, "read_only_groups", None) or []) != new_ro:
-                        setattr(port, "read_only_groups", new_ro)
-                    # PDU power feeds (power section refs), same in-place
-                    # treatment: no port recreate, power adapter re-reads.
-                    new_power = [str(r) for r in (new_by_name[n].get("power") or [])]
-                    if list(getattr(port, "power", None) or []) != new_power:
-                        setattr(port, "power", new_power)
-                except Exception:
-                    # justification: in-place live update; the next reload retries
-                    pass
+                self._reconcile_inplace_update(n, port, new_by_name[n])
                 unchanged.append(n)
             else:
                 updated.append(n)
+        return updated, unchanged
 
-        # Remove then recreate updated; remove deleted
-        for n in removed + updated:
+    def _reconcile_inplace_update(self, n: str, port: Optional[Any], cfg: Dict[str, Any]) -> None:
+        """In-place (no-recreate) updates for an unchanged port:
+        description, RW/RO access-group lists, and PDU power feeds.
+        """
+        if port is None:
+            return
+        try:
+            desc = cfg.get("description")
+            if isinstance(desc, str) and desc:
+                setattr(port, "description", desc)
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+        # In-place update for the RW/RO access-group lists. These are
+        # deliberately NOT in _material_cfg, so a groups-only change
+        # does not recreate the port; new lists apply on next connect.
+        try:
+            new_rw = list(cfg.get("read_write_groups") or [])
+            new_ro = list(cfg.get("read_only_groups") or [])
+            if list(getattr(port, "read_write_groups", None) or []) != new_rw:
+                setattr(port, "read_write_groups", new_rw)
+            if list(getattr(port, "read_only_groups", None) or []) != new_ro:
+                setattr(port, "read_only_groups", new_ro)
+            # PDU power feeds (power section refs), same in-place
+            # treatment: no port recreate, power adapter re-reads.
+            new_power = [str(r) for r in (cfg.get("power") or [])]
+            if list(getattr(port, "power", None) or []) != new_power:
+                setattr(port, "power", new_power)
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+
+    async def _reconcile_destroy(self, names: List[str]) -> None:
+        """Stop/unregister the removed + materially-changed ports."""
+        for n in names:
             try:
                 await self.destroy_port(n)
             except Exception as e:
                 self.logger.error("Failed to destroy TCP initiator port %s: %s", n, e, exc_info=True)
 
-        for n in added + updated:
+    async def _reconcile_rebuild(self, names: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> None:
+        """Create the added + re-created ports from the new config."""
+        for n in names:
             cfg = new_by_name.get(n)
             if not cfg:
                 continue
@@ -837,11 +871,10 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             except Exception as e:
                 self.logger.error("Failed to create TCP initiator port %s: %s", n, e, exc_info=True)
 
-        # Update config snapshot
+    def _reconcile_snapshot(self, new_by_name: Dict[str, Dict[str, Any]]) -> None:
+        """Update the config snapshot to the new state (canonical key)."""
         try:
             self.config["tcp_initiator_ports"] = [new_by_name[k] for k in sorted(new_by_name.keys())]
         except Exception:
             # justification: optional snapshot; the authoritative config is on disk
             pass
-
-        return {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}

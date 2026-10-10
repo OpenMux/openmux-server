@@ -669,3 +669,176 @@ async def test_adapter_reconcile_ports_updates_groups_in_place_without_restart(m
     port = adapter.ports["a"]
     assert list(port.read_write_groups) == []
     assert list(port.read_only_groups) == ["ops"]
+
+
+# ---------------------------------------------------------------------------
+# Coverage-first tests: branches of TcpInitiatorAdapter.reconcile_ports not
+# yet exercised above. They pin the `items` list-input path, the `updated`
+# (material change) destroy+create path, the power-feeds in-place update, and
+# the config-snapshot write, so the bracket-C901 refactor is provably
+# behavior-preserving.
+# ---------------------------------------------------------------------------
+
+
+def _tcip_port_obj(host="h1", port=1, use_tls=False):
+    """A TcpInitiatorPort stand-in carrying all fields old_cfg reads."""
+
+    class PortObj:
+        description = ""
+        enabled = True
+        connect_on_demand = False
+        disconnect_when_idle = False
+        idle_disconnect_delay = 30.0
+
+    po = PortObj()
+    po.host = host
+    po.port = port
+    po.use_tls = use_tls
+    po.ssl_verify = True
+    po.timeout = 10.0
+    po.auto_reconnect = True
+    po.reconnect_delay = 5.0
+    po._batching_enabled = use_tls is False and True  # default True for plain
+    po._batch_size = 1024
+    po._batch_timeout = 0.015
+    po.max_read_write_users = 1
+    po.config = {"protocol": {}}
+    po.scrollback_size = 0
+    po.read_write_groups: List[str] = []
+    po.read_only_groups: List[str] = []
+    po.power: List[str] = []
+    return po
+
+
+@pytest.mark.asyncio
+async def test_reconcile_list_input_added_and_snapshot(monkeypatch):
+    """T1: a bare list input is accepted (items = list) and an added port is
+    created; the config snapshot is written under the canonical key."""
+    adapter = TcpInitiatorAdapter("ti", {"tcp_initiator_ports": [{"name": "a", "host": "h1", "port": 1}]})
+    adapter.ports["a"] = _tcip_port_obj(host="h1", port=1)
+
+    destroyed: List[str] = []
+    created: List[str] = []
+
+    async def fake_destroy(name):
+        destroyed.append(name)
+
+    async def fake_create(name, cfg):
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    # 'a' unchanged, 'b' added -> exercise the list-input `items` path (714-715)
+    # and the config snapshot write (843-845).
+    summary = await adapter.reconcile_ports([{"name": "a", "host": "h1", "port": 1}, {"name": "b", "host": "h2", "port": 2}])
+    assert summary["unchanged"] == ["a"]
+    assert summary["added"] == ["b"]
+    assert summary["removed"] == []
+    assert summary["updated"] == []
+    assert created == ["b"]
+    assert destroyed == []
+    assert [p["name"] for p in adapter.config["tcp_initiator_ports"]] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_material_change_destroy_and_create(monkeypatch):
+    """T2: a material change (host) classifies the port as updated, so it is
+    destroyed then re-created; the power-feeds list updates in place for a
+    separate unchanged port."""
+    adapter = TcpInitiatorAdapter("ti", {"tcp_initiator_ports": [{"name": "a", "host": "h1", "port": 1}]})
+    adapter.ports["a"] = _tcip_port_obj(host="h1", port=1)
+
+    destroyed: List[str] = []
+    created: List[str] = []
+
+    async def fake_destroy(name):
+        destroyed.append(name)
+
+    async def fake_create(name, cfg):
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    # 'a' host change -> updated (destroy+create). No second port, so the
+    # power in-place branch is not exercised here.
+    summary = await adapter.reconcile_ports([{"name": "a", "host": "h1-NEW", "port": 1}])
+    assert summary["updated"] == ["a"]
+    assert summary["unchanged"] == []
+    assert destroyed == ["a"]
+    assert created == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_power_feeds_in_place(monkeypatch):
+    """T3: a `power` list change on an unchanged port updates in place and does
+    not destroy/create."""
+    adapter = TcpInitiatorAdapter("ti", {"tcp_initiator_ports": [{"name": "a", "host": "h1", "port": 1}]})
+    a = _tcip_port_obj(host="h1", port=1)
+    a.power = []
+    adapter.ports["a"] = a
+
+    destroyed: List[str] = []
+    created: List[str] = []
+
+    async def fake_destroy(name):
+        destroyed.append(name)
+
+    async def fake_create(name, cfg):
+        created.append(name)
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    summary = await adapter.reconcile_ports([{"name": "a", "host": "h1", "port": 1, "power": ["rack1.2"]}])
+    assert summary["unchanged"] == ["a"], f"power change is not material: {summary}"
+    assert summary["updated"] == []
+    assert destroyed == []
+    assert created == []
+    assert list(a.power) == ["rack1.2"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_dict_with_non_list_key_is_empty(monkeypatch):
+    """T4: a dict whose tcp_initiator_ports value is not a list treats the
+    adapter as having no ports (items = [])."""
+    adapter = TcpInitiatorAdapter("ti", {"tcp_initiator_ports": [{"name": "a", "host": "h1", "port": 1}]})
+    adapter.ports["a"] = _tcip_port_obj(host="h1", port=1)
+
+    destroyed: List[str] = []
+
+    async def fake_destroy(name):
+        destroyed.append(name)
+
+    async def fake_create(name, cfg):
+        raise AssertionError("no create expected")
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    summary = await adapter.reconcile_ports({"tcp_initiator_ports": "junk"})
+    assert summary == {"added": [], "removed": ["a"], "updated": [], "unchanged": []}
+    assert destroyed == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_non_dict_non_list_input_is_empty(monkeypatch):
+    """T5: anything that is neither a dict nor a list removes all ports."""
+    adapter = TcpInitiatorAdapter("ti", {"tcp_initiator_ports": [{"name": "a", "host": "h1", "port": 1}]})
+    adapter.ports["a"] = _tcip_port_obj(host="h1", port=1)
+
+    destroyed: List[str] = []
+
+    async def fake_destroy(name):
+        destroyed.append(name)
+
+    async def fake_create(name, cfg):
+        raise AssertionError("no create expected")
+
+    monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
+    monkeypatch.setattr(adapter, "create_port", fake_create)
+
+    summary = await adapter.reconcile_ports(7)  # type: ignore[arg-type]
+    assert summary == {"added": [], "removed": ["a"], "updated": [], "unchanged": []}
+    assert destroyed == ["a"]
