@@ -1830,100 +1830,118 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if len(parts) < 3:
                 return None
             ver = parts[0]
-
-            def _decode_payload(b64s: str) -> Optional[Dict[str, Any]]:
-                try:
-                    pad = "=" * (-len(b64s) % 4)
-                    raw = base64.urlsafe_b64decode(b64s + pad)
-                    obj = json.loads(raw.decode("utf-8", errors="ignore"))
-                    return obj if isinstance(obj, dict) else None
-                except Exception:
-                    return None
-
             skew = int(getattr(self, "sso_max_skew_sec", 120))
             now = int(time.time())
 
             # Legacy HMAC format: v1;payload_b64;hexmac
             if ver == "v1" and len(parts) == 3:
-                payload_b64 = parts[1]
-                sig_hex = parts[2]
-                claims = _decode_payload(payload_b64)
-                if not isinstance(claims, dict):
-                    return None
-                iat = int(claims.get("iat", now))
-                exp = int(claims.get("exp", now))
-                if iat - skew > now or now > exp + skew:
-                    return None
-                secret = getattr(self, "sso_secret", None)
-                if not secret:
-                    return None
-                mac = hmac.new(str(secret).encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
-                if not hmac.compare_digest(mac, sig_hex):
-                    return None
-                return claims
+                return self._verify_sso_v1(parts, skew, now)
 
             # Zero-config Ed25519 format: v1e;kid;payload_b64;sig_b64
             if ver == "v1e" and len(parts) == 4:
-                kid = parts[1]
-                payload_b64 = parts[2]
-                sig_b64 = parts[3]
-                claims = _decode_payload(payload_b64)
-                if not isinstance(claims, dict):
-                    return None
-                iat = int(claims.get("iat", now))
-                exp = int(claims.get("exp", now))
-                if iat - skew > now or now > exp + skew:
-                    return None
-                # Optional: ensure the claimed node is either this server or an active federation peer
-                node = claims.get("node")
-                try:
-                    muxcon = self._find_muxcon_adapter()
-                except Exception:
-                    muxcon = None
-                if node:
-                    try:
-                        local_id = getattr(muxcon, "server_id", None) if muxcon is not None else None
-                        allowed = False
-                        if str(node) == str(local_id):
-                            allowed = True
-                        elif muxcon is not None:
-                            allowed = any(
-                                str(c.get("server_id")) == str(node)
-                                for c in (getattr(muxcon, "connections", {}) or {}).values()
-                            )
-                        if not allowed:
-                            return None
-                    except Exception:
-                        return None
-                # Lookup public key by kid from the MuxCon adapter's configured keys
-                try:
-                    pub = None
-                    muxcon_local = self._find_muxcon_adapter()
-                    if muxcon_local is not None:
-                        try:
-                            # MuxCon adapter stores parsed Ed25519 keys under _auth_pubkeys
-                            pubs = getattr(muxcon_local, "_auth_pubkeys", {}) or {}
-                            pub = pubs.get(str(kid))
-                        except Exception:
-                            pub = None
-                    if not pub:
-                        # No registered public key for this kid: reject. Claims must always be
-                        # verified against a key in muxcon.public_keys; unsigned acceptance was
-                        # removed because it allowed unauthenticated admin takeover.
-                        return None
-                    pad = "=" * (-len(payload_b64) % 4)
-                    payload_bytes = base64.urlsafe_b64decode(payload_b64 + pad)
-                    pad2 = "=" * (-len(sig_b64) % 4)
-                    sig = base64.urlsafe_b64decode(sig_b64 + pad2)
-                    # Verify signature (raises on failure)
-                    pub.verify(sig, payload_bytes)
-                    return claims
-                except Exception:
-                    return None
+                return self._verify_sso_v1e(parts, skew, now)
 
             return None
         except Exception:
             return None
+
+    def _verify_sso_v1(self, parts: List[str], skew: int, now: int) -> Optional[Dict[str, Any]]:
+        """Verify the legacy HMAC SSO header (v1;payload_b64;hexmac)."""
+        payload_b64 = parts[1]
+        sig_hex = parts[2]
+        claims = self._sso_decode_payload(payload_b64)
+        if not isinstance(claims, dict):
+            return None
+        if not self._sso_claims_in_valid_window(claims, skew, now):
+            return None
+        secret = getattr(self, "sso_secret", None)
+        if not secret:
+            return None
+        mac = hmac.new(str(secret).encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(mac, sig_hex):
+            return None
+        return claims
+
+    def _verify_sso_v1e(self, parts: List[str], skew: int, now: int) -> Optional[Dict[str, Any]]:
+        """Verify the zero-config Ed25519 SSO header (v1e;kid;payload_b64;sig_b64)."""
+        kid = parts[1]
+        payload_b64 = parts[2]
+        sig_b64 = parts[3]
+        claims = self._sso_decode_payload(payload_b64)
+        if not isinstance(claims, dict):
+            return None
+        if not self._sso_claims_in_valid_window(claims, skew, now):
+            return None
+        # Optional: ensure the claimed node is either this server or an active federation peer
+        node = claims.get("node")
+        if not self._sso_node_allowed(node):
+            return None
+        # Lookup public key by kid from the MuxCon adapter's configured keys
+        pub = self._sso_find_pubkey(kid)
+        if not pub:
+            # No registered public key for this kid: reject. Claims must always be
+            # verified against a key in muxcon.public_keys; unsigned acceptance was
+            # removed because it allowed unauthenticated admin takeover.
+            return None
+        try:
+            pad = "=" * (-len(payload_b64) % 4)
+            payload_bytes = base64.urlsafe_b64decode(payload_b64 + pad)
+            pad2 = "=" * (-len(sig_b64) % 4)
+            sig = base64.urlsafe_b64decode(sig_b64 + pad2)
+            # Verify signature (raises on failure)
+            pub.verify(sig, payload_bytes)
+        except Exception:
+            return None
+        return claims
+
+    def _sso_decode_payload(self, b64s: str) -> Optional[Dict[str, Any]]:
+        """Base64url-decode a payload into a dict, or None on any failure."""
+        try:
+            pad = "=" * (-len(b64s) % 4)
+            raw = base64.urlsafe_b64decode(b64s + pad)
+            obj = json.loads(raw.decode("utf-8", errors="ignore"))
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+
+    def _sso_claims_in_valid_window(self, claims: Dict[str, Any], skew: int, now: int) -> bool:
+        """True when the iat/exp window (with skew) contains now."""
+        iat = int(claims.get("iat", now))
+        exp = int(claims.get("exp", now))
+        return not (iat - skew > now or now > exp + skew)
+
+    def _sso_node_allowed(self, node: Any) -> bool:
+        """True when the claimed node is unset, this server, or an active peer."""
+        if not node:
+            return True
+        try:
+            muxcon = self._find_muxcon_adapter()
+        except Exception:
+            muxcon = None
+        try:
+            local_id = getattr(muxcon, "server_id", None) if muxcon is not None else None
+            if str(node) == str(local_id):
+                return True
+            if muxcon is not None:
+                return any(str(c.get("server_id")) == str(node) for c in (getattr(muxcon, "connections", {}) or {}).values())
+        except Exception:
+            return False
+        return False
+
+    def _sso_find_pubkey(self, kid: str) -> Optional[Any]:
+        """The MuxCon adapter's registered Ed25519 public key for kid, or None."""
+        try:
+            muxcon_local = self._find_muxcon_adapter()
+        except Exception:
+            return None
+        if muxcon_local is not None:
+            try:
+                # MuxCon adapter stores parsed Ed25519 keys under _auth_pubkeys
+                pubs = getattr(muxcon_local, "_auth_pubkeys", {}) or {}
+                return pubs.get(str(kid))
+            except Exception:
+                return None
+        return None
 
     @classmethod
     def validate_config(cls, config: Dict[str, Any]) -> bool:
