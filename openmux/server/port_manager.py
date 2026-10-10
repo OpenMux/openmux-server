@@ -444,115 +444,9 @@ class PortManager:
             if "name" not in port_info:
                 port_info["name"] = name
             # Enrich with federation metadata if available (remote muxcon proxies)
-            try:
-                if hasattr(port, "metadata"):
-                    meta = getattr(port, "metadata")
-                    origin = getattr(meta, "origin_server", None)
-                    if origin is not None:
-                        # Basic server identity
-                        port_info["origin_server_id"] = getattr(origin, "server_id", None)
-                        port_info["origin_server_hostname"] = getattr(origin, "hostname", None)
-                        port_info["origin_server_port"] = getattr(origin, "port", None)
-                        st = getattr(origin, "server_type", None)
-                        port_info["origin_server_type"] = getattr(st, "value", st) if st is not None else None
-                        # V2: full origin object
-                        try:
-                            to_dict = getattr(origin, "to_dict", None)
-                            if callable(to_dict):
-                                port_info["origin_server"] = to_dict()
-                            else:
-                                port_info["origin_server"] = {
-                                    "server_id": getattr(origin, "server_id", None),
-                                    "hostname": getattr(origin, "hostname", None),
-                                    "port": getattr(origin, "port", None),
-                                    "server_type": getattr(getattr(origin, "server_type", None), "value", None),
-                                    "description": getattr(origin, "description", None),
-                                }
-                        except Exception:
-                            port_info["origin_server"] = {"server_id": getattr(origin, "server_id", None)}
-                    # Chain and federation type
-                    chain = getattr(meta, "server_chain", []) or []
-                    port_info["server_chain"] = [getattr(s, "server_id", str(s)) for s in chain]
-                    # V2: chain detailed objects
-                    chain_info = []
-                    try:
-                        for s in chain:
-                            to_dict = getattr(s, "to_dict", None)
-                            if callable(to_dict):
-                                chain_info.append(to_dict())
-                            else:
-                                chain_info.append(
-                                    {
-                                        "server_id": getattr(s, "server_id", str(s)),
-                                        "hostname": getattr(s, "hostname", None),
-                                        "port": getattr(s, "port", None),
-                                        "server_type": getattr(getattr(s, "server_type", None), "value", None),
-                                        "description": getattr(s, "description", None),
-                                    }
-                                )
-                    except Exception:
-                        chain_info = [{"server_id": sid} for sid in port_info["server_chain"]]
-                    port_info["server_chain_info"] = chain_info
-                    ftype = getattr(meta, "federation_type", None)
-                    port_info["federation_type"] = getattr(ftype, "value", ftype) if ftype is not None else None
-                    # Mark as remote/federated
-                    port_info["remote"] = True
-                    # Optional: expose last_seen when present on RemotePortProxy
-                    try:
-                        if hasattr(port, "last_seen"):
-                            port_info["last_seen"] = float(getattr(port, "last_seen"))
-                    except Exception:
-                        # justification: optional metadata; the port listing stays complete
-                        pass
-                    # Optional serial configuration and live line status from remote metadata
-                    try:
-                        sc = getattr(meta, "serial_config", None)
-                        if sc is not None:
-                            port_info["serial_config"] = sc
-                    except Exception:
-                        # justification: optional metadata; the port listing stays complete
-                        pass
-                    try:
-                        ls = getattr(meta, "line_status", None)
-                        if ls is not None:
-                            port_info["line_status"] = ls
-                    except Exception:
-                        # justification: optional metadata; the port listing stays complete
-                        pass
-            except Exception:
-                # justification: optional metadata; the port listing stays complete
-                pass
-
+            self._port_list_federation_enrich(port_info, port)
             # Enrich unified-wrapper ports (e.g., Serial) with config/line-status when available
-            try:
-                unified = getattr(port, "unified_port", None)
-                adapter_type = getattr(port, "adapter_type", None)
-                if unified is not None and isinstance(adapter_type, str) and adapter_type.lower() == "serial":
-                    cfg = getattr(getattr(unified, "config", None), "__dict__", None)
-                    if cfg:
-                        port_info.setdefault(
-                            "serial_config",
-                            {
-                                "device": cfg.get("device"),
-                                "baudrate": cfg.get("baudrate"),
-                                "bytesize": cfg.get("bytesize"),
-                                "parity": cfg.get("parity"),
-                                "stopbits": cfg.get("stopbits"),
-                                "flow_control": cfg.get("flow_control"),
-                            },
-                        )
-                    get_ls = getattr(unified, "get_line_status", None)
-                    if callable(get_ls):
-                        try:
-                            ls = get_ls()
-                            if ls:
-                                port_info.setdefault("line_status", ls)
-                        except Exception:
-                            # justification: optional metadata; the port listing stays complete
-                            pass
-            except Exception:
-                # justification: optional metadata; the port listing stays complete
-                pass
+            self._port_list_unified_serial_enrich(port_info, port)
             port_list.append(port_info)
 
         # Ensure a stable, user-friendly order across all consumers
@@ -562,6 +456,138 @@ class PortManager:
             # justification: best-effort ordering; the list renders unsorted on failure
             pass
         return port_list
+
+    def _origin_to_dict(self, origin: Any) -> Dict[str, Any]:
+        """The full V2 origin object: prefer ``to_dict()``; fall back to a reduced
+        key set when unavailable, and a minimal id-only dict when it raises.
+        """
+        try:
+            to_dict = getattr(origin, "to_dict", None)
+            if callable(to_dict):
+                return to_dict()
+            return {
+                "server_id": getattr(origin, "server_id", None),
+                "hostname": getattr(origin, "hostname", None),
+                "port": getattr(origin, "port", None),
+                "server_type": getattr(getattr(origin, "server_type", None), "value", None),
+                "description": getattr(origin, "description", None),
+            }
+        except Exception:
+            return {"server_id": getattr(origin, "server_id", None)}
+
+    def _port_list_server_chain_info(self, chain: List[Any], port_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """The V2 chain detailed objects. Falls back to id-only entries when a to_dict
+        is unavailable or the chain cannot be built.
+        """
+        chain_info: List[Dict[str, Any]] = []
+        try:
+            for s in chain:
+                to_dict = getattr(s, "to_dict", None)
+                if callable(to_dict):
+                    chain_info.append(to_dict())
+                else:
+                    chain_info.append(
+                        {
+                            "server_id": getattr(s, "server_id", str(s)),
+                            "hostname": getattr(s, "hostname", None),
+                            "port": getattr(s, "port", None),
+                            "server_type": getattr(getattr(s, "server_type", None), "value", None),
+                            "description": getattr(s, "description", None),
+                        }
+                    )
+        except Exception:
+            chain_info = [{"server_id": sid} for sid in port_info["server_chain"]]
+        return chain_info
+
+    def _port_list_federation_optional(self, port: Any, meta: Any, port_info: Dict[str, Any]) -> None:
+        """Optional last_seen / serial_config / line_status, never failing the listing."""
+        # Optional: expose last_seen when present on RemotePortProxy
+        try:
+            if hasattr(port, "last_seen"):
+                port_info["last_seen"] = float(getattr(port, "last_seen"))
+        except Exception:
+            # justification: optional metadata; the port listing stays complete
+            pass
+        # Optional serial configuration and live line status from remote metadata
+        try:
+            sc = getattr(meta, "serial_config", None)
+            if sc is not None:
+                port_info["serial_config"] = sc
+        except Exception:
+            # justification: optional metadata; the port listing stays complete
+            pass
+        try:
+            ls = getattr(meta, "line_status", None)
+            if ls is not None:
+                port_info["line_status"] = ls
+        except Exception:
+            # justification: optional metadata; the port listing stays complete
+            pass
+
+    def _port_list_federation_enrich(self, port_info: Dict[str, Any], port: Any) -> None:
+        """Best-effort federation metadata for one port (remote muxcon proxies):
+        origin identity, server chain, federation type, and the optional fields.
+        """
+        # Enrich with federation metadata if available (remote muxcon proxies)
+        try:
+            if hasattr(port, "metadata"):
+                meta = getattr(port, "metadata")
+                origin = getattr(meta, "origin_server", None)
+                if origin is not None:
+                    # Basic server identity
+                    port_info["origin_server_id"] = getattr(origin, "server_id", None)
+                    port_info["origin_server_hostname"] = getattr(origin, "hostname", None)
+                    port_info["origin_server_port"] = getattr(origin, "port", None)
+                    st = getattr(origin, "server_type", None)
+                    port_info["origin_server_type"] = getattr(st, "value", st) if st is not None else None
+                    # V2: full origin object
+                    port_info["origin_server"] = self._origin_to_dict(origin)
+                # Chain and federation type
+                chain = getattr(meta, "server_chain", []) or []
+                port_info["server_chain"] = [getattr(s, "server_id", str(s)) for s in chain]
+                # V2: chain detailed objects
+                port_info["server_chain_info"] = self._port_list_server_chain_info(chain, port_info)
+                ftype = getattr(meta, "federation_type", None)
+                port_info["federation_type"] = getattr(ftype, "value", ftype) if ftype is not None else None
+                # Mark as remote/federated
+                port_info["remote"] = True
+                self._port_list_federation_optional(port, meta, port_info)
+        except Exception:
+            # justification: optional metadata; the port listing stays complete
+            pass
+
+    def _port_list_unified_serial_enrich(self, port_info: Dict[str, Any], port: Any) -> None:
+        """Best-effort config / line-status enrichment for unified-wrapper ports."""
+        # Enrich unified-wrapper ports (e.g., Serial) with config/line-status when available
+        try:
+            unified = getattr(port, "unified_port", None)
+            adapter_type = getattr(port, "adapter_type", None)
+            if unified is not None and isinstance(adapter_type, str) and adapter_type.lower() == "serial":
+                cfg = getattr(getattr(unified, "config", None), "__dict__", None)
+                if cfg:
+                    port_info.setdefault(
+                        "serial_config",
+                        {
+                            "device": cfg.get("device"),
+                            "baudrate": cfg.get("baudrate"),
+                            "bytesize": cfg.get("bytesize"),
+                            "parity": cfg.get("parity"),
+                            "stopbits": cfg.get("stopbits"),
+                            "flow_control": cfg.get("flow_control"),
+                        },
+                    )
+                get_ls = getattr(unified, "get_line_status", None)
+                if callable(get_ls):
+                    try:
+                        ls = get_ls()
+                        if ls:
+                            port_info.setdefault("line_status", ls)
+                    except Exception:
+                        # justification: optional metadata; the port listing stays complete
+                        pass
+        except Exception:
+            # justification: optional metadata; the port listing stays complete
+            pass
 
     def _fire_client_count_hook(self, port: Any) -> None:
         """Notify the underlying port's adapters of a client-count change.

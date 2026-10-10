@@ -557,3 +557,202 @@ async def test_add_client_unknown_port_returns_false(monkeypatch):
     pm.set_unified_adapters([])
     assert await pm.add_client_to_port("ghost", "c1", "alice") is False
     assert "ghost" not in pm.ports
+
+
+# ---------------------------------------------------------------------------
+# Coverage-first tests: branches of PortManager.get_port_list_with_federation
+# not yet exercised above. They pin the name-backfill path, the non-callable
+# `to_dict` fallback for origin/chain (V1), and the unified-serial
+# serial_config/line_status enrichment, so the bracket-C901 refactor is
+# provably behavior-preserving.
+# ---------------------------------------------------------------------------
+
+
+def _pm_port_with_status(name: str):
+    class _Port:
+        def get_status(self):
+            return {"description": "d"}  # NO "name" key -> backfill branch
+
+    p = _Port()
+    p._nm = name
+    return p
+
+
+@pytest.mark.asyncio
+async def test_port_list_backfills_missing_name():
+    """P1: a port whose get_status() omits 'name' gets the registry name."""
+    pm = PortManager([])
+    port = _pm_port_with_status("p1")
+    pm.ports["p1"] = port  # type: ignore[assignment]
+    lst = await pm.get_port_list_with_federation()
+    assert len(lst) == 1
+    assert lst[0]["name"] == "p1"
+
+
+def _origin_without_to_dict(server_id: str):
+    return SimpleNamespace(
+        server_id=server_id,
+        hostname="h",
+        port=1,
+        server_type=SimpleNamespace(value="server"),
+        description="d",
+    )
+
+
+@pytest.mark.asyncio
+async def test_port_list_origin_and_chain_v1_fallback(monkeypatch):
+    """P2: origin/chain objects WITHOUT a callable to_dict use the V1 dict
+    fallback (the V2 to_dict path is exercised by the federation tests)."""
+    from openmux.server import data_logger as dl_mod
+
+    monkeypatch.setattr(dl_mod.DataLogger, "get", classmethod(lambda cls: DummyDataLogger()))
+    pm = PortManager([])
+
+    class _Remote:
+        def __init__(self, name):
+            self.metadata = SimpleNamespace(
+                name=name,
+                origin_server=_origin_without_to_dict("O1"),
+                server_chain=[_origin_without_to_dict("C1")],
+                federation_type=SimpleNamespace(value="muxcon"),
+                serial_config={"device": "/dev/x"},
+                line_status={"state": "open"},
+                last_seen=None,
+            )
+            self._name = name
+
+        def get_status(self):
+            return {"name": self._name, "description": "d"}
+
+    port = _Remote("r1")
+    pm.ports["r1"] = port  # type: ignore[assignment]
+    lst = await pm.get_port_list_with_federation()
+    entry = next(e for e in lst if e["name"] == "r1")
+    assert entry["origin_server_id"] == "O1"
+    assert entry["origin_server"] == {
+        "server_id": "O1",
+        "hostname": "h",
+        "port": 1,
+        "server_type": "server",
+        "description": "d",
+    }
+    assert entry["server_chain"] == ["C1"]
+    assert entry["server_chain_info"] == [
+        {"server_id": "C1", "hostname": "h", "port": 1, "server_type": "server", "description": "d"}
+    ]
+    assert entry["federation_type"] == "muxcon"
+    assert entry["remote"] is True
+    assert entry["serial_config"] == {"device": "/dev/x"}
+    assert entry["line_status"] == {"state": "open"}
+
+
+@pytest.mark.asyncio
+async def test_port_list_last_seen_float():
+    """P4: a numeric last_seen on a remote proxy is surfaced as a float."""
+    pm = PortManager([])
+
+    class _Remote:
+        def __init__(self, name):
+            self.metadata = SimpleNamespace(
+                name=name,
+                origin_server=_origin_without_to_dict("O1"),
+                server_chain=[],
+                federation_type=None,
+                serial_config=None,
+                line_status=None,
+                last_seen=None,
+            )
+            self._name = name
+            self.last_seen = 1234.5
+
+        def get_status(self):
+            return {"name": self._name, "description": "d"}
+
+    pm.ports["r2"] = _Remote("r2")  # type: ignore[assignment]
+    lst = await pm.get_port_list_with_federation()
+    entry = next(e for e in lst if e["name"] == "r2")
+    assert entry["last_seen"] == 1234.5
+
+
+class _RaisingLineStatus:
+    def get_line_status(self):
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_port_list_unified_serial_get_ls_error_swallowed():
+    """P6: a unified serial adapter whose get_line_status() raises is logged;
+    the listing continues and just omits line_status."""
+    pm = PortManager([])
+
+    class _Unified:
+        config = SimpleNamespace(device="/dev/z", baudrate=9600, bytesize=8, parity="N", stopbits=1, flow_control="none")
+        get_line_status = _RaisingLineStatus().get_line_status
+
+    class _Port:
+        unified_port = _Unified()
+        adapter_type = "serial"
+
+        def get_status(self):
+            return {"name": "us1", "description": "d"}
+
+    pm.ports["us1"] = _Port()  # type: ignore[assignment]
+    lst = await pm.get_port_list_with_federation()
+    entry = next(e for e in lst if e["name"] == "us1")
+    assert entry["serial_config"]["device"] == "/dev/z"
+    assert "line_status" not in entry
+
+
+@pytest.mark.asyncio
+async def test_port_list_last_seen_bad_value_swallowed():
+    """P5: a non-numeric last_seen is skipped (the listing stays complete)."""
+    pm = PortManager([])
+
+    class _Remote:
+        def __init__(self, name):
+            self.metadata = SimpleNamespace(
+                name=name,
+                origin_server=_origin_without_to_dict("O1"),
+                server_chain=[],
+                federation_type=None,
+                serial_config=None,
+                line_status=None,
+                last_seen=None,
+            )
+            self._name = name
+            self.last_seen = "not-a-number"
+
+        def get_status(self):
+            return {"name": self._name, "description": "d"}
+
+    pm.ports["r3"] = _Remote("r3")  # type: ignore[assignment]
+    lst = await pm.get_port_list_with_federation()
+    entry = next(e for e in lst if e["name"] == "r3")
+    assert "last_seen" not in entry
+    assert entry["remote"] is True
+
+
+@pytest.mark.asyncio
+async def test_port_list_unified_serial_line_status_captured():
+    """P7: a unified serial adapter get_line_status() returning a dict populates
+    line_status without clobbering a remote line_status already set."""
+    pm = PortManager([])
+
+    class _Unified:
+        config = SimpleNamespace(device="/dev/z", baudrate=9600, bytesize=8, parity="N", stopbits=1, flow_control="none")
+
+        def get_line_status(self):
+            return {"state": "open", "directions": "rx tx"}
+
+    class _Port:
+        unified_port = _Unified()
+        adapter_type = "serial"
+
+        def get_status(self):
+            return {"name": "us2", "description": "d"}
+
+    pm.ports["us2"] = _Port()  # type: ignore[assignment]
+    lst = await pm.get_port_list_with_federation()
+    entry = next(e for e in lst if e["name"] == "us2")
+    assert entry["serial_config"]["device"] == "/dev/z"
+    assert entry["line_status"] == {"state": "open", "directions": "rx tx"}
