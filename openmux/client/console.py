@@ -226,118 +226,8 @@ class ConsoleUI:
         """
         while self.is_running:
             try:
-                # While an interactive escape submenu is open (e.g. the `p`
-                # power menu), keep reading and rendering server data so the
-                # frozen console still receives everything. This loop remains
-                # the SOLE reader of the connection for the whole session: a
-                # second concurrent reader would desynchronize the transport
-                # (an asyncio stream reader allows only one pending read).
-                if self._stream_exclusive and not self.connection.is_connected:
-                    # Hand back to the menu, which shows the close on its next
-                    # poll; engage reconnect handling if configured.
-                    if self.reconnect_mode == "auto" and not self._auto_reconnect_task:
-                        self._auto_reconnect_task = asyncio.create_task(self._auto_reconnect_loop())
-                    elif self.reconnect_mode == "off":
-                        self.is_running = False
+                if await self._read_step():
                     break
-                # If disconnected, ensure auto/manual handling is engaged and yield briefly
-                if not self.connection.is_connected:
-                    if self.reconnect_mode == "auto" and not self._auto_reconnect_task:
-                        self._auto_reconnect_task = asyncio.create_task(self._auto_reconnect_loop())
-                        if not self.quiet_mode:
-                            sys.stdout.write("\r\n[Reconnecting... auto]\r\n")
-                            sys.stdout.flush()
-                    await asyncio.sleep(0.1)
-                    continue
-                # Read data from server with a short timeout
-                data = await self.connection.read_data(timeout=0.1)
-                # None indicates connection closed (EOF)
-                if data is None:
-                    if not self._received_any_data and not self._notified_disconnect:
-                        # Only show user-facing notice if no prior data was displayed; this keeps
-                        # unit tests (which expect only the data bytes) satisfied after a single
-                        # data chunk followed by EOF.
-                        sys.stdout.write("\r\n")
-                        sys.stdout.flush()
-                        self.logger.info("Server connection closed")
-                        sys.stdout.write("\r\n[Server closed connection]\r\n")
-                        sys.stdout.flush()
-                        self._notified_disconnect = True
-                    # Proactively close adapter resources (e.g., aiohttp sessions) to avoid GC warnings
-                    try:
-                        await self.connection.close()
-                    except Exception:
-                        # justification: shutdown cleanup; the adapter close is idempotent
-                        pass
-                    # If auto reconnect is enabled, start it and keep UI running
-                    if self.reconnect_mode == "auto":
-                        if not self._auto_reconnect_task:
-                            self._auto_reconnect_task = asyncio.create_task(self._auto_reconnect_loop())
-                            if not self.quiet_mode:
-                                sys.stdout.write("\r\n[Reconnecting... auto]\r\n")
-                                sys.stdout.flush()
-                        await asyncio.sleep(0.1)
-                        continue
-                    elif self.reconnect_mode == "manual":
-                        # Keep UI running; allow user to trigger manual reconnect via menu
-                        if not self._auto_reconnect_task and not self.read_only_mode:
-                            if not self.quiet_mode:
-                                sys.stdout.write("\r\n[Disconnected. Use escape 'o' to reconnect]\r\n")
-                                sys.stdout.flush()
-                        await asyncio.sleep(0.1)
-                        continue
-                    else:
-                        self.is_running = False
-                        break
-                # Empty payload means timeout/no data; continue polling
-                if data == b"" or data == "":
-                    continue
-
-                # Record stream activity so the power menu can wait for the
-                # stream to settle (a live [POWER] notice is payload that
-                # renders here) before it re-renders the feed list.
-                self._stream_activity += 1
-
-                # Reflect any access-mode change the adapter learned while
-                # decoding a control-frame response (e.g. after a promote/demote).
-                self._sync_access_mode()
-
-                # Normalize line endings for terminal display
-                if isinstance(data, str):
-                    # Check for shutdown message
-                    if "SERVER:SHUTDOWN" in data:
-                        sys.stdout.write("\r\n[Server shutdown]\r\n")
-                        sys.stdout.flush()
-                        self.is_running = False
-                        break
-                    # Normalize \r\n/\n to exactly one \r\n per line end
-                    # (some payloads, e.g. the live [POWER] notice, are
-                    # already \r\n-terminated - a bare \n replacement would
-                    # double the CR).
-                    normalized_data = data.replace("\r\n", "\n").replace("\n", "\r\n")
-                    sys.stdout.write(normalized_data)
-                    sys.stdout.flush()
-                    if normalized_data:
-                        self._received_any_data = True
-                else:
-                    # Handle bytes data - convert to bytes if memoryview, then normalize
-                    if isinstance(data, memoryview):
-                        data = data.tobytes()
-                    # Check for shutdown message
-                    if b"SERVER:SHUTDOWN" in data:
-                        sys.stdout.write("\r\n[Server shutdown]\r\n")
-                        sys.stdout.flush()
-                        self.is_running = False
-                        break
-                    # Normalize \r\n/\n to exactly one \r\n per line end
-                    # (payloads that are already \r\n-terminated would
-                    # otherwise show a doubled CR).
-                    normalized_data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-                    sys.stdout.buffer.write(normalized_data)
-                    sys.stdout.buffer.flush()
-                    if normalized_data:
-                        self._received_any_data = True
-
             except asyncio.CancelledError:
                 # Task was cancelled
                 break
@@ -349,6 +239,161 @@ class ConsoleUI:
                     continue
                 self.is_running = False
                 break
+
+    async def _read_step(self) -> bool:
+        """Run one iteration of the read loop.
+
+        Returns True when the caller should break and stop, False when it
+        should loop again. The loop remains the SOLE reader of the connection:
+        a second concurrent reader would desynchronize the transport (an
+        asyncio stream reader allows only one pending read).
+        """
+        if self._read_handle_stream_exclusive():
+            return True
+        # If disconnected, ensure auto/manual handling is engaged and yield briefly
+        if not self.connection.is_connected:
+            await self._read_disconnected_poll()
+            return False
+        # Read data from server with a short timeout
+        data = await self.connection.read_data(timeout=0.1)
+        # None indicates connection closed (EOF)
+        if data is None:
+            return await self._read_eof()
+        # Empty payload means timeout/no data; continue polling
+        if data == b"" or data == "":
+            return False
+        # Record stream activity so the power menu can wait for the
+        # stream to settle (a live [POWER] notice is payload that
+        # renders here) before it re-renders the feed list.
+        self._stream_activity += 1
+        # Reflect any access-mode change the adapter learned while
+        # decoding a control-frame response (e.g. after a promote/demote).
+        self._sync_access_mode()
+        return self._read_render(data)
+
+    def _read_handle_stream_exclusive(self) -> bool:
+        """Handle a stream-exclusive (escape-submenu) open over a dead link.
+
+        Returns True when the loop should break. While an interactive escape
+        submenu is open (e.g. the `p` power menu), the read loop keeps running
+        so the frozen console still receives everything, then hands back to the
+        menu - it shows the close on its next poll - engaging reconnect
+        handling if configured.
+        """
+        if not self._stream_exclusive or self.connection.is_connected:
+            return False
+        # Hand back to the menu, which shows the close on its next
+        # poll; engage reconnect handling if configured.
+        if self.reconnect_mode == "auto" and not self._auto_reconnect_task:
+            self._auto_reconnect_task = asyncio.create_task(self._auto_reconnect_loop())
+        elif self.reconnect_mode == "off":
+            self.is_running = False
+        return True
+
+    async def _read_disconnected_poll(self) -> None:
+        """Engage auto-reconnect for a disconnected link, then yield briefly.
+
+        In auto mode this starts a background reconnection task (and, unless
+        quiet, announces it). In manual/off modes it only yields, so the loop
+        keeps polling the connection state.
+        """
+        if self.reconnect_mode == "auto" and not self._auto_reconnect_task:
+            self._auto_reconnect_task = asyncio.create_task(self._auto_reconnect_loop())
+            if not self.quiet_mode:
+                sys.stdout.write("\r\n[Reconnecting... auto]\r\n")
+                sys.stdout.flush()
+        await asyncio.sleep(0.1)
+
+    async def _read_eof(self) -> bool:
+        """Process an EOF (read_data returned None). Returns True to break."""
+        self._read_eof_notice()
+        await self._read_eof_close()
+        return await self._read_eof_reconnect()
+
+    def _read_eof_notice(self) -> None:
+        """Show the one-shot server-closed notice (suppressed after data shown)."""
+        if not self._received_any_data and not self._notified_disconnect:
+            # Only show user-facing notice if no prior data was displayed; this keeps
+            # unit tests (which expect only the data bytes) satisfied after a single
+            # data chunk followed by EOF.
+            sys.stdout.write("\r\n")
+            sys.stdout.flush()
+            self.logger.info("Server connection closed")
+            sys.stdout.write("\r\n[Server closed connection]\r\n")
+            sys.stdout.flush()
+            self._notified_disconnect = True
+
+    async def _read_eof_close(self) -> None:
+        """Proactively close adapter resources (e.g., aiohttp sessions) to avoid GC warnings."""
+        try:
+            await self.connection.close()
+        except Exception:
+            # justification: shutdown cleanup; the adapter close is idempotent
+            pass
+
+    async def _read_eof_reconnect(self) -> bool:
+        """Decide post-EOF reconnect behavior. Returns True when to break.
+
+        auto: start a background reconnection task and keep the UI running.
+        manual: keep the UI running; allow a manual reconnect via the menu.
+        off: stop the loop.
+        """
+        if self.reconnect_mode == "auto":
+            if not self._auto_reconnect_task:
+                self._auto_reconnect_task = asyncio.create_task(self._auto_reconnect_loop())
+                if not self.quiet_mode:
+                    sys.stdout.write("\r\n[Reconnecting... auto]\r\n")
+                    sys.stdout.flush()
+            await asyncio.sleep(0.1)
+            return False
+        if self.reconnect_mode == "manual":
+            # Keep UI running; allow user to trigger manual reconnect via menu
+            if not self._auto_reconnect_task and not self.read_only_mode:
+                if not self.quiet_mode:
+                    sys.stdout.write("\r\n[Disconnected. Use escape 'o' to reconnect]\r\n")
+                    sys.stdout.flush()
+            await asyncio.sleep(0.1)
+            return False
+        self.is_running = False
+        return True
+
+    def _read_render(self, data) -> bool:
+        """Normalize and render one payload. Returns True on a SHUTDOWN (break)."""
+        if isinstance(data, str):
+            # Check for shutdown message
+            if "SERVER:SHUTDOWN" in data:
+                sys.stdout.write("\r\n[Server shutdown]\r\n")
+                sys.stdout.flush()
+                self.is_running = False
+                return True
+            # Normalize \r\n/\n to exactly one \r\n per line end
+            # (some payloads, e.g. the live [POWER] notice, are
+            # already \r\n-terminated - a bare \n replacement would
+            # double the CR).
+            normalized_data = data.replace("\r\n", "\n").replace("\n", "\r\n")
+            sys.stdout.write(normalized_data)
+            sys.stdout.flush()
+            if normalized_data:
+                self._received_any_data = True
+            return False
+        # Handle bytes data - convert to bytes if memoryview, then normalize
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        # Check for shutdown message
+        if b"SERVER:SHUTDOWN" in data:
+            sys.stdout.write("\r\n[Server shutdown]\r\n")
+            sys.stdout.flush()
+            self.is_running = False
+            return True
+        # Normalize \r\n/\n to exactly one \r\n per line end
+        # (payloads that are already \r\n-terminated would
+        # otherwise show a doubled CR).
+        normalized_data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        sys.stdout.buffer.write(normalized_data)
+        sys.stdout.buffer.flush()
+        if normalized_data:
+            self._received_any_data = True
+        return False
 
     async def _auto_reconnect_loop(self):
         """Attempt automatic reconnection with exponential backoff.

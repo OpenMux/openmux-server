@@ -356,6 +356,243 @@ class TestConsoleUI:
             mock_tcsetattr.assert_called_once_with(sys.stdin, termios.TCSADRAIN, "test_settings")
 
 
+class TestReadFromServerBranches:
+    """Pin the reconnect / normalization / EOF branches of ``_read_from_server``.
+
+    The pre-existing read tests only cover: bytes->EOF->off, an exception->off,
+    a CancelledError, and a bare None->off. This class pins the remaining
+    branches (stream-exclusive disconnect, the disconnected-poll auto path and
+    its quiet variant, the EOF user-facing notice, close-raises, the
+    data-is-None auto/manual/off reconnect split, empty-payload continue, the
+    str/bytes normalization, the str/bytes SHUTDOWN checks, the memoryview
+    conversion, and the exception->retry in reconnect modes) on the OLD code
+    so the bracket-C901 split of ``_read_from_server`` is provably
+    behavior-preserving.
+
+    Two mechanics make the otherwise-infinite read loop deterministic:
+    ``asyncio.sleep`` is patched to flip ``is_running`` False (any ``continue``
+    that follows then exits the loop) and ``asyncio.create_task`` is patched to
+    return a dummy token (the spawned ``_auto_reconnect_loop`` coroutine is
+    closed and never scheduled, so no background task interferes).
+    """
+
+    def _ui(self, conn):
+        return ConsoleUI(conn, reconnect_mode="off")
+
+    def _setup(
+        self,
+        conn,
+        *,
+        connected=True,
+        mode="off",
+        quiet=False,
+        stream_exclusive=False,
+        read_only=False,
+        received=False,
+        notified=False,
+    ):
+        conn.is_connected = connected
+        ui = ConsoleUI(conn, reconnect_mode=mode)
+        ui.quiet_mode = quiet
+        ui.read_only_mode = read_only
+        ui._stream_exclusive = stream_exclusive
+        ui._received_any_data = received
+        ui._notified_disconnect = notified
+        ui._auto_reconnect_task = None
+        ui.is_running = True
+        return ui
+
+    def _patch_loop(self, ui, monkeypatch):
+        # create_task -> dummy token (close the coroutine so it never runs)
+        def fake_create_task(coro):
+            coro.close()
+            return object()
+
+        async def fake_sleep(*a, **k):
+            ui.is_running = False
+
+        monkeypatch.setattr("openmux.client.console.asyncio.create_task", fake_create_task)
+        monkeypatch.setattr("openmux.client.console.asyncio.sleep", fake_sleep)
+
+    @pytest.mark.asyncio
+    async def test_stream_exclusive_disconnected_off(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        ui = self._setup(conn, connected=False, mode="off", stream_exclusive=True)
+        self._patch_loop(ui, monkeypatch)
+        await ui._read_from_server()
+        # off mode: is_running cleared and loop broken
+        assert ui.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_stream_exclusive_disconnected_auto(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=[None])
+        conn.close = AsyncMock()
+        ui = self._setup(
+            conn, connected=False, mode="auto", quiet=False, stream_exclusive=True, received=False, notified=False
+        )
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write"), patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        # auto: a reconnect task token was created, then the None/EOF path ran
+        assert ui._auto_reconnect_task is not None
+
+    @pytest.mark.asyncio
+    async def test_disconnected_auto_poll(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        ui = self._setup(conn, connected=False, mode="auto", quiet=False)
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write") as w, patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        # non-quiet: "[Reconnecting... auto]" was shown
+        assert any("[Reconnecting... auto]" in str(c) for c in w.call_args_list)
+        assert ui._auto_reconnect_task is not None
+
+    @pytest.mark.asyncio
+    async def test_disconnected_auto_poll_quiet(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        ui = self._setup(conn, connected=False, mode="auto", quiet=True)
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write") as w, patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        # quiet: no "[Reconnecting... auto]" written
+        assert not any("[Reconnecting... auto]" in str(c) for c in w.call_args_list)
+        assert ui._auto_reconnect_task is not None
+
+    @pytest.mark.asyncio
+    async def test_eof_notice_and_close_raises(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=[None])
+        conn.close = AsyncMock(side_effect=Exception("close boom"))
+        ui = self._setup(conn, connected=True, mode="off", received=False, notified=False)
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write"), patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        # notice shown once, close() called (and its exception swallowed), loop broke
+        assert ui._notified_disconnect is True
+        conn.close.assert_awaited()
+        assert ui.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_eof_no_notice_when_data_seen(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=[None])
+        conn.close = AsyncMock()
+        ui = self._setup(conn, connected=True, mode="off", received=True, notified=True)
+        self._patch_loop(ui, monkeypatch)
+        await ui._read_from_server()
+        # prior data seen -> no notice, still closed + broke
+        assert ui._notified_disconnect is True
+        conn.close.assert_awaited()
+        assert ui.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_eof_auto_reconnect(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=[None])
+        conn.close = AsyncMock()
+        ui = self._setup(conn, connected=True, mode="auto", quiet=False, received=True)
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write") as w, patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        # auto: task created (no task yet) + "[Reconnecting... auto]" + continue
+        assert ui._auto_reconnect_task is not None
+        assert any("[Reconnecting... auto]" in str(c) for c in w.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_eof_manual_reconnect(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=[None])
+        conn.close = AsyncMock()
+        ui = self._setup(conn, connected=True, mode="manual", quiet=False, read_only=False, received=True)
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write") as w, patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        # manual: "[Disconnected. Use escape 'o' to reconnect]" + continue
+        assert any("escape 'o'" in str(c) for c in w.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_eof_manual_read_only(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=[None])
+        conn.close = AsyncMock()
+        ui = self._setup(conn, connected=True, mode="manual", quiet=False, read_only=True, received=True)
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write") as w, patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        # read-only: suppress the "escape 'o'" line (read_only branch of the guard)
+        assert not any("escape 'o'" in str(c) for c in w.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_empty_bytes_continue(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.close = AsyncMock()
+        ui = self._setup(conn, connected=True, mode="off", received=True)
+        conn.read_data = AsyncMock(side_effect=[b"", None])
+        self._patch_loop(ui, monkeypatch)
+        await ui._read_from_server()
+        # b"" -> continue (no render), then None -> off -> break
+        assert ui.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_str_data_normalized(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=["hello\n", None])
+        conn.close = AsyncMock()
+        ui = self._setup(conn, connected=True, mode="off", received=False)
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write") as w, patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        # str path: normalized "\n"->"\r\n" written, data flag set
+        written = [c.args[0] for c in w.call_args_list if c.args and isinstance(c.args[0], str)]
+        assert any("hello\r\n" in s for s in written)
+        assert ui._received_any_data is True
+
+    @pytest.mark.asyncio
+    async def test_str_shutdown(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=["SERVER:SHUTDOWN", None])
+        ui = self._setup(conn, connected=True, mode="off", received=True)
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write"), patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        assert ui.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_bytes_shutdown(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=[b"SERVER:SHUTDOWN", None])
+        ui = self._setup(conn, connected=True, mode="off", received=True)
+        self._patch_loop(ui, monkeypatch)
+        with patch("sys.stdout.write"), patch("sys.stdout.flush"):
+            await ui._read_from_server()
+        assert ui.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_memoryview_bytes_normalized(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=[memoryview(b"abc\r\n"), None])
+        conn.close = AsyncMock()
+        ui = self._setup(conn, connected=True, mode="off", received=False)
+        self._patch_loop(ui, monkeypatch)
+        with patch.object(sys.stdout.buffer, "write") as w, patch.object(sys.stdout.buffer, "flush"):
+            await ui._read_from_server()
+        # memoryview -> tobytes -> normalized written to buffer, data flag set
+        written = [c.args[0] for c in w.call_args_list if c.args and isinstance(c.args[0], bytes)]
+        assert any(b"abc\r\n" == b for b in written)
+        assert ui._received_any_data is True
+
+    @pytest.mark.asyncio
+    async def test_exception_retry_in_auto_mode(self, monkeypatch):
+        conn = AsyncMock(spec=BaseClientAdapter)
+        conn.read_data = AsyncMock(side_effect=Exception("read boom"))
+        ui = self._setup(conn, connected=True, mode="auto", received=True)
+        self._patch_loop(ui, monkeypatch)
+        await ui._read_from_server()
+        # reconnect mode -> logged, slept, continued (loop exited via the sleep flip)
+        assert ui.is_running is False
+
+
 class TestTakeTargetInput:
     """The `f` command's targeted-takeover prompt (issue #61)."""
 
