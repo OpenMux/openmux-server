@@ -2702,132 +2702,192 @@ class WebConsoleAdapter(BaseGenericAdapter):
             subs = set(self._meta_subscribers.get(port_name) or [])
             if not subs:
                 return
-            # Build current meta snapshot for this port; prefer enriched unified entry
-            info = None
-            try:
-                snapshot = self._get_ports_snapshot()
-                # Merge all entries with same name, letting later entries (unified enumeration) override earlier ones
-                combined: Dict[str, Any] = {}
-                for p in snapshot:
-                    if isinstance(p, dict) and p.get("name") == port_name:
-                        try:
-                            combined.update(p)
-                        except Exception:
-                            # justification: best-effort snapshot merge; earlier entries stay
-                            pass
-                info = combined if combined else None
-            except Exception:
-                info = None
-            if info is None:
-                info = {"name": port_name, "connected": False}
-            # Prefer connected state from the event itself to avoid racing the runtime flip
-            event_connected = None
-            try:
-                if isinstance(changes, dict) and "connected" in changes:
-                    event_connected = bool(changes.get("connected"))
-            except Exception:
-                event_connected = None
-
-            # Prefer live connection state from PortManager's port object when available
-            live_connected = None
-            live_adapter = None
-            live_serial_cfg = None
-            try:
-                pm = getattr(self.console_manager, "port_manager", None) if self.console_manager else None
-                port_obj = safe_get_port(pm, port_name) if pm is not None else None
-                if port_obj is not None:
-                    # Unified wrapper exposes unified_port; federated proxies expose is_connected directly
-                    if hasattr(port_obj, "unified_port") and hasattr(getattr(port_obj, "unified_port", None), "is_connected"):
-                        live_connected = bool(getattr(getattr(port_obj, "unified_port", None), "is_connected", None))
-                        live_adapter = getattr(port_obj, "adapter_type", None)
-                        # Try the live serial config if available (issue #65):
-                        # a serial port keeps its per-port settings as a plain
-                        # dict on `config`. Gate on `device` so other
-                        # adapters' per-port dicts (loopback, command, ...) do
-                        # not produce an all-null serial_config here.
-                        try:
-                            cfg = getattr(getattr(port_obj, "unified_port", None), "config", None)
-                            if isinstance(cfg, dict) and cfg.get("device") is not None:
-                                live_serial_cfg = {
-                                    "device": cfg.get("device"),
-                                    "baudrate": cfg.get("baudrate"),
-                                    "bytesize": cfg.get("bytesize"),
-                                    "parity": cfg.get("parity"),
-                                    "stopbits": cfg.get("stopbits"),
-                                    "flow_control": cfg.get("flow_control"),
-                                }
-                        except Exception:
-                            # justification: optional status detail; the port entry stays complete
-                            pass
-                    elif hasattr(port_obj, "is_connected"):
-                        live_connected = bool(getattr(port_obj, "is_connected"))
-                        live_adapter = getattr(port_obj, "adapter_type", None)
-            except Exception:
-                live_connected = None
-
-            # Build meta payload with only defined keys to avoid clobbering UI with nulls
-            meta = {
-                "type": "meta",
-                "name": info.get("name"),
-                "adapter": live_adapter or info.get("adapter") or info.get("adapter_type"),
-                # Choose authoritative connected flag: event > live_read > snapshot
-                "connected": (
-                    bool(event_connected)
-                    if event_connected is not None
-                    else (
-                        bool(live_connected)
-                        if live_connected is not None
-                        else bool(info.get("connected", info.get("is_running", False)))
-                    )
-                ),
-            }
-            desc = info.get("description")
-            if desc is not None:
-                meta["description"] = desc
-            sc = live_serial_cfg or info.get("serial_config")
-            if sc is not None:
-                meta["serial_config"] = sc
-            ls = info.get("line_status")
-            if ls is not None:
-                meta["line_status"] = ls
-            chain = info.get("server_chain")
-            if chain:
-                meta["server_chain"] = chain
-            ls_seen = info.get("last_seen")
-            if ls_seen is not None:
-                meta["last_seen"] = ls_seen
-            # Offline reason (issue #62). Always emit the key — even when
-            # empty — so the web console can clear a stale reason on the
-            # next frame (e.g. when a port recovers). Older peers simply
-            # ignore the extra empty field on the wire.
-            meta["status_message"] = info.get("status_message") or ""
-            # Readiness (issue #68): the derived active/idle/offline value so
-            # the console can recolor the banner/info panel live without a
-            # full re-render. Older clients ignore the extra key.
-            readiness = info.get("readiness")
-            if readiness in (READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE):
-                meta["readiness"] = readiness
-            # PDU power feed state (PDU feature): present only when the port
-            # declares a `power:` feed, so unmapped ports ignore the key.
-            power_info = info.get("power")
-            if isinstance(power_info, dict) and power_info:
-                meta["power"] = power_info
+            info = self._meta_snapshot_info(port_name)
+            meta = self._meta_base_payload(port_name, info, changes)
+            self._meta_optional_keys(meta, info)
             payload = "OMXCTRL " + json.dumps(meta, separators=(",", ":"))
             for cid in list(subs):
-                try:
-                    ws = self._clients.get(cid)
-                    if ws is None:
-                        continue
-                    await ws.send_str(payload)
-                except Exception:
-                    try:
-                        self._meta_subscribers.get(port_name, set()).discard(cid)
-                    except Exception:
-                        # justification: idempotent subscription cleanup
-                        pass
+                await self._meta_send_to_subscriber(port_name, cid, payload)
         except Exception:
             # justification: idempotent subscription cleanup
             pass
+
+    def _meta_snapshot_info(self, port_name: str) -> Dict[str, Any]:
+        """Build the snapshot-derived meta info for a port.
+
+        Merges all snapshot entries sharing the port name (later entries win);
+        falls back to a bare ``{name, connected: False}`` when nothing matches
+        or the snapshot itself fails.
+        """
+        info = None
+        try:
+            snapshot = self._get_ports_snapshot()
+            # Merge all entries with same name, letting later entries (unified enumeration) override earlier ones
+            combined: Dict[str, Any] = {}
+            for p in snapshot:
+                if isinstance(p, dict) and p.get("name") == port_name:
+                    try:
+                        combined.update(p)
+                    except Exception:
+                        # justification: best-effort snapshot merge; earlier entries stay
+                        pass
+            info = combined if combined else None
+        except Exception:
+            info = None
+        if info is None:
+            info = {"name": port_name, "connected": False}
+        return info
+
+    @staticmethod
+    def _meta_event_connected(changes: Optional[Dict[str, Any]]) -> Optional[bool]:
+        """Prefer the event's ``connected`` flag to avoid racing the runtime flip.
+
+        Returns None (fall through to live/snapshot state) when ``changes`` is
+        not a dict, has no ``connected`` key, or reading it raises.
+        """
+        event_connected = None
+        try:
+            if isinstance(changes, dict) and "connected" in changes:
+                event_connected = bool(changes.get("connected"))
+        except Exception:
+            event_connected = None
+        return event_connected
+
+    def _meta_live_state(self, port_name: str) -> Tuple[Optional[bool], Optional[str], Optional[Dict[str, Any]]]:
+        """Read live connection state from the PortManager port object.
+
+        Returns ``(live_connected, live_adapter, live_serial_cfg)``. Unified
+        wrappers expose ``unified_port.is_connected`` (+ an optional serial
+        config gated on ``device``, issue #65); federated proxies expose
+        ``is_connected`` directly. A failure to fetch the port object resets
+        ``live_connected`` to None; the other two keep their initial values.
+        """
+        live_connected = None
+        live_adapter = None
+        live_serial_cfg = None
+        try:
+            pm = getattr(self.console_manager, "port_manager", None) if self.console_manager else None
+            port_obj = safe_get_port(pm, port_name) if pm is not None else None
+            if port_obj is not None:
+                # Unified wrapper exposes unified_port; federated proxies expose is_connected directly
+                if hasattr(port_obj, "unified_port") and hasattr(getattr(port_obj, "unified_port", None), "is_connected"):
+                    live_connected = bool(getattr(getattr(port_obj, "unified_port", None), "is_connected", None))
+                    live_adapter = getattr(port_obj, "adapter_type", None)
+                    live_serial_cfg = self._meta_live_serial_cfg(port_obj)
+                elif hasattr(port_obj, "is_connected"):
+                    live_connected = bool(getattr(port_obj, "is_connected"))
+                    live_adapter = getattr(port_obj, "adapter_type", None)
+        except Exception:
+            live_connected = None
+        return live_connected, live_adapter, live_serial_cfg
+
+    @staticmethod
+    def _meta_live_serial_cfg(port_obj: Any) -> Optional[Dict[str, Any]]:
+        """Extract a live serial config from a unified port, or None.
+
+        A serial port keeps its per-port settings as a plain dict on
+        ``config``. Gate on ``device`` so other adapters' per-port dicts
+        (loopback, command, ...) do not produce an all-null serial_config.
+        """
+        try:
+            cfg = getattr(getattr(port_obj, "unified_port", None), "config", None)
+            if isinstance(cfg, dict) and cfg.get("device") is not None:
+                return {
+                    "device": cfg.get("device"),
+                    "baudrate": cfg.get("baudrate"),
+                    "bytesize": cfg.get("bytesize"),
+                    "parity": cfg.get("parity"),
+                    "stopbits": cfg.get("stopbits"),
+                    "flow_control": cfg.get("flow_control"),
+                }
+        except Exception:
+            # justification: optional status detail; the port entry stays complete
+            pass
+        return None
+
+    def _meta_base_payload(self, port_name: str, info: Dict[str, Any], changes: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build the base meta payload with the authoritative connected flag.
+
+        The connected flag prefers, in order: the event itself, the live
+        port-manager read, then the snapshot.
+        """
+        event_connected = self._meta_event_connected(changes)
+        live_connected, live_adapter, live_serial_cfg = self._meta_live_state(port_name)
+        meta = {
+            "type": "meta",
+            "name": info.get("name"),
+            "adapter": live_adapter or info.get("adapter") or info.get("adapter_type"),
+            # Choose authoritative connected flag: event > live_read > snapshot
+            "connected": (
+                bool(event_connected)
+                if event_connected is not None
+                else (
+                    bool(live_connected)
+                    if live_connected is not None
+                    else bool(info.get("connected", info.get("is_running", False)))
+                )
+            ),
+        }
+        if live_serial_cfg is not None:
+            meta["serial_config"] = live_serial_cfg
+        return meta
+
+    @staticmethod
+    def _meta_optional_keys(meta: Dict[str, Any], info: Dict[str, Any]) -> None:
+        """Append the snapshot-derived optional keys onto a base meta payload.
+
+        ``status_message`` is always emitted (even when empty) so the web
+        console can clear a stale reason on the next frame (issue #62);
+        older peers simply ignore the extra empty field on the wire.
+        """
+        desc = info.get("description")
+        if desc is not None:
+            meta["description"] = desc
+        sc = info.get("serial_config")
+        if sc is not None:
+            meta["serial_config"] = sc
+        ls = info.get("line_status")
+        if ls is not None:
+            meta["line_status"] = ls
+        chain = info.get("server_chain")
+        if chain:
+            meta["server_chain"] = chain
+        ls_seen = info.get("last_seen")
+        if ls_seen is not None:
+            meta["last_seen"] = ls_seen
+        # Offline reason (issue #62). Always emit the key - even when empty -
+        # so the web console can clear a stale reason on the next frame.
+        meta["status_message"] = info.get("status_message") or ""
+        # Readiness (issue #68): the derived active/idle/offline value so the
+        # console can recolor the banner/info panel live without a full
+        # re-render. Older clients ignore the extra key.
+        readiness = info.get("readiness")
+        if readiness in (READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE):
+            meta["readiness"] = readiness
+        # PDU power feed state (PDU feature): present only when the port
+        # declares a `power:` feed, so unmapped ports ignore the key.
+        power_info = info.get("power")
+        if isinstance(power_info, dict) and power_info:
+            meta["power"] = power_info
+
+    async def _meta_send_to_subscriber(self, port_name: str, cid: Any, payload: str) -> None:
+        """Send a meta payload to one subscriber; drop the subscription on failure.
+
+        A subscriber id missing from ``_clients`` is skipped quietly. A send
+        failure removes the id from this port's subscriber set so it is not
+        retried (cleanup is best-effort and itself guarded).
+        """
+        try:
+            ws = self._clients.get(cid)
+            if ws is None:
+                return
+            await ws.send_str(payload)
+        except Exception:
+            try:
+                self._meta_subscribers.get(port_name, set()).discard(cid)
+            except Exception:
+                # justification: idempotent subscription cleanup
+                pass
 
     def _gather_federation_overview(self) -> Dict[str, Any]:
         """Build a federation overview payload mirroring WebStatus._api_get_federation."""
