@@ -743,6 +743,157 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     }
 
 
+def _defaults_locate_md(stub_path=None):
+    """Locate docs/DEFAULTS.md.
+
+    Resolution order: the repo-root copy (relative to this file's parents),
+    then the current-working-directory copy. Returns ``None`` when neither
+    exists. ``stub_path`` is a ``pathlib.Path`` stand-in overridable by tests.
+    """
+    import pathlib
+
+    Path = stub_path if stub_path is not None else pathlib.Path
+    repo_root = Path(__file__).resolve().parents[3]
+    md_path = repo_root / "docs" / "DEFAULTS.md"
+    if not md_path.is_file():
+        # Try current working directory as a fallback
+        alt = Path.cwd() / "docs" / "DEFAULTS.md"
+        if alt.is_file():
+            return alt
+        return None
+    return md_path
+
+
+def _defaults_parse_value(val: str):
+    """Best-effort scalar parse: booleans, then numbers, else the raw string.
+
+    0-prefixed digit runs without a dot stay strings (paths like 0.0.0.0);
+    a single-dot value parses as float, a dotless value as int.
+    """
+    v = val.strip()
+    # Booleans
+    if v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    # Numbers (int or float)
+    try:
+        if v.startswith("0") and v != "0" and "." not in v:
+            # keep as string (paths like 0.0.0.0 handled below)
+            pass
+        else:
+            if "." in v:
+                return float(v)
+            return int(v)
+    except Exception:
+        # justification: heuristic value parse; the raw string is kept
+        pass
+    # IP-like values or paths remain strings
+    return v
+
+
+def _defaults_top_sections():
+    """Known top-level headings: prefix -> (config prefix, is_table).
+
+    For table sections the prefix doubles as the template buildTable() root id.
+    """
+    return {
+        "server": ("server", False),
+        "client_listener": ("client_listener", False),  # (prefix, is_table)
+        "telnet_listener": ("telnet_listener", True),
+        "web_status": ("web_status", False),
+        "web_console": ("web_console", False),
+        "logging": ("logging", False),
+        "serial_ports": ("serial_ports", True),
+        "loopback_ports": ("loopback_ports", True),
+        "command_ports": ("command_ports", True),
+        "tcp_initiator_ports": ("tcp_initiator_ports", True),
+        "muxcon": ("muxcon", False),
+    }
+
+
+def _defaults_muxcon_subsections():
+    """Subsections within muxcon that map to sections or dot-paths."""
+    return {
+        "listeners[*]": ("muxcon.listeners", True),
+        "initiators[*]": ("muxcon.initiators", True),
+        "heartbeats & timing": ("muxcon", False),
+        "multipath": ("muxcon", False),
+        "retransmissions": ("muxcon", False),
+        "federated_cache": ("muxcon", False),
+    }
+
+
+def _defaults_is_heading_candidate(line: str) -> bool:
+    """A line that is neither indented nor a bullet is a heading candidate."""
+    return not line.startswith(" ") and not line.startswith("-")
+
+
+def _defaults_is_section_marker(line: str) -> bool:
+    """A bullet that ends with ':' marks a muxcon subsection header."""
+    s = line.strip()
+    return s.startswith("- ") and s.endswith(":")
+
+
+def _defaults_apply_heading(line: str, heading, top_sections, sections, top_key, cur_sub):
+    """Match a top-level heading and update the section state.
+
+    Returns the new (top_key, cur_sub). An unrecognized heading leaves both
+    unchanged, matching the original fallthrough behavior.
+    """
+    m = heading.match(line.strip())
+    name = m.group(1).strip() if m else None
+    key = None
+    if name:
+        # Normalize known headings that include annotation text
+        # e.g., "serial_ports (per-port) (schema defaults, plus adapter runtime behavior)"
+        for k in list(top_sections.keys()):
+            if name.startswith(k):
+                key = k
+                break
+    if key:
+        top_key = key
+        cur_sub = None
+        # Ensure table dict exists when needed
+        if top_sections[key][1] and key not in sections:
+            sections[key] = {}
+    return top_key, cur_sub
+
+
+def _defaults_apply_section_marker(line: str, is_muxcon: bool, muxcon_subsections, cur_sub):
+    """Update the muxcon subsection from a ``- label:`` marker line."""
+    label = line.strip()[2:-1].strip()
+    if is_muxcon and label in muxcon_subsections:
+        cur_sub = label
+    else:
+        cur_sub = None
+    return cur_sub
+
+
+def _defaults_route_muxcon(key: str, val, cur_sub: str, muxcon_subsections, dot, sections):
+    """Store a muxcon bullet under its subsection (table or dot)."""
+    sub_target = muxcon_subsections[cur_sub][0]
+    if cur_sub == "initiators[*]" and key.startswith("options."):
+        # options.* defaults: keep the full 'options.xxx' for UI mapping
+        sections.setdefault(sub_target, {})
+        sections[sub_target][key] = val
+    elif cur_sub in ("listeners[*]",):
+        sections.setdefault(sub_target, {})
+        sections[sub_target][key] = val
+    elif cur_sub in ("heartbeats & timing", "multipath", "retransmissions", "federated_cache"):
+        # Map directly under muxcon.* in dot map
+        dot[f"muxcon.{key}"] = val
+
+
+def _defaults_route_top(key: str, val, top_sections, top_key, dot, sections):
+    """Store a bullet under the current top-level section (table or dot)."""
+    if top_key and top_key in top_sections:
+        prefix, is_table = top_sections[top_key]
+        if is_table:
+            sections.setdefault(prefix, {})
+            sections[prefix][key] = val
+        else:
+            dot[f"{prefix}.{key}"] = val
+
+
 def _read_defaults_doc() -> Dict[str, Any]:
     """Parse docs/DEFAULTS.md into a simple defaults mapping for the UI.
 
@@ -756,111 +907,36 @@ def _read_defaults_doc() -> Dict[str, Any]:
         import re
         from pathlib import Path
 
-        # Locate docs/DEFAULTS.md relative to repo root
-        # repo_root: openmux/server/web_plugins/ -> repo_root
-        repo_root = Path(__file__).resolve().parents[3]
-        md_path = repo_root / "docs" / "DEFAULTS.md"
-        if not md_path.is_file():
-            # Try current working directory as a fallback
-            alt = Path.cwd() / "docs" / "DEFAULTS.md"
-            if alt.is_file():
-                md_path = alt
-            else:
-                return {"dot": {}, "sections": {}}
-
+        # Locate docs/DEFAULTS.md (repo-root copy, then cwd copy)
+        md_path = _defaults_locate_md(Path)
+        if md_path is None:
+            return {"dot": {}, "sections": {}}
         text = md_path.read_text(encoding="utf-8")
 
-        # Known top-level section names mapping to config prefixes or table IDs
-        # For table sections, we use the same IDs as our template buildTable() roots
-        top_sections = {
-            "server": ("server", False),
-            "client_listener": ("client_listener", False),  # (prefix, is_table)
-            "telnet_listener": ("telnet_listener", True),
-            "web_status": ("web_status", False),
-            "web_console": ("web_console", False),
-            "logging": ("logging", False),
-            "serial_ports": ("serial_ports", True),
-            "loopback_ports": ("loopback_ports", True),
-            "command_ports": ("command_ports", True),
-            "tcp_initiator_ports": ("tcp_initiator_ports", True),
-            "muxcon": ("muxcon", False),
-        }
-
-        # Subsections within muxcon that map to sections or dot-paths
-        muxcon_subsections = {
-            "listeners[*]": ("muxcon.listeners", True),
-            "initiators[*]": ("muxcon.initiators", True),
-            "heartbeats & timing": ("muxcon", False),
-            "multipath": ("muxcon", False),
-            "retransmissions": ("muxcon", False),
-            "federated_cache": ("muxcon", False),
-        }
+        top_sections = _defaults_top_sections()
+        muxcon_subsections = _defaults_muxcon_subsections()
 
         dot: Dict[str, Any] = {}
         sections: Dict[str, Dict[str, Any]] = {}
 
-        cur_top: Optional[str] = None
-        cur_top_key: Optional[str] = None
+        top_key: Optional[str] = None
         cur_sub: Optional[str] = None
 
         # Regexes
         bullet_kv = re.compile(r"^\s*-\s*([a-zA-Z0-9_\.\[\]\* ]+):\s*(.+?)\s*$")
         heading = re.compile(r"^([a-zA-Z0-9_ ]+)(?:\s*\(.*\))?\s*$")
 
-        def parse_value(val: str):
-            v = val.strip()
-            # Booleans
-            if v.lower() in ("true", "false"):
-                return v.lower() == "true"
-            # Numbers (int or float)
-            try:
-                if v.startswith("0") and v != "0" and "." not in v:
-                    # keep as string (paths like 0.0.0.0 handled below)
-                    pass
-                else:
-                    if "." in v:
-                        return float(v)
-                    return int(v)
-            except Exception:
-                # justification: heuristic value parse; the raw string is kept
-                pass
-            # IP-like values or paths remain strings
-            return v
-
         for raw_line in text.splitlines():
             line = raw_line.rstrip("\n")
             if not line.strip():
                 continue
-            if not line.startswith(" ") and not line.startswith("-"):
-                # New top-level heading candidate
-                m = heading.match(line.strip())
-                if m:
-                    name = m.group(1).strip()
-                    key = None
-                    # Normalize known headings that include annotation text
-                    # e.g., "serial_ports (per-port) (schema defaults, plus adapter runtime behavior)"
-                    for k in list(top_sections.keys()):
-                        if name.startswith(k):
-                            key = k
-                            break
-                    if key:
-                        cur_top = key
-                        cur_top_key = top_sections[key][0]
-                        cur_sub = None
-                        # Ensure table dict exists when needed
-                        if top_sections[key][1] and cur_top_key not in sections:
-                            sections[cur_top_key] = {}
-                        continue
-                # If not a recognized heading, skip
+            if _defaults_is_heading_candidate(line):
+                top_key, cur_sub = _defaults_apply_heading(line, heading, top_sections, sections, top_key, cur_sub)
                 continue
 
             # Subsection under muxcon recognized via bullet style marker ending with ':'
-            if line.strip().startswith("- ") and line.strip().endswith(":"):
-                label = line.strip()[2:-1].strip()
-                if cur_top == "muxcon" and label in muxcon_subsections:
-                    cur_sub = label
-                else:
-                    cur_sub = None
+            if _defaults_is_section_marker(line):
+                cur_sub = _defaults_apply_section_marker(line, top_key == "muxcon", muxcon_subsections, cur_sub)
                 continue
 
             # Key-value bullets
@@ -868,35 +944,15 @@ def _read_defaults_doc() -> Dict[str, Any]:
             if not m:
                 continue
             key, value = m.group(1).strip(), m.group(2).strip()
-            val = parse_value(value)
+            val = _defaults_parse_value(value)
 
             # Decide where to store
-            if cur_top == "muxcon" and cur_sub:
-                sub_target, is_table = muxcon_subsections[cur_sub]
-                if cur_sub == "initiators[*]" and key.startswith("options."):
-                    # options.* defaults
-                    base = f"{sub_target}"
-                    # table section defaults: only store the option key after 'options.'
-                    opt_key = key  # keep full 'options.xxx' for UI mapping
-                    sections.setdefault(base, {})
-                    sections[base][opt_key] = val
-                elif cur_sub in ("listeners[*]",):
-                    base = f"{sub_target}"
-                    sections.setdefault(base, {})
-                    sections[base][key] = val
-                elif cur_sub in ("heartbeats & timing", "multipath", "retransmissions", "federated_cache"):
-                    # Map directly under muxcon.* in dot map
-                    dot[f"muxcon.{key}"] = val
+            if top_key == "muxcon" and cur_sub:
+                _defaults_route_muxcon(key, val, cur_sub, muxcon_subsections, dot, sections)
                 continue
 
             # Generic handling for top-level simple sections
-            if cur_top and cur_top_key and cur_top in top_sections:
-                prefix, is_table = top_sections[cur_top]
-                if is_table:
-                    sections.setdefault(prefix, {})
-                    sections[prefix][key] = val
-                else:
-                    dot[f"{prefix}.{key}"] = val
+            _defaults_route_top(key, val, top_sections, top_key, dot, sections)
 
         return {"dot": dot, "sections": sections}
     except Exception:
