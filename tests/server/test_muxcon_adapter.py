@@ -291,6 +291,468 @@ async def test_initiator_tls_unavailable_never_dials_plaintext(monkeypatch):
     assert a.connections == {}
 
 
+# --- _initiator_loop: branch coverage (bracket C901, 27) -------------------
+# The pre-existing test above only pins the TLS-context-None -> OSError ->
+# no-plaintext-dial path. These pin the remaining retry-loop branches on the
+# OLD code so the C901 split of _initiator_loop is provably
+# behavior-preserving: the three backoff-param float() excepts (bad values),
+# the dial-attempt bookkeeping (first vs retry log), the plain/TLS branches,
+# the SNI hostname fallback + its except, the local-bind (valid / bad port),
+# the platform routing connect (iface / fwmark valid / fwmark invalid), the
+# fingerprint gate (failure -> writer closed -> re-raise -> generic handler,
+# and writer-close-raising -> inner except), the short-session throttle vs
+# long-session backoff reset, ConnectionRefused/Reset/Timeout handlers, the
+# OSError handler, and the generic retryable-failure handler.
+# Determinism mechanics: asyncio.open_connection (and the routing connect,
+# handshake, read loop, fingerprint verify and ssl-ctx builder) are stubbed
+# on the adapter/coros, and asyncio.sleep is patched to set the stop event so
+# any backoff iteration terminates the loop.
+# ---------------------------------------------------------------------------
+
+
+class _IL_Writer:
+    def __init__(self, close_raises=False):
+        self._closing = False
+        self.close_raises = close_raises
+        self.close_calls = 0
+        self.wait_closed_calls = 0
+
+    def is_closing(self):
+        return self._closing
+
+    def close(self):
+        if self.close_raises:
+            raise RuntimeError("close boom")
+        self.close_calls += 1
+        self._closing = True
+
+    async def wait_closed(self):
+        self.wait_closed_calls += 1
+
+
+class _OptsSNRaise(dict):
+    """Options where only the ``server_hostname`` lookup raises (SNI except)."""
+
+    def get(self, key, default=None):
+        if key == "server_hostname":
+            raise RuntimeError("sn boom")
+        return super().get(key, default)
+
+
+class _OptsAllRaise(dict):
+    """Options whose every lookup raises -> the generic retry handler."""
+
+    def get(self, key, default=None):
+        raise RuntimeError("opts boom")
+
+
+def _il_peer(options, ts=0.0, attempts=0):
+    p = FederationPeer("il-host", 7, options=options)
+    p._last_dial_ts = ts
+    p._dial_attempts = attempts
+    return p
+
+
+def _il_adapter(monkeypatch, stop_on_sleep=True):
+    """Adapter with a fresh stop event and a sleep that ends the loop."""
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._stop_event = asyncio.Event()
+
+    async def fake_sleep(s=0):
+        if stop_on_sleep:
+            a._stop_event.set()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    return a
+
+
+_PLAIN = {"use_tls": False, "retry_backoff_initial": 0.5, "retry_backoff_max": 1.0}
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_first_dial_short_session(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    peer = _il_peer(dict(_PLAIN, retry_short_session_sec=5.0))
+    announced = []
+    a._announce_verify_mode = lambda p, m: announced.append((p.host, m))
+    seen = []
+
+    async def fake_handshake(r, w, cid):
+        seen.append(("handshake", cid))
+
+    async def fake_read(cid):
+        seen.append(("read", cid))
+
+    async def fake_open(*args, **kw):
+        return object(), _IL_Writer()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    a._perform_client_handshake = fake_handshake
+    a._read_loop = fake_read
+
+    await a._initiator_loop(peer)
+    # first dial (no prior ts) -> "Connecting", attempts reset to 1
+    assert peer._dial_attempts == 1
+    assert announced == [("il-host", "plain")]
+    assert peer._last_dial_ts > 0
+    # plain connect, handshake + read loop ran, session < 5s -> throttled
+    assert ("handshake", seen[0][1]) in seen[0:1] or any(k == "handshake" for k, _ in seen)
+    assert any(k == "read" for k, _ in seen)
+    assert a._stop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_retry_log_increments_attempts(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    peer = _il_peer(dict(_PLAIN), ts=10.0, attempts=3)
+
+    async def fake_open(*args, **kw):
+        raise OSError("dial down")
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    await a._initiator_loop(peer)
+    # prior dial ts present -> "Retrying" path increments the counter
+    assert peer._dial_attempts == 4
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_backoff_param_fallbacks(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    # bad values -> the three float() excepts fall back to 2.0 / 30.0 / 5.0
+    peer = _il_peer(
+        {"use_tls": False, "retry_backoff_initial": "bad", "retry_backoff_max": "bad", "retry_short_session_sec": "bad"}
+    )
+
+    async def fake_open(*args, **kw):
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    # dial raises -> ConnectionRefusedError handler -> backoff sleep ends loop
+    await a._initiator_loop(peer)
+    assert a._stop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_tls_ctx_none_refuses_plaintext(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    dials = []
+
+    async def no_ctx(peer):
+        return None
+
+    async def fake_open(*args, **kw):
+        dials.append(kw)
+
+    a._create_client_ssl_context = no_ctx
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    peer = _il_peer({"use_tls": True})
+    await a._initiator_loop(peer)
+    # ctx None -> OSError raised before any dial; no plaintext connect happened
+    assert dials == []
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_tls_server_hostname_used(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    seen = []
+
+    async def fake_ctx(peer):
+        return object()  # truthy SSL-ish context
+
+    async def fake_open(*args, **kw):
+        seen.append(kw)
+        raise OSError("down")
+
+    a._create_client_ssl_context = fake_ctx
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    peer = _il_peer({"use_tls": True, "server_hostname": "sn.example"})
+    await a._initiator_loop(peer)
+    assert seen and seen[0].get("server_hostname") == "sn.example"
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_tls_server_hostname_except(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    seen = []
+
+    async def fake_ctx(peer):
+        return object()
+
+    async def fake_open(*args, **kw):
+        seen.append(kw)
+        raise OSError("down")
+
+    a._create_client_ssl_context = fake_ctx
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    peer = _il_peer(_OptsSNRaise(use_tls=True))  # get("server_hostname") raises
+    await a._initiator_loop(peer)
+    # except -> safe default to peer.host
+    assert seen and seen[0].get("server_hostname") == "il-host"
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_local_bind_addr(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    seen = []
+
+    async def fake_open(*args, **kw):
+        seen.append(kw)
+        raise OSError("down")
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    peer = _il_peer(dict(_PLAIN, bind_host="127.0.0.9", bind_port="7777"))
+    await a._initiator_loop(peer)
+    # bind_host + int(bind_port) -> local_addr tuple
+    assert seen and seen[0].get("local_addr") == ("127.0.0.9", 7777)
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_local_bind_bad_port(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    seen = []
+
+    async def fake_open(*args, **kw):
+        seen.append(kw)
+        raise OSError("down")
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    peer = _il_peer(dict(_PLAIN, bind_host="127.0.0.9", bind_port="notaport"))
+    await a._initiator_loop(peer)
+    # int() fails -> except -> local_addr stays None
+    assert seen and seen[0].get("local_addr") is None
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_routing_connect_iface(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    routed = []
+
+    async def fake_routing(host, port, ssl_ctx, ssh, local_addr, **kw):
+        routed.append(kw)
+        raise OSError("routing down")
+
+    async def fake_open(*args, **kw):
+        raise AssertionError("plain connect used despite interface option")
+
+    a._connect_with_routing_options = fake_routing
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    peer = _il_peer(dict(_PLAIN, interface="eth9"))
+    await a._initiator_loop(peer)
+    # iface set -> platform routing connect, fwmark None by default
+    assert routed and routed[0].get("interface") == "eth9" and routed[0].get("fwmark") is None
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_routing_connect_fwmark(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    routed = []
+
+    async def fake_routing(host, port, ssl_ctx, ssh, local_addr, **kw):
+        routed.append(kw)
+        raise OSError("routing down")
+
+    a._connect_with_routing_options = fake_routing
+    peer = _il_peer(dict(_PLAIN, interface="eth9", fwmark="7"))
+    await a._initiator_loop(peer)
+    # fwmark "7" -> int 7 passed to the routing connect
+    assert routed and routed[0].get("fwmark") == 7
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_routing_fwmark_bad(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    routed = []
+
+    async def fake_routing(host, port, ssl_ctx, ssh, local_addr, **kw):
+        routed.append(kw)
+        raise OSError("routing down")
+
+    a._connect_with_routing_options = fake_routing
+    peer = _il_peer(dict(_PLAIN, interface="eth9", fwmark="notanint"))
+    await a._initiator_loop(peer)
+    # int("notanint") fails -> except -> fwmark None (iface still routes)
+    assert routed and routed[0].get("interface") == "eth9" and routed[0].get("fwmark") is None
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_fingerprint_fail_writer_closed(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    seen = []
+    w = _IL_Writer()
+
+    async def fake_ctx(peer):
+        return object()
+
+    async def fake_verify(peer, writer):
+        raise ValueError("fp boom")
+
+    async def fake_open(*args, **kw):
+        seen.append(kw)
+        return object(), w
+
+    a._create_client_ssl_context = fake_ctx
+    a._verify_peer_fingerprint = fake_verify
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    peer = _il_peer({"use_tls": True})
+    await a._initiator_loop(peer)
+    # fingerprint failed -> writer closed + wait_closed best-effort -> re-raise
+    # -> generic retryable-failure handler -> backoff sleep ends loop
+    assert w.close_calls == 1 and w.wait_closed_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_fingerprint_fail_writer_close_raises(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    w = _IL_Writer(close_raises=True)
+
+    async def fake_ctx(peer):
+        return object()
+
+    async def fake_verify(peer, writer):
+        raise ValueError("fp boom")
+
+    async def fake_open(*args, **kw):
+        return object(), w
+
+    a._create_client_ssl_context = fake_ctx
+    a._verify_peer_fingerprint = fake_verify
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    peer = _il_peer({"use_tls": True})
+    # writer.close() raising -> inner except (best-effort) swallows; re-raise
+    await a._initiator_loop(peer)
+    assert a._stop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_long_session_resets_backoff(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    hs = []
+
+    async def fake_handshake(r, w, cid):
+        hs.append(cid)
+
+    async def fake_read(cid):
+        pass
+
+    pair = (object(), _IL_Writer())
+
+    async def fake_open(*args, **kw):
+        if not hs:
+            return pair
+        raise OSError("second dial down")
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    a._perform_client_handshake = fake_handshake
+    a._read_loop = fake_read
+    # short_session_sec 0.0 -> any session duration resets backoff to base
+    peer = _il_peer(dict(_PLAIN, retry_short_session_sec=0.0))
+    await a._initiator_loop(peer)
+    assert len(hs) == 1
+    # second dial failed -> OSError handler -> sleep -> stop
+    assert a._stop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_conn_reset_timeout_handlers(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    sleeps = []
+
+    async def counting_sleep(s=0):
+        sleeps.append(s)
+        if len(sleeps) >= 3:
+            a._stop_event.set()
+
+    monkeypatch.setattr(asyncio, "sleep", counting_sleep)
+    errs = iter([ConnectionRefusedError("r"), ConnectionResetError("s"), TimeoutError("t")])
+
+    def raising_open(*args, **kw):
+        raise next(errs)
+
+    monkeypatch.setattr(asyncio, "open_connection", raising_open)
+    peer = _il_peer(dict(_PLAIN))
+    await a._initiator_loop(peer)
+    # one backoff sleep per failed dial type; loop stopped after the third
+    assert len(sleeps) == 3
+
+
+class _OptsIfaceRaise(dict):
+    """Options where only the ``interface`` lookup raises (route except)."""
+
+    def get(self, key, default=None):
+        if key == "interface":
+            raise RuntimeError("iface boom")
+        return super().get(key, default)
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_iface_get_raises(monkeypatch):
+    a = _il_adapter(monkeypatch)
+    seen = []
+
+    async def fake_open(*args, **kw):
+        seen.append(kw)
+        raise OSError("down")
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    routed = []
+
+    async def fake_routing(*a, **k):
+        routed.append(k)
+
+    a._connect_with_routing_options = fake_routing  # must NOT be used
+    peer = _il_peer(_OptsIfaceRaise(use_tls=False, retry_backoff_initial=0.5, retry_backoff_max=1.0))
+    await a._initiator_loop(peer)
+    # interface lookup raised -> except -> iface None -> plain connect path
+    assert routed == []
+    assert len(seen) == 1 and a._stop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_throttle_cancel_breaks(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._stop_event = asyncio.Event()
+    cancelled = False
+
+    async def cancelling_sleep(s=0):
+        nonlocal cancelled
+        cancelled = True
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(asyncio, "sleep", cancelling_sleep)
+
+    async def fake_open(*args, **kw):
+        return object(), _IL_Writer()
+
+    async def fake_handshake(*a, **k):
+        pass
+
+    async def fake_read(cid):
+        pass
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open)
+    a._perform_client_handshake = fake_handshake
+    a._read_loop = fake_read
+    peer = _il_peer(dict(_PLAIN, retry_short_session_sec=5.0))
+    # short session -> throttle sleep -> CancelledError -> break (no stop event)
+    await a._initiator_loop(peer)
+    assert cancelled is True and a._stop_event.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_initiator_loop_outer_cancel_breaks(monkeypatch):
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._stop_event = asyncio.Event()
+
+    def cancel_open(*args, **kw):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(asyncio, "open_connection", cancel_open)
+    peer = _il_peer(dict(_PLAIN))
+    # dial itself cancelled -> outer CancelledError handler -> break (no stop event)
+    await a._initiator_loop(peer)
+    assert a._stop_event.is_set() is False
+
+
 def test_verify_mode_resolution_matrix():
     a = UnifiedMuxConAdapter("mx", {"listeners": []})
     # Default (no optional keys): ToFU gate with relaxed TLS-level check

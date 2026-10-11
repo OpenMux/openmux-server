@@ -3217,11 +3217,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             except Exception:  # justification: writer cleanup on handshake failure is best-effort
                 pass
 
-    async def _initiator_loop(self, peer: FederationPeer):
-        """Maintain outbound connection with exponential backoff reconnect.
+    @staticmethod
+    def _il_backoff_params(peer: FederationPeer) -> Tuple[float, float, float]:
+        """Read the per-peer retry backoff parameters (default-safe).
 
-        Args:
-            peer: Peer configuration to dial and monitor.
+        Returns ``(base_backoff, max_backoff, short_session_sec)``; a value
+        that cannot be coerced to float falls back to the safe default
+        (2.0 / 30.0 / 5.0 seconds).
         """
         # Backoff parameters (per-peer configurable)
         try:
@@ -3236,68 +3238,170 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             short_session_sec = float(peer.options.get("retry_short_session_sec", 5.0))
         except Exception:
             short_session_sec = 5.0
+        return base_backoff, max_backoff, short_session_sec
+
+    def _il_note_dial_attempt(self, peer: FederationPeer) -> None:
+        """Log a dial attempt and update the peer's retry bookkeeping.
+
+        The dial attempt bookkeeping survives restarts of the loop, so the
+        retry logs show how long this peer has been unreachable.
+        """
+        if getattr(peer, "_last_dial_ts", 0):
+            peer._dial_attempts = int(getattr(peer, "_dial_attempts", 0)) + 1
+            self.logger.info(
+                "Retrying MuxCon peer %s:%s (attempt %d, %.0fs since last dial)",
+                peer.host,
+                peer.port,
+                peer._dial_attempts,
+                time.time() - peer._last_dial_ts,
+            )
+        else:
+            peer._dial_attempts = 1
+            self.logger.info("Connecting to MuxCon peer %s:%s", peer.host, peer.port)
+        peer._last_dial_ts = time.time()
+
+    async def _il_client_ssl_context(self, peer: FederationPeer, use_tls: bool):
+        """Build the client SSL context for a dial, or fail closed to OSError.
+
+        Default-safe: enable TLS for initiators unless explicitly disabled.
+        When TLS is requested but the context cannot be built, an OSError is
+        raised so the retry loop backs off instead of dialing in plaintext.
+        """
+        # Build client SSL context if requested
+        ssl_ctx = None
+        if use_tls:
+            ssl_ctx = await self._create_client_ssl_context(peer)
+            if ssl_ctx is None:
+                # Fail closed: retry after backoff instead of dialing in plaintext
+                raise OSError(f"Client TLS unavailable for {peer.host}:{peer.port}; refusing plaintext dial")
+        else:
+            self._announce_verify_mode(peer, "plain")
+        return ssl_ctx
+
+    def _il_server_hostname(self, peer: FederationPeer, ssl_ctx) -> Optional[str]:
+        """Derive the SNI/verification hostname for a TLS dial.
+
+        Sent in every TLS mode. In "ca" and "system" modes it is also the
+        name verification checks; in "pin", "tofou", and "off" modes the
+        TLS-level check is relaxed.
+        """
+        server_hostname = None
+        if ssl_ctx is not None:
+            try:
+                server_hostname = peer.options.get("server_hostname") or peer.host
+            except Exception:  # justification: derive SNI/hostname fallback; safe default to peer.host
+                server_hostname = peer.host
+        return server_hostname
+
+    @staticmethod
+    def _il_local_addr(peer: FederationPeer) -> Optional[Tuple[str, int]]:
+        """Build an optional local bind tuple from the peer options.
+
+        A local bind influences routing via source address. A bind host with
+        a non-integer port is treated as if no bind was requested.
+        """
+        # Optional local bind to influence routing via source address
+        local_addr = None
+        try:
+            bind_host = peer.options.get("bind_host") or peer.options.get("source_ip")
+            if bind_host:
+                bind_port = int(peer.options.get("bind_port", 0))
+                local_addr = (str(bind_host), bind_port)
+        except Exception:
+            local_addr = None
+        return local_addr
+
+    @staticmethod
+    def _il_routing_opts(peer: FederationPeer) -> Tuple[Optional[str], Optional[int]]:
+        """Resolve the platform routing/interface selection for a dial.
+
+        Returns ``(iface, fwmark)``; either may be None. Unparseable values
+        fall back to None rather than failing the dial.
+        """
+        # Platform routing/interface selection
+        iface = None
+        fwmark = None
+        try:
+            iface = peer.options.get("interface") or peer.options.get("bind_interface")
+        except Exception:
+            iface = None
+        try:
+            mark_opt = peer.options.get("fwmark") or peer.options.get("routing_mark") or peer.options.get("so_mark")
+            if mark_opt is not None:
+                fwmark = int(mark_opt)
+        except Exception:
+            fwmark = None
+        return iface, fwmark
+
+    async def _il_verify_fingerprint(self, peer: FederationPeer, use_tls: bool, writer) -> None:
+        """Run the fingerprint gate (pin / ToFU) after a TLS dial.
+
+        Runs only on TLS connections: a plaintext peer has no certificate to
+        check. On verification failure the writer is closed best-effort and
+        the error re-raised so the retry loop backs off.
+        """
+        if use_tls:
+            try:
+                await self._verify_peer_fingerprint(peer, writer)
+            except Exception as e:
+                self.logger.warning(
+                    "Peer fingerprint verification failed for %s:%s: %s", peer.host, peer.port, e, exc_info=True
+                )
+                try:
+                    await _await_writer_closed(writer, self.logger)
+                except Exception:  # justification: writer close best-effort after fingerprint failure
+                    pass
+                raise
+
+    async def _il_backoff_retry(self, backoff: float, max_backoff: float) -> float:
+        """Sleep one backoff and return the next (doubled, capped) backoff."""
+        await asyncio.sleep(backoff)
+        return min(backoff * 2, max_backoff)
+
+    async def _il_finish_session(
+        self,
+        peer: FederationPeer,
+        session_dur: float,
+        short_session_sec: float,
+        backoff: float,
+        base_backoff: float,
+        max_backoff: float,
+    ) -> float:
+        """Reset or throttle the backoff after a session ended.
+
+        A session that lived at least ``short_session_sec`` resets the
+        backoff to the base value. A short-lived session logs a warning,
+        waits one backoff, and returns the doubled (capped) backoff. A
+        cancellation during that wait propagates to the caller's
+        CancelledError handler (the loop breaks there).
+        """
+        # Reset backoff only if the session lived long enough
+        if session_dur >= short_session_sec:
+            return base_backoff
+        # Short-lived session: throttle reconnection attempts
+        self.logger.warning(
+            f"MuxCon session to {peer.host}:{peer.port} ended after {session_dur:.2f}s; throttling reconnect backoff={backoff:.1f}s"
+        )
+        await asyncio.sleep(backoff)
+        return min(backoff * 2, max_backoff)
+
+    async def _initiator_loop(self, peer: FederationPeer):
+        """Maintain outbound connection with exponential backoff reconnect.
+
+        Args:
+            peer: Peer configuration to dial and monitor.
+        """
+        base_backoff, max_backoff, short_session_sec = self._il_backoff_params(peer)
         backoff = base_backoff
         while not self._stop_event.is_set():
             try:
-                # Dial attempt bookkeeping survives restarts of the loop, so the
-                # retry logs show how long this peer has been unreachable.
-                if getattr(peer, "_last_dial_ts", 0):
-                    peer._dial_attempts = int(getattr(peer, "_dial_attempts", 0)) + 1
-                    self.logger.info(
-                        "Retrying MuxCon peer %s:%s (attempt %d, %.0fs since last dial)",
-                        peer.host,
-                        peer.port,
-                        peer._dial_attempts,
-                        time.time() - peer._last_dial_ts,
-                    )
-                else:
-                    peer._dial_attempts = 1
-                    self.logger.info("Connecting to MuxCon peer %s:%s", peer.host, peer.port)
-                peer._last_dial_ts = time.time()
-                # Build client SSL context if requested
+                self._il_note_dial_attempt(peer)
                 # Default-safe: enable TLS for initiators unless explicitly disabled
                 use_tls = bool(peer.options.get("use_tls", True))
-                ssl_ctx = None
-                if use_tls:
-                    ssl_ctx = await self._create_client_ssl_context(peer)
-                    if ssl_ctx is None:
-                        # Fail closed: retry after backoff instead of dialing in plaintext
-                        raise OSError(f"Client TLS unavailable for {peer.host}:{peer.port}; refusing plaintext dial")
-                else:
-                    self._announce_verify_mode(peer, "plain")
-                # SNI/verification hostname: sent in every TLS mode. In "ca" and
-                # "system" modes it is also the name verification checks; in
-                # "pin", "tofou", and "off" modes the TLS-level check is relaxed.
-                server_hostname = None
-                if ssl_ctx is not None:
-                    try:
-                        server_hostname = peer.options.get("server_hostname") or peer.host
-                    except Exception:  # justification: derive SNI/hostname fallback; safe default to peer.host
-                        server_hostname = peer.host
-                # Optional local bind to influence routing via source address
-                local_addr = None
-                try:
-                    bind_host = peer.options.get("bind_host") or peer.options.get("source_ip")
-                    if bind_host:
-                        bind_port = int(peer.options.get("bind_port", 0))
-                        local_addr = (str(bind_host), bind_port)
-                except Exception:
-                    local_addr = None
-
-                # Platform routing/interface selection
-                iface = None
-                fwmark = None
-                try:
-                    iface = peer.options.get("interface") or peer.options.get("bind_interface")
-                except Exception:
-                    iface = None
-                try:
-                    mark_opt = peer.options.get("fwmark") or peer.options.get("routing_mark") or peer.options.get("so_mark")
-                    if mark_opt is not None:
-                        fwmark = int(mark_opt)
-                except Exception:
-                    fwmark = None
-
+                ssl_ctx = await self._il_client_ssl_context(peer, use_tls)
+                server_hostname = self._il_server_hostname(peer, ssl_ctx)
+                local_addr = self._il_local_addr(peer)
+                iface, fwmark = self._il_routing_opts(peer)
                 if iface or fwmark is not None:
                     reader, writer = await self._connect_with_routing_options(
                         peer.host,
@@ -3318,59 +3422,33 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     )
                 # Fingerprint gate (pin / ToFU). Runs only on TLS connections:
                 # a plaintext peer has no certificate to check.
-                if use_tls:
-                    try:
-                        await self._verify_peer_fingerprint(peer, writer)
-                    except Exception as e:
-                        self.logger.warning(
-                            "Peer fingerprint verification failed for %s:%s: %s", peer.host, peer.port, e, exc_info=True
-                        )
-                        try:
-                            await _await_writer_closed(writer, self.logger)
-                        except Exception:  # justification: writer close best-effort after fingerprint failure
-                            pass
-                        raise
+                await self._il_verify_fingerprint(peer, use_tls, writer)
                 conn_id = f"out:{peer.host}:{peer.port}:{int(time.time())}"
                 session_start = time.time()
                 await self._perform_client_handshake(reader, writer, conn_id)
                 # Reader loop (blocks until error/EOF)
                 await self._read_loop(conn_id)
                 session_dur = time.time() - session_start
-                # Reset backoff only if the session lived long enough
-                if session_dur >= short_session_sec:
-                    backoff = base_backoff
-                else:
-                    # Short-lived session: throttle reconnection attempts
-                    self.logger.warning(
-                        f"MuxCon session to {peer.host}:{peer.port} ended after {session_dur:.2f}s; throttling reconnect backoff={backoff:.1f}s"
-                    )
-                    try:
-                        await asyncio.sleep(backoff)
-                    except asyncio.CancelledError:
-                        break
-                    backoff = min(backoff * 2, max_backoff)
+                backoff = await self._il_finish_session(
+                    peer, session_dur, short_session_sec, backoff, base_backoff, max_backoff
+                )
             except asyncio.CancelledError:
                 break
             except ConnectionRefusedError:
                 self.logger.warning("MuxCon initiator connection refused by %s:%s", peer.host, peer.port)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+                backoff = await self._il_backoff_retry(backoff, max_backoff)
             except ConnectionResetError:
                 self.logger.warning("MuxCon initiator connection reset by peer %s:%s", peer.host, peer.port)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+                backoff = await self._il_backoff_retry(backoff, max_backoff)
             except TimeoutError:
                 self.logger.warning("MuxCon initiator connection timeout to %s:%s", peer.host, peer.port)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+                backoff = await self._il_backoff_retry(backoff, max_backoff)
             except OSError as e:
                 self.logger.warning("MuxCon initiator connection error to %s:%s: %s", peer.host, peer.port, e)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+                backoff = await self._il_backoff_retry(backoff, max_backoff)
             except Exception as e:  # justification: retryable failures logged at warning; backoff governs retries
                 self.logger.warning("MuxCon initiator connection error to %s:%s: %s", peer.host, peer.port, e, exc_info=True)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+                backoff = await self._il_backoff_retry(backoff, max_backoff)
 
     def _connect_local_bind(self, sock: socket.socket, local_addr: Optional[Tuple[str, int]]) -> None:
         """Bind an outbound socket to a local address; failures only warn."""
