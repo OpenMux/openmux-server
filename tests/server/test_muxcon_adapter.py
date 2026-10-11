@@ -2487,6 +2487,280 @@ async def test_send_local_port_list_no_pm(monkeypatch):
     assert w.buffer == b""
 
 
+# --- _send_local_port_list: branch coverage (bracket-C901) ------------------
+# The happy-path tests above cover loopback + first-enabled-listener, but the
+# remote_muxcon filter skip, the port-filter continue, the PDU power-adapter
+# finder (and its inner/outer excepts), the "state"-key status, the loopback
+# default line status, the feed-states builder (no-adapter / empty / raising),
+# the "port" key name fallback, and the outer error handler were untested.
+# These pin that behavior so the bracket-C901 refactor is provably
+# behavior-preserving.
+# ---------------------------------------------------------------------------
+
+
+class _SLPL_PM:
+    def __init__(self, ports, adapters=None):
+        self._ports = ports
+        self.unified_adapters = adapters
+
+    async def get_port_list_with_federation(self):
+        return list(self._ports)
+
+
+class _SLPL_RaisingAdapterType:
+    def get_adapter_type(self):
+        raise RuntimeError("type boom")
+
+
+def _slpl_setup(a, conn_id, ports, adapters=None):
+    a.main_port_manager = _SLPL_PM(ports, adapters)
+    w = FakeWriter()
+    a.connections[conn_id] = {"writer": w, "auth_ok": True}
+    a._wire_state[conn_id] = {"send_next": 1}
+    return cast(Any, w)
+
+
+class _AsyncFrameSpy:
+    """A stand-in for _send_protocol_frame that records calls (no buffer write),
+    used to assert the outer-error path never sent a frame."""
+
+    def __init__(self):
+        self.called = 0
+
+    async def __call__(self, writer, frame):
+        self.called += 1
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_skips_remote_muxcon():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    w = _slpl_setup(
+        a,
+        "c1",
+        [
+            {"name": "remote1", "adapter_type": "remote_muxcon", "connected": True},
+            {"name": "local1", "adapter_type": "loopback", "connected": True},
+        ],
+    )
+    await a._send_local_port_list("c1", w)
+    assert b"local1" in w.buffer and b"remote1" not in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_port_filter_skip():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    a._adv_name_exc = ["skip*"]
+    w = _slpl_setup(
+        a,
+        "c2",
+        [
+            {"name": "skip1", "adapter_type": "loopback", "connected": True},
+            {"name": "keep1", "adapter_type": "loopback", "connected": True},
+        ],
+    )
+    await a._send_local_port_list("c2", w)
+    assert b"keep1" in w.buffer and b"skip1" not in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_power_refs_qualified():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    power = SimpleNamespace()
+    power.get_adapter_type = lambda: "power"
+
+    def feed_states(port_name):
+        if port_name == "local2":
+            return {"out1": True, "out2": False}
+        return {}
+
+    power.feed_states = feed_states
+    w = _slpl_setup(a, "c3", [{"name": "local2", "adapter_type": "serial", "connected": True}], adapters=[power])
+    await a._send_local_port_list("c3", w)
+    # refs are advertised GLOBALLY qualified ("<server_id>::<ref>"); the
+    # server_id is this adapter's self.server_id (a hostname here, not "mx"),
+    # so assert the "::" qualification + the power array rather than a fixed prefix.
+    buf = bytes(w.buffer)
+    assert b"power" in buf and b"::out1" in buf and b"::out2" in buf
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_power_raises_in_inner():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    w = _slpl_setup(
+        a,
+        "c4",
+        [{"name": "local3", "adapter_type": "serial", "connected": True}],
+        adapters=[_SLPL_RaisingAdapterType()],
+    )
+    await a._send_local_port_list("c4", w)
+    # inner except -> continue -> power_adapter stays None -> port sent without power
+    assert b"local3" in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_power_outer_sets_none():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+
+    class _BadIter:
+        def __iter__(self):
+            raise RuntimeError("outer boom")
+
+    w = _slpl_setup(
+        a,
+        "c5",
+        [
+            {"name": "local4", "adapter_type": "loopback", "connected": True},
+        ],
+        adapters=_BadIter(),
+    )
+    await a._send_local_port_list("c5", w)
+    # outer except -> power_adapter = None -> port still sent, just without power
+    assert b"local4" in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_feed_states_none_and_empty():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    power = SimpleNamespace()
+    power.get_adapter_type = lambda: "power"
+
+    def fs(name):
+        if name == "nosf":
+            return {}  # empty -> feed_states_for returns None
+        raise RuntimeError("feed_states boom")  # -> inner try/except -> None
+
+    power.feed_states = fs
+    w = _slpl_setup(
+        a,
+        "c6",
+        [
+            {"name": "nosf", "adapter_type": "serial", "connected": True},
+            {"name": "oth", "adapter_type": "serial", "connected": True},
+        ],
+        adapters=[power],
+    )
+    await a._send_local_port_list("c6", w)
+    assert b"nosf" in w.buffer and b"oth" in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_state_key_status():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    w = _slpl_setup(
+        a,
+        "c7",
+        [
+            {"name": "l8", "adapter_type": "loopback", "state": "draining", "max_rw_users": 1},
+        ],
+    )
+    await a._send_local_port_list("c7", w)
+    assert b"draining" in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_serial_line_status_captured():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    w = _slpl_setup(
+        a,
+        "c8",
+        [
+            {
+                "name": "l9",
+                "adapter_type": "serial",
+                "connected": True,
+                "serial_config": {"device": "/dev/ttyX", "baudrate": 115200},
+                "line_status": {"DCD": True},
+            }
+        ],
+    )
+    await a._send_local_port_list("c8", w)
+    assert b"/dev/ttyX" in w.buffer and b"115200" in w.buffer and b"DCD" in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_loopback_default_line_status():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    w = _slpl_setup(a, "c9", [{"name": "loop1", "adapter_type": "loopback", "connected": True}])
+    await a._send_local_port_list("c9", w)
+    assert b"loopback:loop1" in w.buffer and b"DCD" in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_port_key_name_fallback():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    w = _slpl_setup(a, "c10", [{"port": "pkey1", "adapter_type": "loopback", "connected": True}])
+    await a._send_local_port_list("c10", w)
+    assert b"pkey1" in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_loopback_custom_line_status():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    w = _slpl_setup(
+        a,
+        "c12",
+        [
+            {"name": "lcx", "adapter_type": "loopback", "connected": True, "line_status": {"DCD": True}},
+        ],
+    )
+    await a._send_local_port_list("c12", w)
+    assert b"loopback:lcx" in w.buffer and b"DCD" in w.buffer
+
+
+def _port_with_raising_serial_attr():
+    """A port whose access to 'serial_config' raises inside the
+    serial/loopback metadata try, pinning the except branch."""
+
+    class _BadKeyDict(dict):
+        def get(self, key, default=None):
+            if key == "serial_config":
+                raise RuntimeError("serial_config accessor boom")
+            return super().get(key, default)
+
+    return _BadKeyDict({"name": "r1", "adapter_type": "Serial", "connected": True})
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_serial_metadata_raises():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    w = _slpl_setup(a, "c13", [_port_with_raising_serial_attr()])
+    await a._send_local_port_list("c13", w)
+    # except -> serial_cfg/line_status stay None -> port is still sent (no serial details)
+    assert b"r1" in w.buffer
+
+
+@pytest.mark.asyncio
+async def test_send_local_port_list_outer_error():
+    a = UnifiedMuxConAdapter("mx", {"listeners": []})
+    a._adv_name_inc = ["*"]
+    a.main_port_manager = _SLPL_PM([{"name": "l", "adapter_type": "loopback", "connected": True}])
+
+    async def _boom():
+        raise RuntimeError("nope")
+
+    a.main_port_manager.get_port_list_with_federation = _boom
+    w = cast(Any, FakeWriter())
+    a.connections["c11"] = {"writer": w, "auth_ok": True}
+    a._wire_state["c11"] = {"send_next": 1}
+    spy = _AsyncFrameSpy()
+    a._send_protocol_frame = spy
+    # outer except logs and swallows; must not raise and must not send a frame
+    await a._send_local_port_list("c11", w)
+    assert spy.called == 0 and w.buffer == b""
+
+
 @pytest.mark.asyncio
 async def test_control_ports_list_federated_ignored():
     a = UnifiedMuxConAdapter("mx", {"listeners": []})

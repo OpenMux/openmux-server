@@ -4887,23 +4887,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 return
             all_ports = await self.main_port_manager.get_port_list_with_federation()
 
-            # Filter out already-federated remote ports if possible
-            def is_remote(entry: Dict[str, Any]) -> bool:
-                at = entry.get("adapter_type") or entry.get("adapter")
-                return at == "remote_muxcon"
-
-            # Apply advertise filters to local ports
-            exposed = []
-            for p in all_ports:
-                if is_remote(p):
-                    continue
-                pname = p.get("name") or p.get("port") or ""
-                atype = p.get("adapter_type") or p.get("adapter") or ""
-                # server filter rarely applies on advertise; ignore unless configured
-                sid = self.server_id
-                if not self._allow_advertise_port_for_conn(conn_id, pname, atype, sid):
-                    continue
-                exposed.append(p)
+            # Apply advertise filters (and skip already-federated remote ports)
+            exposed = self._slpl_exposed_ports(conn_id, all_ports)
 
             # Build PortMetadata list
             from ...common.federation_types import PortMetadata
@@ -4921,123 +4906,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 server_type=ServerType.LEAF,
                 description=self.server_description or "",
             )
-            # PDU power feeds (outlet federation): resolve each exposed
-            # port's feed states from the local PDU adapter so peers can
-            # render the same feed badge / power menu. Best-effort: a port
-            # without feeds (or no power adapter) omits the field.
-            power_adapter = None
-            try:
-                for a in getattr(self.main_port_manager, "unified_adapters", []) or []:
-                    try:
-                        if str(a.get_adapter_type()).lower() == "power":
-                            power_adapter = a
-                            break
-                    except Exception:
-                        continue
-            except Exception:
-                power_adapter = None
-
-            def feed_states_for(entry: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-                try:
-                    if power_adapter is None or not hasattr(power_adapter, "feed_states"):
-                        return None
-                    port_name = str(entry.get("name") or "")
-                    states = power_adapter.feed_states(port_name) or {}
-                    if not states:
-                        return None
-                    # Refs are advertised GLOBALLY qualified ("<server_id>::<ref>")
-                    # so a peer can tell this node's outlet <ref> from an
-                    # identically named outlet on its own or another node
-                    # (outlet federation). states is keyed by the port's local
-                    # feed entries; the prefix is this node's server id.
-                    return [{"ref": remote_ref(self.server_id, str(r)), "on": states.get(str(r))} for r in states]
-                except Exception:
-                    # justification: optional power metadata; the port advertises without it
-                    return None
+            power_adapter = self._slpl_power_adapter()
 
             metas: List[PortMetadata] = []
             for p in exposed:
-                name = p.get("name") or p.get("port") or "unknown"
-                desc = p.get("description", "")
-                adapter_type = p.get("adapter_type") or p.get("adapter") or "unknown"
-                status = "connected"
-                if "connected" in p:
-                    status = "connected" if p.get("connected") else "disconnected"
-                elif "state" in p:
-                    status = p.get("state")
-                # Port-level write-slot capacity (issue #59): local ports carry the
-                # mode ("one"/"multiple"/"none" or a legacy int); the wire keeps the
-                # capacity int so older peers (integer-only) apply the same >= 2
-                # behavior on their side, while new peers re-derive the mode from it.
-                max_rw = capacity_to_wire(p.get("max_read_write_users", p.get("max_rw_users", 1)))
-                rw_groups = p.get("read_write_groups") or None
-                ro_groups = p.get("read_only_groups") or None
-                # Offline reason (issue #62): forwarded to federated peers so the
-                # remote status page / info panel can surface the same text the
-                # origin shows (empty string stays None and is omitted from the wire).
-                status_message = p.get("status_message") or None
-                # Readiness (issue #68): derived by the wrapper snapshot; absent
-                # on pre-fix local states, so it is simply omitted from the wire.
-                readiness = p.get("readiness") or None
-                # Optional serial details for local serial or loopback ports
-                serial_cfg = None
-                line_status = None
-                try:
-                    at_lower = str(adapter_type).lower()
-                    sc = p.get("serial_config") or {}
-                    if sc:
-                        # Forward whatever config the local adapter snapshot provides
-                        # (serial/loopback have full fields, command/tcp_initiator only
-                        # set "device" so remote peers still see a Device value).
-                        serial_cfg = {
-                            "device": sc.get("device"),
-                            "baudrate": sc.get("baudrate"),
-                            "bytesize": sc.get("bytesize"),
-                            "parity": sc.get("parity"),
-                            "stopbits": sc.get("stopbits"),
-                            "flow_control": sc.get("flow_control"),
-                        }
-                        ls = p.get("line_status")
-                        if isinstance(ls, dict) and ls:
-                            line_status = ls
-                    elif at_lower == "loopback":
-                        # Emulate serial-like metadata for loopback ports so remote peers
-                        # can render consistent details without UI-specific patches.
-                        serial_cfg = {
-                            "device": f"loopback:{name}",
-                            "baudrate": 9600,
-                            "bytesize": 8,
-                            "parity": "N",
-                            "stopbits": 1,
-                            "flow_control": "none",
-                        }
-                        ls = p.get("line_status")
-                        if isinstance(ls, dict) and ls:
-                            line_status = ls
-                        else:
-                            line_status = {"DCD": False, "DSR": True, "CTS": True, "RTS": True, "DTR": True}
-                except Exception:
-                    # justification: optional metadata; the default line status applies
-                    pass
-                metas.append(
-                    PortMetadata(
-                        name=name,
-                        original_name=name,
-                        description=desc,
-                        adapter_type=adapter_type,
-                        origin_server=server_info,
-                        server_chain=[server_info],
-                        status=status,
-                        max_rw_users=max_rw,
-                        serial_config=serial_cfg,
-                        line_status=line_status,
-                        read_write_groups=rw_groups,
-                        read_only_groups=ro_groups,
-                        status_message=status_message,
-                        readiness=readiness,
-                        power=feed_states_for(p),
-                    )
-                )
+                metas.append(self._slpl_port_meta(p, server_info, power_adapter))
 
             seq = self._next_frame_seq(conn_id)
             frame = self.proto.create_federated_port_list_response(metas, seq)
@@ -5045,6 +4918,156 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.info("Sent %s local ports in PORTS:FEDERATED response", len(metas))
         except Exception as e:
             self.logger.error("Error sending local port list: %s", e, exc_info=True)
+
+    def _slpl_exposed_ports(self, conn_id: str, all_ports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The locally-advertised ports: skip federated remote_muxcon entries and
+        any the per-connection advertise filters exclude.
+        """
+
+        def is_remote(entry: Dict[str, Any]) -> bool:
+            at = entry.get("adapter_type") or entry.get("adapter")
+            return at == "remote_muxcon"
+
+        # Apply advertise filters to local ports
+        exposed: List[Dict[str, Any]] = []
+        for p in all_ports:
+            if is_remote(p):
+                continue
+            pname = p.get("name") or p.get("port") or ""
+            atype = p.get("adapter_type") or p.get("adapter") or ""
+            # server filter rarely applies on advertise; ignore unless configured
+            sid = self.server_id
+            if not self._allow_advertise_port_for_conn(conn_id, pname, atype, sid):
+                continue
+            exposed.append(p)
+        return exposed
+
+    def _slpl_power_adapter(self) -> Optional[Any]:
+        """The first power adapter on the local port manager (or None)."""
+        power_adapter = None
+        try:
+            for a in getattr(self.main_port_manager, "unified_adapters", []) or []:
+                try:
+                    if str(a.get_adapter_type()).lower() == "power":
+                        power_adapter = a
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            power_adapter = None
+        return power_adapter
+
+    def _slpl_feed_states(self, entry: Dict[str, Any], power_adapter: Optional[Any]) -> Optional[List[Dict[str, Any]]]:
+        """This port's power-feed states, advertised GLOBALLY qualified."""
+        try:
+            if power_adapter is None or not hasattr(power_adapter, "feed_states"):
+                return None
+            port_name = str(entry.get("name") or "")
+            states = power_adapter.feed_states(port_name) or {}
+            if not states:
+                return None
+            # Refs are advertised GLOBALLY qualified ("<server_id>::<ref>")
+            # so a peer can tell this node's outlet <ref> from an
+            # identically named outlet on its own or another node
+            # (outlet federation). states is keyed by the port's local
+            # feed entries; the prefix is this node's server id.
+            return [{"ref": remote_ref(self.server_id, str(r)), "on": states.get(str(r))} for r in states]
+        except Exception:
+            # justification: optional power metadata; the port advertises without it
+            return None
+
+    def _slpl_port_meta(self, p: Dict[str, Any], server_info: Any, power_adapter: Optional[Any]) -> Any:
+        """Build one PortMetadata entry for an exposed local port."""
+        from ...common.federation_types import PortMetadata
+
+        name = p.get("name") or p.get("port") or "unknown"
+        desc = p.get("description", "")
+        adapter_type = p.get("adapter_type") or p.get("adapter") or "unknown"
+        status = "connected"
+        if "connected" in p:
+            status = "connected" if p.get("connected") else "disconnected"
+        elif "state" in p:
+            status = p.get("state")
+        # Port-level write-slot capacity (issue #59): local ports carry the
+        # mode ("one"/"multiple"/"none" or a legacy int); the wire keeps the
+        # capacity int so older peers (integer-only) apply the same >= 2
+        # behavior on their side, while new peers re-derive the mode from it.
+        max_rw = capacity_to_wire(p.get("max_read_write_users", p.get("max_rw_users", 1)))
+        rw_groups = p.get("read_write_groups") or None
+        ro_groups = p.get("read_only_groups") or None
+        # Offline reason (issue #62): forwarded to federated peers so the
+        # remote status page / info panel can surface the same text the
+        # origin shows (empty string stays None and is omitted from the wire).
+        status_message = p.get("status_message") or None
+        # Readiness (issue #68): derived by the wrapper snapshot; absent
+        # on pre-fix local states, so it is simply omitted from the wire.
+        readiness = p.get("readiness") or None
+        # Optional serial details for local serial or loopback ports
+        serial_cfg, line_status = self._slpl_serial_meta(p, adapter_type, name)
+        return PortMetadata(
+            name=name,
+            original_name=name,
+            description=desc,
+            adapter_type=adapter_type,
+            origin_server=server_info,
+            server_chain=[server_info],
+            status=status,
+            max_rw_users=max_rw,
+            serial_config=serial_cfg,
+            line_status=line_status,
+            read_write_groups=rw_groups,
+            read_only_groups=ro_groups,
+            status_message=status_message,
+            readiness=readiness,
+            power=self._slpl_feed_states(p, power_adapter),
+        )
+
+    def _slpl_serial_meta(
+        self, p: Dict[str, Any], adapter_type: str, name: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """(serial_config, line_status) for a local serial/loopback port, or
+        (None, None) when the optional metadata is absent / errors.
+        """
+        serial_cfg: Optional[Dict[str, Any]] = None
+        line_status: Optional[Dict[str, Any]] = None
+        try:
+            at_lower = str(adapter_type).lower()
+            sc = p.get("serial_config") or {}
+            if sc:
+                # Forward whatever config the local adapter snapshot provides
+                # (serial/loopback have full fields, command/tcp_initiator only
+                # set "device" so remote peers still see a Device value).
+                serial_cfg = {
+                    "device": sc.get("device"),
+                    "baudrate": sc.get("baudrate"),
+                    "bytesize": sc.get("bytesize"),
+                    "parity": sc.get("parity"),
+                    "stopbits": sc.get("stopbits"),
+                    "flow_control": sc.get("flow_control"),
+                }
+                ls = p.get("line_status")
+                if isinstance(ls, dict) and ls:
+                    line_status = ls
+            elif at_lower == "loopback":
+                # Emulate serial-like metadata for loopback ports so remote peers
+                # can render consistent details without UI-specific patches.
+                serial_cfg = {
+                    "device": f"loopback:{name}",
+                    "baudrate": 9600,
+                    "bytesize": 8,
+                    "parity": "N",
+                    "stopbits": 1,
+                    "flow_control": "none",
+                }
+                ls = p.get("line_status")
+                if isinstance(ls, dict) and ls:
+                    line_status = ls
+                else:
+                    line_status = {"DCD": False, "DSR": True, "CTS": True, "RTS": True, "DTR": True}
+        except Exception:
+            # justification: optional metadata; the default line status applies
+            pass
+        return serial_cfg, line_status
 
     # --- Port filter helpers ---
     def _match_any(self, value: str, patterns: List[str]) -> bool:
