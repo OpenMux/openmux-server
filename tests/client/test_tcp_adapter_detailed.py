@@ -7,6 +7,7 @@ from the legacy `ServerConnection`; redundant patterns have been reduced.
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -331,3 +332,182 @@ async def test_close_close_exception(adapter):
     adapter.reader = MagicMock()
     await adapter.close()
     assert adapter.writer is None and adapter.is_connected is False
+
+
+# ---------------------- _list_ports_standard framing ----------------------
+# The connect/auth tests above exercise the legacy "Port List:" blob path but
+# leave the modern LIST framing (JSON payload, LIST:SUCCESS ... END:LIST) and
+# the writer/reader guards untested. These pin that behavior so the bracket-
+# C901 refactor of _list_ports_standard is provably behavior-preserving.
+# ---------------------------------------------------------------------------
+
+
+class _R:
+    def __init__(self, readlines=None, read=b"", read_raises=False, reader=True):
+        self._ql = list(readlines or [])
+        self._read = read
+        self._read_raises = read_raises
+        self._reader = reader
+
+    def __bool__(self):
+        return self._reader
+
+    async def readline(self):
+        if self._ql:
+            return self._ql.pop(0)
+        return b""
+
+    async def read(self, n=4096):
+        if self._read_raises:
+            raise OSError("boom")
+        return self._read
+
+
+class _W:
+    def __init__(self):
+        self.buf = bytearray()
+
+    def write(self, data: bytes):
+        self.buf += data
+
+    async def drain(self):
+        return None
+
+
+def _a(write_ok=True, read_side=None):
+    a = TcpClientAdapter(host="test-server", port=5000, config={"use_tls": False})
+    a.writer = _W() if write_ok else None
+    a.reader = read_side
+    return a
+
+
+@pytest.mark.asyncio
+async def test_list_ports_no_writer():
+    a = _a(write_ok=False)
+    assert await a._list_ports_standard() == []
+
+
+@pytest.mark.asyncio
+async def test_list_ports_no_reader():
+    a = _a()
+    a.reader = None
+    assert await a._list_ports_standard() == []
+
+
+@pytest.mark.asyncio
+async def test_list_ports_readline_raises_fallback():
+    a = _a()
+    r = _R(readlines=[b""])
+
+    async def boom():
+        raise ValueError("no readline")
+
+    r.readline = boom
+    a.reader = r
+    assert await a._list_ports_standard() == []
+
+
+@pytest.mark.asyncio
+async def test_list_ports_json_happy_path():
+    a = _a()
+    payload = {"type": "PORT_LIST", "ports": [{"name": "a"}, {"name": "b"}], "server": {"server_id": "s1"}}
+    a.reader = _R(readlines=[("LIST:" + json.dumps(payload)).encode()])
+    out = await a._list_ports_standard()
+    assert out == ["a", "b"]
+    # last_port_metadata / last_server_info were stored from the JSON payload
+    assert [m["name"] for m in a.last_port_metadata] == ["a", "b"]
+    assert a.last_server_info == {"server_id": "s1"}
+
+
+@pytest.mark.asyncio
+async def test_list_ports_json_payload_is_list():
+    a = _a()
+    # JSON decodes to a list (not a dict) -> raw_ports [] and server None
+    a.reader = _R(readlines=[b"LIST:[" + b'{"name": "a"}' + b"]"])
+    assert await a._list_ports_standard() == []
+
+
+@pytest.mark.asyncio
+async def test_list_ports_json_dedup_by_port_key():
+    a = _a()
+    payload = {"ports": [{"name": "a"}, {"name": "b"}, {"port": "b"}]}
+    a.reader = _R(readlines=[("LIST:" + json.dumps(payload)).encode()])
+    # "b" appears via name then via port (last occurrence wins); "a" unique
+    assert await a._list_ports_standard() == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_list_ports_json_bad_parse():
+    a = _a()
+    # "LIST:{" prefix but the remainder is invalid JSON -> parse error -> []
+    a.reader = _R(readlines=[b"LIST:{not json"])
+    assert await a._list_ports_standard() == []
+
+
+@pytest.mark.asyncio
+async def test_list_ports_legacy_blob():
+    a = _a()
+    a.reader = _R(read=b"Port List:\nX\n\nY\n")
+    assert await a._list_ports_standard() == ["X", "Y"]
+
+
+@pytest.mark.asyncio
+async def test_list_ports_legacy_read_raises():
+    a = _a()
+    a.reader = _R(read=b"", read_raises=True)
+    # first line empty -> non-SUCCESS -> legacy blob path -> read raises -> error -> []
+    assert await a._list_ports_standard() == []
+
+
+@pytest.mark.asyncio
+async def test_list_ports_unexpected_first_line():
+    a = _a()
+    a.reader = _R(readlines=[b"NOPE\n"])
+    assert await a._list_ports_standard() == []
+
+
+@pytest.mark.asyncio
+async def test_list_ports_success_framed():
+    a = _a()
+    a.reader = _R(readlines=[b"LIST:SUCCESS\n", b"p1\n", b"p2\n", b"END:LIST\n"])
+    assert await a._list_ports_standard() == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_list_ports_success_framed_eof():
+    a = _a()
+    a.reader = _R(readlines=[b"LIST:SUCCESS\n", b"p1\n"])
+    # second loop readline returns "" -> break
+    assert await a._list_ports_standard() == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_list_ports_success_framed_error():
+    a = _a()
+    a.reader = _R(readlines=[b"LIST:SUCCESS\n", b"ERROR:bad\n"])
+    assert await a._list_ports_standard() == []
+
+
+class _RaisingMetadata(TcpClientAdapter):
+    """A subclass whose last_port_metadata assignment raises, to pin the
+    JSON metadata-try/except (the functional list is unaffected)."""
+
+    @property
+    def last_port_metadata(self):
+        return None
+
+    @last_port_metadata.setter
+    def last_port_metadata(self, val):
+        raise RuntimeError("no metadata attr")
+
+
+@pytest.mark.asyncio
+async def test_list_ports_json_metadata_assignment_raises():
+    a = _RaisingMetadata(host="test-server", port=5000, config={"use_tls": False})
+    a.writer = _W()
+    payload = {"ports": [{"name": "a"}, {"name": "b"}]}
+    a.reader = _R(readlines=[("LIST:" + json.dumps(payload)).encode()])
+    # the metadata assignment raises -> best-effort except; functional list returned
+    out = await a._list_ports_standard()
+    assert out == ["a", "b"]
+    assert a.last_port_metadata is None

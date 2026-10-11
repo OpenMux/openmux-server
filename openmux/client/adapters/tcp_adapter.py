@@ -645,14 +645,36 @@ class TcpClientAdapter(BaseClientAdapter):
         self.writer.write(b"LIST\n")
         await self.writer.drain()
 
-        # Read response line by line
-        ports = []
+        # Read the first non-empty line (should be LIST:...); None means no reader
+        first_line = await self._list_read_first_line()
+        if first_line is None:
+            return []
 
+        # Interpret first line
+        line_text = first_line.decode(errors="ignore").strip() if isinstance(first_line, (bytes, bytearray)) else ""
+
+        # Case 1: JSON payload style (newer server)
+        if line_text.startswith("LIST:{"):
+            return self._list_ports_json(line_text)
+
+        # Case 2: Expected framed SUCCESS format (else legacy blob)
+        if not line_text.startswith("LIST:SUCCESS"):
+            return await self._list_ports_legacy(line_text, first_line)
+
+        return await self._list_ports_success()
+
+    async def _list_read_first_line(self) -> Optional[bytes]:
+        """Read the first LIST response line, skipping leading blank lines.
+
+        Returns None only when no reader is available (callers map that to
+        an empty list); a readline failure falls back to b"" so the legacy
+        blob path can still try.
+        """
         # Read the first non-empty line (should be LIST:...)
         try:
             if not self.reader:
                 self.logger.error("Reader not available for LIST response")
-                return []
+                return None
             first_line = await self.reader.readline()
             # Skip any leading blank lines gracefully
             skip_guard = 0
@@ -663,60 +685,63 @@ class TcpClientAdapter(BaseClientAdapter):
             # Some callers/tests may not provide readline; fall back to legacy format
             self.logger.debug("readline failed, falling back to read(): %s", e, exc_info=True)
             first_line = b""
+        return first_line  # type: ignore[return-value]
 
-        # Interpret first line
-        line_text = first_line.decode(errors="ignore").strip() if isinstance(first_line, (bytes, bytearray)) else ""
+    def _list_ports_json(self, line_text: str) -> List[str]:
+        """Parse a JSON LIST payload (LIST:{...}) into deduplicated port names
+        and, best-effort, store the raw port metadata + server info.
+        """
+        json_part = line_text[5:]
+        try:
+            import json as _json
 
-        # Case 1: JSON payload style (newer server)
-        if line_text.startswith("LIST:{"):
-            json_part = line_text[5:]
+            payload = _json.loads(json_part)
+            raw_ports = payload.get("ports", []) if isinstance(payload, dict) else []
+            # Deduplicate by name (last occurrence wins) and collect names
+            dedup: dict = {}
+            for entry in raw_ports:
+                if isinstance(entry, dict):
+                    nm = entry.get("name") or entry.get("port")
+                    if nm:
+                        dedup[nm] = entry
+            # Store raw metadata for callers if attribute available
             try:
-                import json as _json
-
-                payload = _json.loads(json_part)
-                raw_ports = payload.get("ports", []) if isinstance(payload, dict) else []
-                # Deduplicate by name (last occurrence wins) and collect names
-                dedup: dict = {}
-                for entry in raw_ports:
-                    if isinstance(entry, dict):
-                        nm = entry.get("name") or entry.get("port")
-                        if nm:
-                            dedup[nm] = entry
-                # Store raw metadata for callers if attribute available
-                try:
-                    self.last_port_metadata = list(dedup.values())  # type: ignore[attr-defined]
-                    srv = payload.get("server") if isinstance(payload, dict) else None
-                    if isinstance(srv, dict):
-                        self.last_server_info = srv  # type: ignore[attr-defined]
-                except Exception:
-                    # justification: optional metadata; the functional port list is unaffected
-                    pass
-                return list(dedup.keys())
-            except Exception as e:
-                self.logger.error("Failed to parse JSON LIST payload: %s: %s", e, line_text[:120], exc_info=True)
-                return []
-
-        # Case 2: Expected framed SUCCESS format
-        if not line_text.startswith("LIST:SUCCESS"):
-            # Legacy fallback reading blob
-            try:
-                if not self.reader:
-                    return ports
-                blob = await self.reader.read(4096)
-                if isinstance(blob, (bytes, bytearray)):
-                    text = blob.decode(errors="ignore")
-                    if "Port List:" in text:
-                        for line in text.splitlines():
-                            if line and not line.startswith("Port List:"):
-                                ports.append(line.strip())
-                        return ports
+                self.last_port_metadata = list(dedup.values())  # type: ignore[attr-defined]
+                srv = payload.get("server") if isinstance(payload, dict) else None
+                if isinstance(srv, dict):
+                    self.last_server_info = srv  # type: ignore[attr-defined]
             except Exception:
-                # Justification: legacy LIST blob parsing best-effort; failure falls through
-                # to standard error path with explicit log below.
-                self.logger.debug("Legacy LIST blob parsing failed", exc_info=True)
-            self.logger.error("Unexpected LIST response: %s", line_text if line_text else str(first_line))
+                # justification: optional metadata; the functional port list is unaffected
+                pass
+            return list(dedup.keys())
+        except Exception as e:
+            self.logger.error("Failed to parse JSON LIST payload: %s: %s", e, line_text[:120], exc_info=True)
             return []
 
+    async def _list_ports_legacy(self, line_text: str, first_line: bytes) -> List[str]:
+        """Parse the legacy LIST blob (a 'Port List:' marker), or error out."""
+        ports: List[str] = []
+        try:
+            if not self.reader:
+                return ports
+            blob = await self.reader.read(4096)
+            if isinstance(blob, (bytes, bytearray)):
+                text = blob.decode(errors="ignore")
+                if "Port List:" in text:
+                    for line in text.splitlines():
+                        if line and not line.startswith("Port List:"):
+                            ports.append(line.strip())
+                    return ports
+        except Exception:
+            # Justification: legacy LIST blob parsing best-effort; failure falls through
+            # to standard error path with explicit log below.
+            self.logger.debug("Legacy LIST blob parsing failed", exc_info=True)
+        self.logger.error("Unexpected LIST response: %s", line_text if line_text else str(first_line))
+        return []
+
+    async def _list_ports_success(self) -> List[str]:
+        """Read the framed SUCCESS port lines until END:LIST / ERROR / EOF."""
+        ports: List[str] = []
         # Read port lines until END:LIST
         while True:
             if not self.reader:
