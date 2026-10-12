@@ -2959,225 +2959,295 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 # justification: idempotent subscription cleanup
                 pass
 
+    def _fed_ov_peer_cfg(self, muxcon: Any) -> List[Dict[str, Any]]:
+        """Configured federation peer entries (host/port/options), in config order."""
+        peers_cfg: List[Dict[str, Any]] = []
+        # peers configured
+        try:
+            for p in getattr(muxcon, "peers", []) or []:
+                peers_cfg.append(
+                    {
+                        "host": getattr(p, "host", None),
+                        "port": getattr(p, "port", None),
+                        "options": getattr(p, "options", {}) or {},
+                    }
+                )
+        except Exception:
+            # justification: optional status detail; the peer list renders without options
+            pass
+        return peers_cfg
+
+    @staticmethod
+    def _fed_ov_remote_peer(conn_writer: Any) -> Optional[Dict[str, Any]]:
+        """Remote peer {host, port} from a connection writer's peername, if any."""
+        peer = None
+        try:
+            if conn_writer is not None:
+                peerinfo = conn_writer.get_extra_info("peername")
+                if peerinfo:
+                    peer = {"host": peerinfo[0], "port": peerinfo[1]}
+        except Exception:
+            peer = None
+        return peer
+
+    @staticmethod
+    def _fed_ov_opened_from_cid(cid: Any) -> Optional[int]:
+        """opened_at timestamp embedded in a <x>:<x>:<x>:<ts> connection id, if parseable."""
+        opened_at = None
+        try:
+            parts = str(cid).split(":")
+            if len(parts) >= 4:
+                opened_at = int(parts[-1])
+        except Exception:
+            opened_at = None
+        return opened_at
+
+    @staticmethod
+    def _fed_ov_handshake_view(hs: Any) -> Tuple[Any, Any, List[Any]]:
+        """(version, client_type, capabilities) from a handshake dict or object."""
+        if isinstance(hs, dict):
+            return hs.get("version"), hs.get("type"), hs.get("capabilities", [])
+        ct = getattr(hs, "client_type", None)
+        if ct is not None and hasattr(ct, "value"):
+            ct = ct.value
+        return getattr(hs, "version", None), ct, getattr(hs, "capabilities", [])
+
+    @staticmethod
+    def _fed_ov_origin_info(origin: Any) -> Optional[Dict[str, Any]]:
+        """Origin server normalized to a dict for the UI.
+
+        None when there is no origin; falls back to {"server_id"} when the
+        normalization itself raises.
+        """
+        # Normalize origin/server_chain into dicts for UI
+        try:
+            if origin is not None and callable(getattr(origin, "to_dict", None)):
+                origin_info = origin.to_dict()  # type: ignore[attr-defined]
+            elif origin is not None:
+                origin_info = {
+                    "server_id": getattr(origin, "server_id", None),
+                    "hostname": getattr(origin, "hostname", None),
+                    "port": getattr(origin, "port", None),
+                    "server_type": getattr(getattr(origin, "server_type", None), "value", None),
+                }
+            else:
+                origin_info = None
+        except Exception:
+            origin_info = {"server_id": getattr(origin, "server_id", None)} if origin else None
+        return origin_info
+
+    @staticmethod
+    def _fed_ov_chain_info(chain_objs: Any) -> Tuple[List[Dict[str, Any]], List[Any]]:
+        """(chain_info as dicts, chain_ids) for the origin server chain."""
+        try:
+            chain_info = []
+            for s in chain_objs or []:
+                if callable(getattr(s, "to_dict", None)):
+                    chain_info.append(s.to_dict())  # type: ignore[attr-defined]
+                else:
+                    chain_info.append({"server_id": getattr(s, "server_id", str(s))})
+        except Exception:
+            chain_info = [{"server_id": getattr(s, "server_id", str(s))} for s in (chain_objs or [])]
+        chain_ids = [getattr(s, "server_id", str(s)) for s in (chain_objs or [])]
+        return chain_info, chain_ids
+
+    @staticmethod
+    def _fed_ov_apply_status(prepped: Dict[str, Any], proxy: Any) -> None:
+        """Copy status_message / readiness from the proxy status snapshot, if any."""
+        # Status text (issue #62) + derived readiness (issue #68) so
+        # the federated catalog row can color idle vs down. The proxy
+        # snapshot already merges link_reason over the origin reason
+        # and derives a link-aware readiness.
+        try:
+            psnap = proxy.get_status() if hasattr(proxy, "get_status") else {}
+            if isinstance(psnap, dict):
+                if psnap.get("status_message"):
+                    prepped["status_message"] = psnap.get("status_message")
+                if psnap.get("readiness"):
+                    prepped["readiness"] = psnap.get("readiness")
+        except Exception:
+            # justification: optional status detail; the port entry stays complete
+            pass
+
+    def _fed_ov_prepped_port(self, pname: str, proxy: Any, meta_by_port: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepped remote_muxcon port entry from one proxy, plus its meta_by_port record."""
+        meta = getattr(proxy, "metadata", None)
+        origin = getattr(meta, "origin_server", None) if meta else None
+        chain_objs = getattr(meta, "server_chain", []) if meta else []
+        ftype = getattr(meta, "federation_type", None) if meta else None
+        serial_cfg = getattr(meta, "serial_config", None) if meta else None
+        line_status = getattr(meta, "line_status", None) if meta else None
+        origin_info = self._fed_ov_origin_info(origin)
+        chain_info, chain_ids = self._fed_ov_chain_info(chain_objs)
+        prepped = {
+            "name": pname,
+            "adapter_type": "remote_muxcon",
+            "connected": bool(getattr(proxy, "is_connected", True)),
+            "origin_server_id": getattr(origin, "server_id", None),
+            "server_chain": chain_ids,
+            "origin_server": origin_info,
+            "server_chain_info": chain_info,
+            "federation_type": (getattr(ftype, "value", ftype) if ftype is not None else None),
+            "max_rw_users": (getattr(meta, "max_rw_users", None) if meta else None),
+            "serial_config": serial_cfg,
+            "line_status": line_status,
+        }
+        self._fed_ov_apply_status(prepped, proxy)
+        # Track per-name metadata for later enrichment of ports_summary
+        meta_by_port[pname] = {
+            "origin_server": origin_info,
+            "server_chain_info": chain_info,
+            "federation_type": prepped.get("federation_type"),
+            "max_rw_users": prepped.get("max_rw_users"),
+            "serial_config": serial_cfg,
+            "line_status": line_status,
+        }
+        return prepped
+
+    def _fed_ov_ports_registered(self, muxcon: Any, cid: Any, meta_by_port: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Port entries registered on one connection.
+
+        Pre-existing quirk preserved: each prepped entry is appended TWICE
+        (one proxy yields two identical entries).
+        """
+        ports_registered: List[Dict[str, Any]] = []
+        try:
+            proxies_map = getattr(muxcon, "_conn_proxies", {}) or {}
+            for pname, proxy in (proxies_map.get(cid, {}) or {}).items():
+                prepped = self._fed_ov_prepped_port(pname, proxy, meta_by_port)
+                ports_registered.append(prepped)
+                ports_registered.append(prepped)
+        except Exception:
+            # justification: optional status detail; the port entry stays complete
+            pass
+        return ports_registered
+
+    @staticmethod
+    def _fed_ov_conn_counts(muxcon: Any, cid: Any) -> int:
+        """Active stream count for one connection (session + local sessions)."""
+        # Counts per connection
+        try:
+            derive_pk = getattr(muxcon, "_derive_peer_key_from_conn_id", None)
+            peer_key = derive_pk(cid) if callable(derive_pk) else None
+            smap = getattr(muxcon, "_session_map", {}) or {}
+            lmap = getattr(muxcon, "_local_session_map", {}) or {}
+            streams_count = len(smap.get(peer_key, {}) or {}) + len(lmap.get(peer_key, {}) or {})
+        except Exception:
+            streams_count = 0
+        return streams_count
+
+    @staticmethod
+    def _fed_ov_hb_view(cid: Any, hb_state: Any, hb_interval: Any) -> Dict[str, Any]:
+        """Heartbeat view (interval, timestamps, rtt, missed, status) for one connection."""
+        hb = hb_state.get(cid, {}) if isinstance(hb_state, dict) else {}
+        return {
+            "interval_sec": hb_interval,
+            "last_req_ts": hb.get("last_req_ts"),
+            "last_ack_ts": hb.get("last_ack_ts"),
+            "rtt_ms": hb.get("rtt_ms"),
+            "missed": hb.get("missed"),
+            "status": (("ok" if hb.get("missed", 0) == 0 else "degraded") if hb else None),
+        }
+
+    def _fed_ov_connection_entry(
+        self, muxcon: Any, cid: Any, c: Dict[str, Any], hb_state: Any, hb_interval: Any, meta_by_port: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """One active-connection entry (role, peer, handshake, ports, counts, heartbeat)."""
+        role = c.get("role")
+        hs = c.get("handshake") or {}
+        peer = self._fed_ov_remote_peer(c.get("writer"))
+        opened_at = self._fed_ov_opened_from_cid(cid)
+        hs_version, ct, hs_caps = self._fed_ov_handshake_view(hs)
+        # Ports registered on this connection
+        ports_registered = self._fed_ov_ports_registered(muxcon, cid, meta_by_port)
+        streams_count = self._fed_ov_conn_counts(muxcon, cid)
+        now_ts = int(time.time())
+        eff_open = int(c.get("opened_at", opened_at) or 0)
+        uptime_seconds = now_ts - eff_open if eff_open else None
+        hb_view = self._fed_ov_hb_view(cid, hb_state, hb_interval)
+        return {
+            "connection_id": cid,
+            "role": role,
+            "opened_at": c.get("opened_at", opened_at),
+            "last_seen": c.get("last_seen", opened_at),
+            "uptime_seconds": uptime_seconds,
+            "remote_peer": peer,
+            "handshake": {
+                "version": hs_version,
+                "client_type": ct,
+                "capabilities": hs_caps,
+                "server_id": c.get("server_id"),
+                "instance_id": c.get("instance_id"),
+            },
+            "active": True,
+            "ports_registered": ports_registered,
+            "counts": {"streams": streams_count, "ports": len(ports_registered)},
+            "heartbeat": hb_view,
+            **(self._derive_mpath_info_for_muxcon(muxcon, cid) or {}),
+        }
+
+    def _fed_ov_ports_summary(self, data_ports: List[Dict[str, Any]], meta_by_port: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Remote-port summary entries (remote_muxcon ports), enriched with live muxcon metadata."""
+        ports_summary: List[Dict[str, Any]] = []
+        for p in data_ports:
+            adapter_type = p.get("adapter_type") or p.get("adapter")
+            if str(adapter_type) == "remote_muxcon":
+                name = p.get("name")
+                live_meta = meta_by_port.get(name)
+                origin_obj = None
+                chain_info = None
+                if live_meta:
+                    origin_obj = live_meta.get("origin_server")
+                    chain_info = live_meta.get("server_chain_info")
+                entry = {
+                    "name": p.get("name"),
+                    "description": p.get("description"),
+                    "connected": bool(p.get("connected", p.get("is_running", False))),
+                    "adapter_type": "remote_muxcon",
+                    "status": (
+                        p.get("adapter_status", {}).get("status")
+                        if isinstance(p.get("adapter_status"), dict)
+                        else p.get("state", "connected")
+                    ),
+                    "origin_server": origin_obj,
+                    "server_chain_info": chain_info,
+                    "server_chain": p.get("server_chain", []),
+                    "federation_type": p.get("federation_type"),
+                    # Display as the mode label ("none"/"one"/"multiple"); legacy ints
+                    # are migrated to their label (issue #59).
+                    "max_rw_users": capacity_display_label(p.get("max_read_write_users", p.get("max_rw_users"))),
+                    "connected_clients": p.get("client_count", p.get("connected_clients", 0)),
+                    "serial_config": (live_meta.get("serial_config") if live_meta else p.get("serial_config")),
+                    "line_status": (live_meta.get("line_status") if live_meta else p.get("line_status")),
+                }
+                ports_summary.append(entry)
+        return ports_summary
+
     def _gather_federation_overview(self) -> Dict[str, Any]:
         """Build a federation overview payload mirroring WebStatus._api_get_federation."""
         try:
             muxcon = self._find_muxcon_adapter()
             node_name = getattr(muxcon, "server_id", None) if muxcon else None
             hb_interval = getattr(muxcon, "heartbeat_interval", None) if muxcon else None
-            peers_cfg = []
-            connections = []
-            ports_summary = []
+            peers_cfg = self._fed_ov_peer_cfg(muxcon)
+            connections: List[Dict[str, Any]] = []
             # Global map of live metadata for remote ports: name -> details from _conn_proxies
             meta_by_port: Dict[str, Any] = {}
+            # active connections
             if muxcon is not None:
-                # peers configured
-                try:
-                    for p in getattr(muxcon, "peers", []) or []:
-                        peers_cfg.append(
-                            {
-                                "host": getattr(p, "host", None),
-                                "port": getattr(p, "port", None),
-                                "options": getattr(p, "options", {}) or {},
-                            }
-                        )
-                except Exception:
-                    # justification: optional status detail; the peer list renders without options
-                    pass
-                # active connections
                 try:
                     hb_state = getattr(muxcon, "_hb_state", {}) or {}
                     for cid, c in (getattr(muxcon, "connections", {}) or {}).items():
-                        role = c.get("role")
-                        hs = c.get("handshake") or {}
-                        conn_writer = c.get("writer")
-                        peer = None
-                        try:
-                            if conn_writer is not None:
-                                peerinfo = conn_writer.get_extra_info("peername")
-                                if peerinfo:
-                                    peer = {"host": peerinfo[0], "port": peerinfo[1]}
-                        except Exception:
-                            peer = None
-                        opened_at = None
-                        try:
-                            parts = str(cid).split(":")
-                            if len(parts) >= 4:
-                                opened_at = int(parts[-1])
-                        except Exception:
-                            opened_at = None
-                        if isinstance(hs, dict):
-                            hs_version = hs.get("version")
-                            ct = hs.get("type")
-                            hs_caps = hs.get("capabilities", [])
-                        else:
-                            hs_version = getattr(hs, "version", None)
-                            ct = getattr(hs, "client_type", None)
-                            if ct is not None and hasattr(ct, "value"):
-                                ct = ct.value
-                            hs_caps = getattr(hs, "capabilities", [])
-                        # Ports registered on this connection
-                        ports_registered = []
-                        try:
-                            proxies_map = getattr(muxcon, "_conn_proxies", {}) or {}
-                            for pname, proxy in (proxies_map.get(cid, {}) or {}).items():
-                                meta = getattr(proxy, "metadata", None)
-                                origin = getattr(meta, "origin_server", None) if meta else None
-                                chain_objs = getattr(meta, "server_chain", []) if meta else []
-                                ftype = getattr(meta, "federation_type", None) if meta else None
-                                serial_cfg = getattr(meta, "serial_config", None) if meta else None
-                                line_status = getattr(meta, "line_status", None) if meta else None
-                                # Normalize origin/server_chain into dicts for UI
-                                try:
-                                    if origin is not None and callable(getattr(origin, "to_dict", None)):
-                                        origin_info = origin.to_dict()  # type: ignore[attr-defined]
-                                    elif origin is not None:
-                                        origin_info = {
-                                            "server_id": getattr(origin, "server_id", None),
-                                            "hostname": getattr(origin, "hostname", None),
-                                            "port": getattr(origin, "port", None),
-                                            "server_type": getattr(getattr(origin, "server_type", None), "value", None),
-                                        }
-                                    else:
-                                        origin_info = None
-                                except Exception:
-                                    origin_info = {"server_id": getattr(origin, "server_id", None)} if origin else None
-                                try:
-                                    chain_info = []
-                                    for s in chain_objs or []:
-                                        if callable(getattr(s, "to_dict", None)):
-                                            chain_info.append(s.to_dict())  # type: ignore[attr-defined]
-                                        else:
-                                            chain_info.append({"server_id": getattr(s, "server_id", str(s))})
-                                except Exception:
-                                    chain_info = [{"server_id": getattr(s, "server_id", str(s))} for s in (chain_objs or [])]
-                                chain_ids = [getattr(s, "server_id", str(s)) for s in (chain_objs or [])]
-                                prepped = {
-                                    "name": pname,
-                                    "adapter_type": "remote_muxcon",
-                                    "connected": bool(getattr(proxy, "is_connected", True)),
-                                    "origin_server_id": getattr(origin, "server_id", None),
-                                    "server_chain": chain_ids,
-                                    "origin_server": origin_info,
-                                    "server_chain_info": chain_info,
-                                    "federation_type": (getattr(ftype, "value", ftype) if ftype is not None else None),
-                                    "max_rw_users": (getattr(meta, "max_rw_users", None) if meta else None),
-                                    "serial_config": serial_cfg,
-                                    "line_status": line_status,
-                                }
-                                # Status text (issue #62) + derived readiness (issue #68) so
-                                # the federated catalog row can color idle vs down. The proxy
-                                # snapshot already merges link_reason over the origin reason
-                                # and derives a link-aware readiness.
-                                try:
-                                    psnap = proxy.get_status() if hasattr(proxy, "get_status") else {}
-                                    if isinstance(psnap, dict):
-                                        if psnap.get("status_message"):
-                                            prepped["status_message"] = psnap.get("status_message")
-                                        if psnap.get("readiness"):
-                                            prepped["readiness"] = psnap.get("readiness")
-                                except Exception:
-                                    # justification: optional status detail; the port entry stays complete
-                                    pass
-                                ports_registered.append(prepped)
-                                ports_registered.append(prepped)
-                                # Track per-name metadata for later enrichment of ports_summary
-                                meta_by_port[pname] = {
-                                    "origin_server": origin_info,
-                                    "server_chain_info": chain_info,
-                                    "federation_type": prepped.get("federation_type"),
-                                    "max_rw_users": prepped.get("max_rw_users"),
-                                    "serial_config": serial_cfg,
-                                    "line_status": line_status,
-                                }
-                        except Exception:
-                            # justification: optional status detail; the port entry stays complete
-                            pass
-                        # Counts per connection
-                        try:
-                            derive_pk = getattr(muxcon, "_derive_peer_key_from_conn_id", None)
-                            peer_key = derive_pk(cid) if callable(derive_pk) else None
-                            smap = getattr(muxcon, "_session_map", {}) or {}
-                            lmap = getattr(muxcon, "_local_session_map", {}) or {}
-                            streams_count = len(smap.get(peer_key, {}) or {}) + len(lmap.get(peer_key, {}) or {})
-                        except Exception:
-                            streams_count = 0
-                        now_ts = int(time.time())
-                        eff_open = int(c.get("opened_at", opened_at) or 0)
-                        uptime_seconds = now_ts - eff_open if eff_open else None
-                        hb = hb_state.get(cid, {}) if isinstance(hb_state, dict) else {}
-                        hb_view = {
-                            "interval_sec": hb_interval,
-                            "last_req_ts": hb.get("last_req_ts"),
-                            "last_ack_ts": hb.get("last_ack_ts"),
-                            "rtt_ms": hb.get("rtt_ms"),
-                            "missed": hb.get("missed"),
-                            "status": (("ok" if hb.get("missed", 0) == 0 else "degraded") if hb else None),
-                        }
-                        connections.append(
-                            {
-                                "connection_id": cid,
-                                "role": role,
-                                "opened_at": c.get("opened_at", opened_at),
-                                "last_seen": c.get("last_seen", opened_at),
-                                "uptime_seconds": uptime_seconds,
-                                "remote_peer": peer,
-                                "handshake": {
-                                    "version": hs_version,
-                                    "client_type": ct,
-                                    "capabilities": hs_caps,
-                                    "server_id": c.get("server_id"),
-                                    "instance_id": c.get("instance_id"),
-                                },
-                                "active": True,
-                                "ports_registered": ports_registered,
-                                "counts": {"streams": streams_count, "ports": len(ports_registered)},
-                                "heartbeat": hb_view,
-                                **(self._derive_mpath_info_for_muxcon(muxcon, cid) or {}),
-                            }
-                        )
+                        connections.append(self._fed_ov_connection_entry(muxcon, cid, c, hb_state, hb_interval, meta_by_port))
                 except Exception:
                     # justification: optional status detail; the connection list stays complete
                     pass
-
             # In web_console context, we already expose port list at top via _get_ports_snapshot(); enrich from there
             try:
                 data_ports = self._get_ports_snapshot()
             except Exception:
                 data_ports = []
-            for p in data_ports:
-                adapter_type = p.get("adapter_type") or p.get("adapter")
-                if str(adapter_type) == "remote_muxcon":
-                    name = p.get("name")
-                    live_meta = meta_by_port.get(name)
-                    origin_obj = None
-                    chain_info = None
-                    if live_meta:
-                        origin_obj = live_meta.get("origin_server")
-                        chain_info = live_meta.get("server_chain_info")
-                    entry = {
-                        "name": p.get("name"),
-                        "description": p.get("description"),
-                        "connected": bool(p.get("connected", p.get("is_running", False))),
-                        "adapter_type": "remote_muxcon",
-                        "status": (
-                            p.get("adapter_status", {}).get("status")
-                            if isinstance(p.get("adapter_status"), dict)
-                            else p.get("state", "connected")
-                        ),
-                        "origin_server": origin_obj,
-                        "server_chain_info": chain_info,
-                        "server_chain": p.get("server_chain", []),
-                        "federation_type": p.get("federation_type"),
-                        # Display as the mode label ("none"/"one"/"multiple"); legacy ints
-                        # are migrated to their label (issue #59).
-                        "max_rw_users": capacity_display_label(p.get("max_read_write_users", p.get("max_rw_users"))),
-                        "connected_clients": p.get("client_count", p.get("connected_clients", 0)),
-                        "serial_config": (live_meta.get("serial_config") if live_meta else p.get("serial_config")),
-                        "line_status": (live_meta.get("line_status") if live_meta else p.get("line_status")),
-                    }
-                    ports_summary.append(entry)
-
+            ports_summary = self._fed_ov_ports_summary(data_ports, meta_by_port)
             total_retx = 0
             try:
                 retx_map = getattr(muxcon, "_peer_retx_count", {}) or {}
