@@ -265,9 +265,35 @@ class GenericAdapterFactory:
         """
         adapters = []
         policy = security_policy or self.security_policy
-        # Fail-fast defaults to True unless explicitly set to False in either
-        # top-level 'fail_fast_adapters' or 'server.fail_fast_adapters'. Any
-        # truthy value keeps it enabled. Only explicit boolean false disables.
+        fail_fast = self._resolve_fail_fast(config)
+        if fail_fast:
+            logger.info("Adapter fail-fast mode ENABLED (default). To disable, set server.fail_fast_adapters: false")
+        if "adapters" in config:
+            logger.info("Using unified adapters configuration format")
+            self._create_unified_adapters(config["adapters"], policy, adapters)
+        else:
+            # Fall back to legacy format
+            active_plugins = self.registry.discover_active_plugins(config)
+            logger.info("Creating adapters for %s active plugins", len(active_plugins))
+            # Emit warnings for config sections that have no registered plugin (likely import failure or typo)
+            self._warn_unregistered_sections(config)
+            self._create_legacy_adapters(active_plugins, policy, config, adapters)
+        # Fail-fast handling (legacy path only) after attempting creation.
+        # The "active_plugins" in locals() guard keeps the legacy-branch abort context.
+        if fail_fast and "active_plugins" in locals():
+            abort_msg = self._fail_fast_abort(config)
+            if abort_msg is not None:
+                raise RuntimeError(abort_msg)
+        logger.info("Successfully created %s total adapter instances", len(adapters))
+        return adapters  # Returns List[BaseGenericAdapter]
+
+    def _resolve_fail_fast(self, config: Dict[str, Any]) -> bool:
+        """Resolve adapter fail-fast mode from config.
+
+        Defaults to True unless explicitly disabled by a top-level or
+        server-level ``fail_fast_adapters`` value. A parse error falls back
+        to fail-fast (the safer default).
+        """
         fail_fast = True
         try:
             srv_cfg = config.get("server", {}) or {}
@@ -285,146 +311,192 @@ class GenericAdapterFactory:
                     fail_fast = True
         except Exception:  # justification: defensive config parsing; defaulting to fail_fast maintains safer behavior
             fail_fast = True
-        if fail_fast:
-            logger.info("Adapter fail-fast mode ENABLED (default). To disable, set server.fail_fast_adapters: false")
+        return fail_fast
 
-        # Check for unified adapters format if explicitly provided
-        if "adapters" in config:
-            logger.info("Using unified adapters configuration format")
-            for adapter_config in config["adapters"]:
-                try:
-                    adapter_type = adapter_config.get("type")
-                    adapter_name = adapter_config.get("name", f"{adapter_type}_adapter")
+    def _create_unified_adapters(
+        self,
+        adapter_configs: List[Dict[str, Any]],
+        policy: Optional[SecurityPolicy],
+        adapters: List[BaseGenericAdapter],
+    ) -> None:
+        """Create adapters from the unified ``adapters`` list format.
 
-                    # Map adapter_type to registered config section name (strict names retained)
-                    plugin = None
-                    if adapter_type:
-                        at = adapter_type.lower()
-                        # Primary lookup: dynamic adapter_type index
-                        plugin = self.registry.get_by_adapter_type(at)
-                        if not plugin:
-                            # Derive candidate section names dynamically.
-                            # Canonical naming convention: <type>_ports when such a section exists;
-                            # also allow direct <type> for adapters whose section is not pluralized.
-                            candidates = []
-                            candidates.append(f"{at}_ports")
-                            candidates.append(at)
-                            # Preserve order: first existing match wins
-                            for name in candidates:
-                                plugin = self.registry.get_plugin(name)
-                                if plugin:
-                                    break
+        Skips (with logging) entries that have no plugin, fail validation,
+        are blocked by policy, or raise during construction.
+        """
+        for adapter_config in adapter_configs:
+            try:
+                adapter_type = adapter_config.get("type")
+                adapter_name = adapter_config.get("name", f"{adapter_type}_adapter")
 
-                    if not plugin:
-                        logger.warning("No plugin found for adapter type: %s", adapter_type)
-                        continue
-
-                    # Validate configuration
-                    adapter_class = plugin.adapter_class
-                    validate_fn = getattr(adapter_class, "validate_config", None)
-                    if callable(validate_fn):
-                        # For unified format, pass the adapter config directly
-                        if not validate_fn(adapter_config):
-                            logger.error("Invalid configuration for %s adapter", adapter_type)
-                            continue
-
-                    # Security policy enforcement
-                    if policy and not self._is_adapter_allowed(policy, plugin, adapter_type):
-                        logger.error(
-                            "Adapter '%s' (type=%s) blocked by security policy",
-                            adapter_name,
-                            adapter_type,
-                        )
-                        continue
-
-                    # Create adapter instance
-                    adapter = adapter_class(adapter_name, adapter_config)
-                    adapters.append(adapter)
-                    logger.info("Created %s adapter '%s'", adapter_type, adapter_name)
-
-                except Exception as e:
-                    logger.error("Failed to create adapter from config %s: %s", adapter_config, e, exc_info=True)
+                plugin = self._resolve_unified_plugin(adapter_type)
+                if not plugin:
+                    logger.warning("No plugin found for adapter type: %s", adapter_type)
                     continue
-        else:
-            # Fall back to legacy format
-            active_plugins = self.registry.discover_active_plugins(config)
-            logger.info("Creating adapters for %s active plugins", len(active_plugins))
-            # Emit warnings for config sections that have no registered plugin (likely import failure or typo)
-            core_sections = {"adapters", "server", "authentication", "logging", "port_actions"}
-            missing_sections: List[str] = []
-            for section, val in config.items():
-                if section in core_sections:
+
+                # Validate configuration
+                if not self._unified_config_ok(plugin.adapter_class, adapter_config, adapter_type):
                     continue
-                if section not in self.registry._plugins and isinstance(val, (dict, list)):
-                    logger.warning(
-                        "Config section '%s' present but no adapter plugin registered (import failure or typo)",
-                        section,
-                    )
-                    missing_sections.append(section)
 
-            for plugin in active_plugins:
+                # Security policy enforcement
+                if not self._unified_policy_ok(policy, plugin, adapter_name, adapter_type):
+                    continue
+
+                # Create adapter instance
+                adapter = plugin.adapter_class(adapter_name, adapter_config)
+                adapters.append(adapter)
+                logger.info("Created %s adapter '%s'", adapter_type, adapter_name)
+
+            except Exception as e:
+                logger.error("Failed to create adapter from config %s: %s", adapter_config, e, exc_info=True)
+                continue
+
+    def _resolve_unified_plugin(self, adapter_type: Optional[str]) -> Optional[AdapterPlugin]:
+        """Resolve a unified ``type`` string to a registered plugin.
+
+        Uses the dynamic adapter_type index first, then candidate section
+        names in order: ``<type>_ports`` (canonical), then bare ``<type>``.
+        """
+        if not adapter_type:
+            return None
+        at = adapter_type.lower()
+        # Primary lookup: dynamic adapter_type index
+        plugin = self.registry.get_by_adapter_type(at)
+        if not plugin:
+            # Preserve order: first existing candidate wins
+            for name in (f"{at}_ports", at):
+                plugin = self.registry.get_plugin(name)
+                if plugin:
+                    break
+        return plugin
+
+    def _unified_config_ok(
+        self,
+        adapter_class: Type[BaseGenericAdapter],
+        adapter_config: Dict[str, Any],
+        adapter_type: Optional[str],
+    ) -> bool:
+        """Check the unified adapter config (False if validate_config rejects it)."""
+        validate_fn = getattr(adapter_class, "validate_config", None)
+        if callable(validate_fn) and not validate_fn(adapter_config):
+            logger.error("Invalid configuration for %s adapter", adapter_type)
+            return False
+        return True
+
+    def _unified_policy_ok(
+        self,
+        policy: Optional[SecurityPolicy],
+        plugin: AdapterPlugin,
+        adapter_name: str,
+        adapter_type: Optional[str],
+    ) -> bool:
+        """Check the unified adapter against the security policy."""
+        if policy and not self._is_adapter_allowed(policy, plugin, adapter_type):
+            logger.error(
+                "Adapter '%s' (type=%s) blocked by security policy",
+                adapter_name,
+                adapter_type,
+            )
+            return False
+        return True
+
+    def _warn_unregistered_sections(self, config: Dict[str, Any]) -> None:
+        """Warn for config sections with no registered adapter plugin (legacy path)."""
+        core_sections = {"adapters", "server", "authentication", "logging", "port_actions"}
+        for section, val in config.items():
+            if section in core_sections or not isinstance(val, (dict, list)):
+                continue
+            if section not in self.registry._plugins:
+                logger.warning(
+                    "Config section '%s' present but no adapter plugin registered (import failure or typo)",
+                    section,
+                )
+
+    def _create_legacy_adapters(
+        self,
+        active_plugins: List[AdapterPlugin],
+        policy: Optional[SecurityPolicy],
+        config: Dict[str, Any],
+        adapters: List[BaseGenericAdapter],
+    ) -> None:
+        """Create one adapter per active legacy plugin; skip the plugin on error."""
+        for plugin in active_plugins:
+            try:
+                plugin_config = config[plugin.config_section]
+                adapter_class = plugin.adapter_class  # This is a BaseGenericAdapter subclass
+                if not self._legacy_section_ok(plugin, adapter_class, plugin_config, policy):
+                    continue
+
+                # Create adapter instance(s) - all inherit from BaseGenericAdapter
+                created_adapters = self._create_adapter_instances(plugin, plugin_config)
+                adapters.extend(created_adapters)
+
+                logger.info("Created %s adapter instance(s) for %s", len(created_adapters), plugin.name)
+
+            except Exception as e:
+                logger.error("Failed to create adapter for plugin %s: %s", plugin.name, e, exc_info=True)
+                # Continue with other plugins rather than failing completely
+
+    def _legacy_section_ok(
+        self,
+        plugin: AdapterPlugin,
+        adapter_class: Type[BaseGenericAdapter],
+        plugin_config: Any,
+        policy: Optional[SecurityPolicy],
+    ) -> bool:
+        """Validate and policy-check one legacy adapter section.
+
+        Raises ValueError when validation fails (the caller logs and skips the
+        plugin). Returns False when the security policy blocks the section.
+        """
+        # Validate plugin-specific configuration
+        validate_fn = getattr(adapter_class, "validate_config", None)
+        if callable(validate_fn):
+            # Pass the full config section dict for validation
+            config_to_validate = {plugin.config_section: plugin_config}
+            if not validate_fn(config_to_validate):
+                logger.error("Invalid configuration for %s", plugin.name)
+                raise ValueError(f"Invalid configuration for {plugin.name}")
+
+        # Security policy enforcement (legacy sections)
+        atype = self._detect_adapter_type(adapter_class)
+        if policy and not self._is_adapter_allowed(policy, plugin, atype):
+            logger.error(
+                "Adapter section '%s' blocked by security policy",
+                plugin.config_section,
+            )
+            return False
+        return True
+
+    def _detect_adapter_type(self, adapter_class: Type[BaseGenericAdapter]) -> Optional[str]:
+        """Best-effort adapter-type id for a class; None when undetectable."""
+        atype = None
+        get_type = getattr(adapter_class, "get_adapter_type", None)
+        if callable(get_type):
+            try:
+                atype = get_type(adapter_class)
+            except Exception:
                 try:
-                    plugin_config = config[plugin.config_section]
-
-                    # Validate plugin-specific configuration
-                    adapter_class = plugin.adapter_class  # This is a BaseGenericAdapter subclass
-                    validate_fn = getattr(adapter_class, "validate_config", None)
-                    if callable(validate_fn):
-                        # Pass the full config section dict for validation
-                        config_to_validate = {plugin.config_section: plugin_config}
-                        if not validate_fn(config_to_validate):
-                            logger.error("Invalid configuration for %s", plugin.name)
-                            raise ValueError(f"Invalid configuration for {plugin.name}")
-
-                    # Security policy enforcement (legacy sections)
+                    atype = get_type()
+                except Exception:
                     atype = None
-                    get_type = getattr(adapter_class, "get_adapter_type", None)
-                    if callable(get_type):
-                        try:
-                            atype = get_type(adapter_class)
-                        except Exception:
-                            try:
-                                atype = get_type()
-                            except Exception:
-                                atype = None
-                    if policy and not self._is_adapter_allowed(policy, plugin, atype):
-                        logger.error(
-                            "Adapter section '%s' blocked by security policy",
-                            plugin.config_section,
-                        )
-                        continue
+        return atype
 
-                    # Create adapter instance(s) - all inherit from BaseGenericAdapter
-                    created_adapters = self._create_adapter_instances(plugin, plugin_config)
-                    adapters.extend(created_adapters)
+    def _fail_fast_abort(self, config: Dict[str, Any]) -> Optional[str]:
+        """Build the fail-fast abort message, or None when no abort is required."""
+        import_errors = self.registry.get_import_errors()
+        missing = self._missing_adapter_sections(config)
+        if not missing:
+            return None
+        detail = ", ".join(f"{k}: {v}" for k, v in import_errors.items()) or "no import error details"
+        return f"Adapter fail-fast: aborting startup due to missing adapters for sections: {', '.join(missing)} | {detail}"
 
-                    logger.info("Created %s adapter instance(s) for %s", len(created_adapters), plugin.name)
-
-                except Exception as e:
-                    logger.error("Failed to create adapter for plugin %s: %s", plugin.name, e, exc_info=True)
-                    # Continue with other plugins rather than failing completely
-
-        # Fail-fast handling (legacy path only) after attempting creation
-        if fail_fast:
-            import_errors = self.registry.get_import_errors()
-            # Any explicitly configured sections missing adapters should abort
-            if "active_plugins" in locals():  # ensure we are in legacy branch context
-                core_sections = {"adapters", "server", "authentication", "logging", "port_actions"}
-                configured_sections = [s for s in config.keys() if s not in core_sections]
-                produced_sections = {p.config_section for p in self.registry.get_all_plugins()}
-                missing = [s for s in configured_sections if s not in produced_sections]
-                # Refine to those we warned about (import failures / typos)
-                if missing:
-                    detail_parts = []
-                    for k, v in import_errors.items():
-                        detail_parts.append(f"{k}: {v}")
-                    detail = ", ".join(detail_parts) if detail_parts else "no import error details"
-                    raise RuntimeError(
-                        f"Adapter fail-fast: aborting startup due to missing adapters for sections: {', '.join(missing)} | {detail}"
-                    )
-
-        logger.info("Successfully created %s total adapter instances", len(adapters))
-        return adapters  # Returns List[BaseGenericAdapter]
+    def _missing_adapter_sections(self, config: Dict[str, Any]) -> List[str]:
+        """Return configured sections that have no registered adapter plugin."""
+        core_sections = {"adapters", "server", "authentication", "logging", "port_actions"}
+        configured_sections = [s for s in config.keys() if s not in core_sections]
+        produced_sections = {p.config_section for p in self.registry.get_all_plugins()}
+        return [s for s in configured_sections if s not in produced_sections]
 
     def set_security_policy(self, policy: Optional[SecurityPolicy]) -> None:
         self.security_policy = policy
