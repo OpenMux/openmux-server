@@ -118,6 +118,169 @@ def absorb_removed_command_port_keys(config: Any, logger: Optional[Any] = None) 
     return keys
 
 
+# issue #67: env passed to spawned processes is sanitized unconditionally.
+# The allow-list below is the base; the port's env: block merges on top.
+_SPAWN_ENV_ALLOWED = ("PATH", "HOME", "SHELL", "USER", "LANG", "LC_ALL")
+_SPAWN_ENV_UNWANTED = (
+    "LC_TERMINAL",
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "ITERM_SESSION_ID",
+    "COLORTERM",
+    "KITTY_INSTALLATION_DIR",
+    "KITTY_LISTEN_ON",
+    "KITTY_WINDOW_ID",
+    "VTE_VERSION",
+)
+
+
+def _spawn_build_env(port: "CommandPort") -> Dict[str, str]:
+    """Build the sanitized env for a spawned process.
+
+    issue #67: sanitizing is unconditional (security posture); the clean_env
+    key is removed. The minimal allow-list is the base; the port's env: block
+    merges extra/override values on top. TERM defaults to xterm.
+    """
+    env: Dict[str, str] = {}
+    for k in _SPAWN_ENV_ALLOWED:
+        v = os.environ.get(k)
+        if v:
+            env[k] = v
+    env.setdefault("TERM", "xterm")
+    for bad in _SPAWN_ENV_UNWANTED:
+        env.pop(bad, None)
+    if isinstance(port.env, dict):
+        env.update(port.env)
+    return env
+
+
+async def _spawn_pty_process(port: "CommandPort", env: Dict[str, str]) -> None:
+    """Spawn via a pty (shell or exec) with its slave as stdio (issue #67 PTY).
+
+    On PTY allocation failure the port falls back to pipes (``use_pty`` set
+    False) and the caller spawns via _spawn_pipe_process. On success
+    ``port.process`` and ``port._pty_master_fd`` are set.
+    """
+    try:
+        master_fd, slave_fd = pty.openpty()
+        if port.shell:
+            port.process = await asyncio.create_subprocess_shell(
+                port.command,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                cwd=port.cwd,
+                env=env,
+                preexec_fn=port._build_preexec_fn(slave_fd),
+            )
+        else:
+            parts = shlex.split(port.command)
+            port.process = await asyncio.create_subprocess_exec(
+                *parts,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                cwd=port.cwd,
+                env=env,
+                preexec_fn=port._build_preexec_fn(slave_fd),
+            )
+        try:
+            os.close(slave_fd)
+        except OSError:  # justification: slave fd already closed by subprocess; safe to ignore
+            pass
+        port._pty_master_fd = master_fd
+    except Exception as e:  # justification: PTY allocation may fail on platform; fallback to pipes acceptable
+        port.logger.error("Failed to allocate PTY for %s, falling back to pipes: %s", port.name, e, exc_info=True)
+        port.use_pty = False
+
+
+async def _spawn_pipe_process(port: "CommandPort", preexec_fn, env: Dict[str, str]) -> None:
+    """Spawn via pipes (shell or exec), stderr merged into stdout."""
+    if port.shell:
+        port.process = await asyncio.create_subprocess_shell(
+            port.command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=port.cwd,
+            env=env,
+            preexec_fn=preexec_fn,
+        )
+    else:
+        parts = shlex.split(port.command)
+        port.process = await asyncio.create_subprocess_exec(
+            *parts,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=port.cwd,
+            env=env,
+            preexec_fn=preexec_fn,
+        )
+
+
+def _spawn_register_pty_reader(port: "CommandPort") -> None:
+    """Attach the event-loop reader for the PTY master fd.
+
+    Failure to register (logged, not raised) never aborts the spawn.
+    """
+    try:
+        port._loop = asyncio.get_running_loop()
+        if port._pty_master_fd is not None:
+            try:
+                os.set_blocking(port._pty_master_fd, False)
+            except Exception:  # justification: optional non-blocking optimization; continue in blocking mode
+                pass
+            port._loop.add_reader(port._pty_master_fd, port._on_pty_read_ready)
+            port._pty_reader_added = True
+    except Exception as e:
+        port.logger.error("Failed to register PTY reader for %s: %s", port.name, e, exc_info=True)
+
+
+def _spawn_reset_previous(port: "CommandPort") -> None:
+    """Drop the read task, PTY loop reader, and master fd from a prior spawn."""
+    if port._read_task:
+        try:
+            port._read_task.cancel()
+        except Exception:  # justification: cancelling stale read task; failure is non-fatal and next spawn proceeds
+            pass
+        port._read_task = None
+    if port._pty_master_fd is not None:
+        if port._loop and port._pty_reader_added:
+            try:
+                port._loop.remove_reader(port._pty_master_fd)
+            except Exception:  # justification: reader may already be detached; safe to proceed
+                pass
+            port._pty_reader_added = False
+        # Close even when the reader already detached itself on EOF,
+        # so a die->Enter respawn cycle cannot leak the old master fd.
+        try:
+            os.close(port._pty_master_fd)
+        except OSError:  # justification: fd may already be closed; next spawn proceeds
+            pass
+        port._pty_master_fd = None
+        port._pty_reader_added = False
+
+
+def _spawn_finish_setup(port: "CommandPort") -> None:
+    """Mark the process up, notify attached clients, and arm the flusher."""
+    port._stopped_notice_sent = False
+    # Lifecycle notice (issue #63): tell attached clients the process
+    # is (re)starting, e.g. an on-demand spawn or an auto-restart.
+    if port.client_count > 0:
+        port._schedule_lifecycle_notice("PROCESS_STARTED", "process started")
+    port.process_active = True
+    # Process is up; mark connected. Covers the on-demand first
+    # spawn, the Enter-respawn path, and auto-restart respawns --
+    # all of them route through here.
+    port._set_connected(True)
+    if port.use_pty:
+        if port._output_flush_task is None or port._output_flush_task.done():
+            port._output_flush_task = asyncio.create_task(port._output_flush_buffer_loop())
+    # Process is running again; clear any prior offline reason (issue #62).
+    port._set_status_message("")
+
+
 class CommandPort:
     """Command execution port wrapping a spawned process (optionally PTY-backed).
 
@@ -565,142 +728,27 @@ class CommandPort:
             # If interactive flags are needed, they should be included in the configured command.
 
             # Reset previous
-            if self._read_task:
-                try:
-                    self._read_task.cancel()
-                except Exception:  # justification: cancelling stale read task; failure is non-fatal and next spawn proceeds
-                    pass
-                self._read_task = None
-            if self._pty_master_fd is not None:
-                if self._loop and self._pty_reader_added:
-                    try:
-                        self._loop.remove_reader(self._pty_master_fd)
-                    except Exception:  # justification: reader may already be detached; safe to proceed
-                        pass
-                    self._pty_reader_added = False
-                # Close even when the reader already detached itself on EOF,
-                # so a die->Enter respawn cycle cannot leak the old master fd.
-                try:
-                    os.close(self._pty_master_fd)
-                except OSError:  # justification: fd may already be closed; next spawn proceeds
-                    pass
-                self._pty_master_fd = None
-                self._pty_reader_added = False
-
-            # Build environment. issue #67: sanitizing is unconditional
-            # (security posture); the clean_env key is removed. The env: block
-            # merges extra/override values on top of the minimal allow-list.
-            env: Dict[str, str] = {}
-            for k in ("PATH", "HOME", "SHELL", "USER", "LANG", "LC_ALL"):
-                v = os.environ.get(k)
-                if v:
-                    env[k] = v
-            env.setdefault("TERM", "xterm")
-            for bad in (
-                "LC_TERMINAL",
-                "TERM_PROGRAM",
-                "TERM_PROGRAM_VERSION",
-                "ITERM_SESSION_ID",
-                "COLORTERM",
-                "KITTY_INSTALLATION_DIR",
-                "KITTY_LISTEN_ON",
-                "KITTY_WINDOW_ID",
-                "VTE_VERSION",
-            ):
-                env.pop(bad, None)
-            if isinstance(self.env, dict):
-                env.update(self.env)
-
+            _spawn_reset_previous(self)
+            # Build environment (issue #67: unconditional sanitizing).
+            env = _spawn_build_env(self)
+            # A PTY allocation failure flips use_pty to False inside
+            # _spawn_pty_process; the independent check below then spawns the
+            # pipe fallback (mirrors the original two-stage structure).
             if self.use_pty:
-                try:
-                    master_fd, slave_fd = pty.openpty()
-                    if self.shell:
-                        self.process = await asyncio.create_subprocess_shell(
-                            self.command,
-                            stdin=slave_fd,
-                            stdout=slave_fd,
-                            stderr=slave_fd,
-                            cwd=self.cwd,
-                            env=env,
-                            preexec_fn=self._build_preexec_fn(slave_fd),
-                        )
-                    else:
-                        parts = shlex.split(self.command)
-                        self.process = await asyncio.create_subprocess_exec(
-                            *parts,
-                            stdin=slave_fd,
-                            stdout=slave_fd,
-                            stderr=slave_fd,
-                            cwd=self.cwd,
-                            env=env,
-                            preexec_fn=self._build_preexec_fn(slave_fd),
-                        )
-                    try:
-                        os.close(slave_fd)
-                    except OSError:  # justification: slave fd already closed by subprocess; safe to ignore
-                        pass
-                    self._pty_master_fd = master_fd
-                except Exception as e:  # justification: PTY allocation may fail on platform; fallback to pipes acceptable
-                    self.logger.error("Failed to allocate PTY for %s, falling back to pipes: %s", self.name, e, exc_info=True)
-                    self.use_pty = False
-
+                await _spawn_pty_process(self, env)
             if not self.use_pty:
-                if self.shell:
-                    self.process = await asyncio.create_subprocess_shell(
-                        self.command,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.STDOUT,
-                        cwd=self.cwd,
-                        env=env,
-                        preexec_fn=preexec_fn,
-                    )
-                else:
-                    parts = shlex.split(self.command)
-                    self.process = await asyncio.create_subprocess_exec(
-                        *parts,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.STDOUT,
-                        cwd=self.cwd,
-                        env=env,
-                        preexec_fn=preexec_fn,
-                    )
+                await _spawn_pipe_process(self, preexec_fn, env)
 
             # Readers/Writers
             stdin_stream = None if self.use_pty else (self.process.stdin if self.process else None)
             self._writer = CommandWriter(stdin_stream, self)
 
             if self.use_pty:
-                try:
-                    self._loop = asyncio.get_running_loop()
-                    if self._pty_master_fd is not None:
-                        try:
-                            os.set_blocking(self._pty_master_fd, False)
-                        except Exception:  # justification: optional non-blocking optimization; continue in blocking mode
-                            pass
-                        self._loop.add_reader(self._pty_master_fd, self._on_pty_read_ready)
-                        self._pty_reader_added = True
-                except Exception as e:
-                    self.logger.error("Failed to register PTY reader for %s: %s", self.name, e, exc_info=True)
+                _spawn_register_pty_reader(self)
             else:
                 self._read_task = asyncio.create_task(self._stdout_reader_task())
 
-            self._stopped_notice_sent = False
-            # Lifecycle notice (issue #63): tell attached clients the process
-            # is (re)starting, e.g. an on-demand spawn or an auto-restart.
-            if self.client_count > 0:
-                self._schedule_lifecycle_notice("PROCESS_STARTED", "process started")
-            self.process_active = True
-            # Process is up; mark connected. Covers the on-demand first
-            # spawn, the Enter-respawn path, and auto-restart respawns --
-            # all of them route through here.
-            self._set_connected(True)
-            if self.use_pty:
-                if self._output_flush_task is None or self._output_flush_task.done():
-                    self._output_flush_task = asyncio.create_task(self._output_flush_buffer_loop())
-            # Process is running again; clear any prior offline reason (issue #62).
-            self._set_status_message("")
+            _spawn_finish_setup(self)
             return True
         except FileNotFoundError as e:
             self.logger.error("Error spawning process for %s: %s", self.name, e, exc_info=True)
