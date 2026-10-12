@@ -993,6 +993,257 @@ class OpenMuxClient:
         return True
 
 
+def _cli_level_name(verbose):
+    """Map the -v count to a logging level name (matches the CLI flag help)."""
+    if verbose >= 2:
+        return "DEBUG"
+    if verbose == 1:
+        return "INFO"
+    return "WARNING"
+
+
+def _cli_logging_config(args):
+    """Build the client logging_config dict from parsed args (no env reliance)."""
+    return {
+        "log_level": _cli_level_name(args.verbose),
+        "file_only": bool(args.log_to_file) and not args.quiet and not args.log_dir,
+        "file_logging_enabled": bool(args.log_to_file) or bool(args.log_file) or bool(args.log_dir),
+        "log_dir": args.log_dir or "logs",
+        "log_file": args.log_file or "openmux_client.log",
+        "log_max_size_mb": int(args.log_max_size or 10),
+        "log_backups": int(args.log_backups or 5),
+    }
+
+
+def _cli_apply_logging(client, logging_config):
+    """Inject logging_config into client and re-init the logging manager."""
+    if isinstance(client.config, dict):
+        existing = client.config.get("logging", {}) or {}
+        existing.update(logging_config)
+        client.config["logging"] = existing
+        client.logging_manager = ClientLoggingManager(client.config["logging"])  # reconfigure logging
+
+
+def _cli_require_server(client, parser, args, message="No server specified and no default found in config"):
+    """Resolve the target server; log + print help + exit(1) when it can't be found."""
+    resolved = client.resolve_default_server(args.server, args.port)
+    if not resolved:
+        logging.error(message)
+        parser.print_help()
+        sys.exit(1)
+    return resolved
+
+
+def _cli_cli_or_config_creds(client, server_host, args):
+    """Prefer CLI-provided credentials, else the config creds for the chosen host."""
+    get_creds = client.get_credentials_for(server_host)
+    get_pub = client.get_pubkey_for(server_host)
+    return (
+        args.username if args.username is not None else get_creds[0],
+        args.password if args.password is not None else get_creds[1],
+        args.key if args.key is not None else get_creds[2],
+        args.pubkey if args.pubkey is not None else get_pub[0],
+        args.pubkey_id if args.pubkey_id is not None else get_pub[1],
+    )
+
+
+def _cli_pubkey_pair(client, args):
+    """Return the effective (pubkey, pubkey_id) pair for a connection."""
+    if not args.pubkey and not args.pubkey_id:
+        return client.get_pubkey_for(args.server)[0:2]
+    return (args.pubkey, args.pubkey_id)
+
+
+async def _cli_ws_connect(client, server_host, server_port, args, port_name):
+    """Open a websocket-adapter connection, resolving pubkey + Basic Auth args."""
+    get_pub = client.get_pubkey_for(server_host)
+    return await client.connect_to_server(
+        server_host,
+        server_port,
+        (args.ws_user if args.ws_user else args.username),
+        (args.ws_password if args.ws_password else args.password),
+        args.key,
+        (args.pubkey if args.pubkey is not None else get_pub[0]),
+        (args.pubkey_id if args.pubkey_id is not None else get_pub[1]),
+        args.encrypt,
+        adapter_type="websocket",
+        port_name=port_name,
+        ws_basic_user=(args.ws_user if args.ws_user else args.username),
+        ws_basic_password=(args.ws_password if args.ws_password else args.password),
+    )
+
+
+def _cli_run_by_name(client, args):
+    """Dispatcher 1: connect to a console by name."""
+    return asyncio.run(
+        client.find_and_connect_by_name(
+            args.name,
+            (args.ws_user if args.adapter == "websocket" and args.ws_user else args.username),
+            (args.ws_password if args.adapter == "websocket" and args.ws_password else args.password),
+            args.key,
+            *_cli_pubkey_pair(client, args),
+            args.encrypt,
+            args.reconnect,
+            args.reconnect_backoff_initial,
+            args.reconnect_backoff_max,
+        )
+    )
+
+
+def _cli_run_list(client, parser, args):
+    """Dispatcher 2: list ports on a server."""
+    server_host, server_port = _cli_require_server(client, parser, args)
+
+    async def list_ports_task():
+        # Prefer CLI creds; else use config creds for chosen host
+        resolved_username, resolved_password, resolved_api_key = args.username, args.password, args.key
+        if resolved_username is None and resolved_password is None and resolved_api_key is None:
+            cfg_username, cfg_password, cfg_api_key = client.get_credentials_for(server_host)
+            resolved_username = cfg_username if cfg_username is not None else resolved_username
+            resolved_password = cfg_password if cfg_password is not None else resolved_password
+            resolved_api_key = cfg_api_key if cfg_api_key is not None else resolved_api_key
+        # Determine pubkey fallback
+        effective_pubkey, effective_pubkey_id = _cli_pubkey_pair(client, args)
+        connection = await client.connect_to_server(
+            server_host,
+            server_port,
+            resolved_username,
+            resolved_password,
+            resolved_api_key,
+            effective_pubkey,
+            effective_pubkey_id,
+            args.encrypt,
+            adapter_type=args.adapter,
+            port_name=None,  # discovery mode for websocket
+            ws_basic_user=(args.ws_user if args.ws_user else args.username),
+            ws_basic_password=(args.ws_password if args.ws_password else args.password),
+        )
+        if connection:
+            try:
+                await client.list_ports(connection)
+            finally:
+                await connection.close()
+
+    asyncio.run(list_ports_task())
+
+
+def _cli_run_batch(client, parser, args):
+    """Dispatcher 3: run a one-shot batch command against a port."""
+    server_host, server_port = _cli_require_server(client, parser, args)
+    if args.adapter == "websocket":
+        logging.error("Batch mode (- command) not yet supported with --adapter websocket")
+        sys.exit(2)
+    username, password, key, pubkey, pubkey_id = _cli_cli_or_config_creds(client, server_host, args)
+    asyncio.run(
+        client.run_batch_command(
+            server_host,
+            server_port,
+            args.port_name,
+            args.command,
+            username,
+            password,
+            key,
+            pubkey,
+            pubkey_id,
+            args.encrypt,
+        )
+    )
+
+
+def _cli_run_port(client, parser, args):
+    """Dispatcher 4: connect to (and run a console on) a single port."""
+    server_host, server_port = _cli_require_server(client, parser, args)
+    if args.adapter == "websocket":
+
+        async def ws_console_on_port():
+            conn = await _cli_ws_connect(client, server_host, server_port, args, args.port_name)
+            if not conn:
+                return
+            from .console import ConsoleUI
+
+            console = ConsoleUI(
+                conn,
+                reconnect_mode=args.reconnect,
+                backoff_initial=args.reconnect_backoff_initial,
+                backoff_max=args.reconnect_backoff_max,
+            )
+            await console.run()
+
+        asyncio.run(ws_console_on_port())
+    else:
+        username, password, key, pubkey, pubkey_id = _cli_cli_or_config_creds(client, server_host, args)
+        asyncio.run(
+            client.run_console_on_port(
+                server_host,
+                server_port,
+                args.port_name,
+                username,
+                password,
+                key,
+                pubkey,
+                pubkey_id,
+                args.encrypt,
+                args.reconnect,
+                args.reconnect_backoff_initial,
+                args.reconnect_backoff_max,
+            )
+        )
+
+
+def _cli_run_server(client, parser, args):
+    """Dispatcher 5: run the interactive server console (websocket auto-selects a port)."""
+    server_host, server_port = _cli_require_server(
+        client, parser, args, message="Either server (-s) or console name (-n) is required, and no default server was found"
+    )
+    if args.adapter == "websocket":
+
+        async def ws_console():
+            # discovery mode first to list ports
+            conn = await _cli_ws_connect(client, server_host, server_port, args, None)
+            if not conn:
+                return
+            ports = await client.list_ports(conn)
+            if not ports:
+                logging.error("No ports available.")
+                await conn.close()
+                return
+            # Simple heuristic: auto-select first port
+            first = ports[0]
+            pn = first.get("name") if isinstance(first, dict) else first
+            await conn.close()
+            conn2 = await _cli_ws_connect(client, server_host, server_port, args, pn)
+            if not conn2:
+                return
+            from .console import ConsoleUI
+
+            console = ConsoleUI(
+                conn2,
+                reconnect_mode=args.reconnect,
+                backoff_initial=args.reconnect_backoff_initial,
+                backoff_max=args.reconnect_backoff_max,
+            )
+            await console.run()
+
+        asyncio.run(ws_console())
+    else:
+        username, password, key, pubkey, pubkey_id = _cli_cli_or_config_creds(client, server_host, args)
+        asyncio.run(
+            client.run_console(
+                server_host,
+                server_port,
+                username,
+                password,
+                key,
+                pubkey,
+                pubkey_id,
+                args.encrypt,
+                args.reconnect,
+                args.reconnect_backoff_initial,
+                args.reconnect_backoff_max,
+            )
+        )
+
+
 def main():
     """Parse CLI arguments and dispatch requested client action.
 
@@ -1100,260 +1351,25 @@ def main():
     args = parser.parse_args()
 
     # Build logging config for client explicitly (no env reliance)
-    if args.verbose >= 2:
-        level_name = "DEBUG"
-    elif args.verbose == 1:
-        level_name = "INFO"
-    else:
-        level_name = "WARNING"
-
-    logging_config = {
-        "log_level": level_name,
-        "file_only": bool(args.log_to_file) and not args.quiet and not args.log_dir,
-        "file_logging_enabled": bool(args.log_to_file) or bool(args.log_file) or bool(args.log_dir),
-        "log_dir": args.log_dir or "logs",
-        "log_file": args.log_file or "openmux_client.log",
-        "log_max_size_mb": int(args.log_max_size or 10),
-        "log_backups": int(args.log_backups or 5),
-    }
+    # Build logging config for client explicitly (no env reliance)
+    logging_config = _cli_logging_config(args)
 
     # Create client with config path; logging manager will receive logging_config from OpenMuxClient
     client = OpenMuxClient(args.config)
-    # Inject logging config into client and re-init logging manager accordingly
-    if isinstance(client.config, dict):
-        existing = client.config.get("logging", {}) or {}
-        existing.update(logging_config)
-        client.config["logging"] = existing
-        client.logging_manager = ClientLoggingManager(client.config["logging"])  # reconfigure logging
+    _cli_apply_logging(client, logging_config)
 
     # Run client
     try:
         if args.name:
-            # Connect to a port by name
-            asyncio.run(
-                client.find_and_connect_by_name(
-                    args.name,
-                    (args.ws_user if args.adapter == "websocket" and args.ws_user else args.username),
-                    (args.ws_password if args.adapter == "websocket" and args.ws_password else args.password),
-                    args.key,
-                    *(
-                        client.get_pubkey_for(args.server)[0:2]
-                        if (not args.pubkey and not args.pubkey_id)
-                        else (args.pubkey, args.pubkey_id)
-                    ),
-                    args.encrypt,
-                    args.reconnect,
-                    args.reconnect_backoff_initial,
-                    args.reconnect_backoff_max,
-                )
-            )
+            _cli_run_by_name(client, args)
         elif args.list:
-            # List ports on a server
-            resolved = client.resolve_default_server(args.server, args.port)
-            if not resolved:
-                logging.error("No server specified and no default found in config")
-                parser.print_help()
-                sys.exit(1)
-            server_host, server_port = resolved
-
-            async def list_ports_task():
-                # Prefer CLI creds; else use config creds for chosen host
-                resolved_username, resolved_password, resolved_api_key = args.username, args.password, args.key
-                if resolved_username is None and resolved_password is None and resolved_api_key is None:
-                    cfg_username, cfg_password, cfg_api_key = client.get_credentials_for(server_host)
-                    resolved_username = cfg_username if cfg_username is not None else resolved_username
-                    resolved_password = cfg_password if cfg_password is not None else resolved_password
-                    resolved_api_key = cfg_api_key if cfg_api_key is not None else resolved_api_key
-                # Determine pubkey fallback
-                effective_pubkey = args.pubkey
-                effective_pubkey_id = args.pubkey_id
-                if not effective_pubkey and not effective_pubkey_id:
-                    cfg_pk, cfg_pk_id = client.get_pubkey_for(server_host)
-                    if cfg_pk:
-                        effective_pubkey, effective_pubkey_id = cfg_pk, cfg_pk_id
-                connection = await client.connect_to_server(
-                    server_host,
-                    server_port,
-                    resolved_username,
-                    resolved_password,
-                    resolved_api_key,
-                    effective_pubkey,
-                    effective_pubkey_id,
-                    args.encrypt,
-                    adapter_type=args.adapter,
-                    port_name=None,  # discovery mode for websocket
-                    ws_basic_user=(args.ws_user if args.ws_user else args.username),
-                    ws_basic_password=(args.ws_password if args.ws_password else args.password),
-                )
-                if connection:
-                    try:
-                        await client.list_ports(connection)
-                    finally:
-                        await connection.close()
-
-            asyncio.run(list_ports_task())
+            _cli_run_list(client, parser, args)
         elif args.port_name and args.command:
-            # Run batch command (unsupported for websocket adapter at present)
-            resolved = client.resolve_default_server(args.server, args.port)
-            if not resolved:
-                logging.error("No server specified and no default found in config")
-                parser.print_help()
-                sys.exit(1)
-            server_host, server_port = resolved
-            if args.adapter == "websocket":
-                logging.error("Batch mode (- command) not yet supported with --adapter websocket")
-                sys.exit(2)
-            else:
-                asyncio.run(
-                    client.run_batch_command(
-                        server_host,
-                        server_port,
-                        args.port_name,
-                        args.command,
-                        # Prefer CLI creds, fallback to config for chosen host
-                        (args.username if args.username is not None else client.get_credentials_for(server_host)[0]),
-                        (args.password if args.password is not None else client.get_credentials_for(server_host)[1]),
-                        (args.key if args.key is not None else client.get_credentials_for(server_host)[2]),
-                        (args.pubkey if args.pubkey is not None else client.get_pubkey_for(server_host)[0]),
-                        (args.pubkey_id if args.pubkey_id is not None else client.get_pubkey_for(server_host)[1]),
-                        args.encrypt,
-                    )
-                )
+            _cli_run_batch(client, parser, args)
         elif args.port_name:
-            # Connect to port
-            resolved = client.resolve_default_server(args.server, args.port)
-            if not resolved:
-                logging.error("No server specified and no default found in config")
-                parser.print_help()
-                sys.exit(1)
-            server_host, server_port = resolved
-            if args.adapter == "websocket":
-
-                async def ws_console_on_port():
-                    conn = await client.connect_to_server(
-                        server_host,
-                        server_port,
-                        (args.ws_user if args.ws_user else args.username),
-                        (args.ws_password if args.ws_password else args.password),
-                        args.key,
-                        (args.pubkey if args.pubkey is not None else client.get_pubkey_for(server_host)[0]),
-                        (args.pubkey_id if args.pubkey_id is not None else client.get_pubkey_for(server_host)[1]),
-                        args.encrypt,
-                        adapter_type="websocket",
-                        port_name=args.port_name,
-                        ws_basic_user=(args.ws_user if args.ws_user else args.username),
-                        ws_basic_password=(args.ws_password if args.ws_password else args.password),
-                    )
-                    if not conn:
-                        return
-                    from .console import ConsoleUI
-
-                    console = ConsoleUI(
-                        conn,
-                        reconnect_mode=args.reconnect,
-                        backoff_initial=args.reconnect_backoff_initial,
-                        backoff_max=args.reconnect_backoff_max,
-                    )
-                    await console.run()
-
-                asyncio.run(ws_console_on_port())
-            else:
-                asyncio.run(
-                    client.run_console_on_port(
-                        server_host,
-                        server_port,
-                        args.port_name,
-                        (args.username if args.username is not None else client.get_credentials_for(server_host)[0]),
-                        (args.password if args.password is not None else client.get_credentials_for(server_host)[1]),
-                        (args.key if args.key is not None else client.get_credentials_for(server_host)[2]),
-                        (args.pubkey if args.pubkey is not None else client.get_pubkey_for(server_host)[0]),
-                        (args.pubkey_id if args.pubkey_id is not None else client.get_pubkey_for(server_host)[1]),
-                        args.encrypt,
-                        args.reconnect,
-                        args.reconnect_backoff_initial,
-                        args.reconnect_backoff_max,
-                    )
-                )
+            _cli_run_port(client, parser, args)
         else:
-            # Run console
-            resolved = client.resolve_default_server(args.server, args.port)
-            if not resolved:
-                logging.error("Either server (-s) or console name (-n) is required, and no default server was found")
-                parser.print_help()
-                sys.exit(1)
-            server_host, server_port = resolved
-            if args.adapter == "websocket":
-
-                async def ws_console():
-                    # discovery mode first to list ports
-                    conn = await client.connect_to_server(
-                        server_host,
-                        server_port,
-                        (args.ws_user if args.ws_user else args.username),
-                        (args.ws_password if args.ws_password else args.password),
-                        args.key,
-                        (args.pubkey if args.pubkey is not None else client.get_pubkey_for(server_host)[0]),
-                        (args.pubkey_id if args.pubkey_id is not None else client.get_pubkey_for(server_host)[1]),
-                        args.encrypt,
-                        adapter_type="websocket",
-                        port_name=None,
-                        ws_basic_user=(args.ws_user if args.ws_user else args.username),
-                        ws_basic_password=(args.ws_password if args.ws_password else args.password),
-                    )
-                    if not conn:
-                        return
-                    ports = await client.list_ports(conn)
-                    if not ports:
-                        logging.error("No ports available.")
-                        await conn.close()
-                        return
-                    # Simple heuristic: auto-select first port
-                    first = ports[0]
-                    pn = first.get("name") if isinstance(first, dict) else first
-                    await conn.close()
-                    conn2 = await client.connect_to_server(
-                        server_host,
-                        server_port,
-                        (args.ws_user if args.ws_user else args.username),
-                        (args.ws_password if args.ws_password else args.password),
-                        args.key,
-                        (args.pubkey if args.pubkey is not None else client.get_pubkey_for(server_host)[0]),
-                        (args.pubkey_id if args.pubkey_id is not None else client.get_pubkey_for(server_host)[1]),
-                        args.encrypt,
-                        adapter_type="websocket",
-                        port_name=pn,
-                        ws_basic_user=(args.ws_user if args.ws_user else args.username),
-                        ws_basic_password=(args.ws_password if args.ws_password else args.password),
-                    )
-                    if not conn2:
-                        return
-                    from .console import ConsoleUI
-
-                    console = ConsoleUI(
-                        conn2,
-                        reconnect_mode=args.reconnect,
-                        backoff_initial=args.reconnect_backoff_initial,
-                        backoff_max=args.reconnect_backoff_max,
-                    )
-                    await console.run()
-
-                asyncio.run(ws_console())
-            else:
-                asyncio.run(
-                    client.run_console(
-                        server_host,
-                        server_port,
-                        (args.username if args.username is not None else client.get_credentials_for(server_host)[0]),
-                        (args.password if args.password is not None else client.get_credentials_for(server_host)[1]),
-                        (args.key if args.key is not None else client.get_credentials_for(server_host)[2]),
-                        (args.pubkey if args.pubkey is not None else client.get_pubkey_for(server_host)[0]),
-                        (args.pubkey_id if args.pubkey_id is not None else client.get_pubkey_for(server_host)[1]),
-                        args.encrypt,
-                        args.reconnect,
-                        args.reconnect_backoff_initial,
-                        args.reconnect_backoff_max,
-                    )
-                )
+            _cli_run_server(client, parser, args)
     except KeyboardInterrupt:
         logging.info("Client stopped by user")
         asyncio.run(client.shutdown())
