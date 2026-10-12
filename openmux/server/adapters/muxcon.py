@@ -4123,6 +4123,139 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             # Cleanup
             await self._close_connection(conn_id)
 
+    def _mpath_has_live_path(self, pk: str, now: float, stale_window: float) -> bool:
+        # Whether a peer group has any non-frozen, non-stale path
+        # (replaces the nested _has_live_path closure).
+        grp = self._mpath_groups.get(pk) or {}
+        conns = grp.get("conns", {}) or {}
+        for cid, meta in conns.items():
+            # Skip frozen connections entirely
+            if self._fault_state.get(cid, {}).get("frozen"):
+                continue
+            # Consider either last_rx_seen / last_seen or last ACK timestamp
+            last_rx = float(meta.get("last_rx_seen") or meta.get("last_seen") or 0)
+            hb = self._hb_state.get(cid) or {}
+            last_ack = float(hb.get("last_ack_ts") or 0)
+            last_activity = max(last_rx, last_ack)
+            if last_activity and (now - last_activity) <= stale_window:
+                return True
+        return False
+
+    def _mpath_effective_stale_window(self) -> float:
+        # Effective stale window must account for heartbeat cadence.
+        try:
+            # Use a shorter window than the hard timeout so UI reflects loss sooner
+            hb_window = self.heartbeat_interval * 1.5
+        except Exception:
+            hb_window = 60.0
+        effective_stale = 0.0
+        try:
+            effective_stale = float(self.mpath_primary_stale_sec)
+        except Exception:
+            effective_stale = 45.0
+        if hb_window > effective_stale:
+            return hb_window
+        return effective_stale
+
+    def _peer_live_keys(self, peer_key: Optional[str]) -> List[str]:
+        # Determine which peers to check (replaces the inline enumeration).
+        peer_keys: List[str] = []
+        if peer_key:
+            peer_keys = [peer_key]
+        else:
+            try:
+                peer_keys = list((self._mpath_groups or {}).keys())
+            except Exception:
+                peer_keys = []
+            # Also include any peers that still have proxies but no group entry
+            try:
+                for pk in (self._peer_proxies or {}).keys():
+                    if pk not in peer_keys:
+                        peer_keys.append(pk)
+            except Exception:
+                # justification: optional enumeration; the known groups are still scanned
+                pass
+        return peer_keys
+
+    @staticmethod
+    def _origin_server_of(proxy) -> Optional[str]:
+        # Resolve the origin server_id for a proxy's link notice text,
+        # falling back to "unknown" when the metadata chain is absent.
+        # Returns None (not "unknown") when the metadata chain RAISES, so
+        # the caller preserves the original skip-on-error semantics (the
+        # reason and the notice were each skipped when metadata failed).
+        try:
+            src_server = None
+            meta = getattr(proxy, "metadata", None)
+            if meta is not None:
+                origin = getattr(meta, "origin_server", None)
+                src_server = getattr(origin, "server_id", None)
+            return src_server or "unknown"
+        except Exception:
+            # justification: optional status detail; the proxy stays registered
+            return None
+
+    @staticmethod
+    def _set_link_reason(proxy, live: bool, src_server: Optional[str]) -> None:
+        # Local offline reason (issue #62): set on the flip to
+        # "no live path", keep while still down, clear on recover.
+        # src_server None means the metadata chain raised: skip (as before).
+        if src_server is None:
+            return
+        try:
+            if live:
+                proxy.link_reason = ""
+            else:
+                proxy.link_reason = f"MuxCon link to {src_server} is down"
+        except Exception:
+            # justification: optional status detail; the proxy stays registered
+            pass
+
+    def _notify_pm_meta(self, pname: str, proxy, pk: str, live: bool) -> None:
+        # Notify PortManager/meta listeners of a live-state change.
+        try:
+            pm = getattr(self, "main_port_manager", None)
+            if pm and hasattr(pm, "notify_meta_updated"):
+                payload = {"event": "federated_live_state", "peer_key": pk, "connected": live}
+                try:
+                    if hasattr(proxy, "last_seen"):
+                        payload["last_seen"] = float(getattr(proxy, "last_seen"))
+                except Exception:
+                    # justification: optional notification; UI event delivery is best-effort
+                    pass
+                pm.notify_meta_updated(pname, payload)
+        except Exception:
+            # justification: optional notification; UI event delivery is best-effort
+            pass
+
+    def _flip_proxy_live_state(self, pk: str, pname: str, proxy, live: bool) -> None:
+        # Flip a single proxy's is_connected (and notify) when it differs
+        # from current liveness. Replaces the innermost for-loop body; the
+        # trailing `continue` becomes a `return` (same: skip this proxy).
+        try:
+            current = bool(getattr(proxy, "is_connected", True))
+            if current == live:
+                return
+            # Flip state without destroying sessions on stale detection
+            try:
+                proxy.is_connected = live
+            except Exception:
+                # justification: optional live-state hint; the stale detection is advisory
+                pass
+            src_server = self._origin_server_of(proxy)
+            self._set_link_reason(proxy, live, src_server)
+            # When transitioning to disconnected, best-effort notify via data queue
+            if not live and src_server is not None:
+                try:
+                    src_path = f"{src_server}::{pname}"
+                    self._emit_link_notice_once(proxy, "stale", src_path)
+                except Exception:
+                    # justification: optional notice; the UI badge catches up on the next event
+                    pass
+            self._notify_pm_meta(pname, proxy, pk, live)
+        except Exception:
+            return
+
     def _update_peer_proxies_live_state(self, peer_key: Optional[str] = None) -> None:
         """Update RemotePortProxy.is_connected based on current multipath liveness.
 
@@ -4137,119 +4270,16 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         try:
             now = time.time()
-            # Effective stale window must account for heartbeat cadence
-            try:
-                # Use a shorter window than the hard timeout so UI reflects loss sooner
-                hb_window = self.heartbeat_interval * 1.5
-            except Exception:
-                hb_window = 60.0
-            effective_stale = 0.0
-            try:
-                effective_stale = float(self.mpath_primary_stale_sec)
-            except Exception:
-                effective_stale = 45.0
-            if hb_window > effective_stale:
-                stale_window = hb_window
-            else:
-                stale_window = effective_stale
-
-            def _has_live_path(pk: str) -> bool:
-                grp = self._mpath_groups.get(pk) or {}
-                conns = grp.get("conns", {}) or {}
-                for cid, meta in conns.items():
-                    # Skip frozen connections entirely
-                    if self._fault_state.get(cid, {}).get("frozen"):
-                        continue
-                    # Consider either last_rx_seen / last_seen or last ACK timestamp
-                    last_rx = float(meta.get("last_rx_seen") or meta.get("last_seen") or 0)
-                    hb = self._hb_state.get(cid) or {}
-                    last_ack = float(hb.get("last_ack_ts") or 0)
-                    last_activity = max(last_rx, last_ack)
-                    if last_activity and (now - last_activity) <= stale_window:
-                        return True
-                return False
-
-            # Determine which peers to check
-            peer_keys = []
-            if peer_key:
-                peer_keys = [peer_key]
-            else:
-                try:
-                    peer_keys = list((self._mpath_groups or {}).keys())
-                except Exception:
-                    peer_keys = []
-                # Also include any peers that still have proxies but no group entry
-                try:
-                    for pk in (self._peer_proxies or {}).keys():
-                        if pk not in peer_keys:
-                            peer_keys.append(pk)
-                except Exception:
-                    # justification: optional enumeration; the known groups are still scanned
-                    pass
+            stale_window = self._mpath_effective_stale_window()
+            peer_keys = self._peer_live_keys(peer_key)
 
             for pk in peer_keys:
                 proxies = (self._peer_proxies or {}).get(pk) or {}
                 if not proxies:
                     continue
-                live = _has_live_path(pk)
+                live = self._mpath_has_live_path(pk, now, stale_window)
                 for pname, proxy in list(proxies.items()):
-                    try:
-                        current = bool(getattr(proxy, "is_connected", True))
-                        if current == live:
-                            continue
-                        # Flip state without destroying sessions on stale detection
-                        try:
-                            proxy.is_connected = live
-                        except Exception:
-                            # justification: optional live-state hint; the stale detection is advisory
-                            pass
-                        # Local offline reason (issue #62): set on the flip to
-                        # "no live path", keep while still down, clear on recover.
-                        try:
-                            if live:
-                                proxy.link_reason = ""
-                            else:
-                                src_server = None
-                                meta = getattr(proxy, "metadata", None)
-                                if meta is not None:
-                                    origin = getattr(meta, "origin_server", None)
-                                    src_server = getattr(origin, "server_id", None)
-                                src_server = src_server or "unknown"
-                                proxy.link_reason = f"MuxCon link to {src_server} is down"
-                        except Exception:
-                            # justification: optional status detail; the proxy stays registered
-                            pass
-                        # When transitioning to disconnected, best-effort notify via data queue
-                        if not live:
-                            try:
-                                src_server = None
-                                meta = getattr(proxy, "metadata", None)
-                                if meta is not None:
-                                    origin = getattr(meta, "origin_server", None)
-                                    src_server = getattr(origin, "server_id", None)
-                                src_server = src_server or "unknown"
-                                src_path = f"{src_server}::{pname}"
-                                self._emit_link_notice_once(proxy, "stale", src_path)
-                            except Exception:
-                                # justification: optional notice; the UI badge catches up on the next event
-                                pass
-                        # Notify PortManager/meta listeners
-                        try:
-                            pm = getattr(self, "main_port_manager", None)
-                            if pm and hasattr(pm, "notify_meta_updated"):
-                                payload = {"event": "federated_live_state", "peer_key": pk, "connected": live}
-                                try:
-                                    if hasattr(proxy, "last_seen"):
-                                        payload["last_seen"] = float(getattr(proxy, "last_seen"))
-                                except Exception:
-                                    # justification: optional notification; UI event delivery is best-effort
-                                    pass
-                                pm.notify_meta_updated(pname, payload)
-                        except Exception:
-                            # justification: optional notification; UI event delivery is best-effort
-                            pass
-                    except Exception:
-                        continue
+                    self._flip_proxy_live_state(pk, pname, proxy, live)
         except Exception:
             # justification: optional notification; UI event delivery is best-effort
             pass
