@@ -591,8 +591,9 @@ def _status_adapter(name: str, adapter_type: str, status_info: Dict[str, Any], i
 
     class _A(FakeAdapter):
         def __init__(self):
-            super().__init__(name, adapter_type=adapter_type, capabilities={
-                AdapterCapability.ACCEPTS_CONNECTIONS}, is_running=is_running)
+            super().__init__(
+                name, adapter_type=adapter_type, capabilities={AdapterCapability.ACCEPTS_CONNECTIONS}, is_running=is_running
+            )
 
         def get_status_info(self):
             return status_info
@@ -638,8 +639,7 @@ async def test_log_status_web_console_single_port_http(tmp_path, caplog):
     wc = _status_adapter(
         "wc",
         "WebSocket",
-        {"type": "WebSocket", "endpoint": "127.0.0.1:8080",
-         "details": {"host": "127.0.0.1", "port": 8080, "tls": False}},
+        {"type": "WebSocket", "endpoint": "127.0.0.1:8080", "details": {"host": "127.0.0.1", "port": 8080, "tls": False}},
     )
     srv.unified_adapters = cast(Any, [wc])
     srv.web_console = wc
@@ -655,8 +655,7 @@ async def test_log_status_web_console_single_port_https(tmp_path, caplog):
     wc = _status_adapter(
         "wc",
         "WebSocket",
-        {"type": "WebSocket", "endpoint": "127.0.0.1:8443",
-         "details": {"host": "127.0.0.1", "port": 8443, "tls": True}},
+        {"type": "WebSocket", "endpoint": "127.0.0.1:8443", "details": {"host": "127.0.0.1", "port": 8443, "tls": True}},
     )
     srv.unified_adapters = cast(Any, [wc])
     srv.web_console = wc
@@ -715,8 +714,7 @@ async def test_log_status_generic_endpoints_list(tmp_path, caplog):
     g = _status_adapter(
         "g",
         "generic",
-        {"type": "generic", "endpoint": "N/A",
-         "details": {"endpoints": ["192.168.1.1:2000", "192.168.1.1:2001"]}},
+        {"type": "generic", "endpoint": "N/A", "details": {"endpoints": ["192.168.1.1:2000", "192.168.1.1:2001"]}},
     )
     srv.unified_adapters = cast(Any, [g])
     srv._log_server_status()
@@ -769,3 +767,129 @@ async def test_log_status_generic_blank_endpoint_fallback(tmp_path, caplog):
             assert "N/A" in msg
             return
     raise AssertionError("no generic adapter log line found")
+
+
+# --- C901 bracket-26: _setup_basic_logging error/guard path coverage --------
+
+
+def test_setup_basic_logging_max_log_size_not_int_keeps_prior(tmp_path):
+    # max_log_size str that fails int() -> the guarded except keeps the prior
+    # _max_bytes (a sentinel here), and setup proceeds with that value
+    setattr(_setup_basic_logging, "_max_bytes", 12345)
+    _setup_basic_logging("INFO", log_dir=str(tmp_path), max_log_size="not-a-number")
+    root = logging.getLogger()
+    rot = [h for h in root.handlers if getattr(h, "_openmux_logging", False)]
+    assert len(rot) == 1
+    assert rot[0].maxBytes == 12345
+    assert getattr(_setup_basic_logging, "_max_bytes") == 12345
+
+
+def test_setup_basic_logging_backup_count_not_int_keeps_prior(tmp_path):
+    # log_backup_count str that fails int() -> guarded except keeps the prior
+    # _backup_count (a sentinel here), and setup proceeds with that value
+    setattr(_setup_basic_logging, "_backup_count", 99)
+    _setup_basic_logging("INFO", log_dir=str(tmp_path), log_backup_count="nope")
+    root = logging.getLogger()
+    rot = [h for h in root.handlers if getattr(h, "_openmux_logging", False) and h.baseFilename.endswith("openmux.log")]
+    assert len(rot) == 1
+    assert rot[0].backupCount == 99
+    assert getattr(_setup_basic_logging, "_backup_count") == 99
+
+
+def test_setup_basic_logging_console_disabled_drop_stale_console_attr(tmp_path):
+    # A path swap while the console is disabled must remove the old console
+    # handler and forget the _console_handler attribute
+    _setup_basic_logging("INFO", log_dir=str(tmp_path / "c1"))
+    old_console = getattr(_setup_basic_logging, "_console_handler")
+    assert old_console is not None
+    assert old_console in logging.getLogger().handlers
+    _setup_basic_logging("INFO", log_dir=str(tmp_path / "c2"), console_enabled=False)
+    assert not hasattr(_setup_basic_logging, "_console_handler")
+    assert old_console not in logging.getLogger().handlers
+    assert getattr(_setup_basic_logging, "_console_enabled") is False
+
+
+def test_setup_basic_logging_main_file_open_fails_console_only(tmp_path, monkeypatch, caplog):
+    # RotatingFileHandler raising OSError on the main log -> console-only
+    # continuation, no main file handler, component handlers still attach
+    log_dir = tmp_path / "ro"
+    from logging.handlers import RotatingFileHandler
+
+    class FailMain(RotatingFileHandler):
+        def __init__(self, filename, *args, **kwargs):
+            if str(filename) == str(log_dir / "openmux.log"):
+                raise OSError("cannot open main log")
+            super().__init__(filename, *args, **kwargs)
+
+    monkeypatch.setattr("logging.handlers.RotatingFileHandler", FailMain)
+    with caplog.at_level(logging.WARNING):
+        _setup_basic_logging("INFO", log_dir=str(log_dir))
+    assert not (log_dir / "openmux.log").exists()
+    # the `if file_handler is not None:` guard skipped: no tagged handler at all
+    root = logging.getLogger()
+    assert not [h for h in root.handlers if getattr(h, "_openmux_logging", False)]
+    assert any("Could not open log file" in r.getMessage() for r in caplog.records)
+
+
+def test_setup_basic_logging_component_open_fails_skips_component(tmp_path, monkeypatch, caplog):
+    # RotatingFileHandler raising OSError on one component file -> that
+    # component is skipped; main file and the other components get handlers
+    log_dir = tmp_path / "compfail"
+    from logging.handlers import RotatingFileHandler
+
+    class FailClient(RotatingFileHandler):
+        def __init__(self, filename, *args, **kwargs):
+            if str(filename) == str(log_dir / "openmux_client.log"):
+                raise OSError("cannot open component log")
+            super().__init__(filename, *args, **kwargs)
+
+    monkeypatch.setattr("logging.handlers.RotatingFileHandler", FailClient)
+    with caplog.at_level(logging.WARNING):
+        _setup_basic_logging("INFO", log_dir=str(log_dir))
+    assert not (log_dir / "openmux_client.log").exists()
+    assert (log_dir / "openmux.log").exists()
+    assert (log_dir / "openmux_server.log").exists()
+    assert not logging.getLogger("openmux.client").handlers
+    assert any("skipping component log" in r.getMessage() for r in caplog.records)
+
+
+def test_setup_basic_logging_component_dir_not_created_skips(tmp_path, monkeypatch):
+    # _openmux_mkdir returning False for the component dir -> all components
+    # are skipped while the main log (in its own subdir) still gets a handler
+    import openmux.server.main as srv_main
+
+    base = tmp_path / "ld"
+    base.mkdir()  # base exists for real; only the main subdir is "created"
+
+    def fake_mkdir(path, *args, **kwargs):
+        if os.path.basename(str(path)) == "sub":
+            os.makedirs(str(path), exist_ok=True)
+            return True
+        return False
+
+    monkeypatch.setattr(srv_main, "_openmux_mkdir", fake_mkdir)
+    _setup_basic_logging("INFO", log_dir=str(base), log_file=str(base / "sub" / "openmux.log"))
+    root = logging.getLogger()
+    main_h = [h for h in root.handlers if getattr(h, "_openmux_logging", False)]
+    assert len(main_h) == 1
+    assert (base / "sub" / "openmux.log").exists()
+    assert not (base / "openmux_server.log").exists()
+    assert not logging.getLogger("openmux.server").handlers
+
+
+def test_setup_basic_logging_level_update_guarded(tmp_path, monkeypatch):
+    # A setLevel failure inside the final "update root and component loggers"
+    # block is swallowed by the defensive guard; startup must not crash
+    calls = []
+    orig = logging.root.setLevel
+
+    def fake_set_level(level):
+        calls.append(level)
+        if len(calls) > 1:  # the setup's first setLevel succeeds, the update block's fails
+            raise RuntimeError("injected during level update")
+        orig(level)
+
+    monkeypatch.setattr(logging.root, "setLevel", fake_set_level)
+    _setup_basic_logging("INFO", log_dir=str(tmp_path))
+    assert len(calls) >= 2
+    assert getattr(_setup_basic_logging, "_configured") is True

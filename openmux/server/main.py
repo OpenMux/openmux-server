@@ -1861,6 +1861,145 @@ def _remove_stale_file_handlers() -> None:
                     _close(h)
 
 
+def _logging_apply_input_limits(max_log_size: Optional[int], log_backup_count: Optional[int]) -> None:
+    """Persist a valid limit arg to the tracking attrs; drop invalid ones.
+
+    A value that cannot be converted to a non-negative int is ignored so a
+    reload with a bad value never discards the running configuration.
+    """
+    if max_log_size is not None:
+        try:
+            setattr(_setup_basic_logging, "_max_bytes", max(0, int(max_log_size)))
+        except Exception:
+            # justification: idempotent attribute injection
+            pass
+    if log_backup_count is not None:
+        try:
+            setattr(_setup_basic_logging, "_backup_count", max(0, int(log_backup_count)))
+        except Exception:
+            # justification: idempotent attribute injection
+            pass
+
+
+def _logging_read_limits() -> "Tuple[int, int]":
+    """(max_bytes, backup_count) from the tracking attrs with safe defaults."""
+    try:
+        max_bytes = getattr(_setup_basic_logging, "_max_bytes", 10 * 1024 * 1024)
+        backup_count = getattr(_setup_basic_logging, "_backup_count", 5)
+    except Exception:
+        max_bytes, backup_count = 10 * 1024 * 1024, 5
+    return max_bytes, backup_count
+
+
+def _logging_file_format() -> logging.Formatter:
+    """Formatter for the main log file handler."""
+    return logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(filename)s:%(lineno)d %(name)s %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def _logging_install_console_handler(root: logging.Logger) -> logging.StreamHandler:
+    """Build the stdout console handler and attach it to the root logger."""
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.NOTSET)
+    console_format = logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(name)s %(filename)s:%(lineno)d %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    console_handler.setFormatter(console_format)
+    root.addHandler(console_handler)
+    return console_handler
+
+
+def _logging_attach_file_handler(root: logging.Logger, file_path, file_format, max_bytes: int, backup_count: int):
+    """Create and attach the main rotating file handler.
+
+    Returns the handler, or ``None`` when the directory cannot be created
+    (warns once, see _openmux_mkdir) or the file cannot be opened.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    if not _openmux_mkdir(file_path.parent):
+        return None
+    try:
+        file_handler = RotatingFileHandler(str(file_path), maxBytes=max_bytes, backupCount=backup_count)
+    except OSError:  # justification: the dir exists; opening the file may still fail
+        logging.warning("Could not open log file %s; continuing console-only", file_path, exc_info=True)
+        return None
+    file_handler.setFormatter(file_format)
+    file_handler.setLevel(logging.NOTSET)
+    file_handler._openmux_logging = True
+    root.addHandler(file_handler)
+    return file_handler
+
+
+def _logging_attach_component_handlers(
+    base, file_path, file_format: logging.Formatter, max_bytes: int, backup_count: int
+) -> None:
+    """Attach per-component rotating file handlers below the base dir.
+
+    Skips a component whose file name collides with the main file's name and
+    whose file would land in the main file's own directory (its records reach
+    that file once, via propagation to root).
+    """
+    from logging.handlers import RotatingFileHandler
+
+    for comp in _LOGGER_COMPONENTS:
+        if f"openmux_{comp}.log" == file_path.name and base == file_path.parent:
+            continue
+        comp_file = base / f"openmux_{comp}.log"
+        # issue #42: warns once when the base dir cannot be created.
+        if not _openmux_mkdir(comp_file.parent):
+            continue
+        try:
+            comp_handler = RotatingFileHandler(str(comp_file), maxBytes=max_bytes, backupCount=backup_count)
+        except OSError:  # justification: the dir exists; opening the file may still fail
+            logging.warning("Could not open log file %s; skipping component log", comp_file, exc_info=True)
+            continue
+        comp_handler.setFormatter(file_format)
+        comp_handler.setLevel(logging.NOTSET)
+        comp_handler._openmux_logging = True
+        logging.getLogger(f"openmux.{comp}").addHandler(comp_handler)
+
+
+def _logging_apply_levels(log_level: int) -> None:
+    """Apply the level to the root logger and every existing openmux logger."""
+    try:
+        logging.getLogger().setLevel(log_level)
+        for name in list(logging.root.manager.loggerDict.keys()):
+            if isinstance(name, str) and (name == "openmux" or name.startswith("openmux.")):
+                lg = logging.getLogger(name)
+                lg.setLevel(log_level)
+                lg.propagate = True
+                for h in list(lg.handlers):
+                    h.setLevel(logging.NOTSET)
+    except Exception:
+        # justification: defensive guard; logging reconfiguration must never crash startup
+        pass
+
+
+def _logging_persist_state(
+    base, file_path, max_bytes: int, backup_count: int, console_enabled, console_handler, path_changed: bool
+) -> None:
+    """Record the successful configuration on the function for reloads."""
+    try:
+        setattr(_setup_basic_logging, "_configured", True)
+        setattr(_setup_basic_logging, "_log_dir", str(base))
+        setattr(_setup_basic_logging, "_log_file", str(file_path))
+        setattr(_setup_basic_logging, "_max_bytes", max_bytes)
+        setattr(_setup_basic_logging, "_backup_count", backup_count)
+        setattr(_setup_basic_logging, "_console_enabled", bool(console_enabled))
+        if console_handler is not None:
+            setattr(_setup_basic_logging, "_console_handler", console_handler)
+        elif path_changed:
+            # Console was disabled (or file setup failed); forget any stale ref
+            if hasattr(_setup_basic_logging, "_console_handler"):
+                delattr(_setup_basic_logging, "_console_handler")
+    except Exception:  # justification: best-effort idempotence flag; safe to ignore failure
+        pass
+
+
 def _setup_basic_logging(
     level_name: Optional[str] = None,
     log_dir: Optional[str] = None,
@@ -1882,34 +2021,17 @@ def _setup_basic_logging(
       the file once, via propagation to root)
     - The console handler honors `console` from the logging block (default True)
     """
-    from logging.handlers import RotatingFileHandler
-
     already_configured = getattr(_setup_basic_logging, "_configured", False)
     base, main_file = _resolve_logging_paths(log_dir, log_file)
 
     # Detect a location change so a reload can swap the file handlers
     path_changed = _logging_paths_changed(log_dir, log_file)
 
-    if max_log_size is not None:
-        try:
-            setattr(_setup_basic_logging, "_max_bytes", max(0, int(max_log_size)))
-        except Exception:
-            # justification: idempotent attribute injection
-            pass
-    if log_backup_count is not None:
-        try:
-            setattr(_setup_basic_logging, "_backup_count", max(0, int(log_backup_count)))
-        except Exception:
-            # justification: idempotent attribute injection
-            pass
+    _logging_apply_input_limits(max_log_size, log_backup_count)
     if console_enabled is not None:
         setattr(_setup_basic_logging, "_console_enabled", bool(console_enabled))
 
-    try:
-        max_bytes = getattr(_setup_basic_logging, "_max_bytes", 10 * 1024 * 1024)
-        backup_count = getattr(_setup_basic_logging, "_backup_count", 5)
-    except Exception:
-        max_bytes, backup_count = 10 * 1024 * 1024, 5
+    max_bytes, backup_count = _logging_read_limits()
 
     root = logging.getLogger()
     resolved_name = level_name or "WARNING"
@@ -1933,89 +2055,25 @@ def _setup_basic_logging(
         if old_console is not None and old_console in root.handlers:
             root.removeHandler(old_console)
 
+    console_handler = None
     if need_file_setup:
         root.setLevel(log_level)
 
-        console_handler = None
         if console_enabled:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(logging.NOTSET)
-            console_format = logging.Formatter(
-                "%(asctime)s.%(msecs)03d %(name)s %(filename)s:%(lineno)d %(levelname)s: %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-            console_handler.setFormatter(console_format)
-            root.addHandler(console_handler)
+            console_handler = _logging_install_console_handler(root)
 
         # Main log file (issue #47: config-driven path, fallback to logs/openmux.log)
         # issue #42: a dir that cannot be created warns once (see _openmux_mkdir)
         # and skips the handler, so a reload re-try does not re-spam.
-        file_handler = None
-        if _openmux_mkdir(main_file.parent):
-            try:
-                file_handler = RotatingFileHandler(str(main_file), maxBytes=max_bytes, backupCount=backup_count)
-            except OSError:  # justification: the dir exists; opening the file may still fail
-                logging.warning("Could not open log file %s; continuing console-only", main_file, exc_info=True)
+        file_handler = _logging_attach_file_handler(root, main_file, _logging_file_format(), max_bytes, backup_count)
         if file_handler is not None:
-            file_format = logging.Formatter(
-                "%(asctime)s.%(msecs)03d %(filename)s:%(lineno)d %(name)s %(levelname)s: %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-            file_handler.setFormatter(file_format)
-            file_handler.setLevel(logging.NOTSET)
-            file_handler._openmux_logging = True
-            root.addHandler(file_handler)
-
             # Component specific loggers (server, client, serial, auth, config, console)
             # Skip any component whose file name collides with the main file's name.
-            main_stem = main_file.name
-            for comp in _LOGGER_COMPONENTS:
-                if f"openmux_{comp}.log" == main_stem and base == main_file.parent:
-                    continue
-                comp_logger = logging.getLogger(f"openmux.{comp}")
-                comp_file = base / f"openmux_{comp}.log"
-                # issue #42: warns once when the base dir cannot be created.
-                if not _openmux_mkdir(comp_file.parent):
-                    continue
-                try:
-                    comp_handler = RotatingFileHandler(str(comp_file), maxBytes=max_bytes, backupCount=backup_count)
-                except OSError:  # justification: the dir exists; opening the file may still fail
-                    logging.warning("Could not open log file %s; skipping component log", comp_file, exc_info=True)
-                    continue
-                comp_handler.setFormatter(file_format)
-                comp_handler.setLevel(logging.NOTSET)
-                comp_handler._openmux_logging = True
-                comp_logger.addHandler(comp_handler)
+            _logging_attach_component_handlers(base, main_file, _logging_file_format(), max_bytes, backup_count)
 
     # Update root and existing component loggers to the desired level
-    try:
-        root.setLevel(log_level)
-        for name in list(logging.root.manager.loggerDict.keys()):
-            if isinstance(name, str) and (name == "openmux" or name.startswith("openmux.")):
-                lg = logging.getLogger(name)
-                lg.setLevel(log_level)
-                lg.propagate = True
-                for h in list(lg.handlers):
-                    h.setLevel(logging.NOTSET)
-    except Exception:
-        # justification: defensive guard; logging reconfiguration must never crash startup
-        pass
-
-    try:
-        setattr(_setup_basic_logging, "_configured", True)
-        setattr(_setup_basic_logging, "_log_dir", str(base))
-        setattr(_setup_basic_logging, "_log_file", str(main_file))
-        setattr(_setup_basic_logging, "_max_bytes", max_bytes)
-        setattr(_setup_basic_logging, "_backup_count", backup_count)
-        setattr(_setup_basic_logging, "_console_enabled", bool(console_enabled))
-        if console_handler is not None:
-            setattr(_setup_basic_logging, "_console_handler", console_handler)
-        elif path_changed:
-            # Console was disabled (or file setup failed); forget any stale ref
-            if hasattr(_setup_basic_logging, "_console_handler"):
-                delattr(_setup_basic_logging, "_console_handler")
-    except Exception:  # justification: best-effort idempotence flag; safe to ignore failure
-        pass
+    _logging_apply_levels(log_level)
+    _logging_persist_state(base, main_file, max_bytes, backup_count, console_enabled, console_handler, path_changed)
 
 
 def _run_check_config(config_path: str, auth_config: Optional[str], security_config: Optional[str]) -> None:
