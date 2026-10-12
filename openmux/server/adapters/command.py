@@ -1626,6 +1626,126 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.error("Error stopping command adapter %s: %s", self.name, e, exc_info=True)
 
     # --- Live configuration reconciliation ---
+    @staticmethod
+    def _reconcile_material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+        # Materialize the config using the same defaults as CommandPort.__init__
+        # so comparison is apples-to-apples.  Silent normalization (wire_to_mode)
+        # on both sides: the load path already logged legacy ints (issue #59).
+        _interactive = bool(cfg.get("interactive", False))
+        mru = wire_to_mode(cfg.get("max_read_write_users", 1))
+        return {
+            "command": cfg.get("command", ""),
+            "shell": bool(cfg.get("shell", False)),
+            "cwd": cfg.get("cwd"),
+            "env": cfg.get("env"),
+            "max_read_write_users": mru,
+            "interactive": _interactive,
+            "scrollback_size": int(cfg.get("scrollback_size", 0)),
+        }
+
+    @staticmethod
+    def _reconcile_port_cfg(port) -> Dict[str, Any]:
+        # Read the material attributes from a live port. Mirrors
+        # _reconcile_material_cfg: it applies the same wire_to_mode
+        # normalization so both sides are compared in the same shape.
+        try:
+            return {
+                "command": getattr(port, "command", None),
+                "shell": getattr(port, "shell", None),
+                "cwd": getattr(port, "cwd", None),
+                "env": getattr(port, "env", None),
+                "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", None)),
+                "interactive": getattr(port, "interactive", None),
+                "scrollback_size": getattr(port, "scrollback_size", None),
+            }
+        except Exception:
+            # justification: a port object that refuses attribute reads (e.g. a
+            # broken property) must not abort the reconcile; returning {} makes
+            # every material field compare as "changed", so the port is
+            # destroy+recreated and converges to the configured state.
+            return {}
+
+    @staticmethod
+    def _reconcile_update_description(port, new_cfg: Dict[str, Any]) -> None:
+        # Description is not material: a description-only edit must not
+        # respawn the port (issue #30: non-material edits avoid recreate).
+        try:
+            desc = new_cfg.get("description")
+            if isinstance(desc, str) and desc:
+                setattr(port, "description", desc)
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+
+    @staticmethod
+    def _reconcile_update_groups_power(port, new_cfg: Dict[str, Any]) -> None:
+        # In-place update for the RW/RO access-group lists. These are
+        # deliberately NOT in _material_cfg, so a groups-only change
+        # does not recreate the port; new lists apply on next connect.
+        try:
+            new_rw = list(new_cfg.get("read_write_groups") or [])
+            new_ro = list(new_cfg.get("read_only_groups") or [])
+            if list(getattr(port, "read_write_groups", None) or []) != new_rw:
+                setattr(port, "read_write_groups", new_rw)
+            if list(getattr(port, "read_only_groups", None) or []) != new_ro:
+                setattr(port, "read_only_groups", new_ro)
+            # PDU power feeds (power section refs), same in-place
+            # treatment: no port recreate, power adapter re-reads.
+            new_power = [str(r) for r in (new_cfg.get("power") or [])]
+            if list(getattr(port, "power", None) or []) != new_power:
+                setattr(port, "power", new_power)
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+
+    @staticmethod
+    def _reconcile_update_lifecycle_flags(port, new_cfg: Dict[str, Any]) -> None:
+        # In-place update of the process-lifecycle flags. These change
+        # a port that stays in service (e.g. a live client session), so
+        # updating the attributes in place avoids a destroy+recreate that
+        # would drop connected clients. The idle timer reads
+        # idle_timeout_sec lazily at fire time and spawn_on_demand is
+        # read on each 0->1 connect, so the new values take effect from
+        # the next client transition. Not in _material_cfg deliberately:
+        # they must not force a recreate.
+        try:
+            if "spawn_on_demand" in new_cfg:
+                new_on_demand = bool(new_cfg.get("spawn_on_demand", False))
+                if isinstance(getattr(port, "spawn_on_demand", None), bool) and port.spawn_on_demand != new_on_demand:
+                    port.spawn_on_demand = new_on_demand
+            if "idle_timeout_sec" in new_cfg:
+                new_idle = float(new_cfg.get("idle_timeout_sec") or 0)
+                if isinstance(getattr(port, "idle_timeout_sec", None), (int, float)) and port.idle_timeout_sec != new_idle:
+                    port.idle_timeout_sec = new_idle
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+
+    async def _destroy_ports(self, names: List[str], what: str) -> None:
+        # Shared by the remove and update passes: each entry is an
+        # independent best-effort destroy, and one failure must not stop
+        # the rest of the reconcile.
+        for n in names:
+            try:
+                await self.destroy_port(n)
+            except Exception as e:
+                self.logger.error("Failed to %s command port %s: %s", what, n, e, exc_info=True)
+
+    async def _create_ports(self, names: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> None:
+        # Shared by the add and update passes: each entry is an
+        # independent best-effort create, and one failure must not stop
+        # the rest of the reconcile.
+        for n in names:
+            cfg = new_by_name.get(n)
+            if not cfg:
+                # justification: names in `added`/`updated` always come from new_by_name;
+                # the guard is structural, left in to pin the invariant.
+                continue
+            try:
+                await self.create_port(n, cfg)
+            except Exception as e:
+                self.logger.error("Failed to create command port %s: %s", n, e, exc_info=True)
+
     async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
         """Incrementally reconcile command ports.
 
@@ -1655,117 +1775,33 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         added = sorted(new_names - old_names)
         common = sorted(old_names & new_names)
 
-        def _material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-            # Apply the same defaults as CommandPort.__init__ so comparison is
-            # apples-to-apples. Silent normalization (wire_to_mode) on both
-            # sides: the load path already logged legacy ints (issue #59).
-            _interactive = bool(cfg.get("interactive", False))
-            mru = wire_to_mode(cfg.get("max_read_write_users", 1))
-            return {
-                "command": cfg.get("command", ""),
-                "shell": bool(cfg.get("shell", False)),
-                "cwd": cfg.get("cwd"),
-                "env": cfg.get("env"),
-                "max_read_write_users": mru,
-                "interactive": _interactive,
-                "scrollback_size": int(cfg.get("scrollback_size", 0)),
-            }
-
         updated: List[str] = []  # type: ignore[name-defined]
         unchanged: List[str] = []  # type: ignore[name-defined]
         for n in common:
             port = self.ports.get(n)
             old_cfg: Dict[str, Any] = {}
             if port is not None:
-                try:
-                    old_cfg = {
-                        "command": getattr(port, "command", None),
-                        "shell": getattr(port, "shell", None),
-                        "cwd": getattr(port, "cwd", None),
-                        "env": getattr(port, "env", None),
-                        "max_read_write_users": wire_to_mode(getattr(port, "max_read_write_users", None)),
-                        "interactive": getattr(port, "interactive", None),
-                        "scrollback_size": getattr(port, "scrollback_size", None),
-                    }
-                except Exception:
-                    old_cfg = {}
-            _new_mat = _material_cfg(new_by_name[n])
+                old_cfg = self._reconcile_port_cfg(port)
+            _new_mat = self._reconcile_material_cfg(new_by_name[n])
             _untracked = set(_new_mat.keys()) - set(old_cfg.keys())
             if _untracked:
                 self.logger.error(
-                    f"[BUG] reconcile_ports: _material_cfg has keys not tracked in old_cfg: "
+                    f"[BUG] reconcile_ports: _reconcile_material_cfg has keys not tracked in old_cfg: "
                     f"{sorted(_untracked)} — add them to old_cfg to ensure changes are detected."
                 )
             if old_cfg == _new_mat:
-                # Update description in-place if provided
-                try:
-                    desc = new_by_name[n].get("description")
-                    if isinstance(desc, str) and desc:
-                        setattr(port, "description", desc)
-                except Exception:
-                    # justification: in-place live update; the next reload retries
-                    pass
-                # In-place update for the RW/RO access-group lists. These are
-                # deliberately NOT in _material_cfg, so a groups-only change
-                # does not recreate the port; new lists apply on next connect.
-                try:
-                    new_rw = list(new_by_name[n].get("read_write_groups") or [])
-                    new_ro = list(new_by_name[n].get("read_only_groups") or [])
-                    if list(getattr(port, "read_write_groups", None) or []) != new_rw:
-                        setattr(port, "read_write_groups", new_rw)
-                    if list(getattr(port, "read_only_groups", None) or []) != new_ro:
-                        setattr(port, "read_only_groups", new_ro)
-                    # PDU power feeds (power section refs), same in-place
-                    # treatment: no port recreate, power adapter re-reads.
-                    new_power = [str(r) for r in (new_by_name[n].get("power") or [])]
-                    if list(getattr(port, "power", None) or []) != new_power:
-                        setattr(port, "power", new_power)
-                except Exception:
-                    # justification: in-place live update; the next reload retries
-                    pass
-                # In-place update of the process-lifecycle flags. These change
-                # a port that stays in service (e.g. a live client session), so
-                # updating the attributes in place avoids a destroy+recreate that
-                # would drop connected clients. The idle timer reads
-                # idle_timeout_sec lazily at fire time and spawn_on_demand is
-                # read on each 0->1 connect, so the new values take effect from
-                # the next client transition. Not in _material_cfg deliberately:
-                # they must not force a recreate.
-                try:
-                    if "spawn_on_demand" in new_by_name[n]:
-                        new_on_demand = bool(new_by_name[n].get("spawn_on_demand", False))
-                        if isinstance(getattr(port, "spawn_on_demand", None), bool) and port.spawn_on_demand != new_on_demand:
-                            port.spawn_on_demand = new_on_demand
-                    if "idle_timeout_sec" in new_by_name[n]:
-                        new_idle = float(new_by_name[n].get("idle_timeout_sec") or 0)
-                        if (
-                            isinstance(getattr(port, "idle_timeout_sec", None), (int, float))
-                            and port.idle_timeout_sec != new_idle
-                        ):
-                            port.idle_timeout_sec = new_idle
-                except Exception:
-                    # justification: in-place live update; the next reload retries
-                    pass
+                self._reconcile_update_description(port, new_by_name[n])
+                self._reconcile_update_groups_power(port, new_by_name[n])
+                self._reconcile_update_lifecycle_flags(port, new_by_name[n])
                 unchanged.append(n)
             else:
                 updated.append(n)
 
         # Remove updated/removed
-        for n in removed + updated:
-            try:
-                await self.destroy_port(n)
-            except Exception as e:
-                self.logger.error("Failed to destroy command port %s: %s", n, e, exc_info=True)
+        await self._destroy_ports(removed + updated, "destroy")
 
         # Create added/updated
-        for n in added + updated:
-            cfg = new_by_name.get(n)
-            if not cfg:
-                continue
-            try:
-                await self.create_port(n, cfg)
-            except Exception as e:
-                self.logger.error("Failed to create command port %s: %s", n, e, exc_info=True)
+        await self._create_ports(added + updated, new_by_name)
 
         # Update adapter config snapshot
         try:
