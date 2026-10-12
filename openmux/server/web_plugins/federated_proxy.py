@@ -268,11 +268,51 @@ async def _handle_proxy(request: web.Request) -> web.StreamResponse:
     V1 behavior: admin-only, GET-only, returns 501 Not Implemented (WS and HTTP pass-through to be added).
     Computes effective X-Forwarded-Prefix for upstream planning.
     """
+    adapter = _proxy_adapter_or_500(request)
+    unauth = _proxy_auth_guard(adapter, request)
+    if unauth is not None:
+        return unauth
+    node = request.match_info.get("node")
+    tail = request.match_info.get("tail") or ""
+    _proxy_check_method(request)
+    base_path = _proxy_effective_base_path(adapter, request)
+    proxied_prefix = _norm_base_path(base_path) + f"/proxy/{node}"
+    # Allowlist enforcement (UI-only for v1)
+    if not _is_ui_allowed_path(tail):
+        raise web.HTTPForbidden(text="Path not allowed")
+    t = (tail or "").lstrip("/")
+    if t == "console":
+        # Redirect to local console with server hint; enhanced console supports FQPN
+        raise web.HTTPFound(location=f"{_norm_base_path(base_path)}/console?server={node}")
+    # Resolve upstream URL from plugin options
+    if not node:
+        raise web.HTTPBadRequest(text="Missing node")
+    upstream_url = _resolve_upstream(adapter, str(node), tail, request)
+    if not upstream_url:
+        raise web.HTTPBadGateway(text="No upstream mapping for node")
+    # Perform streaming GET with caps and timeout
+    max_bytes = int((getattr(adapter, "proxy_max_bytes", None) or 8) * 1024 * 1024)  # 8 MiB default
+    sso_header = _proxy_sso_header(request, adapter, node)
+    parsed = urlsplit(upstream_url)
+    path_qs = (parsed.path or "/") + ("?" + parsed.query if parsed.query else "")
+    return await _proxy_try_candidates(request, adapter, node, upstream_url, path_qs, proxied_prefix, sso_header, max_bytes)
+
+
+def _proxy_adapter_or_500(request: web.Request) -> Any:
+    """Return the web adapter from the request app, or raise 500."""
     _raw = request.app.get(ADAPTER_APP_KEY)
     if _raw is None:
         raise web.HTTPInternalServerError(text="Adapter not available")
     adapter: "WebConsoleAdapter" = _raw  # type: ignore[assignment]
-    # Admin-only guard
+    return adapter
+
+
+def _proxy_auth_guard(adapter: "WebConsoleAdapter", request: web.Request) -> Optional[web.StreamResponse]:
+    """Enforce the auth guard for a proxy request.
+
+    Returns a 401 Response when unauthenticated (so Basic auth is advertised),
+    raises HTTPForbidden when not admin, or returns None when authorized.
+    """
     username = request.get("username")
     if not username:
         # For browsers/tools, advertise Basic so non-session clients can auth
@@ -289,103 +329,163 @@ async def _handle_proxy(request: web.Request) -> web.StreamResponse:
         raise
     except Exception:
         raise web.HTTPForbidden()
+    return None
 
-    node = request.match_info.get("node")
-    tail = request.match_info.get("tail") or ""
+
+def _proxy_check_method(request: web.Request) -> None:
+    """Reject non-GET methods with 405 (v1 is read-only)."""
     method = request.method.upper()
     if method not in ("GET",):
         raise web.HTTPMethodNotAllowed(method, allowed_methods=["GET"])  # v1 read-only
 
-    # Compute proxied prefix: base_path + /proxy/{node}
-    # Try adapter base-path helper when available
+
+def _proxy_effective_base_path(adapter: "WebConsoleAdapter", request: web.Request) -> str:
+    """Compute the effective base path for the current request.
+
+    Prefer the adapter helper when available; fall back to X-Forwarded-Prefix
+    (or an empty string) on error.
+    """
     try:
-        base_path = adapter._effective_base_path(request) if hasattr(adapter, "_effective_base_path") else ""
+        return adapter._effective_base_path(request) if hasattr(adapter, "_effective_base_path") else ""
     except Exception:
         # Fall back to X-Forwarded-Prefix
-        base_path = request.headers.get("X-Forwarded-Prefix", "")
-    proxied_prefix = _norm_base_path(base_path) + f"/proxy/{node}"
+        return request.headers.get("X-Forwarded-Prefix", "")
 
-    # Allowlist enforcement (UI-only for v1)
-    if not _is_ui_allowed_path(tail):
-        raise web.HTTPForbidden(text="Path not allowed")
 
-    t = (tail or "").lstrip("/")
-    if t == "console":
-        # Redirect to local console with server hint; enhanced console supports FQPN
-        raise web.HTTPFound(location=f"{_norm_base_path(base_path)}/console?server={node}")
+def _proxy_sso_header(request: web.Request, adapter: "WebConsoleAdapter", node: Any) -> Optional[str]:
+    """Build the SSO header for the upstream request, or None.
 
-    # Resolve upstream URL from plugin options
-    if not node:
-        raise web.HTTPBadRequest(text="Missing node")
-    upstream_url = _resolve_upstream(adapter, str(node), tail, request)
-    if not upstream_url:
-        raise web.HTTPBadGateway(text="No upstream mapping for node")
-
-    # Compute upstream_base to support Location rewrite
-    # Take scheme://host[:port]/base from mapping
-    # For rewrites, use scheme://host derived from upstream_url
+    Preference order:
+    1) HMAC (legacy) when adapter.sso_secret is configured: "v1;<b64payload>;<hexmac>"
+    2) Zero-config Ed25519 using MuxCon private key if available: "v1e;<kid>;<b64payload>;<b64sig>"
+    """
     try:
-        parts = upstream_url.split("/", 3)
-        upstream_base = parts[0] + "//" + parts[2] if len(parts) >= 3 else ""
-    except Exception:
-        upstream_base = ""
-
-    # Perform streaming GET with caps and timeout
-    timeout = ClientTimeout(total=30)
-    max_bytes = int((getattr(adapter, "proxy_max_bytes", None) or 8) * 1024 * 1024)  # 8 MiB default
-    read = 0
-
-    # Build SSO header
-    def _make_sso_header() -> Optional[str]:
-        """Return an SSO header string.
-
-        Preference order:
-        1) HMAC (legacy) when adapter.sso_secret is configured: "v1;<b64payload>;<hexmac>"
-        2) Zero-config Ed25519 using MuxCon private key if available: "v1e;<kid>;<b64payload>;<b64sig>"
-        """
+        user = request.get("username") or "sso"
+        now = int(time.time())
+        claims = {
+            "ver": 1,
+            "user": user,
+            "perm": "admin",
+            "iat": now,
+            "exp": now + 60,  # 1 minute
+            "node": node,
+        }
+        payload = json.dumps(claims, separators=(",", ":")).encode("utf-8")
+        payload_b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        # 1) Legacy shared secret (if explicitly configured)
+        secret = getattr(adapter, "sso_secret", None)
+        if secret:
+            mac = hmac.new(str(secret).encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+            return f"v1;{payload_b64};{mac}"
+        # 2) Zero-config: sign with muxcon Ed25519 private key
         try:
-            user = request.get("username") or "sso"
-            now = int(time.time())
-            claims = {
-                "ver": 1,
-                "user": user,
-                "perm": "admin",
-                "iat": now,
-                "exp": now + 60,  # 1 minute
-                "node": node,
-            }
-            payload = json.dumps(claims, separators=(",", ":")).encode("utf-8")
-            payload_b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
-
-            # 1) Legacy shared secret (if explicitly configured)
-            secret = getattr(adapter, "sso_secret", None)
-            if secret:
-                mac = hmac.new(str(secret).encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
-                return f"v1;{payload_b64};{mac}"
-
-            # 2) Zero-config: sign with muxcon Ed25519 private key
-            try:
-                muxcon = adapter._find_muxcon_adapter() if hasattr(adapter, "_find_muxcon_adapter") else None
-                priv = getattr(muxcon, "_auth_priv", None) if muxcon else None
-                kid = getattr(muxcon, "_auth_key_id", None) if muxcon else None
-                if priv and kid:
-                    sig = priv.sign(payload)  # bytes
-                    sig_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
-                    return f"v1e;{kid};{payload_b64};{sig_b64}"
-            except Exception:
-                # justification: optional sso signature; the request proceeds unsigned
-                pass
-            return None
+            muxcon = adapter._find_muxcon_adapter() if hasattr(adapter, "_find_muxcon_adapter") else None
+            priv = getattr(muxcon, "_auth_priv", None) if muxcon else None
+            kid = getattr(muxcon, "_auth_key_id", None) if muxcon else None
+            if priv and kid:
+                sig = priv.sign(payload)  # bytes
+                sig_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
+                return f"v1e;{kid};{payload_b64};{sig_b64}"
         except Exception:
-            return None
+            # justification: optional sso signature; the request proceeds unsigned
+            pass
+        return None
+    except Exception:
+        return None
 
-    sso_header = _make_sso_header()
-    fwd_prefix = proxied_prefix
 
-    # Try candidate upstream URLs with common scheme/port combos; disable TLS verify for internal peers
+def _proxy_forward_headers(
+    request: web.Request,
+    adapter: "WebConsoleAdapter",
+    fwd_prefix: str,
+    sso_header: Optional[str],
+) -> Dict[str, str]:
+    """Build the request headers to forward to the upstream."""
+    hdrs = {
+        "Accept": request.headers.get("Accept", "*/*"),
+        "Accept-Language": request.headers.get("Accept-Language", ""),
+        "User-Agent": request.headers.get("User-Agent", "OpenMuxProxy/1.0"),
+        "X-Forwarded-Prefix": fwd_prefix,
+    }
+    if sso_header:
+        # Always include the standard header, plus any custom alias if configured locally
+        std_name = "X-OMX-SSO"
+        cfg_name = getattr(adapter, "sso_trust_header", std_name)
+        hdrs[std_name] = sso_header
+        if cfg_name and cfg_name != std_name:
+            hdrs[cfg_name] = sso_header
+    return hdrs
+
+
+def _proxy_filter_response_headers(upstream_headers: Any, upstream_base: str, proxied_prefix: str) -> Dict[str, str]:
+    """Drop hop-by-hop headers and rewrite Location / Set-Cookie for the proxied prefix."""
+    headers = {}
+    for k, v in upstream_headers.items():
+        lk = k.lower()
+        if lk in _HOP_BY_HOP or lk == "content-length":
+            continue
+        if lk == "location":
+            v = _rewrite_location(v, upstream_base, proxied_prefix)
+        if lk == "set-cookie":
+            v = _rewrite_set_cookie(v, proxied_prefix)
+        headers[k] = v
+    return headers
+
+
+async def _proxy_read_capped(content: Any, max_bytes: int) -> bytes:
+    """Read the upstream body in 64 KiB chunks; 413 if over ``max_bytes``."""
+    buf = bytearray()
+    read = 0
+    async for chunk in content.iter_chunked(64 * 1024):
+        read += len(chunk)
+        if read > max_bytes:
+            raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=read)
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+async def _proxy_process_upstream(
+    upstream: Any,
+    request: web.Request,
+    proxied_prefix: str,
+    node: Any,
+    upstream_base: str,
+    max_bytes: int,
+) -> web.StreamResponse:
+    """Convert one connected upstream into the proxied StreamResponse.
+
+    HTML bodies are fully read (with the cap), root links rewritten, and a
+    web.Response is returned. Other bodies are streamed through a
+    web.StreamResponse with the same per-chunk cap.
+    """
+    status = upstream.status
+    headers = _proxy_filter_response_headers(upstream.headers, upstream_base, proxied_prefix)
+    # If HTML, rewrite root-relative links and forms; else stream
+    ctype = upstream.headers.get("Content-Type", "").lower()
+    if "html" in ctype:
+        body = _rewrite_html_root_links(await _proxy_read_capped(upstream.content, max_bytes), proxied_prefix, node)
+        headers["Content-Length"] = str(len(body))
+        return web.Response(status=status, headers=headers, body=body)
+    resp = web.StreamResponse(status=status, headers=headers)
+    await resp.prepare(request)
+    read = 0
+    async for chunk in upstream.content.iter_chunked(64 * 1024):
+        read += len(chunk)
+        if read > max_bytes:
+            await resp.write_eof()
+            raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=read)
+        await resp.write(chunk)
+    await resp.write_eof()
+    return resp
+
+
+def _proxy_candidates(upstream_url: str) -> list[tuple[str, str, Optional[int]]]:
+    """Enumerate candidate (scheme, host, port) combinations to try.
+
+    Preserve the common fallback behavior for both https and http upstreams.
+    """
     parsed = urlsplit(upstream_url)
     host = parsed.hostname or ""
-    path_qs = (parsed.path or "/") + ("?" + parsed.query if parsed.query else "")
     candidates: list[tuple[str, str, Optional[int]]] = []
     if (parsed.scheme or "https") == "https":
         if parsed.port:
@@ -400,65 +500,37 @@ async def _handle_proxy(request: web.Request) -> web.StreamResponse:
             candidates.append(("http", host, parsed.port))
         candidates.append(("http", host, 8081))
         candidates.append(("http", host, 80))
+    return candidates
 
+
+async def _proxy_try_candidates(
+    request: web.Request,
+    adapter: "WebConsoleAdapter",
+    node: Any,
+    upstream_url: str,
+    path_qs: str,
+    proxied_prefix: str,
+    sso_header: Optional[str],
+    max_bytes: int,
+) -> web.StreamResponse:
+    """Attempt the upstream candidates in order; return the first success.
+
+    Raise 502 when all candidates fail.
+    """
+    # Try candidate upstream URLs with common scheme/port combos; disable TLS verify for internal peers
+    timeout = ClientTimeout(total=30)
+    fwd_prefix = proxied_prefix
     last_error = None
     async with ClientSession(timeout=timeout) as sess:
-        for sch, hst, prt in candidates:
+        for sch, hst, prt in _proxy_candidates(upstream_url):
             base = f"{sch}://{hst}" + (f":{prt}" if prt else "")
             url = base + path_qs
-            hdrs = {
-                "Accept": request.headers.get("Accept", "*/*"),
-                "Accept-Language": request.headers.get("Accept-Language", ""),
-                "User-Agent": request.headers.get("User-Agent", "OpenMuxProxy/1.0"),
-                "X-Forwarded-Prefix": fwd_prefix,
-            }
-            if sso_header:
-                # Always include the standard header, plus any custom alias if configured locally
-                std_name = "X-OMX-SSO"
-                cfg_name = getattr(adapter, "sso_trust_header", std_name)
-                hdrs[std_name] = sso_header
-                if cfg_name and cfg_name != std_name:
-                    hdrs[cfg_name] = sso_header
+            hdrs = _proxy_forward_headers(request, adapter, fwd_prefix, sso_header)
             try:
                 ssl_opt = False if sch == "https" else None
                 async with sess.get(url, headers=hdrs, ssl=ssl_opt) as upstream:
                     upstream_base = base
-                    status = upstream.status
-                    headers = {}
-                    for k, v in upstream.headers.items():
-                        lk = k.lower()
-                        if lk in _HOP_BY_HOP or lk == "content-length":
-                            continue
-                        if lk == "location":
-                            v = _rewrite_location(v, upstream_base, proxied_prefix)
-                        if lk == "set-cookie":
-                            v = _rewrite_set_cookie(v, proxied_prefix)
-                        headers[k] = v
-
-                    # If HTML, rewrite root-relative links and forms; else stream
-                    ctype = upstream.headers.get("Content-Type", "").lower()
-                    if "html" in ctype:
-                        # Read with cap
-                        buf = bytearray()
-                        async for chunk in upstream.content.iter_chunked(64 * 1024):
-                            read += len(chunk)
-                            if read > max_bytes:
-                                raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=read)
-                            buf.extend(chunk)
-                        body = _rewrite_html_root_links(bytes(buf), proxied_prefix, node)
-                        headers["Content-Length"] = str(len(body))
-                        return web.Response(status=status, headers=headers, body=body)
-                    else:
-                        resp = web.StreamResponse(status=status, headers=headers)
-                        await resp.prepare(request)
-                        async for chunk in upstream.content.iter_chunked(64 * 1024):
-                            read += len(chunk)
-                            if read > max_bytes:
-                                await resp.write_eof()
-                                raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=read)
-                            await resp.write(chunk)
-                        await resp.write_eof()
-                        return resp
+                    return await _proxy_process_upstream(upstream, request, proxied_prefix, node, upstream_base, max_bytes)
             except Exception as e:
                 last_error = e
                 continue
