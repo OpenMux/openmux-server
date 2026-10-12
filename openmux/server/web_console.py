@@ -339,6 +339,159 @@ def _get_adapter(request: web.Request) -> "WebConsoleAdapter":
     return request.app[ADAPTER_APP_KEY]  # type: ignore[return-value]
 
 
+def _prefixed_path(base_path: str, p: str) -> str:
+    # Prepend base_path to a route fragment, handling both absolute and
+    # relative targets. The try/except is retained from the original
+    # closure: with well-formed strings __add__ will not raise, but
+    # preserving the guard keeps the fail-safe behavior identical.
+    try:
+        if not base_path:
+            return p
+        return (base_path + p) if p.startswith("/") else (base_path + "/" + p)
+    except Exception:
+        return p
+
+
+def _is_public_path(path: str, base_path: str) -> bool:
+    # Public paths: /healthz, /livez, /logout, /favicon.ico, /static/*,
+    # /login. base_path-scoped variants are honored when the app is
+    # mounted under a prefix.
+    pref = _prefixed_path
+    return (
+        path in ("/healthz", "/livez")
+        or path == pref(base_path, "/healthz")
+        or path == pref(base_path, "/livez")
+        or path == "/logout"
+        or path == pref(base_path, "/logout")
+        or path == "/favicon.ico"
+        or path == pref(base_path, "/favicon.ico")
+        or path.startswith("/static/")
+        or path.startswith(pref(base_path, "/static/"))
+        or path == "/login"
+        or path == pref(base_path, "/login")
+    )
+
+
+def _is_proxy_path(path: str, base_path: str) -> bool:
+    # /proxy is semi-public: the middleware must not redirect it to
+    # login; the proxy handler enforces its own access rules.
+    pref = _prefixed_path
+    return (
+        path == "/proxy"
+        or path.startswith("/proxy/")
+        or path == pref(base_path, "/proxy")
+        or path.startswith(pref(base_path, "/proxy/"))
+    )
+
+
+def _is_readyz_or_api(path: str, base_path: str) -> bool:
+    # Readyz and /api/* are the endpoints where an unauthenticated
+    # caller must get a 401 (Basic challenge) rather than a redirect to
+    # the login page.
+    pref = _prefixed_path
+    return (
+        path == "/readyz"
+        or path == pref(base_path, "/readyz")
+        or path.startswith("/api/")
+        or path.startswith(pref(base_path, "/api/"))
+    )
+
+
+def _auth_via_sso(request: web.Request, adapter: "WebConsoleAdapter") -> bool:
+    # SSO trust header (for federated proxy). Only the header parsing and
+    # verification are guarded: a downstream handler exception must never
+    # be caught here and re-cast as a 401.
+    try:
+        sso_header_name = getattr(adapter, "sso_trust_header", "X-OMX-SSO")
+        sso_value = request.headers.get(sso_header_name)
+        if sso_value:
+            claims = adapter._verify_sso_header(sso_value)
+            if isinstance(claims, dict):
+                request["username"] = str(claims.get("user") or "sso")
+                po = claims.get("perm")
+                if isinstance(po, str) and po:
+                    request["perm_override"] = po
+                return True
+    except Exception:
+        # justification: sso header parse is advisory; the basic fallback follows
+        pass
+    return False
+
+
+def _basic_auth_result(request: web.Request, adapter: "WebConsoleAdapter") -> Optional[bool]:
+    # Parse the Authorization header and try Basic Auth. Only the
+    # credential parsing/verification is protected here; the handler
+    # call is made outside this function so its exceptions are not
+    # swallowed.
+    #
+    # Tri-state (mirrors the original inline branch exactly):
+    #   None  -> no Basic header present; the caller continues the
+    #            normal fallback chain (session cookie, then 401/redirect).
+    #   True  -> authenticated; the caller invokes the handler.
+    #   False -> a Basic header WAS present but authentication failed
+    #            (bad credentials or unparseable header). The caller must
+    #            answer 401 immediately: it must NOT fall through to the
+    #            session cookie check (the original code returned there).
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.lower().startswith("basic "):
+        return None
+    try:
+        enc = auth.split(" ", 1)[1].strip()
+        raw = base64.b64decode(enc).decode("utf-8", errors="ignore")
+        if ":" in raw:
+            username, password = raw.split(":", 1)
+            if adapter.auth_manager and adapter.auth_manager.authenticate(username, password):
+                request["username"] = username
+                return True
+    except Exception:
+        adapter.logger.debug("Basic auth header could not be processed", exc_info=True)
+    return False
+
+
+def basic_auth_401_response(adapter: "WebConsoleAdapter") -> web.Response:
+    # Shared 401 challenge for programmatic clients (Basic Auth failed or
+    # missing on an API/probe endpoint).
+    return web.Response(
+        status=401, text="Unauthorized\n", headers={"WWW-Authenticate": basic_authenticate_header(adapter.realm)}
+    )
+
+
+def _attach_session_user(request: web.Request, adapter: "WebConsoleAdapter") -> bool:
+    # Try to attach username from session cookie; returns True when the
+    # session is valid and the request is bound to the user. Fails safe:
+    # any failure path returns False so the caller continues the normal
+    # auth decision.
+    try:
+        sid = request.cookies.get(adapter._session_cookie_name)
+        if not sid:
+            return False
+        sess = adapter._sessions.get(sid)
+        if not sess:
+            return False
+        now = time.time()
+        if (now - sess.get("last_seen", now)) > adapter.session_ttl_seconds:
+            # expired
+            try:
+                del adapter._sessions[sid]
+            except Exception:
+                # justification: idempotent expiry of a stale session
+                pass
+            return False
+        sess["last_seen"] = now
+        # Record/refresh client IP
+        try:
+            ip = adapter._get_client_ip(request) if hasattr(adapter, "_get_client_ip") else None
+            if ip and not sess.get("ip"):
+                sess["ip"] = ip
+        except Exception:
+            # justification: optional metadata; the session proceeds without an ip
+            pass
+        request["username"] = sess.get("username")
+        return True
+    except Exception:
+        return False
+
+
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     """Hybrid auth: accept Basic Auth for programmatic clients, else require session login.
@@ -358,124 +511,41 @@ async def auth_middleware(request: web.Request, handler):
     except Exception:
         base_path = ""
 
-    def _pref(p: str) -> str:
-        try:
-            if not base_path:
-                return p
-            return (base_path + p) if p.startswith("/") else (base_path + "/" + p)
-        except Exception:
-            return p
-
-    # Helper: try to attach username from session cookie if valid; returns True if attached
-    def _attach_session_user() -> bool:
-        try:
-            sid = request.cookies.get(adapter._session_cookie_name)
-            if not sid:
-                return False
-            sess = adapter._sessions.get(sid)
-            if not sess:
-                return False
-            now = time.time()
-            if (now - sess.get("last_seen", now)) > adapter.session_ttl_seconds:
-                # expired
-                try:
-                    del adapter._sessions[sid]
-                except Exception:
-                    # justification: idempotent expiry of a stale session
-                    pass
-                return False
-            sess["last_seen"] = now
-            # Record/refresh client IP
-            try:
-                ip = adapter._get_client_ip(request) if hasattr(adapter, "_get_client_ip") else None
-                if ip and not sess.get("ip"):
-                    sess["ip"] = ip
-            except Exception:
-                # justification: optional metadata; the session proceeds without an ip
-                pass
-            request["username"] = sess.get("username")
-            return True
-        except Exception:
-            return False
-
     # Public paths: process without enforcing login, but attach username if session is present
-    if (
-        path in ("/healthz", "/livez")
-        or path == _pref("/healthz")
-        or path == _pref("/livez")
-        or path == "/logout"
-        or path == _pref("/logout")
-        or path == "/favicon.ico"
-        or path == _pref("/favicon.ico")
-        or path.startswith("/static/")
-        or path.startswith(_pref("/static/"))
-        or path == "/login"
-        or path == _pref("/login")
-    ):
-        _attach_session_user()
+    if _is_public_path(path, base_path):
+        _attach_session_user(request, adapter)
         return await handler(request)
 
     # Semi-public: /proxy should not be redirected here; attach username if present and allow handler to enforce
-    if path == "/proxy" or path.startswith("/proxy/") or path == _pref("/proxy") or path.startswith(_pref("/proxy/")):
-        _attach_session_user()
+    if _is_proxy_path(path, base_path):
+        _attach_session_user(request, adapter)
         return await handler(request)
 
     # 0) SSO trust header (for federated proxy)
-    # Only the header-parsing/verification is guarded here; a downstream handler
-    # exception must never be caught by this block and re-cast as a 401.
-    authenticated_via_sso = False
-    try:
-        sso_header_name = getattr(adapter, "sso_trust_header", "X-OMX-SSO")
-        sso_value = request.headers.get(sso_header_name)
-        if sso_value:
-            claims = adapter._verify_sso_header(sso_value)
-            if isinstance(claims, dict):
-                request["username"] = str(claims.get("user") or "sso")
-                po = claims.get("perm")
-                if isinstance(po, str) and po:
-                    request["perm_override"] = po
-                authenticated_via_sso = True
-    except Exception:
-        # justification: sso header parse is advisory; the basic fallback follows
-        pass
-    if authenticated_via_sso:
+    if _auth_via_sso(request, adapter):
         return await handler(request)
 
     # 1) Try Basic Auth first (preserve backward compatibility for non-browser clients)
-    # As above, only credential parsing/verification is guarded; the handler call
-    # itself must run outside this try so its exceptions are not swallowed.
-    auth = request.headers.get("Authorization")
-    if auth and auth.lower().startswith("basic "):
-        authenticated_via_basic = False
-        try:
-            enc = auth.split(" ", 1)[1].strip()
-            raw = base64.b64decode(enc).decode("utf-8", errors="ignore")
-            if ":" in raw:
-                username, password = raw.split(":", 1)
-                if adapter.auth_manager and adapter.auth_manager.authenticate(username, password):
-                    request["username"] = username
-                    authenticated_via_basic = True
-        except Exception:
-            adapter.logger.debug("Basic auth header could not be processed", exc_info=True)
-        if authenticated_via_basic:
-            return await handler(request)
+    # As in the original, only credential parsing/verification is guarded; the
+    # handler call itself runs outside the try so its exceptions are not swallowed.
+    basic_result = _basic_auth_result(request, adapter)
+    if basic_result is True:
+        return await handler(request)
+    if basic_result is False:
         # Basic Auth attempted but failed -> 401 for programmatic clients
-        return web.Response(
-            status=401, text="Unauthorized\n", headers={"WWW-Authenticate": basic_authenticate_header(adapter.realm)}
-        )
+        return basic_auth_401_response(adapter)
 
     # 2) Session cookie (_attach_session_user already fails safe, returning False on error)
-    if _attach_session_user():
+    if _attach_session_user(request, adapter):
         return await handler(request)
 
     # Not authenticated -> for API/probe endpoints, return 401 Basic challenge; else redirect to login
-    if path == "/readyz" or path == _pref("/readyz") or path.startswith("/api/") or path.startswith(_pref("/api/")):
-        return web.Response(
-            status=401, text="Unauthorized\n", headers={"WWW-Authenticate": basic_authenticate_header(adapter.realm)}
-        )
+    if _is_readyz_or_api(path, base_path):
+        return basic_auth_401_response(adapter)
+
     next_url = urllib.parse.quote(str(request.rel_url))
     # Redirect to base-scoped login
-    login_url = _pref("/login") + f"?next={next_url}"
+    login_url = _prefixed_path(base_path, "/login") + f"?next={next_url}"
     raise web.HTTPFound(location=login_url)
 
 
