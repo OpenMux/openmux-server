@@ -472,107 +472,123 @@ class TcpServerAdapter(BaseGenericAdapter):
 
             self.logger.debug("Received auth command: %s", auth_line)
 
-            # Parse authentication command
+            # Parse authentication command. The prefixes below are checked in
+            # this order and each arm returns, so dispatch is exclusive and
+            # matches the original if/elif chain.
             if auth_line.startswith("AUTH:PK:INIT:"):
-                # Public key auth initiation: AUTH:PK:INIT:<username>[:<key_id>]
-                parts = auth_line.split(":")
-                # Expected min parts: ['AUTH','PK','INIT','username']
-                if len(parts) >= 4:
-                    username = parts[3]
-                    key_id = parts[4] if len(parts) >= 5 and parts[4] else None
-                    if not hasattr(self.auth_manager, "start_pubkey_challenge"):
-                        self.logger.warning("Public key auth not supported by auth manager")
-                        return False
-                    ch = self.auth_manager.start_pubkey_challenge(username, key_id)
-                    if not ch:
-                        await client.send_line("AUTH:FAILED:Authentication failed")
-                        return False
-                    await client.send_line(f"AUTH:PK:CHALLENGE:{ch['key_id']}:{ch['nonce']}")
-                    # Wait for response line
-                    resp_line = await self.collect_line_from_chars(client)
-                    if not resp_line or not resp_line.startswith("AUTH:PK:RESPONSE:"):
-                        return False
-                    rparts = resp_line.split(":")
-                    # AUTH:PK:RESPONSE:<key_id>:<signature_b64>
-                    if len(rparts) < 5:
-                        return False
-                    resp_key_id = rparts[3]
-                    signature_b64 = rparts[4]
-                    ok = False
-                    try:
-                        ok = self.auth_manager.verify_pubkey_response(username, resp_key_id, signature_b64)
-                    except Exception:
-                        ok = False
-                    if ok:
-                        client.username = username
-                        client.is_authenticated = True
-                        return True
-                    await client.send_line("AUTH:FAILED:Authentication failed")
-                    return False
-            elif auth_line.startswith("AUTH:USER:HMAC:"):
-                # HMAC password challenge flow
-                parts = auth_line.split(":")
-                # AUTH:USER:HMAC:<username>
-                if len(parts) >= 4:
-                    username = parts[3]
-                    src_ip = client.address[0] if hasattr(client, "address") and client.address else None
-                    if hasattr(self.auth_manager, "is_user_locked") and self.auth_manager.is_user_locked(username, src_ip):
-                        await client.send_line("AUTH:FAILED:Account temporarily locked due to failures")
-                        return False
-                    if not hasattr(self.auth_manager, "start_password_hmac_challenge"):
-                        return False
-                    nonce_b64 = self.auth_manager.start_password_hmac_challenge(username)
-                    if not nonce_b64:
-                        await client.send_line("AUTH:FAILED:Authentication failed")
-                        return False
-                    await client.send_line(f"AUTH:CHALLENGE:{nonce_b64}")
-                    # Wait for response
-                    resp = await self.collect_line_from_chars(client)
-                    # AUTH:RESPONSE:<hmac_b64>
-                    if not resp or not resp.startswith("AUTH:RESPONSE:"):
-                        return False
-                    rparts = resp.split(":")
-                    if len(rparts) < 3:
-                        return False
-                    hmac_b64 = rparts[2]
-                    ok = False
-                    try:
-                        ok = self.auth_manager.verify_password_hmac(username, hmac_b64, src_ip)
-                    except Exception:
-                        ok = False
-                    if ok:
-                        client.username = username
-                        client.is_authenticated = True
-                        return True
-                    await client.send_line("AUTH:FAILED:Authentication failed")
-                    return False
-            elif auth_line.startswith("AUTH:KEY:"):
-                # API key auth: AUTH:KEY:<api_key>
-                api_key = auth_line[len("AUTH:KEY:") :]
-                if api_key and hasattr(self.auth_manager, "authenticate_key") and self.auth_manager.authenticate_key(api_key):
-                    client.username = self.auth_manager.get_api_key_name(api_key) or "api-user"
-                    client.is_authenticated = True
-                    return True
-                await client.send_line("AUTH:FAILED:Authentication failed")
-                return False
-            elif auth_line.startswith("AUTH:USER:"):
-                # Plaintext password auth deprecated
-                parts = auth_line.split(":")
-                if len(parts) >= 3:
-                    username = parts[2]
-                    src_ip = client.address[0] if hasattr(client, "address") and client.address else None
-                    if hasattr(self.auth_manager, "is_user_locked") and self.auth_manager.is_user_locked(username, src_ip):
-                        await client.send_line("AUTH:FAILED:Account temporarily locked due to failures")
-                        return False
-                await client.send_line("AUTH:FAILED:Plaintext password auth disabled; upgrade client (use HMAC or pubkey)")
-                self.logger.warning("Rejected deprecated plaintext AUTH:USER attempt")
-                return False
+                return await self._auth_pubkey(client, auth_line)
+            if auth_line.startswith("AUTH:USER:HMAC:"):
+                return await self._auth_hmac(client, auth_line)
+            if auth_line.startswith("AUTH:KEY:"):
+                return await self._auth_api_key(client, auth_line)
+            if auth_line.startswith("AUTH:USER:"):
+                return await self._auth_plaintext_rejected(client, auth_line)
 
             return False
 
         except Exception as e:
             self.logger.error("Authentication error: %s", e, exc_info=True)
             return False
+
+    async def _auth_pubkey(self, client: "ClientSession", auth_line: str) -> bool:
+        """Public key auth flow (``AUTH:PK:INIT:<username>[:<key_id>]``)."""
+        parts = auth_line.split(":")
+        # Expected min parts: ['AUTH','PK','INIT','username']
+        if len(parts) >= 4:
+            username = parts[3]
+            key_id = parts[4] if len(parts) >= 5 and parts[4] else None
+            if not hasattr(self.auth_manager, "start_pubkey_challenge"):
+                self.logger.warning("Public key auth not supported by auth manager")
+                return False
+            ch = self.auth_manager.start_pubkey_challenge(username, key_id)
+            if not ch:
+                await client.send_line("AUTH:FAILED:Authentication failed")
+                return False
+            await client.send_line(f"AUTH:PK:CHALLENGE:{ch['key_id']}:{ch['nonce']}")
+            # Wait for response line
+            resp_line = await self.collect_line_from_chars(client)
+            if not resp_line or not resp_line.startswith("AUTH:PK:RESPONSE:"):
+                return False
+            rparts = resp_line.split(":")
+            # AUTH:PK:RESPONSE:<key_id>:<signature_b64>
+            if len(rparts) < 5:
+                return False
+            resp_key_id = rparts[3]
+            signature_b64 = rparts[4]
+            ok = False
+            try:
+                ok = self.auth_manager.verify_pubkey_response(username, resp_key_id, signature_b64)
+            except Exception:
+                ok = False
+            if ok:
+                client.username = username
+                client.is_authenticated = True
+                return True
+            await client.send_line("AUTH:FAILED:Authentication failed")
+            return False
+        return False
+
+    async def _auth_hmac(self, client: "ClientSession", auth_line: str) -> bool:
+        """HMAC password challenge flow (``AUTH:USER:HMAC:<username>``)."""
+        parts = auth_line.split(":")
+        # AUTH:USER:HMAC:<username>
+        if len(parts) >= 4:
+            username = parts[3]
+            src_ip = client.address[0] if hasattr(client, "address") and client.address else None
+            if hasattr(self.auth_manager, "is_user_locked") and self.auth_manager.is_user_locked(username, src_ip):
+                await client.send_line("AUTH:FAILED:Account temporarily locked due to failures")
+                return False
+            if not hasattr(self.auth_manager, "start_password_hmac_challenge"):
+                return False
+            nonce_b64 = self.auth_manager.start_password_hmac_challenge(username)
+            if not nonce_b64:
+                await client.send_line("AUTH:FAILED:Authentication failed")
+                return False
+            await client.send_line(f"AUTH:CHALLENGE:{nonce_b64}")
+            # Wait for response
+            resp = await self.collect_line_from_chars(client)
+            # AUTH:RESPONSE:<hmac_b64>
+            if not resp or not resp.startswith("AUTH:RESPONSE:"):
+                return False
+            rparts = resp.split(":")
+            if len(rparts) < 3:
+                return False
+            hmac_b64 = rparts[2]
+            ok = False
+            try:
+                ok = self.auth_manager.verify_password_hmac(username, hmac_b64, src_ip)
+            except Exception:
+                ok = False
+            if ok:
+                client.username = username
+                client.is_authenticated = True
+                return True
+            await client.send_line("AUTH:FAILED:Authentication failed")
+            return False
+        return False
+
+    async def _auth_api_key(self, client: "ClientSession", auth_line: str) -> bool:
+        """API key auth flow (``AUTH:KEY:<api_key>``)."""
+        api_key = auth_line[len("AUTH:KEY:") :]
+        if api_key and hasattr(self.auth_manager, "authenticate_key") and self.auth_manager.authenticate_key(api_key):
+            client.username = self.auth_manager.get_api_key_name(api_key) or "api-user"
+            client.is_authenticated = True
+            return True
+        await client.send_line("AUTH:FAILED:Authentication failed")
+        return False
+
+    async def _auth_plaintext_rejected(self, client: "ClientSession", auth_line: str) -> bool:
+        """Plaintext password auth (``AUTH:USER:``) is deprecated and rejected."""
+        parts = auth_line.split(":")
+        if len(parts) >= 3:
+            username = parts[2]
+            src_ip = client.address[0] if hasattr(client, "address") and client.address else None
+            if hasattr(self.auth_manager, "is_user_locked") and self.auth_manager.is_user_locked(username, src_ip):
+                await client.send_line("AUTH:FAILED:Account temporarily locked due to failures")
+                return False
+        await client.send_line("AUTH:FAILED:Plaintext password auth disabled; upgrade client (use HMAC or pubkey)")
+        self.logger.warning("Rejected deprecated plaintext AUTH:USER attempt")
+        return False
 
     async def handle_command_phase(self, client: "ClientSession"):
         """Process command-phase requests until port attach or disconnect.
