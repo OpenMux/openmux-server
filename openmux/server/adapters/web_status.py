@@ -724,218 +724,25 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             writer: Stream writer.
         """
         try:
-            muxcon = None
-            if self.main_port_manager and hasattr(self.main_port_manager, "unified_adapters"):
-                for ad in getattr(self.main_port_manager, "unified_adapters", []) or []:
-                    try:
-                        atype = ad.get_adapter_type()
-                        if str(atype).lower() == "muxcon":
-                            muxcon = ad
-                            break
-                    except Exception:  # justification: adapter type detection best-effort
-                        pass
+            muxcon = self._mpath_find_muxcon()
             if not muxcon:
-                await self._send_json(
-                    writer,
-                    200,
-                    {
-                        "timestamp": time.time(),
-                        "groups": [],
-                        "totals": {"groups": 0, "connections": 0, "primaries": 0, "stale": 0},
-                    },
-                )
+                await self._mpath_empty_payload(writer)
                 return
-            mpath_groups = getattr(muxcon, "_mpath_groups", {}) or {}
-            # Heartbeat state (best-effort) to align UI staleness with adapter logic
-            hb_state = getattr(muxcon, "_hb_state", {}) or {}
-            groups_payload = []
-            total_conns = 0
-            primaries = 0
-            stale_total = 0
             now = time.time()
-            # Derive an effective staleness window similar to muxcon failover logic.
-            # Use max(mpath_primary_stale_sec, heartbeat_interval * 2.5) to avoid
-            # false UI "stale" during normal heartbeat gaps.
-            stale_cut = None
-            try:
-                stale_sec = getattr(muxcon, "mpath_primary_stale_sec", None)
-                if not isinstance(stale_sec, (int, float)) or stale_sec <= 0:
-                    # Fallback default if unset; keep generous to avoid flicker
-                    stale_sec = 45.0
-                eff = float(stale_sec)
-                try:
-                    hb_int = float(getattr(muxcon, "heartbeat_interval", 0) or 0)
-                except Exception:
-                    hb_int = 0.0
-                if hb_int > 0:
-                    hb_window = hb_int * 2.5
-                    if hb_window > eff:
-                        eff = hb_window
-                stale_cut = now - eff
-            except Exception:  # justification: stale cutoff compute best-effort
-                stale_cut = None
-            total_retx = 0
-            total_tx_bytes = 0
-            total_rx_bytes = 0
-            for peer_key, grp in mpath_groups.items():
-                conns = []
-                primary = grp.get("primary")
-                if primary:
-                    primaries += 1
-                server_ids = set()
-                instance_ids = set()
-                # Peer-level metrics (best-effort): sendbuf size, rx buffer depth, retx count
-                sendbuf_sz = 0
-                rxbuf_depth = 0
-                retx_count = 0
-                try:
-                    sb = getattr(muxcon, "_peer_sendbuf", {}).get(peer_key)
-                    if isinstance(sb, dict):
-                        sendbuf_sz = len(sb)
-                except Exception:
-                    sendbuf_sz = 0
-                try:
-                    rxst = getattr(muxcon, "_peer_rx_state", {}).get(peer_key)
-                    if isinstance(rxst, dict):
-                        buf = rxst.get("buffer") or {}
-                        rxbuf_depth = len(buf) if isinstance(buf, dict) else 0
-                except Exception:
-                    rxbuf_depth = 0
-                try:
-                    retx_map = getattr(muxcon, "_peer_retx_count", {}) or {}
-                    if peer_key in retx_map:
-                        retx_count = int(retx_map.get(peer_key) or 0)
-                except Exception:
-                    retx_count = 0
-                try:
-                    total_retx += int(retx_count or 0)
-                except Exception:
-                    # justification: optional metrics; counters default to zero
-                    pass
-                # Bytes TX/RX per peer
-                tx_bytes = 0
-                rx_bytes = 0
-                try:
-                    tx_bytes = int((getattr(muxcon, "_peer_bytes_tx", {}) or {}).get(peer_key, 0) or 0)
-                except Exception:
-                    tx_bytes = 0
-                try:
-                    rx_bytes = int((getattr(muxcon, "_peer_bytes_rx", {}) or {}).get(peer_key, 0) or 0)
-                except Exception:
-                    rx_bytes = 0
-                try:
-                    total_tx_bytes += tx_bytes
-                    total_rx_bytes += rx_bytes
-                except Exception:
-                    # justification: optional metrics; counters default to zero
-                    pass
-                for cid, meta in grp.get("conns", {}).items():
-                    opened_at = meta.get("opened_at")
-                    # Consider both tx/rx activity and last ACK; align with adapter
-                    last_seen = meta.get("last_seen")
-                    last_rx_seen = meta.get("last_rx_seen")
-                    try:
-                        hb_c = hb_state.get(cid, {}) if isinstance(hb_state, dict) else {}
-                        last_ack = hb_c.get("last_ack_ts")
-                        last_req = hb_c.get("last_req_ts")
-                    except Exception:
-                        last_ack = None
-                        last_req = None
-                    pref = meta.get("pref")
-                    # Pull server/instance identity from live connection table
-                    server_id = None
-                    instance_id = None
-                    try:
-                        cinfo = getattr(muxcon, "connections", {}).get(cid, {})
-                        server_id = cinfo.get("server_id")
-                        instance_id = cinfo.get("instance_id")
-                    except Exception:  # justification: identity extraction best-effort
-                        pass
-                    if server_id:
-                        server_ids.add(server_id)
-                    if instance_id:
-                        instance_ids.add(instance_id)
-                    # Compute last activity using RX, TX, and heartbeat ACK timestamps
-                    last_activity = None
-                    try:
-                        vals = [v for v in (last_rx_seen, last_seen, last_ack) if isinstance(v, (int, float))]
-                        last_activity = max(vals) if vals else None
-                    except Exception:
-                        last_activity = last_seen
-                    is_stale = False
-                    if stale_cut is not None:
-                        la = float(last_activity or 0)
-                        if la < stale_cut:
-                            # Candidate stale; apply heartbeat-aware guardrails to avoid flicker
-                            is_stale = True
-                            try:
-                                hb_missed = int((hb_state.get(cid, {}) or {}).get("missed", 0) or 0)
-                            except Exception:
-                                hb_missed = 0
-                            # If only a single heartbeat is outstanding (missed <= 1), treat as not stale.
-                            # Be stricter only when multiple cycles have been missed or the last ACK is far overdue.
-                            try:
-                                hb_int = float(getattr(muxcon, "heartbeat_interval", 0) or 0)
-                            except Exception:
-                                hb_int = 0.0
-                            overdue = False
-                            try:
-                                # Consider ACK overdue if last_req exists and now exceeds 2.5 * hb interval since request
-                                if hb_int > 0 and last_req:
-                                    overdue = (now - float(last_req)) > (hb_int * 2.5)
-                            except Exception:
-                                overdue = False
-                            if hb_missed <= 1 and not overdue:
-                                is_stale = False
-                    if is_stale:
-                        stale_total += 1
-                    conns.append(
-                        {
-                            "conn_id": cid,
-                            "pref": pref,
-                            "opened_at": opened_at,
-                            "last_seen": last_seen,
-                            "age_sec": (now - opened_at) if opened_at else None,
-                            "idle_sec": (now - (last_activity or last_seen)) if (last_activity or last_seen) else None,
-                            "stale": is_stale,
-                            "is_primary": cid == primary,
-                            "server_id": server_id,
-                            "instance_id": instance_id,
-                        }
-                    )
-                total_conns += len(conns)
-                non_stale = sum(1 for c in conns if not c["stale"])
-                groups_payload.append(
-                    {
-                        "peer_key": peer_key,
-                        "primary": primary,
-                        "primary_pref": next((c["pref"] for c in conns if c["conn_id"] == primary), None),
-                        "connections": conns,
-                        "non_stale": non_stale,
-                        "stale": len(conns) - non_stale,
-                        "server_ids": sorted(server_ids),
-                        "instance_ids": sorted(instance_ids),
-                        "distinct_instances": len(instance_ids),
-                        "metrics": {
-                            "sendbuf_size": sendbuf_sz,
-                            "rx_buffer_depth": rxbuf_depth,
-                            "retransmissions": retx_count,
-                            "tx_bytes": tx_bytes,
-                            "rx_bytes": rx_bytes,
-                        },
-                    }
-                )
+            stale_cut = self._mpath_stale_cut(muxcon, now)
+            hb_state = getattr(muxcon, "_hb_state", {}) or {}
+            groups_payload, totals = self._mpath_groups(muxcon, hb_state, stale_cut, now)
             payload = {
                 "timestamp": now,
                 "groups": groups_payload,
                 "totals": {
                     "groups": len(groups_payload),
-                    "connections": total_conns,
-                    "primaries": primaries,
-                    "stale": stale_total,
-                    "retransmissions": total_retx,
-                    "tx_bytes": total_tx_bytes,
-                    "rx_bytes": total_rx_bytes,
+                    "connections": totals["connections"],
+                    "primaries": totals["primaries"],
+                    "stale": totals["stale"],
+                    "retransmissions": totals["retransmissions"],
+                    "tx_bytes": totals["tx_bytes"],
+                    "rx_bytes": totals["rx_bytes"],
                 },
                 "config": {
                     "mpath_primary_stale_sec": getattr(muxcon, "mpath_primary_stale_sec", None),
@@ -947,6 +754,254 @@ class WebStatusAdapter(BaseGenericAdapter):  # noqa: Vulture
             await self._send_json(writer, 200, payload)
         except Exception as e:  # justification: API surfaces error to client; avoids duplicate logging
             await self._send_json(writer, 500, {"error": True, "message": str(e)})
+
+    def _mpath_find_muxcon(self):
+        """Find the muxcon adapter among the port-managed unified adapters, else None."""
+        muxcon = None
+        if self.main_port_manager and hasattr(self.main_port_manager, "unified_adapters"):
+            for ad in getattr(self.main_port_manager, "unified_adapters", []) or []:
+                try:
+                    atype = ad.get_adapter_type()
+                    if str(atype).lower() == "muxcon":
+                        muxcon = ad
+                        break
+                except Exception:  # justification: adapter type detection best-effort
+                    pass
+        return muxcon
+
+    async def _mpath_empty_payload(self, writer: asyncio.StreamWriter) -> None:
+        """Send the no-muxcon summary (empty groups, zeroed totals)."""
+        await self._send_json(
+            writer,
+            200,
+            {
+                "timestamp": time.time(),
+                "groups": [],
+                "totals": {"groups": 0, "connections": 0, "primaries": 0, "stale": 0},
+            },
+        )
+
+    def _mpath_stale_cut(self, muxcon, now: float) -> Optional[float]:
+        """Compute the effective staleness cutoff, or None when not derivable.
+
+        Derive an effective staleness window similar to muxcon failover logic.
+        Use max(mpath_primary_stale_sec, heartbeat_interval * 2.5) to avoid
+        false UI "stale" during normal heartbeat gaps.
+        """
+        stale_cut = None
+        try:
+            stale_sec = getattr(muxcon, "mpath_primary_stale_sec", None)
+            if not isinstance(stale_sec, (int, float)) or stale_sec <= 0:
+                # Fallback default if unset; keep generous to avoid flicker
+                stale_sec = 45.0
+            eff = float(stale_sec)
+            try:
+                hb_int = float(getattr(muxcon, "heartbeat_interval", 0) or 0)
+            except Exception:
+                hb_int = 0.0
+            if hb_int > 0:
+                hb_window = hb_int * 2.5
+                if hb_window > eff:
+                    eff = hb_window
+            stale_cut = now - eff
+        except Exception:  # justification: stale cutoff compute best-effort
+            stale_cut = None
+        return stale_cut
+
+    def _mpath_groups(self, muxcon, hb_state, stale_cut, now: float):
+        """Build the per-peer group list and the running totals, in one pass."""
+        mpath_groups = getattr(muxcon, "_mpath_groups", {}) or {}
+        groups_payload = []
+        totals = {
+            "connections": 0,
+            "primaries": 0,
+            "stale": 0,
+            "retransmissions": 0,
+            "tx_bytes": 0,
+            "rx_bytes": 0,
+        }
+        for peer_key, grp in mpath_groups.items():
+            groups_payload.append(self._mpath_group_entry(muxcon, hb_state, stale_cut, now, peer_key, grp, totals))
+        return groups_payload, totals
+
+    def _mpath_group_entry(self, muxcon, hb_state, stale_cut, now: float, peer_key, grp, totals: dict) -> Dict[str, Any]:
+        """One peer group: its metrics, connections, identity sets, and its share of the totals."""
+        conns = []
+        primary = grp.get("primary")
+        if primary:
+            totals["primaries"] += 1
+        server_ids = set()
+        instance_ids = set()
+        # Peer-level metrics (best-effort): sendbuf size, rx buffer depth, retx count
+        sendbuf_sz, rxbuf_depth, retx_count, tx_bytes, rx_bytes = self._mpath_peer_metrics(muxcon, peer_key)
+        try:
+            totals["retransmissions"] += int(retx_count or 0)
+            totals["tx_bytes"] += tx_bytes
+            totals["rx_bytes"] += rx_bytes
+        except Exception:
+            # justification: optional metrics; counters default to zero
+            pass
+        for cid, meta in grp.get("conns", {}).items():
+            conn_entry, server_id, instance_id = self._mpath_conn_entry(muxcon, hb_state, stale_cut, now, cid, meta, primary)
+            if server_id:
+                server_ids.add(server_id)
+            if instance_id:
+                instance_ids.add(instance_id)
+            conns.append(conn_entry)
+        non_stale = sum(1 for c in conns if not c["stale"])
+        totals["connections"] += len(conns)
+        totals["stale"] += len(conns) - non_stale
+        return {
+            "peer_key": peer_key,
+            "primary": primary,
+            "primary_pref": next((c["pref"] for c in conns if c["conn_id"] == primary), None),
+            "connections": conns,
+            "non_stale": non_stale,
+            "stale": len(conns) - non_stale,
+            "server_ids": sorted(server_ids),
+            "instance_ids": sorted(instance_ids),
+            "distinct_instances": len(instance_ids),
+            "metrics": {
+                "sendbuf_size": sendbuf_sz,
+                "rx_buffer_depth": rxbuf_depth,
+                "retransmissions": retx_count,
+                "tx_bytes": tx_bytes,
+                "rx_bytes": rx_bytes,
+            },
+        }
+
+    def _mpath_peer_metrics(self, muxcon, peer_key) -> Tuple[int, int, int, int, int]:
+        """Best-effort per-peer metrics: sendbuf, rx depth, retx, tx/rx bytes.
+
+        Each source is read in its own try (a failing lookup resets just that
+        counter to zero); absent attrs take the getattr-default path.
+        """
+        sendbuf_sz = 0
+        try:
+            sb = getattr(muxcon, "_peer_sendbuf", {}).get(peer_key)
+            if isinstance(sb, dict):
+                sendbuf_sz = len(sb)
+        except Exception:
+            sendbuf_sz = 0
+        rxbuf_depth = 0
+        try:
+            rxst = getattr(muxcon, "_peer_rx_state", {}).get(peer_key)
+            if isinstance(rxst, dict):
+                buf = rxst.get("buffer") or {}
+                rxbuf_depth = len(buf) if isinstance(buf, dict) else 0
+        except Exception:
+            rxbuf_depth = 0
+        retx_count = 0
+        try:
+            retx_map = getattr(muxcon, "_peer_retx_count", {}) or {}
+            if peer_key in retx_map:
+                retx_count = int(retx_map.get(peer_key) or 0)
+        except Exception:
+            retx_count = 0
+        tx_bytes = 0
+        try:
+            tx_bytes = int((getattr(muxcon, "_peer_bytes_tx", {}) or {}).get(peer_key, 0) or 0)
+        except Exception:
+            tx_bytes = 0
+        rx_bytes = 0
+        try:
+            rx_bytes = int((getattr(muxcon, "_peer_bytes_rx", {}) or {}).get(peer_key, 0) or 0)
+        except Exception:
+            rx_bytes = 0
+        return sendbuf_sz, rxbuf_depth, retx_count, tx_bytes, rx_bytes
+
+    def _mpath_conn_entry(self, muxcon, hb_state, stale_cut, now: float, cid: str, meta: dict, primary):
+        """One connection entry dict, plus its server/instance identity values."""
+        opened_at = meta.get("opened_at")
+        # Consider both tx/rx activity and last ACK; align with adapter
+        last_seen = meta.get("last_seen")
+        last_rx_seen = meta.get("last_rx_seen")
+        last_ack, last_req = self._mpath_conn_hb_view(hb_state, cid)
+        pref = meta.get("pref")
+        # Pull server/instance identity from live connection table
+        server_id, instance_id = self._mpath_conn_identity(muxcon, cid)
+        # Compute last activity using RX, TX, and heartbeat ACK timestamps
+        last_activity = self._mpath_conn_last_activity(last_rx_seen, last_seen, last_ack)
+        is_stale = self._mpath_conn_stale(muxcon, hb_state, cid, stale_cut, now, last_activity, last_seen, last_req)
+        return (
+            {
+                "conn_id": cid,
+                "pref": pref,
+                "opened_at": opened_at,
+                "last_seen": last_seen,
+                "age_sec": (now - opened_at) if opened_at else None,
+                "idle_sec": (now - (last_activity or last_seen)) if (last_activity or last_seen) else None,
+                "stale": is_stale,
+                "is_primary": cid == primary,
+                "server_id": server_id,
+                "instance_id": instance_id,
+            },
+            server_id,
+            instance_id,
+        )
+
+    def _mpath_conn_hb_view(self, hb_state, cid: str) -> Tuple[Optional[float], Optional[float]]:
+        """Heartbeat last_ack/last_req timestamps for a connection (best-effort)."""
+        try:
+            hb_c = hb_state.get(cid, {}) if isinstance(hb_state, dict) else {}
+            last_ack = hb_c.get("last_ack_ts")
+            last_req = hb_c.get("last_req_ts")
+        except Exception:
+            last_ack = None
+            last_req = None
+        return last_ack, last_req
+
+    def _mpath_conn_identity(self, muxcon, cid: str) -> Tuple[Optional[str], Optional[str]]:
+        """Server/instance identity from the live connection table (best-effort)."""
+        server_id = None
+        instance_id = None
+        try:
+            cinfo = getattr(muxcon, "connections", {}).get(cid, {})
+            server_id = cinfo.get("server_id")
+            instance_id = cinfo.get("instance_id")
+        except Exception:  # justification: identity extraction best-effort
+            pass
+        return server_id, instance_id
+
+    def _mpath_conn_last_activity(self, last_rx_seen, last_seen, last_ack):
+        """Most recent activity timestamp among the RX, TX, and heartbeat ACK stamps."""
+        last_activity = None
+        try:
+            vals = [v for v in (last_rx_seen, last_seen, last_ack) if isinstance(v, (int, float))]
+            last_activity = max(vals) if vals else None
+        except Exception:
+            # justification: optional status detail; the core status fields are set
+            last_activity = last_seen
+        return last_activity
+
+    def _mpath_conn_stale(self, muxcon, hb_state, cid: str, stale_cut, now: float, last_activity, last_seen, last_req) -> bool:
+        """Stale verdict for one connection, with heartbeat-aware guardrails."""
+        is_stale = False
+        if stale_cut is not None:
+            la = float(last_activity or 0)
+            if la < stale_cut:
+                # Candidate stale; apply heartbeat-aware guardrails to avoid flicker
+                is_stale = True
+                try:
+                    hb_missed = int((hb_state.get(cid, {}) or {}).get("missed", 0) or 0)
+                except Exception:
+                    hb_missed = 0
+                # If only a single heartbeat is outstanding (missed <= 1), treat as not stale.
+                # Be stricter only when multiple cycles have been missed or the last ACK is far overdue.
+                try:
+                    hb_int = float(getattr(muxcon, "heartbeat_interval", 0) or 0)
+                except Exception:
+                    hb_int = 0.0
+                overdue = False
+                try:
+                    # Consider ACK overdue if last_req exists and now exceeds 2.5 * hb interval since request
+                    if hb_int > 0 and last_req:
+                        overdue = (now - float(last_req)) > (hb_int * 2.5)
+                except Exception:
+                    overdue = False
+                if hb_missed <= 1 and not overdue:
+                    is_stale = False
+        return is_stale
 
     def _derive_mpath_info(self, muxcon, conn_id: str):
         """Derive multipath augmentation fields for a single connection.
