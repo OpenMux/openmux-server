@@ -4424,60 +4424,116 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         # Derive stable peer identity BEFORE tearing down connection record so
         # we can reliably look up proxies and unregister federated ports.
-        try:
-            stable_peer_key = self._derive_peer_key_from_conn_id(conn_id)
-        except Exception:
-            stable_peer_key = None
+        stable_peer_key = self._cc_stable_peer_key(conn_id)
         # Best-effort origin server_id for unregister (prefer connection record)
-        try:
-            _conn_tmp = self.connections.get(conn_id) or {}
-            stable_server_id = _conn_tmp.get("server_id")
-        except Exception:
-            stable_server_id = None
-
+        stable_server_id = self._cc_stable_server_id(conn_id)
         # Attempt to unregister from multipath groups first using full scan
-        try:
-            self._unregister_mpath_connection(conn_id)
-        except Exception:
-            # justification: optional multipath cleanup; the record is already removed
-            pass
+        self._cc_unregister_mpath(conn_id)
         # Fetch connection record after unregister attempt (may be absent)
         conn = self.connections.pop(conn_id, None)
         if not conn:
             # Even if connection record is missing, clear any wire/hb state and log
-            try:
-                self._wire_state.pop(conn_id, None)
-            except Exception:
-                # justification: idempotent state cleanup
-                pass
-            try:
-                self._hb_state.pop(conn_id, None)
-            except Exception:
-                # justification: idempotent state cleanup
-                pass
+            self._cc_pop_state(conn_id)
             self.logger.info("Connection closed: %s", conn_id)
             # `_unregister_mpath_connection` above already ran; if the group just
             # became empty this was the peer's last path - drop its session state
             # (pumps, fed: pseudo-clients, local stream map) so no zombie pump keeps
             # draining a local port for a dead peer (issue #54).
-            try:
-                await self._maybe_cleanup_empty_peer(stable_peer_key)
-            except Exception:
-                self.logger.debug("Empty-peer local session cleanup failed for %s", stable_peer_key, exc_info=True)
+            await self._cc_maybe_cleanup(stable_peer_key)
             return
         # Drop wire state
+        writer: Optional[asyncio.StreamWriter] = conn.get("writer")
+        await self._cc_close_writer(conn_id, writer)
+        self.logger.info("Connection closed: %s", conn_id)
+        # Mark federated proxies for this peer based on current live-path state
+        await self._cc_mark_peer_proxies(conn_id, stable_peer_key, stable_server_id)
+        # Cleanup heartbeat state for this connection
+        self._cc_pop_hb(conn_id)
+        # Topology/proxy state might have changed; refresh per-connection mapping
+        self._cc_refresh_proxies()
+        # If this was the peer's last path, drop its origin-side session state
+        # (pumps, fed: pseudo-clients, local stream map) so nothing keeps draining
+        # local port output for a dead peer (issue #54).
+        await self._cc_maybe_cleanup(stable_peer_key)
+
+    def _cc_stable_peer_key(self, conn_id: str) -> Optional[str]:
+        """Stable peer key for proxy lookups, derived before teardown (best-effort)."""
+        try:
+            return self._derive_peer_key_from_conn_id(conn_id)
+        except Exception:
+            return None
+
+    def _cc_stable_server_id(self, conn_id: str) -> Optional[str]:
+        """Best-effort origin server_id from the connection record (may be None)."""
+        try:
+            _conn_tmp = self.connections.get(conn_id) or {}
+            return _conn_tmp.get("server_id")
+        except Exception:
+            return None
+
+    def _cc_unregister_mpath(self, conn_id: str) -> None:
+        """Unregister the connection from multipath groups first (best-effort)."""
+        try:
+            self._unregister_mpath_connection(conn_id)
+        except Exception:
+            # justification: optional multipath cleanup; the record is already removed
+            pass
+
+    def _cc_pop_state(self, conn_id: str) -> None:
+        """Clear wire/hb state for a connection whose record was already gone."""
+        try:
+            self._wire_state.pop(conn_id, None)
+        except Exception:
+            # justification: idempotent state cleanup
+            pass
+        try:
+            self._hb_state.pop(conn_id, None)
+        except Exception:
+            # justification: idempotent state cleanup
+            pass
+
+    async def _cc_maybe_cleanup(self, stable_peer_key: Optional[str]) -> None:
+        """Drop a peer's origin-side session state (pumps, fed clients, streams)."""
+        try:
+            await self._maybe_cleanup_empty_peer(stable_peer_key)
+        except Exception:
+            self.logger.debug("Empty-peer local session cleanup failed for %s", stable_peer_key, exc_info=True)
+
+    async def _cc_close_writer(self, conn_id: str, writer: Optional[asyncio.StreamWriter]) -> None:
+        """Drop wire state and close the transport for a connection (best-effort)."""
         try:
             self._wire_state.pop(conn_id, None)
         except Exception:  # justification: best-effort wire-state cleanup
             pass
-        writer: Optional[asyncio.StreamWriter] = conn.get("writer")
         if writer:
             try:
                 await _await_writer_closed(writer, self.logger)
             except Exception:  # justification: teardown must not fail the close path
                 pass
-        self.logger.info("Connection closed: %s", conn_id)
-        # Mark federated proxies for this peer based on current live-path state
+
+    def _cc_pop_hb(self, conn_id: str) -> None:
+        """Cleanup heartbeat state for this connection."""
+        try:
+            self._hb_state.pop(conn_id, None)
+        except Exception:  # justification: heartbeat state may be absent; ignore
+            pass
+
+    def _cc_refresh_proxies(self) -> None:
+        """Rebuild the per-connection proxy mapping after topology/proxy changes."""
+        try:
+            self._refresh_conn_proxies()
+        except Exception:
+            # justification: optional mapping rebuild; the previous mapping stays in effect
+            pass
+
+    async def _cc_mark_peer_proxies(
+        self, conn_id: str, stable_peer_key: Optional[str], stable_server_id: Optional[str]
+    ) -> None:
+        """Mark federated proxies for this peer based on current live-path state.
+
+        Best-effort: any failure leaves the proxies in their current state so
+        the next event retries.
+        """
         try:
             # Prefer the stable key determined before popping the connection
             peer_key = stable_peer_key or self._derive_peer_key_from_conn_id(conn_id)
@@ -4485,108 +4541,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             any_paths = bool(grp and grp.get("conns"))
             # If no paths remain, mark proxies offline but retain them in cache
             if not any_paths:
-                # Look up proxies by the stable key; if not found and the key was
-                # host-based, attempt fallback to node:<server_id> derived earlier.
-                proxies = self._peer_proxies.get(peer_key, {})
-                if (not proxies) and stable_server_id:
-                    try:
-                        node_key = f"node:{stable_server_id}"
-                        proxies = self._peer_proxies.get(node_key, proxies)
-                        # Use node_key for subsequent operations if it exists
-                        if proxies:
-                            peer_key = node_key
-                    except Exception:
-                        # justification: optional key resolution; the fallback key is used
-                        pass
-                # Attempt to determine server_id for unregister
-                server_id = None
-                try:
-                    if peer_key.startswith("node:"):
-                        server_id = peer_key.split(":", 1)[1]
-                except Exception:
-                    server_id = None
-                if not server_id and stable_server_id:
-                    server_id = stable_server_id
-                for pname, proxy in list(proxies.items()):
-                    try:
-                        if hasattr(proxy, "is_connected"):
-                            proxy.is_connected = False
-                        # Local offline reason (issue #62): the banner and status
-                        # page need a reason the moment the last muxcon path dies.
-                        try:
-                            src_server = None
-                            meta = getattr(proxy, "metadata", None)
-                            origin = getattr(meta, "origin_server", None) if meta is not None else None
-                            src_server = getattr(origin, "server_id", None) if origin is not None else None
-                            src_server = src_server or "unknown"
-                            proxy.link_reason = f"MuxCon link to {src_server} is down"
-                        except Exception:
-                            # justification: optional status detail; the proxy stays registered
-                            pass
-                        if hasattr(proxy, "disconnect") and callable(proxy.disconnect):
-                            if asyncio.iscoroutinefunction(proxy.disconnect):
-                                await proxy.disconnect()
-                            else:
-                                proxy.disconnect()
-                        try:
-                            src_server = None
-                            try:
-                                meta = getattr(proxy, "metadata", None)
-                                origin = getattr(meta, "origin_server", None)
-                                src_server = getattr(origin, "server_id", None)
-                            except Exception:
-                                src_server = None
-                            src_server = src_server or "unknown"
-                            src_path = f"{src_server}::{pname}"
-                            self._emit_link_notice_once(proxy, "disconnected", src_path)
-                        except Exception:
-                            # justification: optional notice; the UI badge catches up on the next event
-                            pass
-                        self.logger.info(
-                            "Marked federated port '%s' disconnected; no active paths remain for %s", pname, peer_key
-                        )
-                        # Notify UI/consumers via PortManager meta update (if available)
-                        try:
-                            pm = getattr(self, "main_port_manager", None)
-                            if pm and hasattr(pm, "notify_meta_updated"):
-                                pm.notify_meta_updated(pname, {"event": "federated_disconnected", "peer_key": peer_key})
-                        except Exception:
-                            # justification: optional notification; UI event delivery is best-effort
-                            pass
-                    except Exception as e:
-                        self.logger.debug(
-                            "Error marking proxy %s disconnected for peer %s: %s", pname, peer_key, e, exc_info=True
-                        )
-                # Retain proxies in cache; update last_seen and notify meta with last_seen
-                try:
-                    now_ts = time.time()
-                    pm = getattr(self, "main_port_manager", None)
-                    for pname, proxy in list(proxies.items()):
-                        try:
-                            setattr(proxy, "last_seen", getattr(proxy, "last_seen", now_ts))
-                        except Exception:
-                            # justification: optional metadata; the timestamp stays as is
-                            pass
-                        try:
-                            if pm and hasattr(pm, "notify_meta_updated"):
-                                pm.notify_meta_updated(
-                                    pname,
-                                    {
-                                        "event": "federated_cached_offline",
-                                        "peer_key": peer_key,
-                                        "connected": False,
-                                        "last_seen": getattr(proxy, "last_seen", None),
-                                    },
-                                )
-                        except Exception:
-                            self.logger.error("cached-offline notify failed for proxy %s", pname, exc_info=True)
-                except Exception:
-                    self.logger.error("muxcon: group transition failed for peer %s", peer_key, exc_info=True)
-                # Persist cache after transition to offline
-                try:
-                    self._save_federated_cache()
-                except Exception:
-                    self.logger.error("muxcon: failed to save federated cache", exc_info=True)
+                await self._cc_proxies_offline(peer_key, stable_server_id)
             else:
                 # Paths remain in group; recompute live-state (may be all stale)
                 try:
@@ -4597,24 +4552,127 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             # justification: optional live-state recompute; the next event retries
             pass
-        # Cleanup heartbeat state for this connection
+
+    def _cc_offline_proxies(self, peer_key: str, stable_server_id: Optional[str]) -> Tuple[str, Dict[str, Any]]:
+        """Federated proxies to mark offline, with the key to use for them.
+
+        Prefers the stable peer key; when no proxies are found and a server id
+        is known, falls back to node:<server_id>.
+        """
+        proxies = self._peer_proxies.get(peer_key, {})
+        if (not proxies) and stable_server_id:
+            try:
+                node_key = f"node:{stable_server_id}"
+                proxies = self._peer_proxies.get(node_key, proxies)
+                # Use node_key for subsequent operations if it exists
+                if proxies:
+                    peer_key = node_key
+            except Exception:
+                # justification: optional key resolution; the fallback key is used
+                pass
+        # Attempt to determine server_id for unregister (kept for parity with
+        # the historical in-method computation; not consumed by callers).
+        server_id = None
         try:
-            self._hb_state.pop(conn_id, None)
-        except Exception:  # justification: heartbeat state may be absent; ignore
-            pass
-        # Topology/proxy state might have changed; refresh per-connection mapping
-        try:
-            self._refresh_conn_proxies()
+            if peer_key.startswith("node:"):
+                server_id = peer_key.split(":", 1)[1]
         except Exception:
-            # justification: optional mapping rebuild; the previous mapping stays in effect
-            pass
-        # If this was the peer's last path, drop its origin-side session state
-        # (pumps, fed: pseudo-clients, local stream map) so nothing keeps draining
-        # local port output for a dead peer (issue #54).
+            server_id = None
+        if not server_id and stable_server_id:
+            server_id = stable_server_id
+        return peer_key, proxies
+
+    async def _cc_proxies_offline(self, peer_key: str, stable_server_id: Optional[str]) -> None:
+        """Mark all proxies for a path-less peer offline, then persist the cache."""
+        peer_key, proxies = self._cc_offline_proxies(peer_key, stable_server_id)
+        for pname, proxy in list(proxies.items()):
+            await self._cc_mark_proxy_disconnected(pname, proxy, peer_key)
+        # Retain proxies in cache; update last_seen and notify meta with last_seen
+        self._cc_cache_offline_notify(peer_key, proxies)
+        # Persist cache after transition to offline
         try:
-            await self._maybe_cleanup_empty_peer(stable_peer_key)
+            self._save_federated_cache()
         except Exception:
-            self.logger.debug("Empty-peer local session cleanup failed for %s", stable_peer_key, exc_info=True)
+            self.logger.error("muxcon: failed to save federated cache", exc_info=True)
+
+    def _cc_cache_offline_notify(self, peer_key: str, proxies: Dict[str, Any]) -> None:
+        """Retain offline proxies in cache, updating last_seen and meta (best-effort)."""
+        try:
+            now_ts = time.time()
+            pm = getattr(self, "main_port_manager", None)
+            for pname, proxy in list(proxies.items()):
+                try:
+                    setattr(proxy, "last_seen", getattr(proxy, "last_seen", now_ts))
+                except Exception:
+                    # justification: optional metadata; the timestamp stays as is
+                    pass
+                try:
+                    if pm and hasattr(pm, "notify_meta_updated"):
+                        pm.notify_meta_updated(
+                            pname,
+                            {
+                                "event": "federated_cached_offline",
+                                "peer_key": peer_key,
+                                "connected": False,
+                                "last_seen": getattr(proxy, "last_seen", None),
+                            },
+                        )
+                except Exception:
+                    self.logger.error("cached-offline notify failed for proxy %s", pname, exc_info=True)
+        except Exception:
+            self.logger.error("muxcon: group transition failed for peer %s", peer_key, exc_info=True)
+
+    async def _cc_mark_proxy_disconnected(self, pname: str, proxy: Any, peer_key: str) -> None:
+        """Mark one federated proxy disconnected, updating its state and notices."""
+        try:
+            if hasattr(proxy, "is_connected"):
+                proxy.is_connected = False
+            # Local offline reason (issue #62): the banner and status
+            # page need a reason the moment the last muxcon path dies.
+            try:
+                src_server = None
+                meta = getattr(proxy, "metadata", None)
+                origin = getattr(meta, "origin_server", None) if meta is not None else None
+                src_server = getattr(origin, "server_id", None) if origin is not None else None
+                src_server = src_server or "unknown"
+                proxy.link_reason = f"MuxCon link to {src_server} is down"
+            except Exception:
+                # justification: optional status detail; the proxy stays registered
+                pass
+            if hasattr(proxy, "disconnect") and callable(proxy.disconnect):
+                if asyncio.iscoroutinefunction(proxy.disconnect):
+                    await proxy.disconnect()
+                else:
+                    proxy.disconnect()
+            self._cc_emit_link_notice(pname, proxy)
+            self.logger.info("Marked federated port '%s' disconnected; no active paths remain for %s", pname, peer_key)
+            # Notify UI/consumers via PortManager meta update (if available)
+            try:
+                pm = getattr(self, "main_port_manager", None)
+                if pm and hasattr(pm, "notify_meta_updated"):
+                    pm.notify_meta_updated(pname, {"event": "federated_disconnected", "peer_key": peer_key})
+            except Exception:
+                # justification: optional notification; UI event delivery is best-effort
+                pass
+        except Exception as e:
+            self.logger.debug("Error marking proxy %s disconnected for peer %s: %s", pname, peer_key, e, exc_info=True)
+
+    def _cc_emit_link_notice(self, pname: str, proxy: Any) -> None:
+        """Emit a de-duplicated 'disconnected' federated-link notice for a proxy."""
+        try:
+            src_server = None
+            try:
+                meta = getattr(proxy, "metadata", None)
+                origin = getattr(meta, "origin_server", None)
+                src_server = getattr(origin, "server_id", None)
+            except Exception:
+                src_server = None
+            src_server = src_server or "unknown"
+            src_path = f"{src_server}::{pname}"
+            self._emit_link_notice_once(proxy, "disconnected", src_path)
+        except Exception:
+            # justification: optional notice; the UI badge catches up on the next event
+            pass
 
     # --- Federation helpers ---
 
