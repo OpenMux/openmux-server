@@ -989,7 +989,24 @@ async def handle_api_reload(request: web.Request) -> web.Response:
       - tcp_initiator_ports
     """
     adapter = _get_adapter(request)
-    # Require auth and permission
+
+    denied = await _api_reload_forbidden(adapter, request)
+    if denied is not None:
+        return denied
+
+    wants, error = await _api_reload_load_wants(request)
+    if error is not None:
+        return error
+
+    pm = _api_reload_port_manager(adapter)
+    results = await _api_reload_apply_sections(pm, adapter, wants)
+    await _api_reload_disconnect_affected(pm, adapter, results)
+    _api_reload_update_snapshot(pm, wants)
+    return _api_reload_summary_response(results)
+
+
+async def _api_reload_forbidden(adapter: Any, request: web.Request) -> Optional[web.Response]:
+    """Return a 401/403 response when auth or permission fails, else None."""
     username = request.get("username")
     if not username:
         return web.Response(status=401, text="Unauthorized\n")
@@ -999,82 +1016,131 @@ async def handle_api_reload(request: web.Request) -> web.Response:
             return web.Response(status=403, text="Forbidden\n")
     except Exception:
         return web.Response(status=403, text="Forbidden\n")
+    return None
 
+
+async def _api_reload_load_wants(request: web.Request) -> Tuple[Optional[Dict[str, list]], Optional[web.Response]]:
+    """Parse the JSON body into ``wants`` (section -> port list).
+
+    Returns ``(wants, None)`` on success, or ``(None, response)`` with the
+    400 error response when the body is invalid.
+    """
     try:
         payload = await request.json()
     except Exception:
-        return web.json_response({"error": True, "message": "Invalid JSON"}, status=400)
+        return None, web.json_response({"error": True, "message": "Invalid JSON"}, status=400)
     if not isinstance(payload, dict):
-        return web.json_response({"error": True, "message": "Invalid body"}, status=400)
+        return None, web.json_response({"error": True, "message": "Invalid body"}, status=400)
 
     wants: Dict[str, list] = {}
     for key in ("serial_ports", "loopback_ports", "command_ports", "tcp_initiator_ports"):
         if key in payload:
             if not isinstance(payload[key], list):
-                return web.json_response({"error": True, "message": f"{key} must be a list"}, status=400)
+                return None, web.json_response({"error": True, "message": f"{key} must be a list"}, status=400)
             wants[key] = payload[key]
     if not wants:
-        return web.json_response({"error": True, "message": "No supported sections to reload"}, status=400)
+        return None, web.json_response({"error": True, "message": "No supported sections to reload"}, status=400)
+    return wants, None
 
-    # Access adapters
-    pm = getattr(adapter.console_manager, "port_manager", None) if adapter.console_manager else None
+
+def _api_reload_port_manager(adapter: Any) -> Any:
+    """Return the console port manager, or None when absent."""
+    return getattr(adapter.console_manager, "port_manager", None) if adapter.console_manager else None
+
+
+async def _api_reload_apply_sections(pm: Any, adapter: Any, wants: Dict[str, list]) -> Dict[str, Any]:
+    """Reconcile each requested section, keyed by adapter type (the result maps)."""
     unified_adapters = getattr(pm, "unified_adapters", []) if pm else []
-
-    def find_adapter(kind: str):
-        for a in unified_adapters:
-            try:
-                at = a.get_adapter_type()
-            except Exception:
-                at = None
-            if isinstance(at, str) and at.lower() == kind:
-                return a
-        return None
-
-    results: Dict[str, Any] = {}
     mapping = {
         "serial_ports": "serial",
         "loopback_ports": "loopback",
         "command_ports": "command",
         "tcp_initiator_ports": "tcp_initiator",
     }
+    results: Dict[str, Any] = {}
     for key, lst in wants.items():
         kind = mapping[key]
-        aobj = find_adapter(kind)
-        if not aobj:
-            results[kind] = {"error": f"{kind} adapter not active"}
-            continue
-        # Validate
-        try:
-            vfn = getattr(aobj.__class__, "validate_config", None)
-            if callable(vfn) and not vfn({key: lst}):
-                results[kind] = {"error": f"Invalid {key} configuration"}
-                continue
-        except Exception as e:
-            adapter.logger.warning("%s validation error ignored: %s", kind, e)
-        # Names
-        names = [p.get("name") for p in lst if isinstance(p, dict)]
-        if any(not isinstance(n, str) or not n.strip() for n in names) or len(set(names)) != len(names):
-            results[kind] = {"error": f"Invalid or duplicate names in {key}"}
-            continue
-        # Apply
-        try:
-            if hasattr(aobj, "reconcile_ports"):
-                results[kind] = await aobj.reconcile_ports({key: lst})
-            else:
-                results[kind] = {"error": "Adapter does not support live reconcile"}
-        except Exception as e:
-            adapter.logger.error("Hot-reload %s failed: %s", kind, e, exc_info=True)
-            results[kind] = {"error": "Apply failed"}
+        results[kind] = await _api_reload_apply_one(adapter, unified_adapters, kind, key, lst)
+    return results
 
-    # Disconnect clients on affected ports
+
+async def _api_reload_apply_one(adapter: Any, unified_adapters: list, kind: str, key: str, lst: list) -> Any:
+    """Apply one section: find the adapter, validate, check names, then reconcile."""
+    aobj = _api_reload_find_adapter(unified_adapters, kind)
+    if not aobj:
+        return {"error": f"{kind} adapter not active"}
+    if not await _api_reload_validate(adapter, aobj, kind, key, lst):
+        return {"error": f"Invalid {key} configuration"}
+    if not _api_reload_names_ok(lst):
+        return {"error": f"Invalid or duplicate names in {key}"}
+    return await _api_reload_do_apply(adapter, aobj, kind, key, lst)
+
+
+def _api_reload_find_adapter(unified_adapters: list, kind: str) -> Any:
+    """Find the unified adapter whose type matches ``kind``, else None."""
+    for a in unified_adapters:
+        try:
+            at = a.get_adapter_type()
+        except Exception:
+            at = None
+        if isinstance(at, str) and at.lower() == kind:
+            return a
+    return None
+
+
+async def _api_reload_validate(adapter: Any, aobj: Any, kind: str, key: str, lst: list) -> bool:
+    """Return False when the adapter's validate_config rejects the config.
+
+    A validate_config that raises is logged and treated as passing (the caller
+    proceeds to the name check), matching the pre-refactor behavior.
+    """
+    try:
+        vfn = getattr(aobj.__class__, "validate_config", None)
+        if callable(vfn) and not vfn({key: lst}):
+            return False
+    except Exception as e:
+        adapter.logger.warning("%s validation error ignored: %s", kind, e)
+    return True
+
+
+def _api_reload_names_ok(lst: list) -> bool:
+    """True when every named port has a unique, non-blank string name."""
+    names = [p.get("name") for p in lst if isinstance(p, dict)]
+    if any(not isinstance(n, str) or not n.strip() for n in names) or len(set(names)) != len(names):
+        return False
+    return True
+
+
+async def _api_reload_do_apply(adapter: Any, aobj: Any, kind: str, key: str, lst: list) -> Any:
+    """Run the adapter's live reconcile, recording the outcome for the section."""
+    try:
+        if hasattr(aobj, "reconcile_ports"):
+            return await aobj.reconcile_ports({key: lst})
+        return {"error": "Adapter does not support live reconcile"}
+    except Exception as e:
+        adapter.logger.error("Hot-reload %s failed: %s", kind, e, exc_info=True)
+        return {"error": "Apply failed"}
+
+
+def _api_reload_affected_ports(results: Dict[str, Any]) -> List[str]:
+    """Collect the ports that were removed or updated by the applied sections."""
+    affected: List[str] = []
+    for v in results.values():
+        if isinstance(v, dict):
+            for t in ("removed", "updated"):
+                affected.extend(v.get(t, []) or [])
+    return affected
+
+
+async def _api_reload_disconnect_affected(pm: Any, adapter: Any, results: Dict[str, Any]) -> None:
+    """Disconnect connected clients on every affected port, best-effort.
+
+    Per-port failures are logged and skipped; a failure collecting the affected
+    list is logged once and swallowed (post-reconcile cleanup is optional).
+    """
     try:
         if pm:
-            affected = []
-            for v in results.values():
-                if isinstance(v, dict):
-                    for t in ("removed", "updated"):
-                        affected.extend(v.get(t, []) or [])
-            for pname in affected:
+            for pname in _api_reload_affected_ports(results):
                 try:
                     pobj = safe_get_port(pm, pname)
                     clients = list(getattr(pobj, "connected_clients", []) or []) if pobj is not None else []
@@ -1093,7 +1159,9 @@ async def handle_api_reload(request: web.Request) -> web.Response:
     except Exception as e:
         adapter.logger.warning("Post-reconcile disconnect failed: %s", e)
 
-    # Update in-memory config snapshot
+
+def _api_reload_update_snapshot(pm: Any, wants: Dict[str, list]) -> None:
+    """Write the reloaded sections back into the in-memory config snapshot."""
     try:
         cm = getattr(pm, "config_manager", None) if pm else None
         if cm and getattr(cm, "config", None) is not None:
@@ -1103,7 +1171,9 @@ async def handle_api_reload(request: web.Request) -> web.Response:
         # justification: optional snapshot; the authoritative config is on disk
         pass
 
-    # Build backward-compatible aggregated summary at top-level
+
+def _api_reload_summary_response(results: Dict[str, Any]) -> web.Response:
+    """Build the aggregated top-level summary plus the per-section results."""
     aggregate = {"added": [], "updated": [], "removed": [], "unchanged": []}
     for val in results.values():
         if isinstance(val, dict):
@@ -1111,7 +1181,6 @@ async def handle_api_reload(request: web.Request) -> web.Response:
                 items = val.get(k)
                 if items:
                     aggregate[k].extend(items)
-
     return web.json_response({"ok": True, "summary": {**aggregate, **{k: v for k, v in results.items()}}})
 
 
