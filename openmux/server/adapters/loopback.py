@@ -178,6 +178,30 @@ class LoopbackPort:
         self.logger.debug("Loopback write: %s bytes", len(data))
         return len(data)
 
+    # Bracketed tags for recognized ESC sequences (used by the _sanitize_* helpers).
+    _CSI_LETTER_TAGS = {
+        ord("A"): b"[UP]",
+        ord("B"): b"[DOWN]",
+        ord("C"): b"[RIGHT]",
+        ord("D"): b"[LEFT]",
+        ord("H"): b"[HOME]",
+        ord("F"): b"[END]",
+    }
+    _SS3_LETTER_TAGS = {
+        ord("A"): b"[UP]",
+        ord("B"): b"[DOWN]",
+        ord("C"): b"[RIGHT]",
+        ord("D"): b"[LEFT]",
+    }
+    _CSI_NUM_TAGS = {
+        1: b"[HOME]",
+        2: b"[INSERT]",
+        3: b"[DEL]",
+        4: b"[END]",
+        5: b"[PGUP]",
+        6: b"[PGDN]",
+    }
+
     def sanitize_data(self, data: bytes) -> bytes:
         """Sanitize control / escape sequences for safe echo.
 
@@ -186,6 +210,10 @@ class LoopbackPort:
         - ESC-based cursor/navigation sequences converted to bracketed tags.
         - DEL -> ``[DEL]``; other C0 controls -> ``[CTRL-X]`` style tokens.
         - Bytes >= 0x80 passed through.
+
+        The ESC/CSI/SS3 dispatch is delegated to ``_sanitize_*`` helpers, which
+        return the next scan index (or ``None`` when an incomplete run was
+        buffered); this method only routes each byte.
 
         Args:
             data: Raw incoming bytes.
@@ -205,156 +233,122 @@ class LoopbackPort:
         i = 0
         n = len(data)
         while i < n:
-            b = data[i]
-            # Keep CR/LF as-is
-            if b in (0x0A, 0x0D):
-                out.append(b)
-                i += 1
-                continue
-            # Printable ASCII
-            if 0x20 <= b <= 0x7E:
-                out.append(b)
-                i += 1
-                continue
-            # DEL
-            if b == 0x7F:
-                out.extend(b"[DEL]")
-                i += 1
-                continue
-            # ESC sequences
-            if b == 0x1B:
-                # Need at least one more byte to decide
-                if i + 1 >= n:
-                    # Buffer incomplete ESC and wait for next data
-                    self._esc_buf.extend(data[i:])
-                    break
-
-                second = data[i + 1]
-                # CSI sequence ESC [ ...
-                if second == ord("["):
-                    # Need at least ESC [ X
-                    if i + 2 >= n:
-                        self._esc_buf.extend(data[i:])
-                        break
-                    third = data[i + 2]
-                    # Arrow/home/end single-letter forms
-                    if third == ord("A"):
-                        out.extend(b"[UP]")
-                        i += 3
-                        continue
-                    if third == ord("B"):
-                        out.extend(b"[DOWN]")
-                        i += 3
-                        continue
-                    if third == ord("C"):
-                        out.extend(b"[RIGHT]")
-                        i += 3
-                        continue
-                    if third == ord("D"):
-                        out.extend(b"[LEFT]")
-                        i += 3
-                        continue
-                    if third == ord("H"):
-                        out.extend(b"[HOME]")
-                        i += 3
-                        continue
-                    if third == ord("F"):
-                        out.extend(b"[END]")
-                        i += 3
-                        continue
-
-                    # ESC [ <digits> ~ sequences (Insert/Del/PgUp/PgDn, etc.)
-                    if third >= ord("0") and third <= ord("9"):
-                        j = i + 2
-                        digits = bytearray()
-                        while j < n and data[j] >= ord("0") and data[j] <= ord("9"):
-                            digits.append(data[j])
-                            j += 1
-                        # Incomplete at buffer end: keep for next call
-                        if j >= n:
-                            self._esc_buf.extend(data[i:])
-                            break
-                        if data[j] == ord("~") and digits:
-                            code = int(digits.decode("ascii"))
-                            if code == 1:
-                                out.extend(b"[HOME]")
-                            elif code == 2:
-                                out.extend(b"[INSERT]")
-                            elif code == 3:
-                                out.extend(b"[DEL]")
-                            elif code == 4:
-                                out.extend(b"[END]")
-                            elif code == 5:
-                                out.extend(b"[PGUP]")
-                            elif code == 6:
-                                out.extend(b"[PGDN]")
-                            else:
-                                out.extend(b"[CSI-" + digits + b"~]")
-                            i = j + 1
-                            continue
-                        # Not a ~ terminator; treat as bare ESC and continue
-                        out.extend(b"[ESC]")
-                        i += 1
-                        continue
-
-                    # Unrecognized ESC [ sequence; treat as bare ESC
-                    out.extend(b"[ESC]")
-                    i += 1
-                    continue
-
-                # SS3 sequence ESC O A/B/C/D (some terminals for arrows)
-                if second == ord("O"):
-                    if i + 2 >= n:
-                        self._esc_buf.extend(data[i:])
-                        break
-                    third = data[i + 2]
-                    if third == ord("A"):
-                        out.extend(b"[UP]")
-                        i += 3
-                        continue
-                    if third == ord("B"):
-                        out.extend(b"[DOWN]")
-                        i += 3
-                        continue
-                    if third == ord("C"):
-                        out.extend(b"[RIGHT]")
-                        i += 3
-                        continue
-                    if third == ord("D"):
-                        out.extend(b"[LEFT]")
-                        i += 3
-                        continue
-                    # Unknown ESC O sequence; output [ESC]
-                    out.extend(b"[ESC]")
-                    i += 1
-                    continue
-
-                # Bare ESC (not followed by recognized prefix)
-                out.extend(b"[ESC]")
-                i += 1
-                continue
-            # Horizontal tab
-            if b == 0x09:
-                out.extend(b"[TAB]")
-                i += 1
-                continue
-            # Other C0 controls -> caret/tag style
-            if b < 0x20:
-                # Map 0x00 to [NUL], others to [CTRL-X]
-                if b == 0x00:
-                    out.extend(b"[NUL]")
-                else:
-                    try:
-                        out.extend(b"[CTRL-" + bytes([b + 64]) + b"]")
-                    except Exception:  # justification: rare formatting edge; fallback token adequate, avoid noisy logs
-                        out.extend(b"[CTRL]")
-                i += 1
-                continue
-            # Non-ASCII bytes (>= 0x80): pass through unchanged
-            out.append(b)
-            i += 1
+            nxt = self._route_byte(data, i, n, out)
+            if nxt is None:
+                break
+            i = nxt
 
         return bytes(out)
+
+    def _route_byte(self, data: bytes, i: int, n: int, out: bytearray) -> Optional[int]:
+        """Route one byte at data[i]; return the next index, or None to stop.
+
+        Non-ESC bytes are appended (converted to bracketed tags for control
+        bytes) and advance by one. ESC bytes delegate to ``_sanitize_esc``,
+        which may buffer an incomplete run (None = stop scanning).
+        """
+        b = data[i]
+        if b == 0x1B:
+            return self._sanitize_esc(data, i, n, out)
+        if b in (0x0A, 0x0D) or 0x20 <= b <= 0x7E or b >= 0x80:
+            out.append(b)
+            return i + 1
+        if b == 0x7F:
+            out.extend(b"[DEL]")
+            return i + 1
+        if b == 0x09:
+            out.extend(b"[TAB]")
+            return i + 1
+        if b < 0x20:
+            if b == 0x00:
+                out.extend(b"[NUL]")
+            else:
+                try:
+                    out.extend(b"[CTRL-" + bytes([b + 64]) + b"]")
+                except Exception:  # justification: rare formatting edge; fallback token adequate, avoid noisy logs
+                    out.extend(b"[CTRL]")
+            return i + 1
+        return i + 1
+
+    def _buf(self, data: bytes, i: int) -> None:
+        """Buffer bytes from index i to end (an incomplete run) for the next call."""
+        self._esc_buf.extend(data[i:])
+
+    def _sanitize_esc(self, data: bytes, i: int, n: int, out: bytearray) -> Optional[int]:
+        """Resolve an ESC (0x1B) at data[i]; return the next scan index, or None.
+
+        None means an incomplete run was buffered and the caller must stop.
+        The returned index is always past the ESC byte (or past the sequence).
+        """
+        if i + 1 >= n:
+            self._buf(data, i)
+            return None
+        second = data[i + 1]
+        if second == ord("["):
+            return self._sanitize_csi(data, i, n, out)
+        if second == ord("O"):
+            return self._sanitize_ss3(data, i, n, out)
+        out.extend(b"[ESC]")
+        return i + 1
+
+    def _sanitize_csi(self, data: bytes, i: int, n: int, out: bytearray) -> Optional[int]:
+        """Resolve a CSI sequence whose '[' is at data[i+1].
+
+        Letter forms emit an arrow/home/end tag; digit forms delegate; a bare
+        [ESC] is emitted for unrecognized forms (only the ESC byte is consumed);
+        None buffers an incomplete run.
+        """
+        if i + 2 >= n:
+            self._buf(data, i)
+            return None
+        third = data[i + 2]
+        tag = self._CSI_LETTER_TAGS.get(third)
+        if tag is not None:
+            out.extend(tag)
+            return i + 3
+        if 0x30 <= third <= 0x39:
+            return self._sanitize_csi_digit(data, i, n, out)
+        out.extend(b"[ESC]")
+        return i + 1
+
+    def _sanitize_csi_digit(self, data: bytes, i: int, n: int, out: bytearray) -> Optional[int]:
+        """Resolve ESC [ <digits>... where the first digit is at data[i+2].
+
+        A <digits>~ run maps to a numbered token; any other terminator degrades
+        to a bare [ESC] so the digits survive as printables. None = buffer.
+        """
+        j = i + 2
+        while j < n and 0x30 <= data[j] <= 0x39:
+            j += 1
+        if j >= n:
+            self._buf(data, i)
+            return None
+        if data[j] == ord("~"):
+            out.extend(self._csi_digit_token(data[i + 2 : j]))
+            return j + 1
+        out.extend(b"[ESC]")
+        return i + 1
+
+    def _csi_digit_token(self, digit_run: bytes) -> bytes:
+        """Map a <digits>~ digit run to its bracketed token (or a generic tag)."""
+        code = int(digit_run.decode("ascii"))
+        return self._CSI_NUM_TAGS.get(code, b"[CSI-" + digit_run + b"~]")
+
+    def _sanitize_ss3(self, data: bytes, i: int, n: int, out: bytearray) -> Optional[int]:
+        """Resolve an SS3 sequence whose 'O' is at data[i+1].
+
+        Letter forms emit an arrow tag; any other third byte degrades to a bare
+        [ESC] (the 'O' survives as a printable). None buffers an incomplete run.
+        """
+        if i + 2 >= n:
+            self._buf(data, i)
+            return None
+        tag = self._SS3_LETTER_TAGS.get(data[i + 2])
+        if tag is not None:
+            out.extend(tag)
+            return i + 3
+        out.extend(b"[ESC]")
+        return i + 1
 
 
 class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
