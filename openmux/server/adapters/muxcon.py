@@ -6293,150 +6293,219 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         try:
             await asyncio.sleep(1.0)
             while not self._stop_event.is_set():
-                try:
-                    now = time.time()
-                    # Use an effective stale window that respects heartbeat cadence to avoid false stale flags
-                    effective_stale_sec = self.mpath_primary_stale_sec
-                    try:
-                        hb_window = self.heartbeat_interval * 2.5
-                        if hb_window > effective_stale_sec:
-                            effective_stale_sec = hb_window
-                    except Exception:
-                        # justification: optional window tuning; the stale window default applies
-                        pass
-                    stale_cutoff = now - effective_stale_sec if effective_stale_sec > 0 else None
-                    for key, grp in list(self._mpath_groups.items()):
-                        # Hard idle pruning first: close any connection idle beyond configured TTL
-                        try:
-                            ttl_sec = getattr(self, "mpath_neighbor_idle_drop_sec", 0) or 0
-                        except Exception:
-                            ttl_sec = 0
-                        if ttl_sec > 0:
-                            # Per-group throttle map for TTL logs
-                            if "_ttl_pruned" not in grp:
-                                grp["_ttl_pruned"] = {}
-                            for cid, m in list(grp.get("conns", {}).items()):
-                                try:
-                                    hb_c = self._hb_state.get(cid) or {}
-                                    last_ack_c = hb_c.get("last_ack_ts") or 0
-                                    last_activity_c = max(m.get("last_rx_seen") or m.get("last_seen") or 0, last_ack_c)
-                                    if last_activity_c and (now - last_activity_c) >= ttl_sec:
-                                        # Log once per connection
-                                        last_logged = grp["_ttl_pruned"].get(cid, 0)
-                                        if now - last_logged >= ttl_sec:
-                                            self.logger.warning(
-                                                f"[MPATH] Idle TTL exceeded ({ttl_sec:.0f}s) for {cid}; dropping neighbor"
-                                            )
-                                            grp["_ttl_pruned"][cid] = now
-                                        # Immediately remove from group to prevent further selection/log spam
-                                        try:
-                                            if cid in grp["conns"]:
-                                                grp["conns"].pop(cid, None)
-                                            if grp.get("primary") == cid:
-                                                grp["primary"] = next(iter(grp["conns"].keys()), None)
-                                            if not grp["conns"]:
-                                                self._mpath_groups.pop(key, None)
-                                        except Exception:
-                                            # justification: optional failover prune; the close task still runs
-                                            pass
-                                        # Close asynchronously to clean up transport and state
-                                        asyncio.create_task(self._close_connection(cid))
-                                        # Skip further processing for this cid in this iteration
-                                except Exception:
-                                    # justification: best-effort failover sweep; per-connection errors do not stop the scan
-                                    pass
-                        primary = grp.get("primary")
-                        if not primary:
-                            self._select_mpath_connection(key)
-                            continue
-                        meta = grp["conns"].get(primary)
-                        if not meta:
-                            self._select_mpath_connection(key)
-                            continue
-                        # Initialize last change time metadata
-                        if "last_primary_change" not in grp:
-                            grp["last_primary_change"] = meta.get("opened_at") or now
-                        # Determine last activity using both generic activity and heartbeat ACKs
-                        hb = self._hb_state.get(primary) or {}
-                        last_ack = hb.get("last_ack_ts") or 0
-                        last_activity = max(meta.get("last_rx_seen") or meta.get("last_seen") or 0, last_ack)
-                        if stale_cutoff is not None and last_activity < stale_cutoff:
-                            # Before logging/promotion attempt, ensure there exists at least one non-stale alternative
-                            alternatives = []
-                            for cid, m in grp["conns"].items():
-                                if cid == primary:
-                                    continue
-                                hb_c = self._hb_state.get(cid) or {}
-                                last_ack_c = hb_c.get("last_ack_ts") or 0
-                                ls = max(m.get("last_rx_seen") or m.get("last_seen") or 0, last_ack_c)
-                                if stale_cutoff is not None and ls < stale_cutoff:
-                                    continue
-                                alternatives.append(cid)
-                            if not alternatives:
-                                # Throttle repeated stale warnings if no alternative (only every 3 * check interval)
-                                last_warn = grp.get("_last_stale_log_ts") or 0
-                                if now - last_warn > (self.mpath_failover_check_sec * 3):
-                                    self.logger.debug(
-                                        "[MPATH] Primary %s appears stale for %s but no alternative path available",
-                                        primary,
-                                        key,
-                                    )
-                                    grp["_last_stale_log_ts"] = now
-                                # Do not demote; keep primary until alternative appears
-                            else:
-                                last_change = grp.get("last_primary_change", 0)
-                                # Throttle primary churn: avoid re-promoting if last change very recent (< failover interval)
-                                if now - last_change < (self.mpath_failover_check_sec * 1.5):
-                                    # Skip rapid churn
-                                    continue
-                                self.logger.warning("[MPATH] Primary %s stale for %s; attempting promotion", primary, key)
-                                prev = primary
-                                new_primary = self._select_mpath_connection(key)
-                                if new_primary and new_primary != prev:
-                                    grp["last_primary_change"] = now
-                        elif self.mpath_preemptive_promote and self.mpath_strategy == "best_pref":
-                            # Scan for better non-stale preference
-                            try:
-                                cur_pref = int(meta.get("pref", 0))
-                                better = []
-                                for cid, m in grp["conns"].items():
-                                    if cid == primary:
-                                        continue
-                                    hb_c = self._hb_state.get(cid) or {}
-                                    last_ack_c = hb_c.get("last_ack_ts") or 0
-                                    ls = max(m.get("last_rx_seen") or m.get("last_seen") or 0, last_ack_c)
-                                    if stale_cutoff is not None and ls < stale_cutoff:
-                                        continue
-                                    p = int(m.get("pref", 0))
-                                    if p > cur_pref:
-                                        better.append((cid, p, m.get("opened_at", 0)))
-                                if better:
-                                    better.sort(key=lambda x: (x[1], x[2]), reverse=True)
-                                    new_id, new_pref, _ = better[0]
-                                    if new_id != primary:
-                                        # Throttle preemptive churn as well
-                                        last_change = grp.get("last_primary_change", 0)
-                                        if now - last_change >= (self.mpath_failover_check_sec * 1.0):
-                                            grp["primary"] = new_id
-                                            grp["last_primary_change"] = now
-                                            self.logger.info(
-                                                "[MPATH] Preemptive promote %s over %s (pref %s>%s) for %s",
-                                                new_id,
-                                                primary,
-                                                new_pref,
-                                                cur_pref,
-                                                key,
-                                            )
-                            except Exception:  # justification: preemptive scan is advisory; avoid loop disruption
-                                pass
-                except Exception:  # justification: group evaluation best-effort; continue scanning
-                    pass
+                self._mfl_sweep_once()
                 await asyncio.sleep(self.mpath_failover_check_sec)
         except asyncio.CancelledError:
             # justification: loop exits on cancellation; nothing more to clean up
             pass
         except Exception as e:
             self.logger.debug("mpath failover loop exited with error: %s", e, exc_info=True)
+
+    def _mfl_sweep_once(self) -> None:
+        """One failover sweep tick: prune idle neighbors and evaluate primaries.
+
+        All per-tick work is best-effort. A raise anywhere aborts just this
+        tick (the while loop keeps running), matching the inline try/except.
+        """
+        try:
+            now = time.time()
+            stale_cutoff = self._mfl_stale_window(now)
+            for key, grp in list(self._mpath_groups.items()):
+                self._mfl_prune_idle(key, grp, now)
+                primary = grp.get("primary")
+                if not primary:
+                    self._select_mpath_connection(key)
+                    continue
+                meta = grp["conns"].get(primary)
+                if not meta:
+                    self._select_mpath_connection(key)
+                    continue
+                self._mfl_eval_primary(key, grp, primary, meta, now, stale_cutoff)
+        except Exception:
+            # justification: group evaluation best-effort; continue scanning
+            pass
+
+    def _mfl_stale_window(self, now: float) -> Optional[float]:
+        """Compute the effective stale cutoff (heartbeat-aware) for this tick.
+
+        Returns None when no positive window is configured; a raise in the
+        optional heartbeat widening falls back to the stale window default.
+        """
+        # Use an effective stale window that respects heartbeat cadence to avoid false stale flags
+        effective_stale_sec = self.mpath_primary_stale_sec
+        try:
+            hb_window = self.heartbeat_interval * 2.5
+            if hb_window > effective_stale_sec:
+                effective_stale_sec = hb_window
+        except Exception:
+            # justification: optional window tuning; the stale window default applies
+            pass
+        return now - effective_stale_sec if effective_stale_sec > 0 else None
+
+    def _mfl_prune_idle(self, key: str, grp: Dict[str, Any], now: float) -> None:
+        """Hard idle pruning first: close any connection idle beyond configured TTL."""
+        try:
+            ttl_sec = getattr(self, "mpath_neighbor_idle_drop_sec", 0) or 0
+        except Exception:
+            ttl_sec = 0
+        if ttl_sec > 0:
+            # Per-group throttle map for TTL logs
+            if "_ttl_pruned" not in grp:
+                grp["_ttl_pruned"] = {}
+            for cid, m in list(grp.get("conns", {}).items()):
+                self._mfl_prune_one_idle(key, grp, cid, m, now, ttl_sec)
+
+    def _mfl_prune_one_idle(
+        self,
+        key: str,
+        grp: Dict[str, Any],
+        cid: str,
+        m: Dict[str, Any],
+        now: float,
+        ttl_sec: float,
+    ) -> None:
+        """Prune a single connection if idle beyond the TTL.
+
+        Per-connection errors do not stop the scan; the close task is created
+        even when the group bookkeeping fails.
+        """
+        try:
+            hb_c = self._hb_state.get(cid) or {}
+            last_ack_c = hb_c.get("last_ack_ts") or 0
+            last_activity_c = max(m.get("last_rx_seen") or m.get("last_seen") or 0, last_ack_c)
+            if last_activity_c and (now - last_activity_c) >= ttl_sec:
+                # Log once per connection
+                last_logged = grp["_ttl_pruned"].get(cid, 0)
+                if now - last_logged >= ttl_sec:
+                    self.logger.warning(f"[MPATH] Idle TTL exceeded ({ttl_sec:.0f}s) for {cid}; dropping neighbor")
+                    grp["_ttl_pruned"][cid] = now
+                # Immediately remove from group to prevent further selection/log spam
+                try:
+                    if cid in grp["conns"]:
+                        grp["conns"].pop(cid, None)
+                    if grp.get("primary") == cid:
+                        grp["primary"] = next(iter(grp["conns"].keys()), None)
+                    if not grp["conns"]:
+                        self._mpath_groups.pop(key, None)
+                except Exception:
+                    # justification: optional failover prune; the close task still runs
+                    pass
+                # Close asynchronously to clean up transport and state
+                asyncio.create_task(self._close_connection(cid))
+                # Skip further processing for this cid in this iteration
+        except Exception:
+            # justification: best-effort failover sweep; per-connection errors do not stop the scan
+            pass
+
+    def _mfl_eval_primary(
+        self,
+        key: str,
+        grp: Dict[str, Any],
+        primary: str,
+        meta: Dict[str, Any],
+        now: float,
+        stale_cutoff: Optional[float],
+    ) -> None:
+        """Act on the group primary: promote past a stale one or preempt a lower pref."""
+        # Initialize last change time metadata
+        if "last_primary_change" not in grp:
+            grp["last_primary_change"] = meta.get("opened_at") or now
+        # Determine last activity using both generic activity and heartbeat ACKs
+        hb = self._hb_state.get(primary) or {}
+        last_ack = hb.get("last_ack_ts") or 0
+        last_activity = max(meta.get("last_rx_seen") or meta.get("last_seen") or 0, last_ack)
+        if stale_cutoff is not None and last_activity < stale_cutoff:
+            self._mfl_stale_promote(key, grp, primary, now, stale_cutoff)
+        elif self.mpath_preemptive_promote and self.mpath_strategy == "best_pref":
+            # Scan for better non-stale preference
+            self._mfl_preemptive_scan(key, grp, primary, meta, now, stale_cutoff)
+
+    def _mfl_stale_promote(
+        self, key: str, grp: Dict[str, Any], primary: str, now: float, stale_cutoff: Optional[float]
+    ) -> None:
+        """Handle a stale primary: warn when stalled, otherwise attempt promotion."""
+        # Before logging/promotion attempt, ensure there exists at least one non-stale alternative
+        alternatives = []
+        for cid, m in grp["conns"].items():
+            if cid == primary:
+                continue
+            hb_c = self._hb_state.get(cid) or {}
+            last_ack_c = hb_c.get("last_ack_ts") or 0
+            ls = max(m.get("last_rx_seen") or m.get("last_seen") or 0, last_ack_c)
+            if stale_cutoff is not None and ls < stale_cutoff:
+                continue
+            alternatives.append(cid)
+        if not alternatives:
+            # Throttle repeated stale warnings if no alternative (only every 3 * check interval)
+            last_warn = grp.get("_last_stale_log_ts") or 0
+            if now - last_warn > (self.mpath_failover_check_sec * 3):
+                self.logger.debug(
+                    "[MPATH] Primary %s appears stale for %s but no alternative path available",
+                    primary,
+                    key,
+                )
+                grp["_last_stale_log_ts"] = now
+            # Do not demote; keep primary until alternative appears
+        else:
+            last_change = grp.get("last_primary_change", 0)
+            # Throttle primary churn: avoid re-promoting if last change very recent (< failover interval)
+            if now - last_change < (self.mpath_failover_check_sec * 1.5):
+                # Skip rapid churn
+                return
+            self.logger.warning("[MPATH] Primary %s stale for %s; attempting promotion", primary, key)
+            prev = primary
+            new_primary = self._select_mpath_connection(key)
+            if new_primary and new_primary != prev:
+                grp["last_primary_change"] = now
+
+    def _mfl_preemptive_scan(
+        self,
+        key: str,
+        grp: Dict[str, Any],
+        primary: str,
+        meta: Dict[str, Any],
+        now: float,
+        stale_cutoff: Optional[float],
+    ) -> None:
+        """Scan for a better non-stale preference and preemptively promote it.
+
+        The whole scan is advisory; any error is swallowed so the failover
+        loop keeps running.
+        """
+        try:
+            cur_pref = int(meta.get("pref", 0))
+            better = []
+            for cid, m in grp["conns"].items():
+                if cid == primary:
+                    continue
+                hb_c = self._hb_state.get(cid) or {}
+                last_ack_c = hb_c.get("last_ack_ts") or 0
+                ls = max(m.get("last_rx_seen") or m.get("last_seen") or 0, last_ack_c)
+                if stale_cutoff is not None and ls < stale_cutoff:
+                    continue
+                p = int(m.get("pref", 0))
+                if p > cur_pref:
+                    better.append((cid, p, m.get("opened_at", 0)))
+            if better:
+                better.sort(key=lambda x: (x[1], x[2]), reverse=True)
+                new_id, new_pref, _ = better[0]
+                if new_id != primary:
+                    # Throttle preemptive churn as well
+                    last_change = grp.get("last_primary_change", 0)
+                    if now - last_change >= (self.mpath_failover_check_sec * 1.0):
+                        grp["primary"] = new_id
+                        grp["last_primary_change"] = now
+                        self.logger.info(
+                            "[MPATH] Preemptive promote %s over %s (pref %s>%s) for %s",
+                            new_id,
+                            primary,
+                            new_pref,
+                            cur_pref,
+                            key,
+                        )
+        except Exception:
+            # justification: preemptive scan is advisory; avoid loop disruption
+            pass
 
     async def _send_control_mpath(self, peer_key: str, payload: str) -> bool:
         """Send a control frame over the currently selected path for a peer.
