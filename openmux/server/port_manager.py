@@ -25,6 +25,206 @@ from openmux.server.data_logger import DataLogger
 from openmux.server.port_utils import natural_sort_key
 
 
+class UnifiedPortWrapper:
+    """Legacy-compatible wrapper for a unified adapter port.
+
+    Exposes the legacy `Port` interface surface (status, clients,
+    queues, write/disconnect) over an adapter-owned unified port.
+    """
+
+    def __init__(self, unified_port, adapter):
+        self.name = unified_port.name
+        self.unified_port = unified_port
+        self.adapter = adapter
+        self.logger = logging.getLogger(f"openmux.server.port_manager.unified_wrapper.{self.name}")
+
+        adapter_type = adapter.get_adapter_type()
+
+        self.description = getattr(unified_port, "description", f"Unified {adapter_type} port")
+        self.is_running = getattr(unified_port, "is_running", True)
+        self.connected_clients = []
+        # Write-slot capacity mode (issue #59): "one"/"multiple"/"none"
+        # (or a legacy int, which consumers map via write_capacity()).
+        self.max_read_write_users = getattr(unified_port, "max_read_write_users", 5)
+        # Console-group access control (issue #24): empty on both = open to all.
+        # Read live from the underlying port (not captured at registration)
+        # so a Soft Reload's in-place group update is visible from the next
+        # connection attempt without requiring the wrapper to be recreated,
+        # matching the pattern used for "description" above.
+        self.adapter_type = adapter_type
+        self.loopback = str(adapter_type).lower() == "loopback"
+
+        # Wrapper owns its own delivery queue; port.data_queue (if any)
+        # remains as a test-only staging buffer accessed via port.read_data().
+        self.data_queue = asyncio.Queue(maxsize=100)
+        self.client_queues: Dict[str, asyncio.Queue] = {}
+        # Count of chunks evicted by the drop-oldest-on-full policy, surfaced via get_status().
+        self.dropped_chunks = 0
+        # Active federation relays viewing this port (issue #83). While
+        # greater than zero, the shared queue below is fed even with no
+        # local clients, so the relay sees every byte.
+        self._federation_viewer_count = 0
+        # Scrollback ring buffer: retains the last scrollback_size bytes for replay
+        # on client request.  0 = disabled.
+        self.scrollback_size = int(getattr(unified_port, "scrollback_size", 0))
+        self._scrollback = bytearray()
+
+    @property
+    def read_write_groups(self) -> List[str]:
+        # Read live from the underlying port: a Soft Reload may update
+        # this list in place, and the access ladder reads it on connect.
+        return list(getattr(self.unified_port, "read_write_groups", None) or [])
+
+    @property
+    def read_only_groups(self) -> List[str]:
+        # Read live from the underlying port (mirrors read_write_groups).
+        return list(getattr(self.unified_port, "read_only_groups", None) or [])
+
+    def get_status(self):
+        """Return a status snapshot for this unified wrapper."""
+        status = {
+            "name": self.name,
+            # Read live so reconcile_ports' in-place description updates (soft reload)
+            # are reflected without requiring the wrapper to be recreated.
+            "description": getattr(self.unified_port, "description", self.description),
+            "adapter": self.adapter_type,
+            "state": (self.unified_port.state.value if hasattr(self.unified_port, "state") else "active"),
+            # Read live so an on-demand command port registered before
+            # its first spawn (or a port whose process later starts or
+            # exits) reports its current state, not the value captured
+            # at registration.
+            "is_running": bool(getattr(self.unified_port, "is_running", self.is_running)),
+            # When unified port exposes connection state (e.g., Serial), surface it explicitly
+            "connected": bool(
+                getattr(self.unified_port, "is_connected", getattr(self.unified_port, "is_running", self.is_running))
+            ),
+            "connected_clients": len(self.connected_clients),
+            "max_read_write_users": self.max_read_write_users,
+            "read_write_groups": self.read_write_groups,
+            "read_only_groups": self.read_only_groups,
+            "dropped_chunks": self.dropped_chunks,
+        }
+        # Include adapter-provided snapshot details when available
+        snapshot = getattr(self.unified_port, "get_status_snapshot", None)
+        if callable(snapshot):
+            try:
+                extra = snapshot() or {}
+                if isinstance(extra, dict):
+                    status.update(extra)
+            except Exception:
+                self.logger.debug(
+                    "Unified port %s get_status_snapshot failed",
+                    self.name,
+                    exc_info=True,
+                )
+        elif hasattr(self.unified_port, "status_snapshot"):
+            extra = getattr(self.unified_port, "status_snapshot")
+            if isinstance(extra, dict):
+                status.update(extra)
+        # Readiness (issue #68): derived at snapshot time — "offline" when
+        # the adapter set a status_message (reason shown), "idle" when no
+        # reason and the port is not currently running, else "active".
+        try:
+            status["readiness"] = derive_port_readiness(
+                port_is_alive(self.unified_port),
+                status.get("status_message"),
+            )
+        except Exception:
+            # justification: optional status detail; the core status fields are set
+            pass
+        return status
+
+    def add_client(self, client: Any) -> None:
+        """Register a client and trigger the adapter hook if present."""
+        if client not in self.connected_clients:
+            self.connected_clients.append(client)
+            if hasattr(self.unified_port, "on_client_count_changed"):
+                try:
+                    self.unified_port.on_client_count_changed(len(self.connected_clients))
+                except Exception:
+                    # justification: hook failure should not block port add; log and continue
+                    self.logger.error(
+                        "on_client_count_changed hook error (add_client) for unified port %s",
+                        self.name,
+                        exc_info=True,
+                    )
+
+    def remove_client(self, client: Any) -> None:
+        """Unregister a client and trigger the adapter hook if present."""
+        if client in self.connected_clients:
+            self.connected_clients.remove(client)
+            client_id = client.get("client_id") if isinstance(client, dict) else None
+            if client_id:
+                self.client_queues.pop(client_id, None)
+            if hasattr(self.unified_port, "on_client_count_changed"):
+                try:
+                    self.unified_port.on_client_count_changed(len(self.connected_clients))
+                except Exception:
+                    # justification: hook failure should not block client removal; log and continue
+                    self.logger.error(
+                        "on_client_count_changed hook error (remove_client) for unified port %s",
+                        self.name,
+                        exc_info=True,
+                    )
+            # When the last client disconnects, clear any remaining buffered
+            # data. Skip while a federation relay holds the queue (issue
+            # #83): those chunks are still owed to the peer and are
+            # drained when the last hold releases.
+            if len(self.connected_clients) == 0 and getattr(self, "_federation_viewer_count", 0) == 0:
+                try:
+                    while True:
+                        self.data_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    # justification: queue drained as intended; emptiness is the exit signal
+                    pass
+
+    async def write_data(self, data: bytes) -> bool:
+        """Write to the underlying unified port using best available path."""
+        # Prefer adapter unified write_to_port if available
+        if hasattr(self.adapter, "write_to_port"):
+            try:
+                res = await self.adapter.write_to_port(self.name, data)
+                if isinstance(res, bool):
+                    return res
+                if isinstance(res, int):
+                    return res > 0
+                return True
+            except Exception:
+                # justification: unified write error already contained; log traceback for diagnosis
+                self.logger.error("Unified write_to_port error for %s", self.name, exc_info=True)
+                return False
+        # Fallback: underlying loopback port writer
+        writer = getattr(self.unified_port, "_writer", None)
+        if writer:
+            try:
+                if hasattr(writer, "write") and callable(getattr(writer, "write")):
+                    written = await writer.write(data)
+                    return written > 0
+                if hasattr(writer, "async_write") and callable(getattr(writer, "async_write")):
+                    written = await writer.async_write(data)
+                    return written > 0
+            except Exception:
+                # justification: fallback writer failure non-fatal; log traceback
+                self.logger.error("Unified underlying writer error for %s", self.name, exc_info=True)
+                return False
+        return False
+
+    async def disconnect(self) -> None:
+        """Invoke the unified port's stop/disconnect hooks if available."""
+        if hasattr(self.unified_port, "stop"):
+            try:
+                await self.unified_port.stop()
+            except Exception:
+                # justification: stop hook failure should not prevent broader shutdown; log
+                self.logger.error("Unified port stop() error for %s", self.name, exc_info=True)
+        elif hasattr(self.unified_port, "disconnect"):
+            try:
+                await self.unified_port.disconnect()
+            except Exception:
+                # justification: disconnect hook failure should not block cleanup; log
+                self.logger.error("Unified port disconnect() error for %s", self.name, exc_info=True)
+
+
 class PortManager:
     """Manages ports across legacy and unified adapters."""
 
@@ -192,202 +392,6 @@ class PortManager:
             An object that mimics the legacy `Port` interface sufficiently for
             the console and manager layers.
         """
-
-        # This is a simple compatibility wrapper that implements the Port interface
-        # for unified adapter ports
-        class UnifiedPortWrapper:
-            def __init__(self, unified_port, adapter):
-                self.name = unified_port.name
-                self.unified_port = unified_port
-                self.adapter = adapter
-                self.logger = logging.getLogger(f"openmux.server.port_manager.unified_wrapper.{self.name}")
-
-                adapter_type = adapter.get_adapter_type()
-
-                self.description = getattr(unified_port, "description", f"Unified {adapter_type} port")
-                self.is_running = getattr(unified_port, "is_running", True)
-                self.connected_clients = []
-                # Write-slot capacity mode (issue #59): "one"/"multiple"/"none"
-                # (or a legacy int, which consumers map via write_capacity()).
-                self.max_read_write_users = getattr(unified_port, "max_read_write_users", 5)
-                # Console-group access control (issue #24): empty on both = open to all.
-                # Read live from the underlying port (not captured at registration)
-                # so a Soft Reload's in-place group update is visible from the next
-                # connection attempt without requiring the wrapper to be recreated,
-                # matching the pattern used for "description" above.
-                self.adapter_type = adapter_type
-                self.loopback = str(adapter_type).lower() == "loopback"
-
-                # Wrapper owns its own delivery queue; port.data_queue (if any)
-                # remains as a test-only staging buffer accessed via port.read_data().
-                self.data_queue = asyncio.Queue(maxsize=100)
-                self.client_queues: Dict[str, asyncio.Queue] = {}
-                # Count of chunks evicted by the drop-oldest-on-full policy, surfaced via get_status().
-                self.dropped_chunks = 0
-                # Active federation relays viewing this port (issue #83). While
-                # greater than zero, the shared queue below is fed even with no
-                # local clients, so the relay sees every byte.
-                self._federation_viewer_count = 0
-                # Scrollback ring buffer: retains the last scrollback_size bytes for replay
-                # on client request.  0 = disabled.
-                self.scrollback_size = int(getattr(unified_port, "scrollback_size", 0))
-                self._scrollback = bytearray()
-
-            @property
-            def read_write_groups(self) -> List[str]:
-                # Read live from the underlying port: a Soft Reload may update
-                # this list in place, and the access ladder reads it on connect.
-                return list(getattr(self.unified_port, "read_write_groups", None) or [])
-
-            @property
-            def read_only_groups(self) -> List[str]:
-                # Read live from the underlying port (mirrors read_write_groups).
-                return list(getattr(self.unified_port, "read_only_groups", None) or [])
-
-            def get_status(self):
-                """Return a status snapshot for this unified wrapper."""
-                status = {
-                    "name": self.name,
-                    # Read live so reconcile_ports' in-place description updates (soft reload)
-                    # are reflected without requiring the wrapper to be recreated.
-                    "description": getattr(self.unified_port, "description", self.description),
-                    "adapter": self.adapter_type,
-                    "state": (self.unified_port.state.value if hasattr(self.unified_port, "state") else "active"),
-                    # Read live so an on-demand command port registered before
-                    # its first spawn (or a port whose process later starts or
-                    # exits) reports its current state, not the value captured
-                    # at registration.
-                    "is_running": bool(getattr(self.unified_port, "is_running", self.is_running)),
-                    # When unified port exposes connection state (e.g., Serial), surface it explicitly
-                    "connected": bool(
-                        getattr(self.unified_port, "is_connected", getattr(self.unified_port, "is_running", self.is_running))
-                    ),
-                    "connected_clients": len(self.connected_clients),
-                    "max_read_write_users": self.max_read_write_users,
-                    "read_write_groups": self.read_write_groups,
-                    "read_only_groups": self.read_only_groups,
-                    "dropped_chunks": self.dropped_chunks,
-                }
-                # Include adapter-provided snapshot details when available
-                snapshot = getattr(self.unified_port, "get_status_snapshot", None)
-                if callable(snapshot):
-                    try:
-                        extra = snapshot() or {}
-                        if isinstance(extra, dict):
-                            status.update(extra)
-                    except Exception:
-                        self.logger.debug(
-                            "Unified port %s get_status_snapshot failed",
-                            self.name,
-                            exc_info=True,
-                        )
-                elif hasattr(self.unified_port, "status_snapshot"):
-                    extra = getattr(self.unified_port, "status_snapshot")
-                    if isinstance(extra, dict):
-                        status.update(extra)
-                # Readiness (issue #68): derived at snapshot time — "offline" when
-                # the adapter set a status_message (reason shown), "idle" when no
-                # reason and the port is not currently running, else "active".
-                try:
-                    status["readiness"] = derive_port_readiness(
-                        port_is_alive(self.unified_port),
-                        status.get("status_message"),
-                    )
-                except Exception:
-                    # justification: optional status detail; the core status fields are set
-                    pass
-                return status
-
-            def add_client(self, client: Any) -> None:
-                """Register a client and trigger the adapter hook if present."""
-                if client not in self.connected_clients:
-                    self.connected_clients.append(client)
-                    if hasattr(self.unified_port, "on_client_count_changed"):
-                        try:
-                            self.unified_port.on_client_count_changed(len(self.connected_clients))
-                        except Exception:
-                            # justification: hook failure should not block port add; log and continue
-                            self.logger.error(
-                                "on_client_count_changed hook error (add_client) for unified port %s",
-                                self.name,
-                                exc_info=True,
-                            )
-
-            def remove_client(self, client: Any) -> None:
-                """Unregister a client and trigger the adapter hook if present."""
-                if client in self.connected_clients:
-                    self.connected_clients.remove(client)
-                    client_id = client.get("client_id") if isinstance(client, dict) else None
-                    if client_id:
-                        self.client_queues.pop(client_id, None)
-                    if hasattr(self.unified_port, "on_client_count_changed"):
-                        try:
-                            self.unified_port.on_client_count_changed(len(self.connected_clients))
-                        except Exception:
-                            # justification: hook failure should not block client removal; log and continue
-                            self.logger.error(
-                                "on_client_count_changed hook error (remove_client) for unified port %s",
-                                self.name,
-                                exc_info=True,
-                            )
-                    # When the last client disconnects, clear any remaining buffered
-                    # data. Skip while a federation relay holds the queue (issue
-                    # #83): those chunks are still owed to the peer and are
-                    # drained when the last hold releases.
-                    if len(self.connected_clients) == 0 and getattr(self, "_federation_viewer_count", 0) == 0:
-                        try:
-                            while True:
-                                self.data_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            # justification: queue drained as intended; emptiness is the exit signal
-                            pass
-
-            async def write_data(self, data: bytes) -> bool:
-                """Write to the underlying unified port using best available path."""
-                # Prefer adapter unified write_to_port if available
-                if hasattr(self.adapter, "write_to_port"):
-                    try:
-                        res = await self.adapter.write_to_port(self.name, data)
-                        if isinstance(res, bool):
-                            return res
-                        if isinstance(res, int):
-                            return res > 0
-                        return True
-                    except Exception:
-                        # justification: unified write error already contained; log traceback for diagnosis
-                        self.logger.error("Unified write_to_port error for %s", self.name, exc_info=True)
-                        return False
-                # Fallback: underlying loopback port writer
-                writer = getattr(self.unified_port, "_writer", None)
-                if writer:
-                    try:
-                        if hasattr(writer, "write") and callable(getattr(writer, "write")):
-                            written = await writer.write(data)
-                            return written > 0
-                        if hasattr(writer, "async_write") and callable(getattr(writer, "async_write")):
-                            written = await writer.async_write(data)
-                            return written > 0
-                    except Exception:
-                        # justification: fallback writer failure non-fatal; log traceback
-                        self.logger.error("Unified underlying writer error for %s", self.name, exc_info=True)
-                        return False
-                return False
-
-            async def disconnect(self) -> None:
-                """Invoke the unified port's stop/disconnect hooks if available."""
-                if hasattr(self.unified_port, "stop"):
-                    try:
-                        await self.unified_port.stop()
-                    except Exception:
-                        # justification: stop hook failure should not prevent broader shutdown; log
-                        self.logger.error("Unified port stop() error for %s", self.name, exc_info=True)
-                elif hasattr(self.unified_port, "disconnect"):
-                    try:
-                        await self.unified_port.disconnect()
-                    except Exception:
-                        # justification: disconnect hook failure should not block cleanup; log
-                        self.logger.error("Unified port disconnect() error for %s", self.name, exc_info=True)
-
         return UnifiedPortWrapper(unified_port, adapter)
 
     def list_ports(self) -> List[Dict[str, Any]]:
