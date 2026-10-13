@@ -438,126 +438,16 @@ class OpenMuxClient:
         if not ports:
             print_client_info("No ports available", "WARNING")
             return []
-
-        # Determine if we have structured metadata to show
-        meta_entries = None
-        try:
-            if ports and isinstance(ports[0], dict):
-                meta_entries = ports
-            else:
-                meta_entries = getattr(connection, "last_port_metadata", None)
-                if meta_entries and not isinstance(meta_entries, list):
-                    meta_entries = None
-        except Exception:
-            meta_entries = None
-
-        # Server identity (when the server reports it in the LIST payload)
-        # so multiple OpenMux nodes are distinguishable in the listing.
+        meta_entries = self._lp_meta_entries(connection, ports)
         srv = getattr(connection, "last_server_info", None) or {}
-        srv_label = srv.get("description") if isinstance(srv, dict) else None
-        srv_id = srv.get("id") if isinstance(srv, dict) else None
-        if srv_label and srv_id:
-            print_client_info(f"Ports on {connection.host}:{connection.port} ({srv_label}, server_id={srv_id}):")
-        elif srv_label:
-            print_client_info(f"Ports on {connection.host}:{connection.port} ({srv_label}):")
-        else:
-            print_client_info(f"Ports on {connection.host}:{connection.port}:")
+        self._lp_print_server_header(connection, srv)
         if meta_entries:
-            # Optional: detect duplicate names to hint users about composite ids
-            try:
-                name_counts = {}
-                for entry in meta_entries:
-                    nm = entry.get("name") or entry.get("port")
-                    if nm:
-                        name_counts[nm] = name_counts.get(nm, 0) + 1
-                dup_names = {n for n, c in name_counts.items() if c > 1}
-            except Exception:
-                dup_names = set()
+            dup_names = self._lp_dup_names(meta_entries)
             for i, entry in enumerate(meta_entries):
-                name = entry.get("name") or entry.get("port") or "<unknown>"
-                comp_id = entry.get("id") or None
-                desc = entry.get("description") or ""
-                device = entry.get("device") or entry.get("phy_device") or None
-                # Status/clients (support both legacy and unified fields)
-                is_connected = bool(entry.get("connected")) or bool(entry.get("is_running"))
-                status = "Connected" if is_connected else "Disconnected"
-                clients = entry.get("client_count")
-                if clients is None:
-                    clients = entry.get("connected_clients")
-                rw_cap = entry.get("max_read_write_users")
-
-                # Federation info (muxcon origins)
-                os_obj = entry.get("origin_server") if isinstance(entry.get("origin_server"), dict) else None
-                origin_host = entry.get("origin_server_hostname") or (os_obj.get("hostname") if os_obj else None)
-                origin_id = (
-                    entry.get("origin_server_id")
-                    or (os_obj.get("server_id") if os_obj else None)
-                    or entry.get("origin_server")
-                )
-                origin_desc = os_obj.get("description") if os_obj else None
-                origin_port = entry.get("origin_server_port") or (os_obj.get("port") if os_obj else None)
-                # Fallbacks for federated remote ports
-                if not origin_host or str(origin_host).lower() == "remote":
-                    # Try remote_connection_id (peer key like node:<id> or host:<ip> or host:port)
-                    rcid = entry.get("remote_connection_id")
-                    if rcid:
-                        origin_host = rcid
-                        origin_port = None
-                    else:
-                        # Try server_chain first element (origin id)
-                        sc = entry.get("server_chain")
-                        if isinstance(sc, list) and sc:
-                            origin_id = sc[0]
-                ftype = entry.get("federation_type")
-
-                label = name if not comp_id else f"{name}  ({comp_id})"
-                parts = [f"  {i+1}. {label}"]
-                if desc:
-                    parts.append(f"- {desc}")
-                details = []
-                if device:
-                    details.append(str(device))
-                if status:
-                    details.append(status)
-                if clients is not None:
-                    if rw_cap is not None:
-                        details.append(f"{clients} clients/{rw_cap} rw")
-                    else:
-                        details.append(f"{clients} clients")
-                # Compose origin in fixed order: [id=..., desc=..., hostname=..., port=...]
-                if origin_host or origin_id or origin_desc or origin_port:
-                    origin_fields = []
-                    if origin_id:
-                        origin_fields.append(f"id={origin_id}")
-                    if origin_desc:
-                        origin_fields.append(f"desc={origin_desc}")
-                    if origin_host:
-                        origin_fields.append(f"hostname={origin_host}")
-                    if origin_port:
-                        origin_fields.append(f"port={origin_port}")
-                    origin_label = f"[{', '.join(origin_fields)}]" if origin_fields else "[]"
-                    if ftype:
-                        details.append(f"origin={origin_label} ({ftype})")
-                    else:
-                        details.append(f"origin={origin_label}")
-                if details:
-                    parts.append(" - " + ", ".join(details))
-                print_client_info(" ".join(parts))
-
+                self._lp_print_meta_entry(i, entry)
             # If duplicates exist, provide a short hint with examples
             if dup_names:
-                examples = []
-                try:
-                    for entry in meta_entries:
-                        nm = entry.get("name") or entry.get("port")
-                        cid = entry.get("id")
-                        if nm in dup_names and cid:
-                            examples.append(cid)
-                        if len(examples) >= 3:
-                            break
-                except Exception:
-                    # justification: optional detail collection for the duplicate-name error message
-                    pass
+                examples = self._lp_dup_examples(meta_entries, dup_names)
                 if examples:
                     print_client_info(
                         "Duplicate port names detected. Use server_id::name to disambiguate, e.g.: " + ", ".join(examples)
@@ -567,6 +457,156 @@ class OpenMuxClient:
             for i, port in enumerate(ports):
                 print_client_info(f"  {i+1}. {port}")
         return ports
+
+    def _lp_meta_entries(self, connection: BaseClientAdapter, ports: List[Any]) -> Optional[List[Dict[str, Any]]]:
+        """Structured metadata for the listing, or None when unavailable.
+
+        Prefers dict-typed port entries; otherwise the adapter-captured
+        last_port_metadata (only when it is a list). Best-effort: any error
+        yields None so the listing falls back to plain port names.
+        """
+        meta_entries = None
+        try:
+            if ports and isinstance(ports[0], dict):
+                meta_entries = ports
+            else:
+                meta_entries = getattr(connection, "last_port_metadata", None)
+                if meta_entries and not isinstance(meta_entries, list):
+                    meta_entries = None
+        except Exception:
+            # justification: structured metadata is optional; fall back to plain port names
+            meta_entries = None
+        return meta_entries
+
+    def _lp_print_server_header(self, connection: BaseClientAdapter, srv: Any) -> None:
+        """Print the 'Ports on host:port (label, server_id=...)' header line."""
+        srv_label = srv.get("description") if isinstance(srv, dict) else None
+        srv_id = srv.get("id") if isinstance(srv, dict) else None
+        base = f"Ports on {connection.host}:{connection.port}"
+        if srv_label and srv_id:
+            print_client_info(f"{base} ({srv_label}, server_id={srv_id}):")
+        elif srv_label:
+            print_client_info(f"{base} ({srv_label}):")
+        else:
+            print_client_info(f"{base}:")
+
+    def _lp_dup_names(self, meta_entries: List[Dict[str, Any]]) -> set:
+        """Set of port names appearing more than once (best-effort)."""
+        try:
+            name_counts = {}
+            for entry in meta_entries:
+                nm = entry.get("name") or entry.get("port")
+                if nm:
+                    name_counts[nm] = name_counts.get(nm, 0) + 1
+            dup_names = {n for n, c in name_counts.items() if c > 1}
+        except Exception:
+            # justification: optional detail for the duplicate-name hint; degrade to no hint
+            dup_names = set()
+        return dup_names
+
+    def _lp_dup_examples(self, meta_entries: List[Dict[str, Any]], dup_names: set) -> list:
+        """Up to 3 composite ids for duplicate-named ports (for the hint message)."""
+        examples = []
+        try:
+            for entry in meta_entries:
+                nm = entry.get("name") or entry.get("port")
+                cid = entry.get("id")
+                if nm in dup_names and cid:
+                    examples.append(cid)
+                if len(examples) >= 3:
+                    break
+        except Exception:
+            # justification: optional detail collection for the duplicate-name error message
+            pass
+        return examples
+
+    def _lp_print_meta_entry(self, i: int, entry: Dict[str, Any]) -> None:
+        """Print one structured port entry with its status, clients, and origin."""
+        name = entry.get("name") or entry.get("port") or "<unknown>"
+        comp_id = entry.get("id") or None
+        desc = entry.get("description") or ""
+        device = entry.get("device") or entry.get("phy_device") or None
+        # Status/clients (support both legacy and unified fields)
+        is_connected = bool(entry.get("connected")) or bool(entry.get("is_running"))
+        status = "Connected" if is_connected else "Disconnected"
+        clients = entry.get("client_count")
+        if clients is None:
+            clients = entry.get("connected_clients")
+        rw_cap = entry.get("max_read_write_users")
+        # Federation info (muxcon origins)
+        origin_host, origin_id, origin_desc, origin_port, ftype = self._lp_origin_info(entry)
+        label = name if not comp_id else f"{name}  ({comp_id})"
+        parts = [f"  {i+1}. {label}"]
+        if desc:
+            parts.append(f"- {desc}")
+        details = []
+        if device:
+            details.append(str(device))
+        if status:
+            details.append(status)
+        if clients is not None:
+            if rw_cap is not None:
+                details.append(f"{clients} clients/{rw_cap} rw")
+            else:
+                details.append(f"{clients} clients")
+        origin_detail = self._lp_origin_detail(origin_host, origin_id, origin_desc, origin_port, ftype)
+        if origin_detail:
+            details.append(origin_detail)
+        if details:
+            parts.append(" - " + ", ".join(details))
+        print_client_info(" ".join(parts))
+
+    def _lp_origin_info(self, entry: Dict[str, Any]) -> Tuple[Any, Any, Any, Any, Any]:
+        """Federation origin for a port entry: host, id, description, port, type.
+
+        Origin fields come from flat keys or the nested origin_server object,
+        with remote-port fallbacks (remote_connection_id, then server_chain).
+        """
+        os_obj = entry.get("origin_server") if isinstance(entry.get("origin_server"), dict) else None
+        origin_host = entry.get("origin_server_hostname") or (os_obj.get("hostname") if os_obj else None)
+        origin_id = (
+            entry.get("origin_server_id") or (os_obj.get("server_id") if os_obj else None) or entry.get("origin_server")
+        )
+        origin_desc = os_obj.get("description") if os_obj else None
+        origin_port = entry.get("origin_server_port") or (os_obj.get("port") if os_obj else None)
+        # Fallbacks for federated remote ports
+        if not origin_host or str(origin_host).lower() == "remote":
+            # Try remote_connection_id (peer key like node:<id> or host:<ip> or host:port)
+            rcid = entry.get("remote_connection_id")
+            if rcid:
+                origin_host = rcid
+                origin_port = None
+            else:
+                # Try server_chain first element (origin id)
+                sc = entry.get("server_chain")
+                if isinstance(sc, list) and sc:
+                    origin_id = sc[0]
+        ftype = entry.get("federation_type")
+        return origin_host, origin_id, origin_desc, origin_port, ftype
+
+    def _lp_origin_detail(
+        self, origin_host: Any, origin_id: Any, origin_desc: Any, origin_port: Any, ftype: Any
+    ) -> Optional[str]:
+        """The 'origin=[id=..., desc=..., hostname=..., port=...] (type)' detail, or None.
+
+        Returns None when all four origin fields are empty (matches the original
+        guard that only emits an origin detail when at least one exists).
+        """
+        if origin_host or origin_id or origin_desc or origin_port:
+            origin_fields = []
+            if origin_id:
+                origin_fields.append(f"id={origin_id}")
+            if origin_desc:
+                origin_fields.append(f"desc={origin_desc}")
+            if origin_host:
+                origin_fields.append(f"hostname={origin_host}")
+            if origin_port:
+                origin_fields.append(f"port={origin_port}")
+            origin_label = f"[{', '.join(origin_fields)}]" if origin_fields else "[]"
+            if ftype:
+                return f"origin={origin_label} ({ftype})"
+            return f"origin={origin_label}"
+        return None
 
     # Removed cached multi-server listing; client always fetches live now
 
