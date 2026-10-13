@@ -11,6 +11,7 @@ import os
 import signal
 import stat
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1189,6 +1190,258 @@ class OpenMuxServer:
             # justification: shutdown cleanup; the stop already handles and logs its own failures
             pass
 
+    # Full-reload phase timeouts (seconds); a hung adapter must not block the
+    # reload forever (issue: hung stop/start would wedge the whole reload)
+    _RELOAD_STOP_TIMEOUT_S = 10.0
+    _RELOAD_START_TIMEOUT_S = 10.0
+
+    def _reload_full_apply_config(self, req_id: str, summary: Dict[str, Any], deferred_old_wc: Optional[Any]) -> bool:
+        """Reload config from disk and re-apply logging (full-reload config phase).
+
+        Returns True on success. On failure records a load_config error,
+        restores the (possibly deferred) web console reference, and returns
+        False so the caller aborts the reload.
+        """
+        try:
+            cfg_path = getattr(self.config_manager, "config_path", None)
+            self.logger.info("[reload-full:%s] Loading config from %s", req_id, cfg_path)
+            t0 = time.time()
+            self._reload_config_from_disk()
+            self.logger.info(f"[reload-full:{req_id}] Config loaded in {time.time() - t0:.3f}s")
+            # Re-apply logging config (level and file paths) - issue #47
+            try:
+                self._apply_logging_from_config()
+            except Exception:
+                self.logger.error(
+                    "[reload-full:%s] Unexpected error re-applying logging config; logs keep the prior setup",
+                    req_id,
+                    exc_info=True,
+                )
+        except Exception as e:
+            self.logger.error("Full reload: config load failed: %s", e)
+            summary["errors"].append({"phase": "load_config", "error": str(e)})
+            # deferred_old_wc (if set) is still alive; otherwise the old WebConsole
+            # was already stopped above, so there is no current instance to track.
+            self.web_console = deferred_old_wc
+            return False
+        return True
+
+    def _reload_full_recreate(
+        self, full_config: Dict[str, Any], req_id: str, summary: Dict[str, Any], deferred_old_wc: Optional[Any]
+    ) -> Tuple[bool, Optional[Any]]:
+        """Rebuild adapters from the freshly loaded config (full-reload recreate phase).
+
+        Returns (ok, deferred_new_wc). On failure resets unified_adapters and the
+        web console reference and returns (False, None).
+        """
+        try:
+            self.unified_adapters = self.unified_adapter_factory.create_adapters_from_config(full_config)
+            self.web_console = self._find_web_console(self.unified_adapters)
+            deferred_new_wc: Optional[Any] = self.web_console
+            try:
+                self.logger.info("[reload-full:%s] Created %s unified adapters", req_id, len(self.unified_adapters))
+                for a in self.unified_adapters:
+                    atype = a.get_adapter_type()
+                    summary["created_adapters"].append({"name": getattr(a, "name", "?"), "type": atype})
+                    self.logger.debug("[reload-full:%s] Created: %s (%s)", req_id, getattr(a, "name", "?"), atype)
+            except Exception:
+                # justification: cosmetic response detail; the adapter list itself is already set
+                pass
+        except Exception as e:
+            self.logger.error("Full reload: adapter creation failed: %s", e, exc_info=True)
+            summary["errors"].append({"phase": "create_adapters", "error": str(e)})
+            self.unified_adapters = []
+            self.web_console = deferred_old_wc
+            return (False, None)
+        return (True, deferred_new_wc)
+
+    def _reload_full_wire(self, full_config: Dict[str, Any], req_id: str, summary: Dict[str, Any]) -> None:
+        """Wire dependencies (port/console/auth managers, server config) into each adapter."""
+        self.logger.info("[reload-full:%s] Wiring adapter dependencies", req_id)
+        for adapter in self.unified_adapters:
+            try:
+                if hasattr(adapter, "main_port_manager"):
+                    adapter.main_port_manager = self.port_manager
+                if hasattr(adapter, "server_config"):
+                    adapter.server_config = full_config
+                set_auth = getattr(adapter, "set_auth_manager", None)
+                if callable(set_auth):
+                    set_auth(self.auth_manager)
+                set_console = getattr(adapter, "set_console_manager", None)
+                if callable(set_console):
+                    set_console(self.console_manager)
+                try:
+                    atype = adapter.get_adapter_type()
+                    self.logger.debug(
+                        "[reload-full:%s] Wired dependencies for %s (%s)", req_id, getattr(adapter, "name", "?"), atype
+                    )
+                except Exception:
+                    # justification: logging failure must not change the request outcome
+                    pass
+            except Exception as e:
+                self.logger.error(
+                    "Full reload: dependency wiring failed for %s: %s", getattr(adapter, "name", "?"), e, exc_info=True
+                )
+                summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "wire_error": str(e)})
+
+    async def _reload_full_stop_one(self, adapter: Any, req_id: str, origin: str, web_name: str) -> Tuple[str, str, str]:
+        """Stop a single old adapter during a full reload.
+
+        Returns (status, aname, atype) where status is "ok", "timeout", or
+        "deferred" (web console stop deferred to a background task to avoid a
+        self-stop deadlock). A hung adapter.stop() is bounded by _RELOAD_STOP_TIMEOUT_S.
+        """
+        aname = getattr(adapter, "name", "?")
+        atype = adapter.get_adapter_type()
+        # Avoid self-stop deadlock: if the reload was triggered from the web console itself,
+        # defer stopping that web console instance until after we return the HTTP response.
+        if origin == "config-editor" and web_name == aname and adapter is self.web_console:
+            self.logger.warning(
+                "[reload-full:%s] Deferring stop of self-hosted WebConsole '%s' to avoid in-request shutdown",
+                req_id,
+                aname,
+            )
+            return ("deferred", aname, atype)
+        self.logger.info("[reload-full:%s] Stopping %s (%s) ...", req_id, aname, atype)
+        t0 = time.monotonic()
+        try:
+            # Ensure a hung adapter.stop() won't block the reload forever
+            await asyncio.wait_for(adapter.stop(), timeout=self._RELOAD_STOP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            self.logger.error(
+                f"[reload-full:{req_id}] Timeout stopping {aname} ({atype}) after {self._RELOAD_STOP_TIMEOUT_S:.1f}s; continuing",
+                exc_info=False,
+            )
+            return ("timeout", aname, atype)
+        self.logger.info(f"[reload-full:{req_id}] Stopped {aname} ({atype}) in {time.monotonic() - t0:.3f}s")
+        return ("ok", aname, atype)
+
+    async def _reload_full_stop_phase(
+        self, old: List[Any], req_id: str, origin: str, user: str, remote: str, ctx: Dict[str, Any], summary: Dict[str, Any]
+    ) -> Optional[Any]:
+        """Stop every adapter from the previous config (full-reload stop phase).
+
+        Returns the deferred web-console adapter (stop postponed to a background
+        task), or None if none was deferred.
+        """
+        web_name = str(ctx.get("web_adapter_name") or "")
+        deferred_old_wc: Optional[Any] = None
+        try:
+            targets: List[str] = []
+            for a in old:
+                atype = a.get_adapter_type()
+                targets.append(f"{getattr(a, 'name', '?')}({atype})")
+                self.logger.debug("[reload-full:%s] Stop target: %s (%s)", req_id, getattr(a, "name", "?"), atype)
+            self.logger.info(
+                f"[reload-full:{req_id}] Initiating STOP phase by {origin} user={user} remote={remote}; "
+                f"targets={len(targets)}: {', '.join(targets)}"
+            )
+        except Exception:
+            # justification: logging failure must not change the request outcome
+            pass
+        for adapter in old:
+            try:
+                status, aname, atype = await self._reload_full_stop_one(adapter, req_id, origin, web_name)
+            except Exception as e:
+                self.logger.error("Error stopping adapter %s: %s", adapter.name, e, exc_info=True)
+                summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "stop_error": str(e)})
+                continue
+            if status == "deferred":
+                deferred_old_wc = adapter
+                # Do not count as stopped here; will stop later
+                continue
+            if status == "timeout":
+                summary["errors"].append({"adapter": aname, "stop_timeout": self._RELOAD_STOP_TIMEOUT_S})
+            summary["stopped"] += 1
+            try:
+                summary["stopped_adapters"].append({"name": aname, "type": atype})
+            except Exception:
+                # justification: optional response detail; the stopped count above is the authoritative tally
+                pass
+        self.logger.info("[reload-full:%s] Stop phase complete: %s adapters processed", req_id, summary["stopped"])
+        return deferred_old_wc
+
+    async def _reload_full_start_one(self, adapter: Any, req_id: str, aname: str, atype: str, summary: Dict[str, Any]) -> None:
+        """Start a single adapter and record its outcome (full-reload start phase).
+
+        Bounds adapter.start() with _RELOAD_START_TIMEOUT_S; records a start entry
+        (with a best-effort endpoint hint) on success, and a timeout/False error
+        entry on failure.
+        """
+        self.logger.info("[reload-full:%s] Starting %s (%s) ...", req_id, aname, atype)
+        s0 = time.monotonic()
+        ok = True
+        try:
+            ok = await asyncio.wait_for(adapter.start(), timeout=self._RELOAD_START_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            self.logger.error(
+                f"[reload-full:{req_id}] Timeout starting {aname} ({atype}) after {self._RELOAD_START_TIMEOUT_S:.1f}s",
+                exc_info=False,
+            )
+            summary["errors"].append({"adapter": aname, "start_timeout": self._RELOAD_START_TIMEOUT_S})
+            ok = False
+        if ok:
+            summary["started"] += 1
+            try:
+                entry = {"name": aname, "type": atype}
+                # Try to include a small endpoint hint, if available
+                try:
+                    si = adapter.get_status_info()
+                    det = (si or {}).get("details", {}) or {}
+                    if isinstance(det, dict):
+                        if "endpoint" in si:
+                            entry["endpoint"] = si.get("endpoint")
+                        elif "host" in det and "port" in det:
+                            entry["endpoint"] = f"{det.get('host')}:{det.get('port')}"
+                except Exception:
+                    # justification: optional summary detail; the reload proceeds
+                    pass
+                summary["started_adapters"].append(entry)
+                self.logger.info(
+                    f"[reload-full:{req_id}] Started {entry.get('name')} ({entry.get('type')}) "
+                    f"{entry.get('endpoint','')} in {time.monotonic() - s0:.3f}s"
+                )
+            except Exception:
+                # justification: logging failure must not change the request outcome
+                pass
+        else:
+            summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "start_error": "start returned False"})
+
+    async def _reload_full_start(
+        self, req_id: str, summary: Dict[str, Any], deferred_old_wc: Optional[Any], deferred_new_wc: Optional[Any]
+    ) -> None:
+        """Start every recreated adapter (full-reload start phase).
+
+        If we deferred stopping the current WebConsole, also defer starting the new
+        WebConsole until after the HTTP response returns.
+        """
+        self.logger.info("[reload-full:%s] Starting %d adapters", req_id, len(self.unified_adapters))
+        for adapter in self.unified_adapters:
+            try:
+                aname = getattr(adapter, "name", "?")
+                atype = adapter.get_adapter_type()
+                if deferred_old_wc is not None and adapter is deferred_new_wc:
+                    summary["web_console_restart_deferred"] = True
+                    self.logger.warning(
+                        "[reload-full:%s] Deferring start of new WebConsole '%s' until after response", req_id, aname
+                    )
+                    continue
+                await self._reload_full_start_one(adapter, req_id, aname, atype, summary)
+            except Exception as e:
+                self.logger.error("Full reload: start failed for %s: %s", getattr(adapter, "name", "?"), e, exc_info=True)
+                summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "start_error": str(e)})
+
+    def _reload_full_schedule_deferred(
+        self, req_id: str, summary: Dict[str, Any], deferred_old_wc: Optional[Any], deferred_new_wc: Optional[Any]
+    ) -> None:
+        """If we deferred the self WebConsole stop, schedule its restart in the background now."""
+        if summary.get("web_console_restart_deferred") and deferred_old_wc is not None and deferred_new_wc is not None:
+            try:
+                asyncio.create_task(self._deferred_restart_web_console(deferred_old_wc, deferred_new_wc, req_id))
+                self.logger.info("[reload-full:%s] Scheduled deferred WebConsole restart task", req_id)
+            except Exception as e:
+                self.logger.error("[reload-full:%s] Scheduling deferred WebConsole restart failed: %s", req_id, e)
+
     async def reload_adapters_full(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Fully reload unified adapters from the current config.
 
@@ -1209,81 +1462,15 @@ class OpenMuxServer:
         }
         try:
             # Correlation and origin context for logs
-            import time as _time
-
             ctx = context or {}
             req_id = str(ctx.get("req_id") or "srv")
             origin = str(ctx.get("origin") or "unknown")
             remote = str(ctx.get("remote") or "?")
             user = str(ctx.get("user") or "?")
 
-            # Phase timeouts (seconds)
-            STOP_TIMEOUT_S = 10.0
-            START_TIMEOUT_S = 10.0
-
             # Stop existing adapters
             old = list(self.unified_adapters or [])
-            deferred_old_wc = None
-            deferred_new_wc = None
-            try:
-                targets = []
-                for a in old:
-                    atype = a.get_adapter_type()
-                    targets.append(f"{getattr(a, 'name', '?')}({atype})")
-                    self.logger.debug("[reload-full:%s] Stop target: %s (%s)", req_id, getattr(a, "name", "?"), atype)
-                self.logger.info(
-                    f"[reload-full:{req_id}] Initiating STOP phase by {origin} user={user} remote={remote}; targets={len(targets)}: {', '.join(targets)}"
-                )
-            except Exception:
-                # justification: logging failure must not change the request outcome
-                pass
-            for adapter in old:
-                try:
-                    aname = getattr(adapter, "name", "?")
-                    atype = adapter.get_adapter_type()
-                    # Avoid self-stop deadlock: if the reload was triggered from the web console itself,
-                    # defer stopping that web console instance until after we return the HTTP response.
-                    if (
-                        origin == "config-editor"
-                        and str(ctx.get("web_adapter_name") or "") == aname
-                        and adapter is self.web_console
-                    ):
-                        self.logger.warning(
-                            "[reload-full:%s] Deferring stop of self-hosted WebConsole '%s' to avoid in-request shutdown",
-                            req_id,
-                            aname,
-                        )
-                        deferred_old_wc = adapter
-                        # Do not count as stopped here; will stop later
-                        continue
-                    self.logger.info("[reload-full:%s] Stopping %s (%s) ...", req_id, aname, atype)
-                    _t0 = _time.monotonic()
-                    # Ensure a hung adapter.stop() won't block the reload forever
-                    try:
-                        await asyncio.wait_for(adapter.stop(), timeout=STOP_TIMEOUT_S)
-                    except asyncio.TimeoutError:
-                        self.logger.error(
-                            f"[reload-full:{req_id}] Timeout stopping {aname} ({atype}) after {STOP_TIMEOUT_S:.1f}s; continuing",
-                            exc_info=False,
-                        )
-                        summary["errors"].append(
-                            {
-                                "adapter": aname,
-                                "stop_timeout": STOP_TIMEOUT_S,
-                            }
-                        )
-                    else:
-                        self.logger.info(f"[reload-full:{req_id}] Stopped {aname} ({atype}) in {_time.monotonic()-_t0:.3f}s")
-                    summary["stopped"] += 1
-                    try:
-                        summary["stopped_adapters"].append({"name": aname, "type": atype})
-                    except Exception:
-                        # justification: optional response detail; the stopped count above is the authoritative tally
-                        pass
-                except Exception as e:
-                    self.logger.error("Error stopping adapter %s: %s", adapter.name, e, exc_info=True)
-                    summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "stop_error": str(e)})
-            self.logger.info("[reload-full:%s] Stop phase complete: %s adapters processed", req_id, summary["stopped"])
+            deferred_old_wc = await self._reload_full_stop_phase(old, req_id, origin, user, remote, ctx, summary)
             # Clear adapter list and detach from port manager
             self.unified_adapters = []
             # Note: deliberately not clearing self.web_console here - if its stop was
@@ -1296,52 +1483,13 @@ class OpenMuxServer:
                 pass
 
             # Reload configuration from disk
-            try:
-                cfg_path = getattr(self.config_manager, "config_path", None)
-                self.logger.info("[reload-full:%s] Loading config from %s", req_id, cfg_path)
-                import time as _t
-
-                _t0 = _t.time()
-                self._reload_config_from_disk()
-                self.logger.info(f"[reload-full:{req_id}] Config loaded in {_t.time()-_t0:.3f}s")
-                # Re-apply logging config (level and file paths) - issue #47
-                try:
-                    self._apply_logging_from_config()
-                except Exception:
-                    self.logger.error(
-                        "[reload-full:%s] Unexpected error re-applying logging config; logs keep the prior setup",
-                        req_id,
-                        exc_info=True,
-                    )
-            except Exception as e:
-                self.logger.error("Full reload: config load failed: %s", e)
-                summary["errors"].append({"phase": "load_config", "error": str(e)})
-                # deferred_old_wc (if set) is still alive; otherwise the old WebConsole
-                # was already stopped above, so there is no current instance to track.
-                self.web_console = deferred_old_wc
+            if not self._reload_full_apply_config(req_id, summary, deferred_old_wc):
                 return summary
-
             full_config = self.config_manager.config or {}
 
             # Recreate adapters
-            try:
-                self.unified_adapters = self.unified_adapter_factory.create_adapters_from_config(full_config)
-                self.web_console = self._find_web_console(self.unified_adapters)
-                deferred_new_wc = self.web_console
-                try:
-                    self.logger.info("[reload-full:%s] Created %s unified adapters", req_id, len(self.unified_adapters))
-                    for a in self.unified_adapters:
-                        atype = a.get_adapter_type()
-                        summary["created_adapters"].append({"name": getattr(a, "name", "?"), "type": atype})
-                        self.logger.debug("[reload-full:%s] Created: %s (%s)", req_id, getattr(a, "name", "?"), atype)
-                except Exception:
-                    # justification: cosmetic response detail; the adapter list itself is already set
-                    pass
-            except Exception as e:
-                self.logger.error("Full reload: adapter creation failed: %s", e, exc_info=True)
-                summary["errors"].append({"phase": "create_adapters", "error": str(e)})
-                self.unified_adapters = []
-                self.web_console = deferred_old_wc
+            ok, deferred_new_wc = self._reload_full_recreate(full_config, req_id, summary, deferred_old_wc)
+            if not ok:
                 return summary
 
             # Reattach to port manager
@@ -1352,92 +1500,10 @@ class OpenMuxServer:
                 pass
 
             # Wire dependencies
-            self.logger.info("[reload-full:%s] Wiring adapter dependencies", req_id)
-            for adapter in self.unified_adapters:
-                try:
-                    if hasattr(adapter, "main_port_manager"):
-                        adapter.main_port_manager = self.port_manager
-                    if hasattr(adapter, "server_config"):
-                        adapter.server_config = full_config
-                    set_auth = getattr(adapter, "set_auth_manager", None)
-                    if callable(set_auth):
-                        set_auth(self.auth_manager)
-                    set_console = getattr(adapter, "set_console_manager", None)
-                    if callable(set_console):
-                        set_console(self.console_manager)
-                    try:
-                        atype = adapter.get_adapter_type()
-                        self.logger.debug(
-                            "[reload-full:%s] Wired dependencies for %s (%s)", req_id, getattr(adapter, "name", "?"), atype
-                        )
-                    except Exception:
-                        # justification: logging failure must not change the request outcome
-                        pass
-                except Exception as e:
-                    self.logger.error(
-                        "Full reload: dependency wiring failed for %s: %s", getattr(adapter, "name", "?"), e, exc_info=True
-                    )
-                    summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "wire_error": str(e)})
+            self._reload_full_wire(full_config, req_id, summary)
 
             # Start adapters
-            self.logger.info("[reload-full:%s] Starting %d adapters", req_id, len(self.unified_adapters))
-            for adapter in self.unified_adapters:
-                try:
-                    aname = getattr(adapter, "name", "?")
-                    atype = adapter.get_adapter_type()
-                    # If we deferred stopping the current WebConsole, also defer starting the new WebConsole
-                    if deferred_old_wc is not None and adapter is deferred_new_wc:
-                        summary["web_console_restart_deferred"] = True
-                        self.logger.warning(
-                            "[reload-full:%s] Deferring start of new WebConsole '%s' until after response", req_id, aname
-                        )
-                        continue
-                    self.logger.info("[reload-full:%s] Starting %s (%s) ...", req_id, aname, atype)
-                    _s0 = _time.monotonic()
-                    try:
-                        ok = await asyncio.wait_for(adapter.start(), timeout=START_TIMEOUT_S)
-                    except asyncio.TimeoutError:
-                        self.logger.error(
-                            f"[reload-full:{req_id}] Timeout starting {aname} ({atype}) after {START_TIMEOUT_S:.1f}s",
-                            exc_info=False,
-                        )
-                        summary["errors"].append(
-                            {
-                                "adapter": aname,
-                                "start_timeout": START_TIMEOUT_S,
-                            }
-                        )
-                        ok = False
-                    if ok:
-                        summary["started"] += 1
-                        try:
-                            entry = {"name": getattr(adapter, "name", "?"), "type": atype}
-                            # Try to include a small endpoint hint, if available
-                            try:
-                                si = adapter.get_status_info()
-                                det = (si or {}).get("details", {}) or {}
-                                if isinstance(det, dict):
-                                    if "endpoint" in si:
-                                        entry["endpoint"] = si.get("endpoint")
-                                    elif "host" in det and "port" in det:
-                                        entry["endpoint"] = f"{det.get('host')}:{det.get('port')}"
-                            except Exception:
-                                # justification: optional summary detail; the reload proceeds
-                                pass
-                            summary["started_adapters"].append(entry)
-                            self.logger.info(
-                                f"[reload-full:{req_id}] Started {entry.get('name')} ({entry.get('type')}) {entry.get('endpoint','')} in {_time.monotonic()-_s0:.3f}s"
-                            )
-                        except Exception:
-                            # justification: logging failure must not change the request outcome
-                            pass
-                    else:
-                        summary["errors"].append(
-                            {"adapter": getattr(adapter, "name", "?"), "start_error": "start returned False"}
-                        )
-                except Exception as e:
-                    self.logger.error("Full reload: start failed for %s: %s", getattr(adapter, "name", "?"), e, exc_info=True)
-                    summary["errors"].append({"adapter": getattr(adapter, "name", "?"), "start_error": str(e)})
+            await self._reload_full_start(req_id, summary, deferred_old_wc, deferred_new_wc)
 
             self.logger.info(
                 "[reload-full:%s] Reload complete: stopped=%s created=%s started=%s errors=%s",
@@ -1448,14 +1514,7 @@ class OpenMuxServer:
                 len(summary["errors"]),
             )
 
-            # If we deferred self WebConsole restart, schedule it in the background now
-            if summary.get("web_console_restart_deferred") and deferred_old_wc is not None and deferred_new_wc is not None:
-                try:
-                    asyncio.create_task(self._deferred_restart_web_console(deferred_old_wc, deferred_new_wc, req_id))
-                    self.logger.info("[reload-full:%s] Scheduled deferred WebConsole restart task", req_id)
-                except Exception as e:
-                    self.logger.error("[reload-full:%s] Scheduling deferred WebConsole restart failed: %s", req_id, e)
-
+            self._reload_full_schedule_deferred(req_id, summary, deferred_old_wc, deferred_new_wc)
             return summary
         except Exception as e:
             self.logger.error("reload_adapters_full failed: %s", e, exc_info=True)
