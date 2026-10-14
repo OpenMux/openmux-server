@@ -7428,10 +7428,65 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         from ...common.federation_types import (
             FederationType,
             PortMetadata,
-            ServerInfo,
         )
 
         # Build origin server info (V2 expects full object)
+        server_info = self._rp_origin_server_info(pd)
+        name, desc, adapter_type = self._rp_base_fields(pd)
+        # Port-level write-slot capacity (issue #59): the wire field stays int; the
+        # REMOTE side evaluates it. A new origin sends 0/1/WIRE_MULTIPLE, an older
+        # peer sends its legacy count (>= 2 behaves like multiple here as well).
+        max_rw = capacity_from_wire(pd.get("max_rw_users", 1) or 1)
+        status = pd.get("status", "connected")
+        server_chain = self._rp_build_server_chain(server_info, pd)
+        # Optional serial/line-status details if peer provides them
+        serial_cfg = self._rp_serial_config(pd)
+        line_status = self._rp_line_status(pd)
+        rw_groups = pd.get("read_write_groups") or None
+        ro_groups = pd.get("read_only_groups") or None
+        # Offline reason (issue #62): forwarded from the origin over the wire;
+        # missing on older peers (treated as None).
+        status_msg = pd.get("status_message") or None
+        # Readiness (issue #68): forwarded from the origin; missing on older peers.
+        readiness_msg = pd.get("readiness") or None
+        power_feeds = self._rp_power_feeds(pd, server_info)
+
+        metadata = PortMetadata(
+            name=name,
+            original_name=name,
+            description=desc,
+            adapter_type=adapter_type,
+            origin_server=server_info,
+            server_chain=server_chain,
+            status=status,
+            max_rw_users=max_rw,
+            federation_type=FederationType.PULL,
+            serial_config=serial_cfg,
+            line_status=line_status,
+            read_write_groups=rw_groups,
+            read_only_groups=ro_groups,
+            status_message=status_msg,
+            readiness=readiness_msg,
+            power=power_feeds,
+        )
+
+        # Reuse existing proxy if present to preserve clients and sessions
+        if await self._rp_reuse_check(conn_id, name, metadata):
+            try:
+                self._save_federated_cache()
+            except Exception:
+                self.logger.error("muxcon: failed to save federated cache", exc_info=True)
+            return
+
+        # Create remote proxy and register with port manager
+        await self._rp_register_new(conn_id, name, metadata)
+
+    def _rp_origin_server_info(self, pd: Dict[str, Any]) -> ServerInfo:
+        """Build the origin server info (V2 expects a full object).
+
+        A dict origin yields a full ServerInfo (bad server_type falls back to
+        LEAF); a legacy string id yields a minimal LEAF ServerInfo.
+        """
         origin_field = pd.get("origin_server")
         if isinstance(origin_field, dict):
             try:
@@ -7460,15 +7515,22 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 port=0,
                 server_type=ServerType.LEAF,
             )
+        return server_info
+
+    def _rp_base_fields(self, pd: Dict[str, Any]):
+        """Return (name, description, adapter_type) for the port."""
         name = pd.get("name") or pd.get("original_name") or "remote_port"
         desc = pd.get("description", f"Remote port {name}")
         adapter_type = pd.get("adapter_type", "remote_muxcon")
-        # Port-level write-slot capacity (issue #59): the wire field stays int; the
-        # REMOTE side evaluates it. A new origin sends 0/1/WIRE_MULTIPLE, an older
-        # peer sends its legacy count (>= 2 behaves like multiple here as well).
-        max_rw = capacity_from_wire(pd.get("max_rw_users", 1) or 1)
-        status = pd.get("status", "connected")
-        # Server chain if provided (prefer V2 detailed objects)
+        return name, desc, adapter_type
+
+    def _rp_build_server_chain(self, server_info: ServerInfo, pd: Dict[str, Any]) -> List:
+        """Build the server chain (origin first, then relay hops).
+
+        Prefers the V2 detailed "server_chain_info" list and falls back to the
+        legacy "server_chain" string ids; missing or malformed chain data is
+        non-fatal (the proxy registers without hops).
+        """
         server_chain = [server_info]
         sc_info = pd.get("server_chain_info")
         if isinstance(sc_info, list) and sc_info:
@@ -7515,7 +7577,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             except Exception:
                 # justification: optional chain metadata; the proxy registers without hops
                 pass
-        # Optional serial/line-status details if peer provides them
+        return server_chain
+
+    def _rp_serial_config(self, pd: Dict[str, Any]):
+        """Parse the optional serial_config detail if the peer provides it."""
         serial_cfg = None
         try:
             sc = pd.get("serial_config")
@@ -7530,6 +7595,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 }
         except Exception:
             serial_cfg = None
+        return serial_cfg
+
+    def _rp_line_status(self, pd: Dict[str, Any]):
+        """Parse the optional line_status detail if the peer provides it."""
         line_status = None
         try:
             ls = pd.get("line_status")
@@ -7537,201 +7606,247 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 line_status = ls
         except Exception:
             line_status = None
-        rw_groups = pd.get("read_write_groups") or None
-        ro_groups = pd.get("read_only_groups") or None
-        # Offline reason (issue #62): forwarded from the origin over the wire;
-        # missing on older peers (treated as None).
-        status_msg = pd.get("status_message") or None
-        # Readiness (issue #68): forwarded from the origin; missing on older peers.
-        readiness_msg = pd.get("readiness") or None
-        # PDU power feeds (outlet federation): [{ref, on}] advertised by the
-        # origin; on = last-reported outlet state (null = unknown). Tolerates
-        # bare-string entries (ref-only) and drops malformed ones so one bad
-        # feed never fails the port registration.
-        power_feeds = None
+        return line_status
+
+    def _rp_power_entry(self, entry, server_id):
+        """Normalize one advertised power feed entry (outlet federation).
+
+        Returns a {"ref", "on"} dict, or None when the entry is malformed (so
+        one bad feed never fails the port registration).
+        """
+        if isinstance(entry, dict):
+            r = entry.get("ref")
+            if not isinstance(r, str) or not r:
+                return None
+            on = entry.get("on")
+        elif isinstance(entry, str) and entry:
+            r, on = entry, None
+        else:
+            return None
+        if on is not True and on is not False:
+            on = None
+        # Qualify the origin's local ref with the origin's server id
+        # ("origin::<ref>") so it is globally unique even when two
+        # nodes have an outlet of the same name. An already-prefixed
+        # entry (defensive) is kept as-is (outlet federation).
+        if split_remote_ref(r) is None:
+            r = remote_ref(server_id, r)
+        return {"ref": r, "on": on}
+
+    def _rp_power_feeds(self, pd: Dict[str, Any], server_info: ServerInfo):
+        """Normalize the advertised PDU power feeds for a port.
+
+        PDU power feeds: [{ref, on}] advertised by the origin; on =
+        last-reported outlet state (null = unknown). Malformed entries are
+        dropped so one bad feed never fails the port registration.
+        """
         raw_power = pd.get("power")
         if isinstance(raw_power, list) and raw_power:
             power_feeds = []
             for entry in raw_power:
-                if isinstance(entry, dict):
-                    r = entry.get("ref")
-                    if not isinstance(r, str) or not r:
-                        continue
-                    on = entry.get("on")
-                elif isinstance(entry, str) and entry:
-                    r, on = entry, None
-                else:
-                    continue
-                if on is not True and on is not False:
-                    on = None
-                # Qualify the origin's local ref with the origin's server id
-                # ("origin::<ref>") so it is globally unique even when two
-                # nodes have an outlet of the same name. An already-prefixed
-                # entry (defensive) is kept as-is (outlet federation).
-                if split_remote_ref(r) is None:
-                    r = remote_ref(server_info.server_id, r)
-                power_feeds.append({"ref": r, "on": on})
-            power_feeds = power_feeds or None
+                feed = self._rp_power_entry(entry, server_info.server_id)
+                if feed is not None:
+                    power_feeds.append(feed)
+            return power_feeds or None
+        return None
 
-        metadata = PortMetadata(
-            name=name,
-            original_name=name,
-            description=desc,
-            adapter_type=adapter_type,
-            origin_server=server_info,
-            server_chain=server_chain,
-            status=status,
-            max_rw_users=max_rw,
-            federation_type=FederationType.PULL,
-            serial_config=serial_cfg,
-            line_status=line_status,
-            read_write_groups=rw_groups,
-            read_only_groups=ro_groups,
-            status_message=status_msg,
-            readiness=readiness_msg,
-            power=power_feeds,
-        )
+    def _rp_existing_port(self, name: str):
+        """Look up an already-registered port by name, tolerating lookup errors."""
+        existing = None
+        try:
+            existing = self.main_port_manager.get_port(name)
+        except Exception:
+            try:
+                existing = getattr(self.main_port_manager, "ports", {}).get(name)
+            except Exception:
+                existing = None
+        return existing
 
-        # Reuse existing proxy if present to preserve clients and sessions
-        reused = False
+    async def _rp_reuse_check(self, conn_id: str, name: str, metadata) -> bool:
+        """Reuse an existing proxy with the same name, updating it in place.
+
+        Returns True when a proxy was found and updated (so the caller saves
+        the cache and returns), else False to fall through to creation.
+        """
         try:
             if hasattr(self, "main_port_manager") and self.main_port_manager:
-                existing = None
-                try:
-                    existing = self.main_port_manager.get_port(name)
-                except Exception:
-                    try:
-                        existing = getattr(self.main_port_manager, "ports", {}).get(name)
-                    except Exception:
-                        existing = None
+                existing = self._rp_existing_port(name)
                 if existing is not None and hasattr(existing, "remote_port_name"):
                     # Update existing proxy in-place
-                    peer_key = self._derive_peer_key_from_conn_id(conn_id)
-                    # Re-bind proxy to this new adapter instance so writes go over live connections
-                    try:
-                        setattr(existing, "adapter", self)
-                    except Exception:
-                        # justification: idempotent rebind; the proxy is already functional
-                        pass
-                    setattr(existing, "connection_id", peer_key)
-                    setattr(existing, "metadata", metadata)
-                    setattr(existing, "server_adapter", self)
-                    # Refresh the write-slot capacity mode ("none"/"one"/"multiple")
-                    # from the fresh metadata so a soft-reloaded origin is honored
-                    # without recreating the proxy. (issue #59)
-                    try:
-                        existing.max_read_write_users = wire_to_mode(getattr(metadata, "max_rw_users", None))
-                    except Exception:
-                        # justification: in-place live update; the next reload retries
-                        pass
-                    # Refresh the power feed list + states from the fresh
-                    # advertisement (outlet federation). The origin re-sends
-                    # authoritative states on re-advertise, so replace (do not
-                    # merge) what the POWER:STATE frames had recorded.
-                    try:
-                        await self._apply_power_meta_to_proxy(existing, metadata)
-                    except Exception:
-                        # justification: optional power detail; the port stays functional
-                        pass
-                    if hasattr(existing, "is_connected"):
-                        existing.is_connected = True
-                    # Link is back: drop the local "MuxCon link ... is down" reason
-                    # so the origin's freshly-advertised reason (or no reason)
-                    # surfaces again (issue #62).
-                    try:
-                        if hasattr(existing, "link_reason"):
-                            existing.link_reason = ""
-                    except Exception:
-                        # justification: optional status detail; the origin reason resurfaces
-                        pass
-                    # A proxy loaded from the federated cache may have been
-                    # registered without its data callback (issue #56): inbound
-                    # data would then fall back to the proxy's own data_queue,
-                    # which nothing consumes on this side, black-holing the
-                    # port. Re-run the PortManager registration, which installs
-                    # the callback (and manager back-reference) idempotently.
-                    if getattr(existing, "data_callback", None) is None:
-                        try:
-                            await self.main_port_manager.register_federated_port(metadata, existing)
-                            self.logger.info("Re-registered cached federated port '%s' with data callback on reconnect", name)
-                        except Exception as e:
-                            self.logger.warning(
-                                "Failed to re-register data callback for %s on reconnect: %s", name, e, exc_info=True
-                            )
-                    # Clear old client sessions and reopen on new connection
-                    try:
-                        if hasattr(existing, "close_all_streams"):
-                            await existing.close_all_streams()
-                    except Exception:  # justification: stream cleanup on reuse is best-effort
-                        pass
-                    # Close the stream ids the dead path never got to close, so the
-                    # origin tears down their orphaned sessions (pumps, federated
-                    # clients, and any read-write slot they hold) before the fresh
-                    # streams open below.
-                    try:
-                        await self._close_stale_proxy_sessions(existing, conn_id)
-                    except Exception:  # justification: stale session cleanup on reuse is best-effort
-                        pass
-                    # Notify clients that link is restored (de-duplicated)
-                    try:
-                        # Build machine-readable source path server/port
-                        src_server = None
-                        try:
-                            origin = getattr(metadata, "origin_server", None)
-                            src_server = getattr(origin, "server_id", None)
-                        except Exception:  # justification: metadata introspection is optional
-                            src_server = None
-                        src_server = src_server or "unknown"
-                        src_path = f"{src_server}::{name}"
-                        self._emit_link_notice_once(existing, "restored", src_path)
-                    except Exception:  # justification: notification is advisory; ignore queueing failures
-                        pass
-                    # Attempt to reopen streams for currently connected clients
-                    try:
-                        for c in list(getattr(existing, "connected_clients", []) or []):
-                            cid = c.get("client_id") if isinstance(c, dict) else None
-                            if cid and hasattr(existing, "open_stream_for_client"):
-                                await existing.open_stream_for_client(cid)
-                    except Exception as e:
-                        self.logger.debug("Failed to reopen streams for %s on reconnect: %s", name, e, exc_info=True)
-                    # Re-request the origin's read-write grant for the clients that
-                    # held it before the outage. The streams above reopened
-                    # read-only and nothing else re-sends FEDRW, so without this a
-                    # pre-outage writer stays write-dead on the origin (its local
-                    # record still says read-write, so every write is silently
-                    # rejected at the origin's mode gate) until a human takes the slot.
-                    try:
-                        await self._regrant_proxy_read_write(existing, conn_id)
-                    except Exception:  # justification: re-grant on reuse is best-effort
-                        pass
-
-                    # Update peer->proxy mapping
-                    try:
-                        peer_key = self._derive_peer_key_from_conn_id(conn_id)
-                        if peer_key not in self._peer_proxies:
-                            self._peer_proxies[peer_key] = {}
-                        self._peer_proxies[peer_key][name] = existing
-                        # Keep per-connection view updated when proxies change
-                        try:
-                            self._refresh_conn_proxies()
-                        except Exception:
-                            # justification: optional mapping rebuild; the previous mapping stays in effect
-                            pass
-                    except Exception:
-                        # justification: optional mapping rebuild; the previous mapping stays in effect
-                        pass
-                    reused = True
+                    await self._rp_update_existing(conn_id, name, existing, metadata)
+                    return True
         except Exception as e:
             self.logger.debug("Proxy reuse check failed for %s on %s: %s", name, conn_id, e, exc_info=True)
+        return False
 
-        if reused:
+    async def _rp_update_existing(self, conn_id: str, name: str, existing, metadata) -> None:
+        """Update a reused proxy in place and reopen its clients/sessions."""
+        peer_key = self._derive_peer_key_from_conn_id(conn_id)
+        # Re-bind proxy to this new adapter instance so writes go over live connections
+        try:
+            setattr(existing, "adapter", self)
+        except Exception:
+            # justification: idempotent rebind; the proxy is already functional
+            pass
+        await self._rp_update_meta_and_power(existing, peer_key, metadata)
+        self._rp_set_reconnected_link_state(existing)
+        # A proxy loaded from the federated cache may have been
+        # registered without its data callback (issue #56): inbound
+        # data would then fall back to the proxy's own data_queue,
+        # which nothing consumes on this side, black-holing the
+        # port. Re-run the PortManager registration, which installs
+        # the callback (and manager back-reference) idempotently.
+        if getattr(existing, "data_callback", None) is None:
+            await self._rp_reregister_data_callback(existing, metadata, name)
+        # Clear old client sessions and reopen on new connection
+        await self._rp_close_streams_and_stale(existing, conn_id)
+        # Notify clients that link is restored (de-duplicated)
+        await self._rp_notify_link_restored(existing, metadata, name)
+        # Attempt to reopen streams for currently connected clients
+        await self._rp_reopen_streams(existing, name)
+        # Re-request the origin's read-write grant for the clients that
+        # held it before the outage. The streams above reopened
+        # read-only and nothing else re-sends FEDRW, so without this a
+        # pre-outage writer stays write-dead on the origin (its local
+        # record still says read-write, so every write is silently
+        # rejected at the origin's mode gate) until a human takes the slot.
+        try:
+            await self._regrant_proxy_read_write(existing, conn_id)
+        except Exception:  # justification: re-grant on reuse is best-effort
+            pass
+        # Update peer->proxy mapping
+        self._rp_update_peer_mapping(peer_key, name, existing)
+
+    async def _rp_update_meta_and_power(self, existing, peer_key: str, metadata) -> None:
+        """Refresh a proxy's identity, metadata, capacity and power feeds."""
+        setattr(existing, "connection_id", peer_key)
+        setattr(existing, "metadata", metadata)
+        setattr(existing, "server_adapter", self)
+        # Refresh the write-slot capacity mode ("none"/"one"/"multiple")
+        # from the fresh metadata so a soft-reloaded origin is honored
+        # without recreating the proxy. (issue #59)
+        try:
+            existing.max_read_write_users = wire_to_mode(getattr(metadata, "max_rw_users", None))
+        except Exception:
+            # justification: in-place live update; the next reload retries
+            pass
+        # Refresh the power feed list + states from the fresh
+        # advertisement (outlet federation). The origin re-sends
+        # authoritative states on re-advertise, so replace (do not
+        # merge) what the POWER:STATE frames had recorded.
+        try:
+            await self._apply_power_meta_to_proxy(existing, metadata)
+        except Exception:
+            # justification: optional power detail; the port stays functional
+            pass
+
+    def _rp_set_reconnected_link_state(self, existing) -> None:
+        """Mark the proxy reconnected and clear the local link-down reason."""
+        if hasattr(existing, "is_connected"):
+            existing.is_connected = True
+        # Link is back: drop the local "MuxCon link ... is down" reason
+        # so the origin's freshly-advertised reason (or no reason)
+        # surfaces again (issue #62).
+        try:
+            if hasattr(existing, "link_reason"):
+                existing.link_reason = ""
+        except Exception:
+            # justification: optional status detail; the origin reason resurfaces
+            pass
+
+    async def _rp_reregister_data_callback(self, existing, metadata, name: str) -> None:
+        """Re-run port registration to install the missing data callback."""
+        try:
+            await self.main_port_manager.register_federated_port(metadata, existing)
+            self.logger.info("Re-registered cached federated port '%s' with data callback on reconnect", name)
+        except Exception as e:
+            self.logger.warning("Failed to re-register data callback for %s on reconnect: %s", name, e, exc_info=True)
+
+    async def _rp_close_streams_and_stale(self, existing, conn_id: str) -> None:
+        """Close cached client streams and the stale sessions a dead path left."""
+        try:
+            if hasattr(existing, "close_all_streams"):
+                await existing.close_all_streams()
+        except Exception:  # justification: stream cleanup on reuse is best-effort
+            pass
+        # Close the stream ids the dead path never got to close, so the
+        # origin tears down their orphaned sessions (pumps, federated
+        # clients, and any read-write slot they hold) before the fresh
+        # streams open below.
+        try:
+            await self._close_stale_proxy_sessions(existing, conn_id)
+        except Exception:  # justification: stale session cleanup on reuse is best-effort
+            pass
+
+    def _rp_restore_source_path(self, metadata, name: str) -> str:
+        """Build the machine-readable source path server/port (server_id::port)."""
+        src_server = None
+        try:
+            origin = getattr(metadata, "origin_server", None)
+            src_server = getattr(origin, "server_id", None)
+        except Exception:  # justification: metadata introspection is optional
+            src_server = None
+        src_server = src_server or "unknown"
+        return f"{src_server}::{name}"
+
+    async def _rp_notify_link_restored(self, existing, metadata, name: str) -> None:
+        """Notify clients that the link to this port is restored (de-duplicated)."""
+        try:
+            self._emit_link_notice_once(existing, "restored", self._rp_restore_source_path(metadata, name))
+        except Exception:  # justification: notification is advisory; ignore queueing failures
+            pass
+
+    async def _rp_reopen_streams(self, existing, name: str) -> None:
+        """Attempt to reopen streams for currently connected clients."""
+        try:
+            for c in list(getattr(existing, "connected_clients", []) or []):
+                cid = c.get("client_id") if isinstance(c, dict) else None
+                if cid and hasattr(existing, "open_stream_for_client"):
+                    await existing.open_stream_for_client(cid)
+        except Exception as e:
+            self.logger.debug("Failed to reopen streams for %s on reconnect: %s", name, e, exc_info=True)
+
+    def _rp_update_peer_mapping(self, peer_key: str, name: str, proxy) -> None:
+        """Record the peer->proxy mapping and rebuild the per-connection view."""
+        try:
+            if peer_key not in self._peer_proxies:
+                self._peer_proxies[peer_key] = {}
+            self._peer_proxies[peer_key][name] = proxy
+            # Keep per-connection view updated when proxies change
             try:
-                self._save_federated_cache()
+                self._refresh_conn_proxies()
             except Exception:
-                self.logger.error("muxcon: failed to save federated cache", exc_info=True)
-            return
+                # justification: optional mapping rebuild; the previous mapping stays in effect
+                pass
+        except Exception:
+            # justification: optional mapping rebuild; the previous mapping stays in effect
+            pass
 
-        # Create remote proxy and register with port manager
+    def _rp_register_duplicate(self, name: str, origin_id) -> bool:
+        """Return True if a port with the identical name and origin is registered."""
+        try:
+            # Directly scan existing registered ports dictionary
+            for existing_name, existing_port in list(self.main_port_manager.ports.items()):
+                if existing_name != name:
+                    continue
+                try:
+                    meta2 = getattr(existing_port, "metadata", None)
+                    if meta2:
+                        o2 = getattr(meta2, "origin_server", None)
+                        sid2 = getattr(o2, "server_id", None)
+                        if sid2 == origin_id:
+                            self.logger.info(
+                                "Duplicate federated port '%s' from %s; skipping re-registration", name, origin_id
+                            )
+                            return True
+                except Exception:  # justification: existing-port metadata introspection is optional
+                    pass
+        except Exception:  # justification: duplicate check is advisory; proceed to registration
+            pass
+        return False
+
+    async def _rp_register_new(self, conn_id: str, name: str, metadata) -> None:
+        """Create a new RemotePortProxy and register it with the port manager."""
         peer_key = self._derive_peer_key_from_conn_id(conn_id)
         proxy = self.RemotePortProxy(self, peer_key, name, metadata)
         # Provide back-reference for management/cleanup
@@ -7739,31 +7854,14 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         if hasattr(self, "main_port_manager") and self.main_port_manager:
             # Idempotent: skip if a port with identical name & origin already present
             # Duplicate check (non-blocking): avoid re-entrant await of port manager list
+            origin_id = None
             try:
+                origin = getattr(metadata, "origin_server", None)
+                origin_id = getattr(origin, "server_id", None)
+            except Exception:  # justification: metadata introspection optional; default to origin_id=None
                 origin_id = None
-                try:
-                    origin = getattr(metadata, "origin_server", None)
-                    origin_id = getattr(origin, "server_id", None)
-                except Exception:  # justification: metadata introspection optional; default to origin_id=None
-                    origin_id = None
-                # Directly scan existing registered ports dictionary
-                for existing_name, existing_port in list(self.main_port_manager.ports.items()):
-                    if existing_name != name:
-                        continue
-                    try:
-                        meta2 = getattr(existing_port, "metadata", None)
-                        if meta2:
-                            o2 = getattr(meta2, "origin_server", None)
-                            sid2 = getattr(o2, "server_id", None)
-                            if sid2 == origin_id:
-                                self.logger.info(
-                                    "Duplicate federated port '%s' from %s; skipping re-registration", name, origin_id
-                                )
-                                return
-                    except Exception:  # justification: existing-port metadata introspection is optional
-                        pass
-            except Exception:  # justification: duplicate check is advisory; proceed to registration
-                pass
+            if self._rp_register_duplicate(name, origin_id):
+                return
             registered = await self.main_port_manager.register_federated_port(metadata, proxy)
             if registered:
                 self.logger.info("Registered federated port: %s", registered)
