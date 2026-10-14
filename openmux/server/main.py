@@ -950,27 +950,86 @@ class OpenMuxServer:
         summary: Dict[str, Any] = {"auth_updated": False, "adapters": {}}
         # Reload config
         try:
-            cfg_path = getattr(self.config_manager, "config_path", None)
-            self.logger.info("[reload-soft:%s] Loading config from %s", req_id, cfg_path)
-            import time as _t
-
-            _t0 = _t.time()
-            new_cfg = self._reload_config_from_disk()
-            self.logger.info(f"[reload-soft:{req_id}] Config loaded in {_t.time()-_t0:.3f}s")
-            # Re-apply logging config (level and file paths) - issue #47
-            try:
-                self._apply_logging_from_config()
-            except Exception:
-                self.logger.error(
-                    "[reload-soft:%s] Unexpected error re-applying logging config; logs keep the prior setup",
-                    req_id,
-                    exc_info=True,
-                )
+            new_cfg = self._ras_load_config(req_id)
         except Exception as e:
             self.logger.error("[reload-soft:%s] Config load failed: %s", req_id, e, exc_info=True)
             return {"error": str(e)}
 
         # Update AuthManager live
+        await self._ras_update_auth(new_cfg, summary, req_id)
+
+        # Hot-apply UI-only web_console settings (motd, logged_in_motd).
+        # The web console endpoint is NOT restarted by soft reload, but these
+        # values are read per request/render, so they update in place.
+        self._ras_update_webconsole_ui(new_cfg, summary, req_id)
+
+        # Reconcile adapters that support in-place updates
+        adapters = list(getattr(self, "unified_adapters", []) or [])
+        sections = self._ras_new_cfg_sections(new_cfg)
+        await self._ras_bootstrap_adapters(adapters, sections, req_id)
+        for a in adapters:
+            spec = self._ras_spec_for(a, sections)
+            if spec:
+                await self._ras_apply_reconcile(a, spec, summary, req_id)
+
+        self.logger.info("[reload-soft:%s] Completed with summary: %s", req_id, summary)
+        return summary
+
+    def _ras_load_config(self, req_id: str) -> Dict[str, Any]:
+        """Load the new config from disk and re-apply the logging setup."""
+        cfg_path = getattr(self.config_manager, "config_path", None)
+        self.logger.info("[reload-soft:%s] Loading config from %s", req_id, cfg_path)
+        import time as _t
+
+        _t0 = _t.time()
+        new_cfg = self._reload_config_from_disk()
+        self.logger.info(f"[reload-soft:{req_id}] Config loaded in {_t.time()-_t0:.3f}s")
+        # Re-apply logging config (level and file paths) - issue #47
+        try:
+            self._apply_logging_from_config()
+        except Exception:
+            self.logger.error(
+                "[reload-soft:%s] Unexpected error re-applying logging config; logs keep the prior setup",
+                req_id,
+                exc_info=True,
+            )
+        return new_cfg
+
+    def _ras_new_cfg_sections(self, new_cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """Collect the new-config sections used by bootstrap and reconcile."""
+        return {
+            "serial": new_cfg.get("serial_ports"),
+            "loopback": new_cfg.get("loopback_ports"),
+            "command": new_cfg.get("command_ports"),
+            "tcp_initiator": new_cfg.get("tcp_initiator_ports"),
+            "telnet_listener": new_cfg.get("telnet_listener"),
+            "ssh_listener": new_cfg.get("ssh_listener"),
+            "muxcon": new_cfg.get("muxcon"),
+            "client_listener": new_cfg.get("client_listener"),
+            "power": new_cfg.get("power"),
+        }
+
+    def _ras_reconcile_spec(self) -> List[Tuple[str, str, Any]]:
+        """(adapter key, log label, absent-section default) per reconcilable type.
+
+        Port sections default to [] (a dropped section removes its ports),
+        MuxCon/Power default to {}, and the client listener converges to
+        disabled.
+        """
+        return [
+            ("serial", "Serial", []),
+            ("loopback", "Loopback", []),
+            ("command", "Command", []),
+            ("tcp_initiator", "TCP initiator", []),
+            ("telnet_listener", "Telnet listener", []),
+            ("ssh_listener", "SSH listener", []),
+            ("muxcon", "MuxCon", {}),
+            ("client_listener", "Client listener", {"enabled": False}),
+            ("power", "Power", {}),
+        ]
+
+    async def _ras_update_auth(self, new_cfg: Dict[str, Any], summary: Dict[str, Any], req_id: str) -> None:
+        """Update the AuthManager live from the new auth section."""
         try:
             if hasattr(self.auth_manager, "update_config"):
                 await self.auth_manager.update_config(new_cfg.get("authentication", {}))
@@ -979,9 +1038,8 @@ class OpenMuxServer:
         except Exception as e:
             self.logger.error("[reload-soft:%s] Auth update failed: %s", req_id, e, exc_info=True)
 
-        # Hot-apply UI-only web_console settings (motd, logged_in_motd).
-        # The web console endpoint is NOT restarted by soft reload, but these
-        # values are read per request/render, so they update in place.
+    def _ras_update_webconsole_ui(self, new_cfg: Dict[str, Any], summary: Dict[str, Any], req_id: str) -> None:
+        """Hot-apply UI-only web_console settings (motd, logged_in_motd) in place."""
         try:
             if self.web_console is not None and hasattr(self.web_console, "update_ui_config"):
                 wc_cfg = new_cfg.get("web_console", new_cfg)
@@ -993,47 +1051,29 @@ class OpenMuxServer:
         except Exception as e:
             self.logger.error("[reload-soft:%s] web_console UI update failed: %s", req_id, e, exc_info=True)
 
-        # Reconcile adapters that support in-place updates
-        serial_section = new_cfg.get("serial_ports")
-        loopback_section = new_cfg.get("loopback_ports")
-        command_section = new_cfg.get("command_ports")
-        tcp_init_section = new_cfg.get("tcp_initiator_ports")
-        telnet_section = new_cfg.get("telnet_listener")
-        ssh_section = new_cfg.get("ssh_listener")
-        muxcon_section = new_cfg.get("muxcon")
-        client_listener_section = new_cfg.get("client_listener")
-        power_section = new_cfg.get("power")
+    async def _ras_bootstrap_adapters(self, adapters: List[Any], sections: Dict[str, Any], req_id: str) -> None:
+        """Bootstrap adapter types that have ports in the new config but no running instance.
 
-        adapters = list(getattr(self, "unified_adapters", []) or [])
-
-        # Bootstrap adapter types that have ports in the new config but no running instance.
-        # This happens when a port type is added to a server that was started without that section.
+        This happens when a port type is added to a server that was started
+        without that section. New adapters are created starting empty and the
+        reconcile pass populates them.
+        """
         _factory = getattr(self, "unified_adapter_factory", None)
         _bootstrap_map = [
-            ("serial", "serial_ports", serial_section),
-            ("loopback", "loopback_ports", loopback_section),
-            ("command", "command_ports", command_section),
-            ("tcp_initiator", "tcp_initiator_ports", tcp_init_section),
-            ("telnet_listener", "telnet_listener", telnet_section),
-            ("ssh_listener", "ssh_listener", ssh_section),
-            ("muxcon", "muxcon", muxcon_section),
-            ("client_listener", "client_listener", client_listener_section),
-            ("power", "power", power_section),
+            ("serial", "serial_ports", sections["serial"]),
+            ("loopback", "loopback_ports", sections["loopback"]),
+            ("command", "command_ports", sections["command"]),
+            ("tcp_initiator", "tcp_initiator_ports", sections["tcp_initiator"]),
+            ("telnet_listener", "telnet_listener", sections["telnet_listener"]),
+            ("ssh_listener", "ssh_listener", sections["ssh_listener"]),
+            ("muxcon", "muxcon", sections["muxcon"]),
+            ("client_listener", "client_listener", sections["client_listener"]),
+            ("power", "power", sections["power"]),
         ]
         for _type_key, _sec_key, _sec_val in _bootstrap_map:
             if not _sec_val:
                 continue  # absent/empty: reconcile below handles removal
-            _running = False
-            for _a in adapters:
-                try:
-                    _at = _a.get_adapter_type()
-                    if str(_at or "").lower() == _type_key:
-                        _running = True
-                        break
-                except Exception:
-                    # justification: optional lookup; the adapter bookkeeping is still correct
-                    pass
-            if _running or not _factory:
+            if self._ras_running_type_present(_type_key, adapters) or not _factory:
                 continue
             try:
                 _plugin = _factory.registry.get_plugin(_sec_key)
@@ -1043,17 +1083,7 @@ class OpenMuxServer:
                 # Create adapter starting empty; reconcile below populates it
                 _new_insts = _factory._create_adapter_instances(_plugin, [])
                 for _na in _new_insts:
-                    if hasattr(_na, "main_port_manager"):
-                        _na.main_port_manager = self.port_manager
-                    if callable(getattr(_na, "set_auth_manager", None)):
-                        _na.set_auth_manager(self.auth_manager)
-                    if callable(getattr(_na, "set_console_manager", None)):
-                        _na.set_console_manager(self.console_manager)
-                    try:
-                        _ok = await _na.start()
-                    except Exception as _se:
-                        _ok = False
-                        self.logger.error("[reload-soft:%s] %s adapter start error: %s", req_id, _type_key, _se, exc_info=True)
+                    _ok = await self._ras_wire_new_adapter(_na, _type_key, req_id)
                     if _ok:
                         self.unified_adapters.append(_na)
                         self.port_manager.set_unified_adapters(self.unified_adapters)
@@ -1066,99 +1096,64 @@ class OpenMuxServer:
             except Exception as _e:
                 self.logger.error("[reload-soft:%s] Failed to bootstrap %s adapter: %s", req_id, _type_key, _e, exc_info=True)
 
-        for a in adapters:
+    def _ras_running_type_present(self, _type_key: str, adapters: List[Any]) -> bool:
+        """Whether one of the given adapters already reports the type key."""
+        _running = False
+        for _a in adapters:
             try:
-                atype = a.get_adapter_type()
-                key = (str(atype) if atype else "").lower()
-                # Serial — absent section treated as empty list to remove ports when section is dropped
-                if key == "serial" and hasattr(a, "reconcile_ports"):
-                    effective = serial_section if serial_section is not None else []
-                    try:
-                        res = await a.reconcile_ports(effective)
-                        summary["adapters"].setdefault("serial", res)
-                    except Exception as e:
-                        self.logger.error("[reload-soft:%s] Serial reconcile error: %s", req_id, e, exc_info=True)
-                        summary["adapters"]["serial"] = {"error": str(e)}
-                # Loopback
-                if key == "loopback" and hasattr(a, "reconcile_ports"):
-                    effective = loopback_section if loopback_section is not None else []
-                    try:
-                        res = await a.reconcile_ports(effective)
-                        summary["adapters"].setdefault("loopback", res)
-                    except Exception as e:
-                        self.logger.error("[reload-soft:%s] Loopback reconcile error: %s", req_id, e, exc_info=True)
-                        summary["adapters"]["loopback"] = {"error": str(e)}
-                # Command
-                if key == "command" and hasattr(a, "reconcile_ports"):
-                    effective = command_section if command_section is not None else []
-                    try:
-                        res = await a.reconcile_ports(effective)
-                        summary["adapters"].setdefault("command", res)
-                    except Exception as e:
-                        self.logger.error("[reload-soft:%s] Command reconcile error: %s", req_id, e, exc_info=True)
-                        summary["adapters"]["command"] = {"error": str(e)}
-                # TCP initiator
-                if key == "tcp_initiator" and hasattr(a, "reconcile_ports"):
-                    effective = tcp_init_section if tcp_init_section is not None else []
-                    try:
-                        res = await a.reconcile_ports(effective)
-                        summary["adapters"].setdefault("tcp_initiator", res)
-                    except Exception as e:
-                        self.logger.error("[reload-soft:%s] TCP initiator reconcile error: %s", req_id, e, exc_info=True)
-                        summary["adapters"]["tcp_initiator"] = {"error": str(e)}
-                # Telnet listener
-                if key == "telnet_listener" and hasattr(a, "reconcile_ports"):
-                    effective = telnet_section if telnet_section is not None else []
-                    try:
-                        res = await a.reconcile_ports(effective)
-                        summary["adapters"].setdefault("telnet_listener", res)
-                    except Exception as e:
-                        self.logger.error("[reload-soft:%s] Telnet listener reconcile error: %s", req_id, e, exc_info=True)
-                        summary["adapters"]["telnet_listener"] = {"error": str(e)}
-                # SSH listener
-                if key == "ssh_listener" and hasattr(a, "reconcile_ports"):
-                    effective = ssh_section if ssh_section is not None else []
-                    try:
-                        res = await a.reconcile_ports(effective)
-                        summary["adapters"].setdefault("ssh_listener", res)
-                    except Exception as e:
-                        self.logger.error("[reload-soft:%s] SSH listener reconcile error: %s", req_id, e, exc_info=True)
-                        summary["adapters"]["ssh_listener"] = {"error": str(e)}
-                # MuxCon federation adapter
-                if key == "muxcon" and hasattr(a, "reconcile_ports"):
-                    effective = muxcon_section if muxcon_section is not None else {}
-                    try:
-                        res = await a.reconcile_ports(effective)
-                        summary["adapters"].setdefault("muxcon", res)
-                    except Exception as e:
-                        self.logger.error("[reload-soft:%s] MuxCon reconcile error: %s", req_id, e, exc_info=True)
-                        summary["adapters"]["muxcon"] = {"error": str(e)}
-                # Client listener (single-endpoint TCP console listener)
-                if key == "client_listener" and hasattr(a, "reconcile_ports"):
-                    # Absent section means "no listener" (same as a full
-                    # reload): converge by disabling.
-                    effective = client_listener_section if client_listener_section is not None else {"enabled": False}
-                    try:
-                        res = await a.reconcile_ports(effective)
-                        summary["adapters"].setdefault("client_listener", res)
-                    except Exception as e:
-                        self.logger.error("[reload-soft:%s] Client listener reconcile error: %s", req_id, e, exc_info=True)
-                        summary["adapters"]["client_listener"] = {"error": str(e)}
-                # Power (PDU outlets; no console ports to recreate)
-                if key == "power" and hasattr(a, "reconcile_ports"):
-                    # Absent section means no PDUs (same as a full reload).
-                    effective = power_section if power_section is not None else {}
-                    try:
-                        res = await a.reconcile_ports(effective)
-                        summary["adapters"].setdefault("power", res)
-                    except Exception as e:
-                        self.logger.error("[reload-soft:%s] Power reconcile error: %s", req_id, e, exc_info=True)
-                        summary["adapters"]["power"] = {"error": str(e)}
+                _at = _a.get_adapter_type()
+                if str(_at or "").lower() == _type_key:
+                    _running = True
+                    break
             except Exception:
-                continue
+                # justification: optional lookup; the adapter bookkeeping is still correct
+                pass
+        return _running
 
-        self.logger.info("[reload-soft:%s] Completed with summary: %s", req_id, summary)
-        return summary
+    async def _ras_wire_new_adapter(self, _na: Any, _type_key: str, req_id: str) -> bool:
+        """Wire a freshly created adapter to the managers and start it."""
+        if hasattr(_na, "main_port_manager"):
+            _na.main_port_manager = self.port_manager
+        if callable(getattr(_na, "set_auth_manager", None)):
+            _na.set_auth_manager(self.auth_manager)
+        if callable(getattr(_na, "set_console_manager", None)):
+            _na.set_console_manager(self.console_manager)
+        try:
+            _ok = await _na.start()
+        except Exception as _se:
+            _ok = False
+            self.logger.error("[reload-soft:%s] %s adapter start error: %s", req_id, _type_key, _se, exc_info=True)
+        return _ok
+
+    def _ras_spec_for(self, a: Any, sections: Dict[str, Any]) -> Optional[Tuple[str, str, Any]]:
+        """(key, label, effective section) for a running adapter, or None to skip.
+
+        Returns None when the adapter has no reconcilable type or no
+        reconcile_ports hook. Absent sections map to the type's empty default.
+        """
+        try:
+            atype = a.get_adapter_type()
+            key = (str(atype) if atype else "").lower()
+            if not hasattr(a, "reconcile_ports"):
+                return None
+            for k, label, empty in self._ras_reconcile_spec():
+                if key == k:
+                    section = sections[k]
+                    return (key, label, section if section is not None else empty)
+            return None
+        except Exception:
+            # justification: adapter type lookup is best-effort; one bad adapter does not stop the scan
+            return None
+
+    async def _ras_apply_reconcile(self, a: Any, spec: Tuple[str, str, Any], summary: Dict[str, Any], req_id: str) -> None:
+        """Run one adapter's reconcile hook against its resolved section."""
+        key, label, effective = spec
+        try:
+            res = await a.reconcile_ports(effective)
+            summary["adapters"].setdefault(key, res)
+        except Exception as e:
+            self.logger.error("[reload-soft:%s] %s reconcile error: %s", req_id, label, e, exc_info=True)
+            summary["adapters"][key] = {"error": str(e)}
 
     async def shutdown(self):
         """Gracefully shut down the server."""
