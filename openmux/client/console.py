@@ -927,218 +927,240 @@ class ConsoleUI:
                 escape introducer.
         """
         try:
-            if command == ".":
-                # Disconnect
-                sys.stdout.write("\r\n[Disconnecting...]\r\n")
-                sys.stdout.flush()
-                # Gracefully close connection before stopping loop
-                try:
-                    await self.connection.close()
-                except Exception:
-                    # justification: shutdown cleanup; the adapter close is idempotent
-                    pass
-                self.is_running = False
-
-            elif command == "a":
-                # Request read-write access from the server
-                await self._request_access_mode(
-                    "request_read_write", "[Read-write access is not supported by this connection]"
-                )
-
-            elif command == "s":
-                # Release read-write access; switch to read-only (spy) mode
-                await self._request_access_mode(
-                    "release_read_write", "[Release read-write is not supported by this connection]"
-                )
-
-            elif command == "f":
-                # Take the port's write slot (issue #59 Part 2, issue #61):
-                # pick the holder by client_id, or Enter for the most
-                # recently attached holder. The server demotes that one
-                # holder and promotes this client, restoring the holder if
-                # the promotion fails.
-                target = await self._read_take_target_input()
-                await self._force_access_mode(target or None)
-
-            elif command == "i":
-                # Information dump
-                await self._show_info()
-
-            elif command == "w":
-                # Who currently holds read-write access on this port
-                await self._show_users()
-
-            elif command == "v":
-                # Show version
-                sys.stdout.write("\r\n[OpenMux Client v1.0]\r\n")
-                sys.stdout.flush()
-
-            elif command == "p":
-                # PDU power control: interactive per-console feed menu. Same
-                # behavior and wording as the telnet/SSH listeners' `p`
-                # escape item (number = toggle, a = all, Enter = exit). The
-                # old playback placeholders (p/P) are removed.
-                await self._power_menu()
-
-            elif command == "r":
-                # Replay lines
-                sys.stdout.write(f"\r\n[Replay last {self.replay_lines} lines - not implemented]\r\n")
-                sys.stdout.flush()
-
-            elif command == "R":
-                # Set replay lines
-                sys.stdout.write("\r\n[Set replay lines: ")
-                sys.stdout.flush()
-                try:
-                    num_str = ""
-                    while True:
-                        await asyncio.sleep(0.01)
-                        if self._is_data_available():
-                            if self._stdin_fd is not None:
-                                import os as _os
-
-                                ch = _os.read(self._stdin_fd, 1).decode("latin1", errors="ignore")
-                            else:
-                                ch = sys.stdin.read(1)
-                            if ch == "\r" or ch == "\n":
-                                break
-                            elif ch.isdigit():
-                                num_str += ch
-                                sys.stdout.write(ch)
-                                sys.stdout.flush()
-
-                    if num_str:
-                        self.replay_lines = int(num_str)
-                        sys.stdout.write(f"]\r\n[Replay lines set to {self.replay_lines}]\r\n")
-                    else:
-                        sys.stdout.write("]\r\n[Cancelled]\r\n")
-                    sys.stdout.flush()
-                except ValueError:
-                    sys.stdout.write("]\r\n[Invalid number]\r\n")
-                    sys.stdout.flush()
-
-            elif command == "l":
-                # List break sequences or send break
-                sys.stdout.write("\r\n[Break sequences - not implemented]\r\n")
-                sys.stdout.flush()
-
-            elif command == "o":
-                # Manual reconnect
-                if not self.quiet_mode:
-                    sys.stdout.write("\r\n[Reconnecting...]\r\n")
-                    sys.stdout.flush()
-                try:
-                    ok = await getattr(self.connection, "reconnect")()
-                except Exception as e:
-                    self.logger.error("Reconnect error: %s", e, exc_info=True)
-                    ok = False
-                if ok:
-                    if not self.quiet_mode:
-                        sys.stdout.write("[Reconnected]\r\n")
-                        sys.stdout.flush()
-                    self._notified_disconnect = False
-                else:
-                    if not self.quiet_mode:
-                        sys.stdout.write("[Reconnect failed]\r\n")
-                        sys.stdout.flush()
-
-            elif command == "z":
-                # Suspend connection
-                sys.stdout.write("\r\n[Suspend not supported - use . to disconnect]\r\n")
-                sys.stdout.flush()
-
-            elif command == "e":
-                # Change escape sequence
-                sys.stdout.write("\r\n[Enter new escape sequence (2 chars): ")
-                sys.stdout.flush()
-                try:
-                    chars = ""
-                    for i in range(2):
-                        while True:
-                            await asyncio.sleep(0.01)
-                            if self._is_data_available():
-                                if self._stdin_fd is not None:
-                                    import os as _os
-
-                                    ch = _os.read(self._stdin_fd, 1).decode("latin1", errors="ignore")
-                                else:
-                                    ch = sys.stdin.read(1)
-                                chars += ch
-                                if ord(ch) < 32:
-                                    sys.stdout.write(f"^{chr(ord(ch) + 64)}")
-                                else:
-                                    sys.stdout.write(ch)
-                                sys.stdout.flush()
-                                break
-
-                    self.escape_char1 = chars[0]
-                    self.escape_char2 = chars[1]
-                    # Refresh byte equivalents used by the input handler
-                    self.escape_b1 = self.escape_char1.encode("latin1", errors="ignore")
-                    self.escape_b2 = self.escape_char2.encode("latin1", errors="ignore")
-                    sys.stdout.write("]\r\n[Escape sequence changed]\r\n")
-                    sys.stdout.flush()
-                except Exception as e:
-                    # Real user-facing error; log with traceback for diagnostics.
-                    self.logger.error("Failed to change escape sequence: %s", e, exc_info=True)
-                    sys.stdout.write("]\r\n[Error changing escape sequence]\r\n")
-                    sys.stdout.flush()
-
-            elif command == "\r" or command == "\n":
-                # Continue - ignore the escape sequence
-                pass
-
-            elif command == "\x12":  # Ctrl+R
-                # Replay last line
-                sys.stdout.write("\r\n[Replay last line - not implemented]\r\n")
-                sys.stdout.flush()
-
-            elif command == "?":
-                # Show help
-                await self._show_help()
-
-            elif command == "\\":
-                # Octal character input
-                sys.stdout.write("\r\n[Enter 3 octal digits: ")
-                sys.stdout.flush()
-                try:
-                    octal_str = ""
-                    for i in range(3):
-                        while True:
-                            await asyncio.sleep(0.01)
-                            if self._is_data_available():
-                                if self._stdin_fd is not None:
-                                    import os as _os
-
-                                    ch = _os.read(self._stdin_fd, 1).decode("latin1", errors="ignore")
-                                else:
-                                    ch = sys.stdin.read(1)
-                                if ch.isdigit() and ch in "01234567":
-                                    octal_str += ch
-                                    sys.stdout.write(ch)
-                                    sys.stdout.flush()
-                                    break
-
-                    octal_val = int(octal_str, 8)
-                    sys.stdout.write("]\r\n")
-                    sys.stdout.flush()
-
-                    if not self.read_only_mode:
-                        # Send exact single byte corresponding to octal value
-                        await self.connection.send_data(bytes([octal_val]))
-
-                except (ValueError, OverflowError):
-                    sys.stdout.write("]\r\n[Invalid octal value]\r\n")
-                    sys.stdout.flush()
-
-            else:
-                # Unknown command - discard
-                sys.stdout.write(f"\r\n[Unknown command: {repr(command)}]\r\n")
-                sys.stdout.flush()
-
+            await self._esc_cmd_dispatch(command)
         except Exception as e:
             self.logger.error("Error processing escape command '%s': %s", command, e, exc_info=True)
             sys.stdout.write(f"\r\n[Error processing command: {e}]\r\n")
+            sys.stdout.flush()
+
+    async def _esc_cmd_dispatch(self, command: str) -> None:
+        """Route one parsed escape command to its handler.
+
+        Command mnemonics that only print a static notice (v, r, l, z, ^R)
+        are looked up in the notices table first; the remaining commands map
+        to handler methods. Anything unknown is reported and discarded.
+        """
+        notice = self._esc_cmd_notices().get(command)
+        if notice is not None:
+            await self._esc_cmd_static_notice(notice)
+            return
+        handler = self._esc_cmd_handlers().get(command)
+        if handler is not None:
+            await handler()
+            return
+        # Unknown command - discard
+        sys.stdout.write(f"\r\n[Unknown command: {repr(command)}]\r\n")
+        sys.stdout.flush()
+
+    def _esc_cmd_notices(self) -> Dict[str, str]:
+        """Static notice text per command mnemonic (computed per dispatch)."""
+        return {
+            # Show version
+            "v": "\r\n[OpenMux Client v1.0]\r\n",
+            # Replay lines
+            "r": f"\r\n[Replay last {self.replay_lines} lines - not implemented]\r\n",
+            # List break sequences or send break
+            "l": "\r\n[Break sequences - not implemented]\r\n",
+            # Suspend connection
+            "z": "\r\n[Suspend not supported - use . to disconnect]\r\n",
+            # Ctrl+R - Replay last line
+            "\x12": "\r\n[Replay last line - not implemented]\r\n",
+        }
+
+    def _esc_cmd_handlers(self) -> Dict[str, Any]:
+        """Mapping of command mnemonic to its async handler method."""
+        return {
+            ".": self._esc_cmd_disconnect,
+            "a": self._esc_cmd_request_write,
+            "s": self._esc_cmd_release_write,
+            "f": self._esc_cmd_take,
+            # Information dump
+            "i": self._show_info,
+            # Who currently holds read-write access on this port
+            "w": self._show_users,
+            # PDU power control: interactive per-console feed menu. Same
+            # behavior and wording as the telnet/SSH listeners' `p`
+            # escape item (number = toggle, a = all, Enter = exit). The
+            # old playback placeholders (p/P) are removed.
+            "p": self._power_menu,
+            # Set replay lines
+            "R": self._esc_cmd_set_replay,
+            # Manual reconnect
+            "o": self._esc_cmd_reconnect,
+            # Change escape sequence
+            "e": self._esc_cmd_change_escape,
+            # Continue - ignore the escape sequence
+            "\r": self._esc_cmd_noop,
+            "\n": self._esc_cmd_noop,
+            # Show help
+            "?": self._show_help,
+            # Octal character input
+            "\\": self._esc_cmd_octal,
+        }
+
+    async def _esc_cmd_static_notice(self, text: str) -> None:
+        """Print one static escape-command notice."""
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    async def _esc_cmd_noop(self) -> None:
+        """No-op handler: the continue commands ignore the escape sequence."""
+        pass
+
+    async def _esc_cmd_read_char(self) -> str:
+        """Read one stdin character when data is available, else return "".
+
+        Uses the raw _stdin_fd on POSIX when set, otherwise sys.stdin.
+        """
+        await asyncio.sleep(0.01)
+        if self._is_data_available():
+            if self._stdin_fd is not None:
+                import os as _os
+
+                return _os.read(self._stdin_fd, 1).decode("latin1", errors="ignore")
+            return sys.stdin.read(1)
+        return ""
+
+    async def _esc_cmd_disconnect(self) -> None:
+        """Disconnect: close the connection gracefully and stop the loop."""
+        sys.stdout.write("\r\n[Disconnecting...]\r\n")
+        sys.stdout.flush()
+        # Gracefully close connection before stopping loop
+        try:
+            await self.connection.close()
+        except Exception:
+            # justification: shutdown cleanup; the adapter close is idempotent
+            pass
+        self.is_running = False
+
+    async def _esc_cmd_request_write(self) -> None:
+        """Request read-write access from the server."""
+        await self._request_access_mode("request_read_write", "[Read-write access is not supported by this connection]")
+
+    async def _esc_cmd_release_write(self) -> None:
+        """Release read-write access; switch to read-only (spy) mode."""
+        await self._request_access_mode("release_read_write", "[Release read-write is not supported by this connection]")
+
+    async def _esc_cmd_take(self) -> None:
+        """Take the port's write slot (issue #59 Part 2, issue #61).
+
+        Pick the holder by client_id, or Enter for the most recently
+        attached holder. The server demotes that one holder and promotes
+        this client, restoring the holder if the promotion fails.
+        """
+        target = await self._read_take_target_input()
+        await self._force_access_mode(target or None)
+
+    async def _esc_cmd_set_replay(self) -> None:
+        """Prompt for and set the replay-lines count (digits only)."""
+        sys.stdout.write("\r\n[Set replay lines: ")
+        sys.stdout.flush()
+        try:
+            num_str = ""
+            while True:
+                ch = await self._esc_cmd_read_char()
+                if not ch:
+                    continue
+                if ch == "\r" or ch == "\n":
+                    break
+                elif ch.isdigit():
+                    num_str += ch
+                    sys.stdout.write(ch)
+                    sys.stdout.flush()
+
+            if num_str:
+                self.replay_lines = int(num_str)
+                sys.stdout.write(f"]\r\n[Replay lines set to {self.replay_lines}]\r\n")
+            else:
+                sys.stdout.write("]\r\n[Cancelled]\r\n")
+            sys.stdout.flush()
+        except ValueError:
+            sys.stdout.write("]\r\n[Invalid number]\r\n")
+            sys.stdout.flush()
+
+    async def _esc_cmd_reconnect(self) -> None:
+        """Manual reconnect to the session."""
+        if not self.quiet_mode:
+            sys.stdout.write("\r\n[Reconnecting...]\r\n")
+            sys.stdout.flush()
+        try:
+            ok = await getattr(self.connection, "reconnect")()
+        except Exception as e:
+            self.logger.error("Reconnect error: %s", e, exc_info=True)
+            ok = False
+        await self._esc_cmd_reconnect_notify(ok)
+
+    async def _esc_cmd_reconnect_notify(self, ok: bool) -> None:
+        """Report the reconnect outcome; reset the disconnect flag on success."""
+        if ok:
+            if not self.quiet_mode:
+                sys.stdout.write("[Reconnected]\r\n")
+                sys.stdout.flush()
+            self._notified_disconnect = False
+        else:
+            if not self.quiet_mode:
+                sys.stdout.write("[Reconnect failed]\r\n")
+                sys.stdout.flush()
+
+    async def _esc_cmd_change_escape(self) -> None:
+        """Read two characters and set them as the new escape sequence."""
+        sys.stdout.write("\r\n[Enter new escape sequence (2 chars): ")
+        sys.stdout.flush()
+        try:
+            chars = ""
+            for i in range(2):
+                while True:
+                    ch = await self._esc_cmd_read_char()
+                    if not ch:
+                        continue
+                    chars += ch
+                    if ord(ch) < 32:
+                        sys.stdout.write(f"^{chr(ord(ch) + 64)}")
+                    else:
+                        sys.stdout.write(ch)
+                    sys.stdout.flush()
+                    break
+
+            self.escape_char1 = chars[0]
+            self.escape_char2 = chars[1]
+            # Refresh byte equivalents used by the input handler
+            self.escape_b1 = self.escape_char1.encode("latin1", errors="ignore")
+            self.escape_b2 = self.escape_char2.encode("latin1", errors="ignore")
+            sys.stdout.write("]\r\n[Escape sequence changed]\r\n")
+            sys.stdout.flush()
+        except Exception as e:
+            # Real user-facing error; log with traceback for diagnostics.
+            self.logger.error("Failed to change escape sequence: %s", e, exc_info=True)
+            sys.stdout.write("]\r\n[Error changing escape sequence]\r\n")
+            sys.stdout.flush()
+
+    async def _esc_cmd_octal(self) -> None:
+        """Read three octal digits and send the corresponding single byte."""
+        sys.stdout.write("\r\n[Enter 3 octal digits: ")
+        sys.stdout.flush()
+        try:
+            octal_str = ""
+            for i in range(3):
+                while True:
+                    ch = await self._esc_cmd_read_char()
+                    if not ch:
+                        continue
+                    if ch.isdigit() and ch in "01234567":
+                        octal_str += ch
+                        sys.stdout.write(ch)
+                        sys.stdout.flush()
+                        break
+
+            octal_val = int(octal_str, 8)
+            sys.stdout.write("]\r\n")
+            sys.stdout.flush()
+
+            if not self.read_only_mode:
+                # Send exact single byte corresponding to octal value
+                await self.connection.send_data(bytes([octal_val]))
+
+        except (ValueError, OverflowError):
+            sys.stdout.write("]\r\n[Invalid octal value]\r\n")
             sys.stdout.flush()
 
     async def _show_help(self):
