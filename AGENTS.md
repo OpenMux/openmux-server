@@ -46,8 +46,8 @@ Use the existing `.venv` (`.venv/bin/python`, `.venv/bin/pytest`) rather than sy
   than PEP8's default 79/88 when wrapping lines.
 - Use type hints on function signatures (`Optional`, `Dict`, `List`, `Set`, `Tuple` from `typing`);
   the codebase is not fully typed but new/edited code should be.
-- Keep cyclomatic complexity low (`flake8 --max-complexity=10` is enforced); extract helpers
-  rather than deeply nesting conditionals.
+- Keep cyclomatic complexity low (ruff C901, `max-complexity = 10`, advisory pass in
+  `make lint`); extract helpers rather than deeply nesting conditionals.
 - Async code lives under `openmux/server/` and `openmux/client/` — never block the event loop
   (no bare `time.sleep`, blocking I/O, or sync subprocess calls in async paths).
 - Docstrings are short and practical (purpose + resolution order/edge cases), not full

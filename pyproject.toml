@@ -139,8 +139,11 @@ multi_line_output = 3
 line_length = 127
 
 [tool.flake8]
+# Line length: E501 was moved to ruff during the flake8-to-ruff transition
+# (ruff checks E501 at the same 127 in [tool.ruff]); keep the 127 value so any
+# other length-aware flake8 rule does not fall back to the 79 default.
 max-line-length = 127
-extend-ignore = ["E203", "W503"]
+extend-ignore = ["E203", "W503", "E501"]
 
 [tool.ruff]
 line-length = 127
@@ -151,3 +154,8 @@ extend-exclude = ["old", "build"]
 # Comments like `# noqa: Vulture` are written for the vulture tool. Marking
 # Vulture as external keeps ruff from flagging them as invalid noqa directives.
 external = ["Vulture"]
+
+[tool.ruff.lint.mccabe]
+# C901 ceiling for the advisory complexity pass in `make lint` (ruff replaced
+# flake8's max-complexity when the complexity rule moved off flake8).
+max-complexity = 10

@@ -280,6 +280,11 @@ lint: venv-dev
 	$(PYTHON_VENV) -m ruff check --select E9,F401,F63,F7,F82,F841 openmux/
 	@# Advisory style pass (flake8): findings are shown but never fail the build.
 	$(PYTHON_VENV) -m flake8 openmux/ --exit-zero
+	@# Advisory ruff pass (C901 complexity, E501 line length): shown but never fail the
+	@# build. Ruff is the authority for both (max-complexity=10 and line-length=127
+	@# in pyproject); flake8's E501/C901 were disabled in .flake8 during the
+	@# flake8-to-ruff transition.
+	$(PYTHON_VENV) -m ruff check --select C901,E501 openmux/ --exit-zero
 	$(call print_success,"Linting completed")
 
 # Run code formatters

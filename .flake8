@@ -1,7 +1,9 @@
 [flake8]
+# Line length: E501 was moved to ruff during the flake8-to-ruff transition
+# (ruff checks E501 at the same 127 in [tool.ruff]); keep the 127 value so any
+# other length-aware flake8 rule does not fall back to the 79 default.
 max-line-length = 127
-extend-ignore = E203, W503
-max-complexity = 10
+extend-ignore = E203, W503, E501
 count = True
 show-source = True
 statistics = True
