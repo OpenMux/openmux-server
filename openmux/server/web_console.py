@@ -34,6 +34,7 @@ import sys
 import time
 import urllib.parse
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -1279,27 +1280,45 @@ def _max_rw_users_for_port(adapter: Any, port_name: str) -> Optional[int]:
     return None
 
 
-async def handle_ws(request: web.Request) -> web.StreamResponse:
-    adapter = _get_adapter(request)
-    username = request.get("username") or "web"
+@dataclass
+class _Hw:
+    """Bundles the per-connection state the original handle_ws kept as locals."""
+
+    adapter: Any = None
+    ws: Any = None
+    client_id: str = ""
+    port_name: str = ""
+    username: str = ""
+    meta_only: bool = False
+    attached: bool = False
+    want_meta: bool = False
+    mode: Optional[str] = None
+
+
+async def _hws_prepare(adapter, request):
+    h = _Hw(adapter=adapter, username=request.get("username") or "web")
+    port_name = request.get("_fqpn_port") or request.match_info.get("port_name")
     port_name = request.get("_fqpn_port") or request.match_info.get("port_name")
     if not port_name:
         raise web.HTTPBadRequest(text="Missing port name")
-    port_name = html.unescape(port_name)
+    h.port_name = html.unescape(port_name)
 
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
-
-    client_id = f"ws:{id(ws)}"
-    adapter._clients[client_id] = ws
-    adapter._ws_to_client[ws] = client_id
+    h.ws = ws
+    h.client_id = f"ws:{id(ws)}"
+    h.attached = False
+    h.meta_only = False
+    h.mode = None
+    adapter._clients[h.client_id] = ws
+    adapter._ws_to_client[ws] = h.client_id
     # Capture client IP for this websocket
     try:
         ip = adapter._get_client_ip(request) if hasattr(adapter, "_get_client_ip") else None
         if ip:
             if not hasattr(adapter, "_client_meta"):
                 adapter._client_meta = {}
-            adapter._client_meta[client_id] = {"ip": ip, "username": username, "port": port_name, "type": "websocket"}
+            adapter._client_meta[h.client_id] = {"ip": ip, "username": h.username, "port": h.port_name, "type": "websocket"}
     except Exception:
         # justification: optional metadata; the client works without it
         pass
@@ -1312,318 +1331,400 @@ async def handle_ws(request: web.Request) -> web.StreamResponse:
             want_meta = True
     except Exception:
         want_meta = False
+    h.want_meta = want_meta
+    return h
 
-    attached = False
-    meta_only = False
 
-    def _cleanup_ws() -> None:
-        """Remove this websocket from adapter tracking dicts on early exit."""
-        adapter._clients.pop(client_id, None)
-        adapter._ws_to_client.pop(ws, None)
-        if hasattr(adapter, "_client_meta"):
-            adapter._client_meta.pop(client_id, None)
+def _hws_cleanup(adapter, h) -> None:
+    """Remove this websocket from adapter tracking dicts on early exit."""
+    adapter._clients.pop(h.client_id, None)
+    adapter._ws_to_client.pop(h.ws, None)
+    if hasattr(adapter, "_client_meta"):
+        adapter._client_meta.pop(h.client_id, None)
 
+
+async def _hws_attach(adapter, h):
+    """Resolve the attach for this client. Sets h.mode / h.attached / h.meta_only.
+    Returns True when the driver should continue to the read loop; False when the
+    socket was closed and adapter tracking cleaned up (driver returns ws now)."""
+    if not (adapter.console_manager and hasattr(adapter.console_manager, "connect_client_to_port")):
+        await h.ws.close(code=1011, message=b"Console manager not available")
+        _hws_cleanup(adapter, h)
+        return False
+    ok, mode, reason = await adapter.console_manager.connect_client_to_port(h.client_id, h.port_name, h.username)
+    h.mode = mode
+    if ok:
+        h.attached = True
+        return True
+    if reason == "denied_by_group_acl":
+        await h.ws.close(code=4003, message=b"Access denied to this port")
+        _hws_cleanup(adapter, h)
+        return False
+    if reason == "no_permissions":
+        await h.ws.close(code=4003, message=b"No permissions assigned to this account")
+        _hws_cleanup(adapter, h)
+        return False
+    # Fallback: allow meta-only websocket when federated port is currently down
+    return await _hws_fallback_metaonly(adapter, h)
+
+
+async def _hws_connect_phase(adapter, h):
+    """Returns True when the driver must return ws now (early close), False to
+    continue into the read loop."""
+    if not await _hws_attach(adapter, h):
+        return True
     try:
-        if not (adapter.console_manager and hasattr(adapter.console_manager, "connect_client_to_port")):
-            await ws.close(code=1011, message=b"Console manager not available")
-            _cleanup_ws()
-            return ws
-        ok, mode, reason = await adapter.console_manager.connect_client_to_port(client_id, port_name, username)
-        if ok:
-            attached = True
-        elif reason == "denied_by_group_acl":
-            await ws.close(code=4003, message=b"Access denied to this port")
-            _cleanup_ws()
-            return ws
-        elif reason == "no_permissions":
-            await ws.close(code=4003, message=b"No permissions assigned to this account")
-            _cleanup_ws()
-            return ws
-        else:
-            # Fallback: allow meta-only websocket when federated port is currently down
-            try:
-                pm = getattr(adapter.console_manager, "port_manager", None)
-                port_obj = safe_get_port(pm, port_name)
-                is_fed = bool(getattr(port_obj, "remote_port_name", None))
-                is_up = bool(getattr(port_obj, "is_connected", True)) if port_obj is not None else True
-                if is_fed and not is_up:
-                    meta_only = True
-                else:
-                    await ws.close(code=4003, message=b"Port attach failed")
-                    _cleanup_ws()
-                    return ws
-            except Exception:
-                await ws.close(code=4003, message=b"Port attach failed")
-                _cleanup_ws()
-                return ws
+        if hasattr(adapter.console_manager, "register_client_channel"):
+            adapter.console_manager.register_client_channel(h.client_id, adapter)
+    except Exception:
+        adapter.logger.error("register_client_channel failed for WS client %s", h.client_id, exc_info=True)
+    adapter.logger.info(
+        f"Web client {h.client_id} connected to port {h.port_name} " + (f"({h.mode})" if h.attached else "(meta-only)")
+    )
+    if h.attached:
+        await _hws_send_client_mode(adapter, h)
+        await _hws_send_presence(adapter, h)
+
+    await _hws_subscribe_meta(adapter, h)
+    return False
+
+
+async def _hws_fallback_metaonly(adapter, h):
+    """Meta-only attach for a down federated port. Returns False when the socket
+    was closed and the driver should return."""
+    try:
+        pm = getattr(adapter.console_manager, "port_manager", None)
+        port_obj = safe_get_port(pm, h.port_name)
+        is_fed = bool(getattr(port_obj, "remote_port_name", None))
+        is_up = bool(getattr(port_obj, "is_connected", True)) if port_obj is not None else True
+        if is_fed and not is_up:
+            h.meta_only = True
+            return True
+        await h.ws.close(code=4003, message=b"Port attach failed")
+        _hws_cleanup(adapter, h)
+        return False
+    except Exception:
+        await h.ws.close(code=4003, message=b"Port attach failed")
+        _hws_cleanup(adapter, h)
+        return False
+
+
+async def _hws_send_client_mode(adapter, h):
+    try:
+        granted_mode = "read-write" if h.mode == "read-write" else "read-only"
+        payload = {
+            "type": "client_mode",
+            "ok": True,
+            "mode": granted_mode,
+            # Lets the browser pass its own client_id back on actions it triggers
+            # (e.g. Port Actions self-demote/auto-restore, see docs/design/port_actions.md).
+            "client_id": h.client_id,
+        }
+        if granted_mode == "read-only":
+            holders = _rw_holders_for_port(adapter, h.port_name)
+            if holders:
+                payload["rw_holders"] = holders
+            max_rw = _max_rw_users_for_port(adapter, h.port_name)
+            if max_rw is not None:
+                payload["max_rw_users"] = max_rw
+        await h.ws.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
+    except Exception:
+        # justification: best-effort control message; the UI tolerates a miss
+        pass
+
+
+async def _hws_send_presence(adapter, h):
+    try:
+        # Initial viewer-presence snapshot for this client's own badge (issue #48);
+        # other already-attached viewers already got this via ConsoleManager's
+        # attach-time broadcast_presence() call.
+        viewers = adapter.console_manager.get_viewers_display(h.port_name)
+        presence = {"type": "presence", "viewers": viewers}
+        await h.ws.send_str("OMXCTRL " + json.dumps(presence, separators=(",", ":")))
+    except Exception:
+        # justification: best-effort control message; the UI tolerates a miss
+        pass
+
+
+async def _hws_subscribe_meta(adapter, h):
+    if h.want_meta:
         try:
-            if hasattr(adapter.console_manager, "register_client_channel"):
-                adapter.console_manager.register_client_channel(client_id, adapter)
-        except Exception:
-            adapter.logger.error("register_client_channel failed for WS client %s", client_id, exc_info=True)
-        adapter.logger.info(
-            f"Web client {client_id} connected to port {port_name} " + (f"({mode})" if attached else "(meta-only)")
-        )
-
-        if attached:
+            subs = adapter._meta_subscribers.setdefault(h.port_name, set())
+            subs.add(h.client_id)
+            # Send one immediate snapshot on subscribe
             try:
-                granted_mode = "read-write" if mode == "read-write" else "read-only"
-                payload = {
-                    "type": "client_mode",
-                    "ok": True,
-                    "mode": granted_mode,
-                    # Lets the browser pass its own client_id back on actions it triggers
-                    # (e.g. Port Actions self-demote/auto-restore, see docs/design/port_actions.md).
-                    "client_id": client_id,
-                }
-                if granted_mode == "read-only":
-                    holders = _rw_holders_for_port(adapter, port_name)
-                    if holders:
-                        payload["rw_holders"] = holders
-                    max_rw = _max_rw_users_for_port(adapter, port_name)
-                    if max_rw is not None:
-                        payload["max_rw_users"] = max_rw
-                await ws.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
-            except Exception:
-                # justification: best-effort control message; the UI tolerates a miss
-                pass
-            try:
-                # Initial viewer-presence snapshot for this client's own badge (issue #48);
-                # other already-attached viewers already got this via ConsoleManager's
-                # attach-time broadcast_presence() call.
-                viewers = adapter.console_manager.get_viewers_display(port_name)
-                presence = {"type": "presence", "viewers": viewers}
-                await ws.send_str("OMXCTRL " + json.dumps(presence, separators=(",", ":")))
-            except Exception:
-                # justification: best-effort control message; the UI tolerates a miss
-                pass
-
-        # Register this client for event-driven meta pushes on this port
-        if want_meta:
-            try:
-                subs = adapter._meta_subscribers.setdefault(port_name, set())
-                subs.add(client_id)
-                # Send one immediate snapshot on subscribe
-                try:
-                    await adapter._broadcast_meta(port_name)
-                except Exception:
-                    # justification: best-effort meta push; the next event retries
-                    pass
+                await adapter._broadcast_meta(h.port_name)
             except Exception:
                 # justification: best-effort meta push; the next event retries
                 pass
-    except Exception as e:
-        adapter.logger.error("Error connecting web client to port %s: %s", port_name, e, exc_info=True)
+        except Exception:
+            # justification: best-effort meta push; the next event retries
+            pass
+
+
+# --- per-control handlers; each returns True (handled) on the path it takes ---
+
+
+async def _hws_ctrl_rw_request(adapter, h, req):
+    ok = False
+    try:
+        ok = await adapter.console_manager.promote_client_to_read_write(h.client_id, h.port_name)
+    except Exception:
+        ok = False
+    # Reply with a client_mode control frame so UI can update
+    resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
+    if not ok:
+        holders = _rw_holders_for_port(adapter, h.port_name)
+        if holders:
+            resp["rw_holders"] = holders
+        max_rw = _max_rw_users_for_port(adapter, h.port_name)
+        if max_rw is not None:
+            resp["max_rw_users"] = max_rw
+    try:
+        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+    except Exception:
+        # justification: best-effort control message; the UI tolerates a miss
+        pass
+    return True
+
+
+async def _hws_ctrl_release_rw(adapter, h, req):
+    try:
+        await adapter.console_manager.demote_client_to_read_only(h.client_id, h.port_name)
+    except Exception:
+        # justification: best-effort mode change; the client keeps its mode
+        pass
+    resp = {"type": "client_mode", "ok": True, "mode": "read-only"}
+    try:
+        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+    except Exception:
+        # justification: best-effort control message; the UI tolerates a miss
+        pass
+    return True
+
+
+async def _hws_ctrl_force_promote(adapter, h, req):
+    # Single write-slot takeover (issue #59 Part 2).
+    # `client_id` names the victim; absent = most
+    # recently attached holder. The victim's own
+    # demotion notice is pushed by the console manager.
+    target = req.get("client_id") if isinstance(req.get("client_id"), str) and req.get("client_id") != h.client_id else None
+    ok, reason = False, "not_attached"
+    try:
+        ok, reason = await adapter.console_manager.take_write_slot(h.client_id, h.port_name, target)
+    except Exception:
+        ok, reason = False, "error"
+    resp = {
+        "type": "client_mode",
+        "ok": bool(ok),
+        "mode": ("read-write" if ok else "read-only"),
+        "reason": reason,
+    }
+    if ok and reason == "already_rw":
+        resp.pop("reason")
+    if ok and reason.startswith("takeover from "):
+        # Targeted takeover (issue #61): the victim's
+        # holder label rides along so the taker's
+        # console can show "taken from <holder>".
+        resp["takeover"] = reason.removeprefix("takeover from ")
+    if not ok:
+        max_rw = _max_rw_users_for_port(adapter, h.port_name)
+        if max_rw is not None:
+            resp["max_rw_users"] = max_rw
+    try:
+        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+    except Exception:
+        # justification: best-effort control message; the UI tolerates a miss
+        pass
+    return True
+
+
+async def _hws_ctrl_query_holders(adapter, h, req):
+    try:
+        holders = _rw_holders_for_port(adapter, h.port_name)
+        resp = {"type": "rw_holders", "holders": holders}
+        max_rw = _max_rw_users_for_port(adapter, h.port_name)
+        if max_rw is not None:
+            resp["max_rw_users"] = max_rw
+        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+    except Exception:
+        # justification: best-effort control message; the UI tolerates a miss
+        pass
+    return True
+
+
+async def _hws_ctrl_power(adapter, h, req):
+    # PDU power control from the console CLI (console.py
+    # `p` menu): feed list for the attached port or one
+    # switch. `username` is the Basic-Auth identity; the
+    # live [POWER] notice rides the meta fan-out.
+    pdu = adapter._find_power_adapter()
+    if pdu is None:
+        if req.get("type") == "power_query":
+            resp = {"type": "power_feeds", "ok": False, "error": "power management is not configured", "feeds": []}
+        else:
+            resp = {"type": "power_switch", "ok": False, "error": "power management is not configured"}
+    else:
+        resp = await pdu.handle_power_frame(h.port_name, req, h.username, client_id=h.client_id) or {
+            "type": "power_switch",
+            "ok": False,
+            "error": "power management is not configured",
+        }
+    try:
+        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+    except Exception:
+        # justification: best-effort control message; the UI tolerates a miss
+        pass
+    return True
+
+
+async def _hws_ctrl_scrollback(adapter, h, req):
+    try:
+        scrollback = adapter.console_manager.port_manager.get_scrollback(h.port_name)
+        if scrollback:
+            await h.ws.send_bytes(scrollback)
+        resp = {"type": "scrollback_done", "bytes": len(scrollback)}
+        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+    except Exception:
+        adapter.logger.debug("scrollback send error for %s", h.port_name, exc_info=True)
+    return True
+
+
+async def _hws_omxctrl(adapter, h, msg):
+    """Handle one inbound TEXT frame that may be an OMXCTRL control frame.
+    Returns True when the frame was a handled control (skip the port write)."""
+    try:
+        if isinstance(msg.data, str) and msg.data.startswith("OMXCTRL "):
+            payload = msg.data[len("OMXCTRL ") :]
+            req = json.loads(payload)
+            if isinstance(req, dict):
+                t = req.get("type")
+                if t in ("request_rw", "promote"):
+                    return await _hws_ctrl_rw_request(adapter, h, req)
+                if t == "release_rw":
+                    return await _hws_ctrl_release_rw(adapter, h, req)
+                if t == "force_promote":
+                    return await _hws_ctrl_force_promote(adapter, h, req)
+                if t == "query_rw_holders":
+                    return await _hws_ctrl_query_holders(adapter, h, req)
+                if t in ("power_query", "power_switch"):
+                    return await _hws_ctrl_power(adapter, h, req)
+                if t == "request_scrollback":
+                    return await _hws_ctrl_scrollback(adapter, h, req)
+    except Exception:
+        # justification: best-effort control message; the UI tolerates a miss
+        pass
+    return False
+
+
+async def _hws_read_loop(adapter, h):
+    async for msg in h.ws:
         try:
-            await ws.close(code=1011, message=b"Attach error")
+            if msg.type == web.WSMsgType.TEXT:
+                if await _hws_omxctrl(adapter, h, msg):
+                    continue  # handled control; do not forward
+                data = msg.data.encode("utf-8", errors="ignore")
+            elif msg.type == web.WSMsgType.BINARY:
+                data = bytes(msg.data)
+            elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSING, web.WSMsgType.CLOSED):
+                break
+            else:
+                continue
+            # In meta-only mode while the federated port is down, drop writes silently
+            if not h.meta_only:
+                await adapter.console_manager.port_manager.write_to_port(h.port_name, data, h.client_id)
+        except Exception as e:
+            adapter.logger.error("Write to port error: %s", e, exc_info=True)
+            break
+
+
+async def _hws_cancelled(adapter, h):
+    # Shutdown path cancels pending receives; exit quietly
+    try:
+        await h.ws.close(code=1011, message=b"Server shutting down")
+    except Exception:
+        # justification: best-effort close; the socket may already be gone
+        pass
+
+
+def _hws_finally_log(adapter, h):
+    adapter.logger.info(
+        "Web client %s websocket loop ending for port %s (closed=%s close_code=%s exception=%r)",
+        h.client_id,
+        h.port_name,
+        getattr(h.ws, "closed", None),
+        getattr(h.ws, "close_code", None),
+        h.ws.exception() if hasattr(h.ws, "exception") else None,
+    )
+
+
+def _hws_finally_meta(adapter, h):
+    # Remove subscription for event-driven meta
+    try:
+        subs = adapter._meta_subscribers.get(h.port_name)
+        if isinstance(subs, set) and h.client_id in subs:
+            subs.discard(h.client_id)
+            if not subs:
+                adapter._meta_subscribers.pop(h.port_name, None)
+    except Exception:
+        # justification: idempotent subscription cleanup
+        pass
+
+
+async def _hws_finally_disconnect(adapter, h):
+    try:
+        if adapter.console_manager and hasattr(adapter.console_manager, "disconnect_client_from_port"):
+            await adapter.console_manager.disconnect_client_from_port(h.client_id, h.port_name)
+        try:
+            if hasattr(adapter.console_manager, "unregister_client_channel"):
+                adapter.console_manager.unregister_client_channel(h.client_id)
+        except Exception:
+            # justification: idempotent routing cleanup; a stale entry is harmless
+            pass
+    except Exception:
+        adapter.logger.warning("Web console WS teardown error for client %s", h.client_id, exc_info=True)
+
+
+async def handle_ws(request: web.Request) -> web.StreamResponse:
+    adapter = _get_adapter(request)
+    h = await _hws_prepare(adapter, request)
+    try:
+        early = await _hws_connect_phase(adapter, h)
+    except Exception as e:
+        # A CancelledError raised here is not caught: it propagates out of
+        # handle_ws, exactly as in the original (the first try did not trap it).
+        adapter.logger.error("Error connecting web client to port %s: %s", h.port_name, e, exc_info=True)
+        try:
+            await h.ws.close(code=1011, message=b"Attach error")
         except Exception:
             # justification: best-effort error close; the attach failure is already logged above
             pass
-        _cleanup_ws()
-        return ws
-
+        _hws_cleanup(adapter, h)
+        return h.ws
+    if early:
+        return h.ws
     try:
-        async for msg in ws:
-            try:
-                if msg.type == web.WSMsgType.TEXT:
-                    # Handle client control frames starting with 'OMXCTRL '
-                    try:
-                        if isinstance(msg.data, str) and msg.data.startswith("OMXCTRL "):
-                            payload = msg.data[len("OMXCTRL ") :]
-                            req = json.loads(payload)
-                            if isinstance(req, dict) and req.get("type") in ("request_rw", "promote"):
-                                ok = False
-                                try:
-                                    ok = await adapter.console_manager.promote_client_to_read_write(client_id, port_name)
-                                except Exception:
-                                    ok = False
-                                # Reply with a client_mode control frame so UI can update
-                                resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
-                                if not ok:
-                                    holders = _rw_holders_for_port(adapter, port_name)
-                                    if holders:
-                                        resp["rw_holders"] = holders
-                                    max_rw = _max_rw_users_for_port(adapter, port_name)
-                                    if max_rw is not None:
-                                        resp["max_rw_users"] = max_rw
-                                try:
-                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
-                                except Exception:
-                                    # justification: best-effort control message; the UI tolerates a miss
-                                    pass
-                                continue  # handled control; do not forward
-                            if isinstance(req, dict) and req.get("type") == "release_rw":
-                                try:
-                                    await adapter.console_manager.demote_client_to_read_only(client_id, port_name)
-                                except Exception:
-                                    # justification: best-effort mode change; the client keeps its mode
-                                    pass
-                                resp = {"type": "client_mode", "ok": True, "mode": "read-only"}
-                                try:
-                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
-                                except Exception:
-                                    # justification: best-effort control message; the UI tolerates a miss
-                                    pass
-                                continue  # handled control; do not forward
-                            if isinstance(req, dict) and req.get("type") == "force_promote":
-                                # Single write-slot takeover (issue #59 Part 2).
-                                # `client_id` names the victim; absent = most
-                                # recently attached holder. The victim's own
-                                # demotion notice is pushed by the console manager.
-                                target = (
-                                    req.get("client_id")
-                                    if isinstance(req.get("client_id"), str) and req.get("client_id") != client_id
-                                    else None
-                                )
-                                ok, reason = False, "not_attached"
-                                try:
-                                    ok, reason = await adapter.console_manager.take_write_slot(client_id, port_name, target)
-                                except Exception:
-                                    ok, reason = False, "error"
-                                resp = {
-                                    "type": "client_mode",
-                                    "ok": bool(ok),
-                                    "mode": ("read-write" if ok else "read-only"),
-                                    "reason": reason,
-                                }
-                                if ok and reason == "already_rw":
-                                    resp.pop("reason")
-                                if ok and reason.startswith("takeover from "):
-                                    # Targeted takeover (issue #61): the victim's
-                                    # holder label rides along so the taker's
-                                    # console can show "taken from <holder>".
-                                    resp["takeover"] = reason.removeprefix("takeover from ")
-                                if not ok:
-                                    max_rw = _max_rw_users_for_port(adapter, port_name)
-                                    if max_rw is not None:
-                                        resp["max_rw_users"] = max_rw
-                                try:
-                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
-                                except Exception:
-                                    # justification: best-effort control message; the UI tolerates a miss
-                                    pass
-                                continue  # handled control; do not forward
-                            if isinstance(req, dict) and req.get("type") == "query_rw_holders":
-                                try:
-                                    holders = _rw_holders_for_port(adapter, port_name)
-                                    resp = {"type": "rw_holders", "holders": holders}
-                                    max_rw = _max_rw_users_for_port(adapter, port_name)
-                                    if max_rw is not None:
-                                        resp["max_rw_users"] = max_rw
-                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
-                                except Exception:
-                                    # justification: best-effort control message; the UI tolerates a miss
-                                    pass
-                                continue  # handled control; do not forward
-                            if isinstance(req, dict) and req.get("type") in ("power_query", "power_switch"):
-                                # PDU power control from the console CLI (console.py
-                                # `p` menu): feed list for the attached port or one
-                                # switch. `username` is the Basic-Auth identity; the
-                                # live [POWER] notice rides the meta fan-out.
-                                pdu = adapter._find_power_adapter()
-                                if pdu is None:
-                                    if req.get("type") == "power_query":
-                                        resp = {
-                                            "type": "power_feeds",
-                                            "ok": False,
-                                            "error": "power management is not configured",
-                                            "feeds": [],
-                                        }
-                                    else:
-                                        resp = {
-                                            "type": "power_switch",
-                                            "ok": False,
-                                            "error": "power management is not configured",
-                                        }
-                                else:
-                                    resp = await pdu.handle_power_frame(port_name, req, username, client_id=client_id) or {
-                                        "type": "power_switch",
-                                        "ok": False,
-                                        "error": "power management is not configured",
-                                    }
-                                try:
-                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
-                                except Exception:
-                                    # justification: best-effort control message; the UI tolerates a miss
-                                    pass
-                                continue  # handled control; do not forward
-                            if isinstance(req, dict) and req.get("type") == "request_scrollback":
-                                try:
-                                    scrollback = adapter.console_manager.port_manager.get_scrollback(port_name)
-                                    if scrollback:
-                                        await ws.send_bytes(scrollback)
-                                    resp = {"type": "scrollback_done", "bytes": len(scrollback)}
-                                    await ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
-                                except Exception:
-                                    adapter.logger.debug("scrollback send error for %s", port_name, exc_info=True)
-                                continue  # handled control; do not forward
-                    except Exception:
-                        # justification: best-effort control message; the UI tolerates a miss
-                        pass
-                    data = msg.data.encode("utf-8", errors="ignore")
-                elif msg.type == web.WSMsgType.BINARY:
-                    data = bytes(msg.data)
-                elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSING, web.WSMsgType.CLOSED):
-                    break
-                else:
-                    continue
-                # In meta-only mode while the federated port is down, drop writes silently
-                if not meta_only:
-                    await adapter.console_manager.port_manager.write_to_port(port_name, data, client_id)
-            except Exception as e:
-                adapter.logger.error("Write to port error: %s", e, exc_info=True)
-                break
+        await _hws_read_loop(adapter, h)
     except asyncio.CancelledError:
-        # Shutdown path cancels pending receives; exit quietly
-        try:
-            await ws.close(code=1011, message=b"Server shutting down")
-        except Exception:
-            # justification: best-effort close; the socket may already be gone
-            pass
+        await _hws_cancelled(adapter, h)
     except Exception as e:
-        adapter.logger.error("Websocket loop error for %s: %s", port_name, e, exc_info=True)
+        adapter.logger.error("Websocket loop error for %s: %s", h.port_name, e, exc_info=True)
     finally:
-        adapter.logger.info(
-            "Web client %s websocket loop ending for port %s (closed=%s close_code=%s exception=%r)",
-            client_id,
-            port_name,
-            getattr(ws, "closed", None),
-            getattr(ws, "close_code", None),
-            ws.exception() if hasattr(ws, "exception") else None,
-        )
         # No background metadata task (event-driven only)
-        # Remove subscription for event-driven meta
-        try:
-            subs = adapter._meta_subscribers.get(port_name)
-            if isinstance(subs, set) and client_id in subs:
-                subs.discard(client_id)
-                if not subs:
-                    adapter._meta_subscribers.pop(port_name, None)
-        except Exception:
-            # justification: idempotent subscription cleanup
-            pass
-        try:
-            if adapter.console_manager and hasattr(adapter.console_manager, "disconnect_client_from_port"):
-                await adapter.console_manager.disconnect_client_from_port(client_id, port_name)
-            try:
-                if hasattr(adapter.console_manager, "unregister_client_channel"):
-                    adapter.console_manager.unregister_client_channel(client_id)
-            except Exception:
-                # justification: idempotent routing cleanup; a stale entry is harmless
-                pass
-        except Exception:
-            adapter.logger.warning("Web console WS teardown error for client %s", client_id, exc_info=True)
-        adapter._clients.pop(client_id, None)
-        adapter._ws_to_client.pop(ws, None)
+        _hws_finally_log(adapter, h)
+        _hws_finally_meta(adapter, h)
+        await _hws_finally_disconnect(adapter, h)
+        adapter._clients.pop(h.client_id, None)
+        adapter._ws_to_client.pop(h.ws, None)
         try:
             if hasattr(adapter, "_client_meta"):
-                adapter._client_meta.pop(client_id, None)
+                adapter._client_meta.pop(h.client_id, None)
         except Exception:
             # justification: idempotent metadata cleanup
             pass
-        adapter.logger.info("Web client %s disconnected from port %s", client_id, port_name)
+        adapter.logger.info("Web client %s disconnected from port %s", h.client_id, h.port_name)
 
-    return ws
+    return h.ws
 
 
 async def handle_ws_fqpn(request: web.Request) -> web.StreamResponse:
