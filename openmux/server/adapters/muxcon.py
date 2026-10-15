@@ -5465,292 +5465,370 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.debug("[%s] CONTROL: %s", conn_id, payload[:200])
             # Handle authentication control messages first
             if payload.startswith("AUTH:"):
-                parts = payload.split(":")
-                if len(parts) >= 2 and parts[1] == "PK":
-                    # AUTH:PK:CHALLENGE:<key_id>:<nonce_b64> (client side)
-                    if len(parts) >= 5 and parts[2] == "CHALLENGE":
-                        try:
-                            kid = parts[3]
-                            nonce_b64 = parts[4]
-                            if self._auth_priv and self._auth_key_id and kid == self._auth_key_id:
-                                nonce = base64.b64decode(nonce_b64)
-                                sig = self._auth_priv.sign(nonce)
-                                sig_b64 = base64.b64encode(sig).decode()
-                                seq = self._next_frame_seq(conn_id)
-                                frame = self.proto.create_control_frame(0, seq, f"AUTH:PK:RESPONSE:{kid}:{sig_b64}")
-                                await self._send_protocol_frame(writer, frame)
-                            else:
-                                # No key to respond; send error
-                                seq = self._next_frame_seq(conn_id)
-                                frame = self.proto.create_control_frame(0, seq, "AUTH:ERROR:no_client_key")
-                                await self._send_protocol_frame(writer, frame)
-                        except Exception:
-                            # justification: protocol step; the peer re-authenticates on reconnect
-                            pass
-                        return
-                    # AUTH:PK:RESPONSE:<key_id>:<sig_b64> (server side)
-                    if len(parts) >= 5 and parts[2] == "RESPONSE":
-                        try:
-                            kid = parts[3]
-                            sig_b64 = parts[4]
-                            conn = self.connections.get(conn_id) or {}
-                            st = conn.get("auth_state") or {}
-                            if not st or st.get("type") != "pk" or st.get("key_id") != kid:
-                                return
-                            if time.time() > st.get("expires_at", 0):
-                                # expired
-                                seq = self._next_frame_seq(conn_id)
-                                frame = self.proto.create_control_frame(0, seq, "AUTH:ERROR:expired")
-                                await self._send_protocol_frame(writer, frame)
-                                await self._close_connection(conn_id)
-                                return
-                            pub = self._auth_pubkeys.get(kid)
-                            ok = False
-                            if pub:
-                                try:
-                                    sig = base64.b64decode(sig_b64)
-                                    pub.verify(sig, st.get("nonce") or b"")
-                                    ok = True
-                                except Exception:
-                                    ok = False
-                            if ok:
-                                conn["auth_ok"] = True
-                                conn.pop("auth_state", None)
-                                # Apply per-key muxcon filters for this authenticated peer
-                                try:
-                                    self._apply_per_connection_filters(conn_id, kid)
-                                except Exception:
-                                    self.logger.error(
-                                        "muxcon: failed to apply per-connection filters for conn=%s", conn_id, exc_info=True
-                                    )
-                                seq = self._next_frame_seq(conn_id)
-                                frame = self.proto.create_control_frame(0, seq, "AUTH:OK")
-                                await self._send_protocol_frame(writer, frame)
-                                # Now that auth is OK, advertise our ports
-                                try:
-                                    await self._maybe_advertise_local_ports(conn_id)
-                                except Exception:
-                                    self.logger.error("muxcon: local port advertisement failed for %s", conn_id, exc_info=True)
-                            else:
-                                seq = self._next_frame_seq(conn_id)
-                                frame = self.proto.create_control_frame(0, seq, "AUTH:ERROR:bad_signature")
-                                await self._send_protocol_frame(writer, frame)
-                                await self._close_connection(conn_id)
-                        except Exception:
-                            self.logger.error("muxcon: AUTH:PK:RESPONSE processing failed for %s", conn_id, exc_info=True)
-                        return
-                # AUTH:OK (client side update) - only initiator-side (client role) connections
-                # may set auth_ok from an inbound AUTH:OK. A server-side (acceptor) connection
-                # never legitimately receives AUTH:OK: the server side *sends* it after a
-                # verified signature. A peer sending us AUTH:OK is attempting to self-authenticate
-                # without the Ed25519 challenge - close the connection.
-                if payload == "AUTH:OK":
-                    try:
-                        conn = self.connections.get(conn_id)
-                        if conn and conn.get("role") == "client":
-                            conn["auth_ok"] = True
-                            # Apply our own per-key filters if we have a client key id
-                            try:
-                                if self._auth_key_id:
-                                    self._apply_per_connection_filters(conn_id, self._auth_key_id)
-                            except Exception:
-                                self.logger.error(
-                                    "muxcon: failed to apply per-connection filters for conn=%s", conn_id, exc_info=True
-                                )
-                            # After AUTH:OK, advertise our ports
-                            try:
-                                await self._maybe_advertise_local_ports(conn_id)
-                            except Exception:
-                                self.logger.error("muxcon: local port advertisement failed for %s", conn_id, exc_info=True)
-                        elif conn:
-                            self.logger.warning(
-                                f"[{conn_id}] AUTH:OK received on non-client-role connection; closing "
-                                "(possible self-authentication attempt)"
-                            )
-                            await self._close_connection(conn_id)
-                    except Exception:
-                        self.logger.error("muxcon: AUTH:OK processing failed for %s", conn_id, exc_info=True)
+                if await self._ctl_auth(conn_id, writer, payload):
                     return
-                if payload.startswith("AUTH:ERROR"):
-                    # Server reported auth failure; log actionable hints and close
-                    try:
-                        parts = payload.split(":")
-                        code = parts[2] if len(parts) >= 3 else "unknown"
-                        # Provide detailed guidance for common cases
-                        if code == "missing_or_unknown_pkid":
-                            if self._auth_key_id and self._auth_priv:
-                                self.logger.error(
-                                    f"MuxCon auth failed: server does not recognize PKID '{self._auth_key_id}'. "
-                                    f"Ensure listener muxcon.auth.public_keys includes key_id='{self._auth_key_id}' with the matching public key."
-                                )
-                            else:
-                                self.logger.error(
-                                    "MuxCon auth failed: server requires a known PKID but client did not advertise one. "
-                                    "Set muxcon.auth.key_id and muxcon.auth.private_key on the initiator."
-                                )
-                        elif code == "bad_signature":
-                            self.logger.error(
-                                "MuxCon auth failed: bad signature. Verify the initiator private key matches the server's configured public key for this key_id."
-                            )
-                        elif code == "expired":
-                            self.logger.warning(
-                                "MuxCon auth challenge expired before response. Check clock skew and network latency; reconnect will retry."
-                            )
-                        else:
-                            self.logger.error("MuxCon auth failed with error: %s", payload)
-                    except Exception:
-                        self.logger.error("MuxCon auth failed with error: %s", payload)
-                    await self._close_connection(conn_id)
-                    return
-            # Fast shutdown (no drain). Any BEGIN triggers immediate END + close.
-            # Unauthenticated peers may not control connection lifecycle.
-            if payload.startswith("MPATH:SHUTDOWN:BEGIN"):
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                st = self._shutdown_state.setdefault(conn_id, {"state": "BEGIN_SEEN"})
-                if st.get("state") != "CLOSED":
-                    st["state"] = "BEGIN_SEEN"
-                    try:
-                        seq = self._next_frame_seq(conn_id)
-                        frame = self.proto.create_control_frame(0, seq, "MPATH:END")
-                        await self._send_protocol_frame(writer, frame)
-                    except Exception:  # justification: shutdown END send is best-effort; proceed to close
-                        pass
-                    st["state"] = "CLOSED"
-                    await self._close_connection(conn_id)
-                return
-            if payload == "MPATH:END":
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                st = self._shutdown_state.setdefault(conn_id, {"state": "CLOSED"})
-                if st.get("state") != "CLOSED":
-                    st["state"] = "CLOSED"
-                await self._close_connection(conn_id)
-                return
-            # Heartbeat request/ack handling (new HB payloads or legacy HB:... in C-frames)
-            if payload.startswith("REQ:") or payload.startswith("HB:REQ:"):
-                # Ignore heartbeats from unauthenticated peers; they keep no state
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                # Echo back ACK with same timestamp
-                try:
-                    raw = payload.split(":", 1)[1] if payload.startswith("REQ:") else payload.split(":", 2)[2]
-                    ts = float(raw)
-                except Exception:  # justification: malformed heartbeat timestamp; fall back to current time
-                    ts = time.time()
-                ack_seq = self._next_frame_seq(conn_id)
-                ack = self.proto.create_heartbeat_ack(ts, ack_seq)
-                await self._send_protocol_frame(writer, ack)
-                # Update last_seen on inbound heartbeat
-                try:
-                    if conn_id in self.connections:
-                        ts_now = time.time()
-                        self.connections[conn_id]["last_seen"] = ts_now
-                        key = self._derive_peer_key_from_conn_id(conn_id)
-                        grp = self._mpath_groups.get(key)
-                        if grp and conn_id in grp.get("conns", {}):
-                            grp["conns"][conn_id]["last_seen"] = ts_now
-                            grp["conns"][conn_id]["last_rx_seen"] = ts_now
-                except Exception:  # justification: heartbeat metrics computation is best-effort
-                    pass
-                return
-
-            if payload.startswith("ACK:") or payload.startswith("HB:ACK:"):
-                # Update heartbeat state (ignore unauthenticated peers)
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                try:
-                    raw = payload.split(":", 1)[1] if payload.startswith("ACK:") else payload.split(":", 2)[2]
-                    ts = float(raw)
-                except Exception:  # justification: malformed ACK timestamp; use current time as fallback
-                    ts = time.time()
-                st = self._hb_state.setdefault(
-                    conn_id,
-                    {
-                        "last_req_ts": 0.0,
-                        "last_ack_ts": 0.0,
-                        "missed": 0,
-                        "rtt_ms": None,
-                    },
-                )
-                st["last_ack_ts"] = time.time()
-                # Compute RTT if matches our last req
-                try:
-                    if st["last_req_ts"]:
-                        st["rtt_ms"] = max(
-                            0,
-                            int((st["last_ack_ts"] - st["last_req_ts"]) * 1000),
-                        )
-                    st["missed"] = 0
-                except Exception:  # justification: last_seen update is advisory; ignore failures
-                    pass
-                # Update last_seen on ACK
-                try:
-                    if conn_id in self.connections:
-                        ts_now = time.time()
-                        self.connections[conn_id]["last_seen"] = ts_now
-                        key = self._derive_peer_key_from_conn_id(conn_id)
-                        grp = self._mpath_groups.get(key)
-                        if grp and conn_id in grp.get("conns", {}):
-                            grp["conns"][conn_id]["last_seen"] = ts_now
-                            grp["conns"][conn_id]["last_rx_seen"] = ts_now
-                except Exception:  # justification: last_seen update is advisory; ignore failures
-                    pass
-                return
-            if payload == "PORTS:LIST:FEDERATED":
-                # Ignore request-based discovery; we proactively advertise on auth/handshake
-                return
-            if payload.startswith("PORTS:FEDERATED:"):
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                await self._handle_ports_federated(conn_id, payload)
-                return
-            if payload.startswith("VIEWERS:"):
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                await self._handle_viewers_frame(conn_id, payload)
-                return
-            if payload.startswith("PORT_STATUS:"):
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                await self._handle_port_status_frame(conn_id, payload)
-                return
-            if payload.startswith("POWER:STATE:"):
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                await self._handle_power_state_frame(conn_id, payload)
-                return
-            if payload.startswith("POWER:SWITCH:"):
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                pdu_adapter = None
-                for uad in getattr(getattr(self, "main_port_manager", None), "unified_adapters", None) or []:
-                    try:
-                        if str(uad.get_adapter_type()).lower() == "power":
-                            pdu_adapter = uad
-                            break
-                    except Exception:
-                        continue
-                await self._handle_power_switch_frame(conn_id, writer, payload, pdu_adapter)
-                return
-            if payload.startswith("POWER:RESULT:"):
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                await self._handle_power_result_frame(conn_id, payload)
-                return
-            if payload.startswith("FEDRW:"):
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                await self._handle_fedrw_request(conn_id, writer, payload)
-                return
-            if payload.startswith("FEDRWACK:"):
-                if not self._is_conn_authenticated(conn_id):
-                    return
-                await self._handle_fedrw_ack(conn_id, payload)
-                return
-            # Other commands can be added here
+            await self._ctl_dispatch(conn_id, writer, payload)
         except Exception as e:
             self.logger.error("Error processing control command from %s: %s", conn_id, e, exc_info=True)
+
+    async def _ctl_auth(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> bool:
+        # Returns True when a recognized AUTH form was handled (stop), False when
+        # the payload is an AUTH: form we do not recognize (fall through to the
+        # non-auth dispatch, as in the original).
+        parts = payload.split(":")
+        if len(parts) >= 2 and parts[1] == "PK":
+            # AUTH:PK:CHALLENGE:<key_id>:<nonce_b64> (client side)
+            if len(parts) >= 5 and parts[2] == "CHALLENGE":
+                await self._ctl_auth_challenge(conn_id, writer, payload)
+                return True
+            # AUTH:PK:RESPONSE:<key_id>:<sig_b64> (server side)
+            if len(parts) >= 5 and parts[2] == "RESPONSE":
+                await self._ctl_auth_response(conn_id, writer, payload)
+                return True
+        # AUTH:OK (client side update) - only initiator-side (client role) connections
+        # may set auth_ok from an inbound AUTH:OK. A server-side (acceptor) connection
+        # never legitimately receives AUTH:OK: the server side *sends* it after a
+        # verified signature. A peer sending us AUTH:OK is attempting to self-authenticate
+        # without the Ed25519 challenge - close the connection.
+        if payload == "AUTH:OK":
+            await self._ctl_auth_ok(conn_id, writer, payload)
+            return True
+        if payload.startswith("AUTH:ERROR"):
+            await self._ctl_auth_error(conn_id, writer, payload)
+            return True
+        return False
+
+    async def _ctl_auth_challenge(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
+        # AUTH:PK:CHALLENGE:<key_id>:<nonce_b64> (client side)
+        parts = payload.split(":")
+        # NOTE: _ctl_auth already validated len(parts) >= 5 and parts[2] == "CHALLENGE".
+        try:
+            kid = parts[3]
+            nonce_b64 = parts[4]
+            if self._auth_priv and self._auth_key_id and kid == self._auth_key_id:
+                nonce = base64.b64decode(nonce_b64)
+                sig = self._auth_priv.sign(nonce)
+                sig_b64 = base64.b64encode(sig).decode()
+                seq = self._next_frame_seq(conn_id)
+                frame = self.proto.create_control_frame(0, seq, f"AUTH:PK:RESPONSE:{kid}:{sig_b64}")
+                await self._send_protocol_frame(writer, frame)
+            else:
+                # No key to respond; send error
+                seq = self._next_frame_seq(conn_id)
+                frame = self.proto.create_control_frame(0, seq, "AUTH:ERROR:no_client_key")
+                await self._send_protocol_frame(writer, frame)
+        except Exception:
+            # justification: protocol step; the peer re-authenticates on reconnect
+            pass
+
+    async def _ctl_auth_response(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
+        # AUTH:PK:RESPONSE:<key_id>:<sig_b64> (server side)
+        parts = payload.split(":")
+        # NOTE: _ctl_auth already validated len(parts) >= 5 and parts[2] == "RESPONSE".
+        try:
+            kid = parts[3]
+            sig_b64 = parts[4]
+            conn = self.connections.get(conn_id) or {}
+            st = conn.get("auth_state") or {}
+            if not st or st.get("type") != "pk" or st.get("key_id") != kid:
+                return
+            if not await self._ctl_verify_auth_response(conn_id, writer, kid, sig_b64, st):
+                return
+            conn["auth_ok"] = True
+            conn.pop("auth_state", None)
+            # Apply per-key muxcon filters for this authenticated peer
+            try:
+                self._apply_per_connection_filters(conn_id, kid)
+            except Exception:
+                self.logger.error("muxcon: failed to apply per-connection filters for conn=%s", conn_id, exc_info=True)
+            seq = self._next_frame_seq(conn_id)
+            frame = self.proto.create_control_frame(0, seq, "AUTH:OK")
+            await self._send_protocol_frame(writer, frame)
+            # Now that auth is OK, advertise our ports
+            try:
+                await self._maybe_advertise_local_ports(conn_id)
+            except Exception:
+                self.logger.error("muxcon: local port advertisement failed for %s", conn_id, exc_info=True)
+        except Exception:
+            self.logger.error("muxcon: AUTH:PK:RESPONSE processing failed for %s", conn_id, exc_info=True)
+
+    async def _ctl_verify_auth_response(
+        self, conn_id: str, writer: asyncio.StreamWriter, kid: str, sig_b64: str, st: Dict
+    ) -> bool:
+        if time.time() > st.get("expires_at", 0):
+            # expired
+            seq = self._next_frame_seq(conn_id)
+            frame = self.proto.create_control_frame(0, seq, "AUTH:ERROR:expired")
+            await self._send_protocol_frame(writer, frame)
+            await self._close_connection(conn_id)
+            return False
+        pub = self._auth_pubkeys.get(kid)
+        ok = False
+        if pub:
+            try:
+                sig = base64.b64decode(sig_b64)
+                pub.verify(sig, st.get("nonce") or b"")
+                ok = True
+            except Exception:
+                ok = False
+        if not ok:
+            seq = self._next_frame_seq(conn_id)
+            frame = self.proto.create_control_frame(0, seq, "AUTH:ERROR:bad_signature")
+            await self._send_protocol_frame(writer, frame)
+            await self._close_connection(conn_id)
+            return False
+        return True
+
+    async def _ctl_auth_ok(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
+        # AUTH:OK (client side update) - only initiator-side (client role) connections
+        # may set auth_ok from an inbound AUTH:OK. A server-side (acceptor) connection
+        # never legitimately receives AUTH:OK: the server side *sends* it after a
+        # verified signature. A peer sending us AUTH:OK is attempting to self-authenticate
+        # without the Ed25519 challenge - close the connection.
+        try:
+            conn = self.connections.get(conn_id)
+            if conn and conn.get("role") == "client":
+                conn["auth_ok"] = True
+                # Apply our own per-key filters if we have a client key id
+                try:
+                    if self._auth_key_id:
+                        self._apply_per_connection_filters(conn_id, self._auth_key_id)
+                except Exception:
+                    self.logger.error("muxcon: failed to apply per-connection filters for conn=%s", conn_id, exc_info=True)
+                # After AUTH:OK, advertise our ports
+                try:
+                    await self._maybe_advertise_local_ports(conn_id)
+                except Exception:
+                    self.logger.error("muxcon: local port advertisement failed for %s", conn_id, exc_info=True)
+            elif conn:
+                self.logger.warning(
+                    f"[{conn_id}] AUTH:OK received on non-client-role connection; closing "
+                    "(possible self-authentication attempt)"
+                )
+                await self._close_connection(conn_id)
+        except Exception:
+            self.logger.error("muxcon: AUTH:OK processing failed for %s", conn_id, exc_info=True)
+
+    async def _ctl_auth_error(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
+        # Server reported auth failure; log actionable hints and close
+        try:
+            parts = payload.split(":")
+            code = parts[2] if len(parts) >= 3 else "unknown"
+            # Provide detailed guidance for common cases
+            if code == "missing_or_unknown_pkid":
+                if self._auth_key_id and self._auth_priv:
+                    self.logger.error(
+                        f"MuxCon auth failed: server does not recognize PKID '{self._auth_key_id}'. "
+                        f"Ensure listener muxcon.auth.public_keys includes key_id='{self._auth_key_id}' with the matching public key."
+                    )
+                else:
+                    self.logger.error(
+                        "MuxCon auth failed: server requires a known PKID but client did not advertise one. "
+                        "Set muxcon.auth.key_id and muxcon.auth.private_key on the initiator."
+                    )
+            elif code == "bad_signature":
+                self.logger.error(
+                    "MuxCon auth failed: bad signature. Verify the initiator private key matches the server's configured public key for this key_id."
+                )
+            elif code == "expired":
+                self.logger.warning(
+                    "MuxCon auth challenge expired before response. Check clock skew and network latency; reconnect will retry."
+                )
+            else:
+                self.logger.error("MuxCon auth failed with error: %s", payload)
+        except Exception:
+            self.logger.error("MuxCon auth failed with error: %s", payload)
+        await self._close_connection(conn_id)
+
+    async def _ctl_dispatch(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
+        if await self._ctl_shutdown(conn_id, writer, payload):
+            return
+        if await self._ctl_ports(conn_id, writer, payload):
+            return
+        if await self._ctl_power(conn_id, writer, payload):
+            return
+        if await self._ctl_fedrw(conn_id, writer, payload):
+            return
+        # Other commands can be added here
+
+    async def _ctl_shutdown(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> bool:
+        # Fast shutdown (no drain). Any BEGIN triggers immediate END + close.
+        # Unauthenticated peers may not control connection lifecycle.
+        if payload.startswith("MPATH:SHUTDOWN:BEGIN"):
+            await self._ctl_shutdown_begin(conn_id, writer, payload)
+            return True
+        if payload == "MPATH:END":
+            await self._ctl_mpath_end(conn_id, writer)
+            return True
+        # Heartbeat request/ack handling (new HB payloads or legacy HB:... in C-frames)
+        if payload.startswith("REQ:") or payload.startswith("HB:REQ:"):
+            await self._ctl_hb_req(conn_id, writer, payload)
+            return True
+        if payload.startswith("ACK:") or payload.startswith("HB:ACK:"):
+            await self._ctl_hb_ack(conn_id, writer, payload)
+            return True
+        return False
+
+    async def _ctl_shutdown_begin(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
+        if not self._is_conn_authenticated(conn_id):
+            return
+        st = self._shutdown_state.setdefault(conn_id, {"state": "BEGIN_SEEN"})
+        if st.get("state") != "CLOSED":
+            st["state"] = "BEGIN_SEEN"
+            try:
+                seq = self._next_frame_seq(conn_id)
+                frame = self.proto.create_control_frame(0, seq, "MPATH:END")
+                await self._send_protocol_frame(writer, frame)
+            except Exception:  # justification: shutdown END send is best-effort; proceed to close
+                pass
+            st["state"] = "CLOSED"
+            await self._close_connection(conn_id)
+
+    async def _ctl_mpath_end(self, conn_id: str, writer: asyncio.StreamWriter) -> None:
+        if not self._is_conn_authenticated(conn_id):
+            return
+        st = self._shutdown_state.setdefault(conn_id, {"state": "CLOSED"})
+        if st.get("state") != "CLOSED":
+            st["state"] = "CLOSED"
+        await self._close_connection(conn_id)
+
+    async def _ctl_hb_req(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
+        # Ignore heartbeats from unauthenticated peers; they keep no state
+        if not self._is_conn_authenticated(conn_id):
+            return
+        # Echo back ACK with same timestamp
+        try:
+            raw = payload.split(":", 1)[1] if payload.startswith("REQ:") else payload.split(":", 2)[2]
+            ts = float(raw)
+        except Exception:  # justification: malformed heartbeat timestamp; fall back to current time
+            ts = time.time()
+        ack_seq = self._next_frame_seq(conn_id)
+        ack = self.proto.create_heartbeat_ack(ts, ack_seq)
+        await self._send_protocol_frame(writer, ack)
+        # Update last_seen on inbound heartbeat
+        try:
+            if conn_id in self.connections:
+                ts_now = time.time()
+                self.connections[conn_id]["last_seen"] = ts_now
+                key = self._derive_peer_key_from_conn_id(conn_id)
+                grp = self._mpath_groups.get(key)
+                if grp and conn_id in grp.get("conns", {}):
+                    grp["conns"][conn_id]["last_seen"] = ts_now
+                    grp["conns"][conn_id]["last_rx_seen"] = ts_now
+        except Exception:  # justification: heartbeat metrics computation is best-effort
+            pass
+
+    async def _ctl_hb_ack(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> None:
+        # Update heartbeat state (ignore unauthenticated peers)
+        if not self._is_conn_authenticated(conn_id):
+            return
+        # NOTE: the original parsed the ACK's payload timestamp here and then ignored
+        # it (last_ack_ts is set from time.time()). We keep that exact behavior: the
+        # parse is only a malformed-timestamp validator, so a bad ACK: falls back to
+        # time.time() in the except arm; the parsed value is deliberately not used.
+        try:
+            raw = payload.split(":", 1)[1] if payload.startswith("ACK:") else payload.split(":", 2)[2]
+            float(raw)
+        except Exception:  # justification: malformed ACK timestamp; use current time as fallback
+            time.time()
+        st = self._hb_state.setdefault(
+            conn_id,
+            {
+                "last_req_ts": 0.0,
+                "last_ack_ts": 0.0,
+                "missed": 0,
+                "rtt_ms": None,
+            },
+        )
+        st["last_ack_ts"] = time.time()
+        # Compute RTT if matches our last req
+        try:
+            if st["last_req_ts"]:
+                st["rtt_ms"] = max(
+                    0,
+                    int((st["last_ack_ts"] - st["last_req_ts"]) * 1000),
+                )
+            st["missed"] = 0
+        except Exception:  # justification: last_seen update is advisory; ignore failures
+            pass
+        # Update last_seen on ACK
+        try:
+            if conn_id in self.connections:
+                ts_now = time.time()
+                self.connections[conn_id]["last_seen"] = ts_now
+                key = self._derive_peer_key_from_conn_id(conn_id)
+                grp = self._mpath_groups.get(key)
+                if grp and conn_id in grp.get("conns", {}):
+                    grp["conns"][conn_id]["last_seen"] = ts_now
+                    grp["conns"][conn_id]["last_rx_seen"] = ts_now
+        except Exception:  # justification: last_seen update is advisory; ignore failures
+            pass
+
+    async def _ctl_ports(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> bool:
+        if payload == "PORTS:LIST:FEDERATED":
+            # Ignore request-based discovery; we proactively advertise on auth/handshake
+            return True
+        if payload.startswith("PORTS:FEDERATED:"):
+            if not self._is_conn_authenticated(conn_id):
+                return True
+            await self._handle_ports_federated(conn_id, payload)
+            return True
+        if payload.startswith("VIEWERS:"):
+            if not self._is_conn_authenticated(conn_id):
+                return True
+            await self._handle_viewers_frame(conn_id, payload)
+            return True
+        if payload.startswith("PORT_STATUS:"):
+            if not self._is_conn_authenticated(conn_id):
+                return True
+            await self._handle_port_status_frame(conn_id, payload)
+            return True
+        return False
+
+    async def _ctl_power(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> bool:
+        if payload.startswith("POWER:STATE:"):
+            if not self._is_conn_authenticated(conn_id):
+                return True
+            await self._handle_power_state_frame(conn_id, payload)
+            return True
+        if payload.startswith("POWER:SWITCH:"):
+            if not self._is_conn_authenticated(conn_id):
+                return True
+            pdu_adapter = self._ctl_find_pdu_adapter()
+            await self._handle_power_switch_frame(conn_id, writer, payload, pdu_adapter)
+            return True
+        if payload.startswith("POWER:RESULT:"):
+            if not self._is_conn_authenticated(conn_id):
+                return True
+            await self._handle_power_result_frame(conn_id, payload)
+            return True
+        return False
+
+    async def _ctl_fedrw(self, conn_id: str, writer: asyncio.StreamWriter, payload: str) -> bool:
+        if payload.startswith("FEDRW:"):
+            if not self._is_conn_authenticated(conn_id):
+                return True
+            await self._handle_fedrw_request(conn_id, writer, payload)
+            return True
+        if payload.startswith("FEDRWACK:"):
+            if not self._is_conn_authenticated(conn_id):
+                return True
+            await self._handle_fedrw_ack(conn_id, payload)
+            return True
+        return False
+
+    def _ctl_find_pdu_adapter(self):
+        for uad in getattr(getattr(self, "main_port_manager", None), "unified_adapters", None) or []:
+            if self._ctl_uad_is_power(uad):
+                return uad
+        return None
+
+    def _ctl_uad_is_power(self, uad) -> bool:
+        try:
+            return str(uad.get_adapter_type()).lower() == "power"
+        except Exception:
+            # justification: adapter-type probe is best-effort; treat as non-power and keep scanning
+            return False
 
     async def initiate_graceful_shutdown(self, conn_id: str, writer: asyncio.StreamWriter, reason: Optional[str] = None):
         """Initiate fast shutdown: send BEGIN then END and close immediately."""
