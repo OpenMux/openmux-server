@@ -4004,309 +4004,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         info = port.get_status() if hasattr(port, "get_status") else {"name": name}
                         if "name" not in info:
                             info["name"] = name
-                        # PDU power feed state (PDU feature): feeds, derived
-                        # all|some|none|unknown, and all_power_lost. Omitted
-                        # entirely when the port declares no `power:` feed.
-                        if power_adapter is not None:
-                            try:
-                                power_payload = power_adapter.port_power_payload(str(name))
-                                if power_payload is not None:
-                                    info["power"] = power_payload
-                            except Exception:
-                                # justification: optional status detail; the port entry stays complete
-                                pass
-                        # Compute a stable composite id: <server_id>::<port_name>
-                        comp_id = None
-                        try:
-                            origin_id = info.get("origin_server_id")
-                            if not origin_id:
-                                # Try to derive a local server_id via muxcon adapter
-                                mux = self._find_muxcon_adapter()
-                                origin_id = getattr(mux, "server_id", None) if mux else None
-                            if origin_id:
-                                comp_id = f"{origin_id}::{info['name']}"
-                            else:
-                                comp_id = f"local::{info['name']}"
-                        except Exception:
-                            comp_id = f"local::{info['name']}"
-                        info["id"] = comp_id
-                        # Expose last_seen for federated RemotePortProxy when available
-                        try:
-                            if hasattr(port, "last_seen"):
-                                ls_val = getattr(port, "last_seen")
-                                if ls_val is not None:
-                                    info["last_seen"] = float(ls_val)
-                        except Exception:
-                            # justification: optional metadata; the port entry stays complete
-                            pass
-                        # If this is a loopback port, ensure dummy serial metadata so UI shows info badges
-                        try:
-                            atype = (info.get("adapter_type") or info.get("adapter") or "").lower()
-                            if atype == "loopback":
-                                # Populate default serial config if missing
-                                if not info.get("serial_config"):
-                                    info["serial_config"] = {
-                                        "device": f"loopback:{name}",
-                                        "baudrate": 9600,
-                                        "bytesize": 8,
-                                        "parity": "N",
-                                        "stopbits": 1,
-                                        "flow_control": "none",
-                                    }
-                                # Populate default line status if missing
-                                if not info.get("line_status"):
-                                    info["line_status"] = {"DCD": False, "DSR": True, "CTS": True, "RTS": True, "DTR": True}
-                        except Exception:
-                            # justification: optional status detail; the default line status applies
-                            pass
-                        # If this is a federated remote proxy, enrich with serial/line-status from metadata
-                        try:
-                            meta = getattr(port, "metadata", None)
-                            if meta is not None:
-                                sc = getattr(meta, "serial_config", None)
-                                if sc is not None:
-                                    info["serial_config"] = sc
-                                ls = getattr(meta, "line_status", None)
-                                if ls is not None:
-                                    info["line_status"] = ls
-                                # Origin server identity and chain for federated ports
-                                try:
-                                    origin = getattr(meta, "origin_server", None)
-                                    if origin is not None:
-                                        # Basic server identity
-                                        info["origin_server_id"] = getattr(origin, "server_id", None)
-                                        info["origin_server_hostname"] = getattr(origin, "hostname", None)
-                                        info["origin_server_port"] = getattr(origin, "port", None)
-                                        st = getattr(origin, "server_type", None)
-                                        info["origin_server_type"] = getattr(st, "value", st) if st is not None else None
-                                        # Full origin object when possible
-                                        try:
-                                            to_dict = getattr(origin, "to_dict", None)
-                                            if callable(to_dict):
-                                                info["origin_server"] = to_dict()
-                                            else:
-                                                info["origin_server"] = {
-                                                    "server_id": getattr(origin, "server_id", None),
-                                                    "hostname": getattr(origin, "hostname", None),
-                                                    "port": getattr(origin, "port", None),
-                                                    "server_type": getattr(
-                                                        getattr(origin, "server_type", None), "value", None
-                                                    ),
-                                                    "description": getattr(origin, "description", None),
-                                                }
-                                        except Exception:
-                                            info["origin_server"] = {"server_id": getattr(origin, "server_id", None)}
-                                    # Chain
-                                    chain = getattr(meta, "server_chain", []) or []
-                                    info["server_chain"] = [getattr(s, "server_id", str(s)) for s in chain]
-                                    # Detailed chain objects when possible
-                                    try:
-                                        chain_info = []
-                                        for s in chain:
-                                            to_dict = getattr(s, "to_dict", None)
-                                            if callable(to_dict):
-                                                chain_info.append(to_dict())
-                                            else:
-                                                chain_info.append(
-                                                    {
-                                                        "server_id": getattr(s, "server_id", str(s)),
-                                                        "hostname": getattr(s, "hostname", None),
-                                                        "port": getattr(s, "port", None),
-                                                        "server_type": getattr(getattr(s, "server_type", None), "value", None),
-                                                        "description": getattr(s, "description", None),
-                                                    }
-                                                )
-                                        info["server_chain_info"] = chain_info
-                                    except Exception:
-                                        info["server_chain_info"] = [
-                                            {"server_id": sid} for sid in info.get("server_chain", [])
-                                        ]
-                                    # Federation type if present
-                                    ftype = getattr(meta, "federation_type", None)
-                                    info["federation_type"] = getattr(ftype, "value", ftype) if ftype is not None else None
-                                    # Offline reason (issue #62): surface the origin's
-                                    # advertised reason on the federated port entry.
-                                    # get_status() normally already carries this from the
-                                    # same metadata, but this keeps the field present
-                                    # even if a future snapshot change drops it.
-                                    # A down muxcon link takes precedence over the
-                                    # origin's last reason (same rule as
-                                    # RemotePortProxy.get_status): the freshest
-                                    # fact is the link outage, not a stale reason.
-                                    try:
-                                        sm = getattr(meta, "status_message", None)
-                                        if sm:
-                                            info["status_message"] = sm
-                                    except Exception:
-                                        # justification: optional status detail; the previous reason stays
-                                        pass
-                                    try:
-                                        lr = getattr(port, "link_reason", None)
-                                        if lr:
-                                            info["status_message"] = lr
-                                    except Exception:
-                                        # justification: optional status detail; the previous reason stays
-                                        pass
-                                    # Readiness (issue #68): RemotePortProxy.get_status()
-                                    # already derives a link-aware value, so only fill
-                                    # in when it is absent (older code paths / older
-                                    # peers that send no readiness and a minimal
-                                    # snapshot).
-                                    try:
-                                        existing_readiness = info.get("readiness")
-                                        if existing_readiness not in (
-                                            READINESS_ACTIVE,
-                                            READINESS_IDLE,
-                                            READINESS_OFFLINE,
-                                        ):
-                                            _alive = bool(info.get("connected", getattr(port, "is_connected", False)))
-                                            info["readiness"] = (
-                                                READINESS_OFFLINE
-                                                if info.get("status_message")
-                                                else (READINESS_IDLE if not _alive else READINESS_ACTIVE)
-                                            )
-                                    except Exception:
-                                        # justification: optional readiness derivation; the base status remains
-                                        pass
-                                except Exception:
-                                    # justification: optional readiness derivation; the base status remains
-                                    pass
-                        except Exception:
-                            # justification: optional status enrichment wrapper; the base entry stays complete
-                            pass
-                        # Attach clients info when available
-                        try:
-                            cc = getattr(port, "connected_clients", None)
-                            if isinstance(cc, list):
-                                info["client_count"] = len(cc)
-                                # Best-effort usernames list
-                                usernames = []
-                                details = []
-                                for c in cc:
-                                    u = None
-                                    cid = None
-                                    if isinstance(c, dict):
-                                        u = c.get("username") or c.get("client_id")
-                                        cid = c.get("client_id")
-                                    else:
-                                        u = getattr(c, "username", None) or getattr(c, "client_id", None)
-                                        cid = getattr(c, "client_id", None)
-                                    if u:
-                                        usernames.append(str(u))
-                                    # Build enriched detail using _client_meta when available
-                                    try:
-                                        ip = None
-                                        typ = None
-                                        meta = self._resolve_client_meta(cid) if cid else {}
-                                        if meta:
-                                            ip = meta.get("ip")
-                                            typ = meta.get("type")
-                                        details.append(
-                                            {
-                                                "client_id": cid,
-                                                "username": u,
-                                                "ip": ip,
-                                                "type": typ or None,
-                                            }
-                                        )
-                                    except Exception:
-                                        # justification: optional client detail; the counts stay accurate
-                                        pass
-                                if usernames:
-                                    info["clients"] = usernames
-                                # Merge in any clients we know from _client_meta for this port (avoid double count)
-                                try:
-                                    existing_ids = set()
-                                    for c in cc:
-                                        try:
-                                            ecid = c.get("client_id") if isinstance(c, dict) else getattr(c, "client_id", None)
-                                            if ecid:
-                                                existing_ids.add(str(ecid))
-                                        except Exception:
-                                            continue
-                                    extra = [
-                                        cid
-                                        for cid, meta in (self._client_meta or {}).items()
-                                        if isinstance(meta, dict) and meta.get("port") == name and str(cid) not in existing_ids
-                                    ]
-                                    if extra:
-                                        info["client_count"] = int(info.get("client_count", 0)) + len(extra)
-                                        try:
-                                            ex_usernames = [
-                                                str((self._client_meta.get(cid) or {}).get("username") or cid) for cid in extra
-                                            ]
-                                            info.setdefault("clients", [])
-                                            info["clients"].extend(ex_usernames)
-                                            # Also extend details with enriched meta
-                                            for cid in extra:
-                                                try:
-                                                    meta = self._resolve_client_meta(cid) or {}
-                                                    details.append(
-                                                        {
-                                                            "client_id": cid,
-                                                            "username": meta.get("username") or cid,
-                                                            "ip": meta.get("ip"),
-                                                            "type": meta.get("type", "websocket"),
-                                                        }
-                                                    )
-                                                except Exception:
-                                                    continue
-                                        except Exception:
-                                            # justification: optional enumeration; the list degrades gracefully
-                                            pass
-                                    if details:
-                                        info["client_details"] = details
-                                except Exception:
-                                    # justification: optional enumeration; the list degrades gracefully
-                                    pass
-                            else:
-                                # If the port doesn't expose connected_clients, approximate from our meta
-                                try:
-                                    extras = [
-                                        cid
-                                        for cid, meta in (self._client_meta or {}).items()
-                                        if isinstance(meta, dict) and meta.get("port") == name
-                                    ]
-                                    if extras:
-                                        info["client_count"] = len(extras)
-                                        try:
-                                            info["clients"] = [
-                                                str((self._client_meta.get(cid) or {}).get("username") or cid)
-                                                for cid in extras
-                                            ]
-                                            # Build details list as well
-                                            det = []
-                                            for cid in extras:
-                                                try:
-                                                    meta = self._resolve_client_meta(cid) or {}
-                                                    det.append(
-                                                        {
-                                                            "client_id": cid,
-                                                            "username": meta.get("username") or cid,
-                                                            "ip": meta.get("ip"),
-                                                            "type": meta.get("type", "websocket"),
-                                                        }
-                                                    )
-                                                except Exception:
-                                                    continue
-                                            if det:
-                                                info["client_details"] = det
-                                        except Exception:
-                                            # justification: optional enumeration; the list degrades gracefully
-                                            pass
-                                except Exception:
-                                    # justification: optional enumeration; the list degrades gracefully
-                                    pass
-                        except Exception:
-                            # justification: optional client detail; the counts stay accurate
-                            pass
+                        self._pinfo_power(name, info, power_adapter)
+                        self._pinfo_composite(info)
+                        self._pinfo_last_seen(port, info)
+                        self._pinfo_loopback(name, info)
+                        self._pinfo_federated(port, info)
+                        self._pinfo_clients(name, port, info)
                         ports.append(info)
-                        try:
-                            if info.get("name"):
-                                seen_names.add(str(info["name"]))
-                        except Exception:
-                            # justification: best-effort dedupe; the listing tolerates a repeat
-                            pass
+                        self._pinfo_record_name(info, seen_names)
                     except Exception:
                         continue
                 # Removed fallback enumeration of unified adapters to avoid duplicate paths.
@@ -4320,6 +4025,332 @@ class WebConsoleAdapter(BaseGenericAdapter):
             # justification: best-effort ordering; the list renders unsorted on failure
             pass
         return ports
+
+    def _pinfo_record_name(self, info: Dict[str, Any], seen_names: set) -> None:
+        try:
+            if info.get("name"):
+                seen_names.add(str(info["name"]))
+        except Exception:
+            # justification: best-effort dedupe; the listing tolerates a repeat
+            pass
+
+    def _pinfo_power(self, name: str, info: Dict[str, Any], power_adapter) -> None:
+        # PDU power feed state (PDU feature): feeds, derived
+        # all|some|none|unknown, and all_power_lost. Omitted
+        # entirely when the port declares no `power:` feed.
+        if power_adapter is not None:
+            try:
+                power_payload = power_adapter.port_power_payload(str(name))
+                if power_payload is not None:
+                    info["power"] = power_payload
+            except Exception:
+                # justification: optional status detail; the port entry stays complete
+                pass
+
+    def _pinfo_composite(self, info: Dict[str, Any]) -> None:
+        # Compute a stable composite id: <server_id>::<port_name>
+        comp_id = None
+        try:
+            origin_id = info.get("origin_server_id")
+            if not origin_id:
+                # Try to derive a local server_id via muxcon adapter
+                mux = self._find_muxcon_adapter()
+                origin_id = getattr(mux, "server_id", None) if mux else None
+            if origin_id:
+                comp_id = f"{origin_id}::{info['name']}"
+            else:
+                comp_id = f"local::{info['name']}"
+        except Exception:
+            comp_id = f"local::{info['name']}"
+        info["id"] = comp_id
+
+    def _pinfo_last_seen(self, port, info: Dict[str, Any]) -> None:
+        # Expose last_seen for federated RemotePortProxy when available
+        try:
+            if hasattr(port, "last_seen"):
+                ls_val = getattr(port, "last_seen")
+                if ls_val is not None:
+                    info["last_seen"] = float(ls_val)
+        except Exception:
+            # justification: optional metadata; the port entry stays complete
+            pass
+
+    def _pinfo_loopback(self, name: str, info: Dict[str, Any]) -> None:
+        # If this is a loopback port, ensure dummy serial metadata so UI shows info badges
+        try:
+            atype = (info.get("adapter_type") or info.get("adapter") or "").lower()
+            if atype == "loopback":
+                # Populate default serial config if missing
+                if not info.get("serial_config"):
+                    info["serial_config"] = {
+                        "device": f"loopback:{name}",
+                        "baudrate": 9600,
+                        "bytesize": 8,
+                        "parity": "N",
+                        "stopbits": 1,
+                        "flow_control": "none",
+                    }
+                # Populate default line status if missing
+                if not info.get("line_status"):
+                    info["line_status"] = {"DCD": False, "DSR": True, "CTS": True, "RTS": True, "DTR": True}
+        except Exception:
+            # justification: optional status detail; the default line status applies
+            pass
+
+    def _pinfo_federated(self, port, info: Dict[str, Any]) -> None:
+        # If this is a federated remote proxy, enrich with serial/line-status from metadata
+        try:
+            meta = getattr(port, "metadata", None)
+            if meta is not None:
+                sc = getattr(meta, "serial_config", None)
+                if sc is not None:
+                    info["serial_config"] = sc
+                ls = getattr(meta, "line_status", None)
+                if ls is not None:
+                    info["line_status"] = ls
+                self._pinfo_federated_origin(meta, port, info)
+        except Exception:
+            # justification: optional status enrichment wrapper; the base entry stays complete
+            pass
+
+    def _pinfo_federated_origin(self, meta, port, info: Dict[str, Any]) -> None:
+        # Origin server identity and chain for federated ports
+        try:
+            origin = getattr(meta, "origin_server", None)
+            if origin is not None:
+                # Basic server identity
+                info["origin_server_id"] = getattr(origin, "server_id", None)
+                info["origin_server_hostname"] = getattr(origin, "hostname", None)
+                info["origin_server_port"] = getattr(origin, "port", None)
+                st = getattr(origin, "server_type", None)
+                info["origin_server_type"] = getattr(st, "value", st) if st is not None else None
+                # Full origin object when possible
+                self._pinfo_federated_origin_obj(origin, info)
+            # Chain
+            chain = getattr(meta, "server_chain", []) or []
+            info["server_chain"] = [getattr(s, "server_id", str(s)) for s in chain]
+            # Detailed chain objects when possible
+            self._pinfo_federated_chain_info(info, chain)
+            # Federation type if present
+            ftype = getattr(meta, "federation_type", None)
+            info["federation_type"] = getattr(ftype, "value", ftype) if ftype is not None else None
+            # Offline reason (issue #62) + readiness (issue #68), delegated:
+            self._pinfo_federated_tail(meta, port, info)
+        except Exception:
+            # justification: optional readiness derivation; the base status remains
+            pass
+
+    def _pinfo_federated_origin_obj(self, origin, info: Dict[str, Any]) -> None:
+        # Full origin object when possible
+        try:
+            to_dict = getattr(origin, "to_dict", None)
+            if callable(to_dict):
+                info["origin_server"] = to_dict()
+            else:
+                info["origin_server"] = {
+                    "server_id": getattr(origin, "server_id", None),
+                    "hostname": getattr(origin, "hostname", None),
+                    "port": getattr(origin, "port", None),
+                    "server_type": getattr(getattr(origin, "server_type", None), "value", None),
+                    "description": getattr(origin, "description", None),
+                }
+        except Exception:
+            info["origin_server"] = {"server_id": getattr(origin, "server_id", None)}
+
+    def _pinfo_federated_chain_info(self, info: Dict[str, Any], chain) -> None:
+        # Detailed chain objects when possible
+        try:
+            chain_info = []
+            for s in chain:
+                to_dict = getattr(s, "to_dict", None)
+                if callable(to_dict):
+                    chain_info.append(to_dict())
+                else:
+                    chain_info.append(
+                        {
+                            "server_id": getattr(s, "server_id", str(s)),
+                            "hostname": getattr(s, "hostname", None),
+                            "port": getattr(s, "port", None),
+                            "server_type": getattr(getattr(s, "server_type", None), "value", None),
+                            "description": getattr(s, "description", None),
+                        }
+                    )
+            info["server_chain_info"] = chain_info
+        except Exception:
+            info["server_chain_info"] = [{"server_id": sid} for sid in info.get("server_chain", [])]
+
+    def _pinfo_federated_tail(self, meta, port, info: Dict[str, Any]) -> None:
+        # Offline reason (issue #62): surface the origin's
+        # advertised reason on the federated port entry.
+        # get_status() normally already carries this from the
+        # same metadata, but this keeps the field present
+        # even if a future snapshot change drops it.
+        # A down muxcon link takes precedence over the
+        # origin's last reason (same rule as
+        # RemotePortProxy.get_status): the freshest
+        # fact is the link outage, not a stale reason.
+        try:
+            sm = getattr(meta, "status_message", None)
+            if sm:
+                info["status_message"] = sm
+        except Exception:
+            # justification: optional status detail; the previous reason stays
+            pass
+        try:
+            lr = getattr(port, "link_reason", None)
+            if lr:
+                info["status_message"] = lr
+        except Exception:
+            # justification: optional status detail; the previous reason stays
+            pass
+        # Readiness (issue #68): RemotePortProxy.get_status()
+        # already derives a link-aware value, so only fill
+        # in when it is absent (older code paths / older
+        # peers that send no readiness and a minimal
+        # snapshot).
+        try:
+            existing_readiness = info.get("readiness")
+            if existing_readiness not in (READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE):
+                _alive = bool(info.get("connected", getattr(port, "is_connected", False)))
+                info["readiness"] = (
+                    READINESS_OFFLINE if info.get("status_message") else (READINESS_IDLE if not _alive else READINESS_ACTIVE)
+                )
+        except Exception:
+            # justification: optional readiness derivation; the base status remains
+            pass
+
+    def _pinfo_clients(self, name: str, port, info: Dict[str, Any]) -> None:
+        # Attach clients info when available
+        try:
+            cc = getattr(port, "connected_clients", None)
+            if isinstance(cc, list):
+                self._pinfo_clients_list(name, cc, info)
+            else:
+                self._pinfo_clients_meta(name, info)
+        except Exception:
+            # justification: optional client detail; the counts stay accurate
+            pass
+
+    def _pinfo_clients_list(self, name: str, cc, info: Dict[str, Any]) -> None:
+        info["client_count"] = len(cc)
+        # Best-effort usernames list
+        usernames = []
+        details = []
+        for c in cc:
+            u = None
+            cid = None
+            if isinstance(c, dict):
+                u = c.get("username") or c.get("client_id")
+                cid = c.get("client_id")
+            else:
+                u = getattr(c, "username", None) or getattr(c, "client_id", None)
+                cid = getattr(c, "client_id", None)
+            if u:
+                usernames.append(str(u))
+            # Build enriched detail using _client_meta when available
+            try:
+                ip = None
+                typ = None
+                meta = self._resolve_client_meta(cid) if cid else {}
+                if meta:
+                    ip = meta.get("ip")
+                    typ = meta.get("type")
+                details.append(
+                    {
+                        "client_id": cid,
+                        "username": u,
+                        "ip": ip,
+                        "type": typ or None,
+                    }
+                )
+            except Exception:
+                # justification: optional client detail; the counts stay accurate
+                pass
+        if usernames:
+            info["clients"] = usernames
+        # Merge in any clients we know from _client_meta for this port (avoid double count)
+        self._pinfo_clients_merge(name, cc, info, details)
+
+    def _pinfo_clients_merge(self, name: str, cc, info: Dict[str, Any], details) -> None:
+        try:
+            existing_ids = set()
+            for c in cc:
+                try:
+                    ecid = c.get("client_id") if isinstance(c, dict) else getattr(c, "client_id", None)
+                    if ecid:
+                        existing_ids.add(str(ecid))
+                except Exception:
+                    continue
+            extra = [
+                cid
+                for cid, meta in (self._client_meta or {}).items()
+                if isinstance(meta, dict) and meta.get("port") == name and str(cid) not in existing_ids
+            ]
+            if extra:
+                info["client_count"] = int(info.get("client_count", 0)) + len(extra)
+                try:
+                    ex_usernames = [str((self._client_meta.get(cid) or {}).get("username") or cid) for cid in extra]
+                    info.setdefault("clients", [])
+                    info["clients"].extend(ex_usernames)
+                    # Also extend details with enriched meta
+                    self._pinfo_clients_extend_details(extra, details)
+                except Exception:
+                    # justification: optional enumeration; the list degrades gracefully
+                    pass
+            if details:
+                info["client_details"] = details
+        except Exception:
+            # justification: optional enumeration; the list degrades gracefully
+            pass
+
+    def _pinfo_clients_extend_details(self, extra, details) -> None:
+        for cid in extra:
+            try:
+                meta = self._resolve_client_meta(cid) or {}
+                details.append(
+                    {
+                        "client_id": cid,
+                        "username": meta.get("username") or cid,
+                        "ip": meta.get("ip"),
+                        "type": meta.get("type", "websocket"),
+                    }
+                )
+            except Exception:
+                continue
+
+    def _pinfo_clients_meta(self, name: str, info) -> None:
+        # If the port doesn't expose connected_clients, approximate from our meta
+        try:
+            extras = [
+                cid for cid, meta in (self._client_meta or {}).items() if isinstance(meta, dict) and meta.get("port") == name
+            ]
+            if extras:
+                info["client_count"] = len(extras)
+                try:
+                    info["clients"] = [str((self._client_meta.get(cid) or {}).get("username") or cid) for cid in extras]
+                    # Build details list as well
+                    det = []
+                    for cid in extras:
+                        try:
+                            meta = self._resolve_client_meta(cid) or {}
+                            det.append(
+                                {
+                                    "client_id": cid,
+                                    "username": meta.get("username") or cid,
+                                    "ip": meta.get("ip"),
+                                    "type": meta.get("type", "websocket"),
+                                }
+                            )
+                        except Exception:
+                            continue
+                    if det:
+                        info["client_details"] = det
+                except Exception:
+                    # justification: optional enumeration; the list degrades gracefully
+                    pass
+        except Exception:
+            # justification: optional enumeration; the list degrades gracefully
+            pass
 
     async def _ensure_assets(self) -> None:
         """Ensure required xterm assets exist locally before serving the UI."""
