@@ -113,8 +113,9 @@ def _inject_remote_banner(body: bytes, node: str) -> bytes:
     """
     try:
         text = body.decode("utf-8", errors="ignore")
+        banner_style = "background:#fff3cd;color:#664d03;border:1px solid #ffe69c;padding:8px 12px;margin:8px 0;"
         banner = (
-            '<div class="proxy-remote-banner" style="background:#fff3cd;color:#664d03;border:1px solid #ffe69c;padding:8px 12px;margin:8px 0;">'
+            f'<div class="proxy-remote-banner" style="{banner_style}">'
             + "Viewing remote node: <strong>"
             + (node or "?")
             + "</strong>"

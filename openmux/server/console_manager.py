@@ -1291,7 +1291,8 @@ class ConsoleManager:
     def _log_takeover_audit(self, port: Any, port_name: str, taker_id: str, taker_username: str, victim_id: str) -> None:
         """One audit line per takeover (taker, victim, port, time + DataLogger event)."""
         self.logger.info(
-            f"WRITE-SLOT TAKEOVER (federation) port={port_name} taker={taker_username}:{taker_id} victim={victim_id} time={time.time():.3f}"
+            f"WRITE-SLOT TAKEOVER (federation) port={port_name} "
+            f"taker={taker_username}:{taker_id} victim={victim_id} time={time.time():.3f}"
         )
         try:
             DataLogger.get().record_meta(

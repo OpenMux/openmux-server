@@ -578,7 +578,9 @@ async def _render_status_page(
         status_payload["sort_dir"] = sort_dir
         status_payload["sort_query"] = preserved_query
         status_payload["status_path"] = request.rel_url.path or default_status_path
-        body = adapter._render_status(status_payload, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm)  # type: ignore[attr-defined]
+        body = adapter._render_status(  # type: ignore[attr-defined]
+            status_payload, plugin_nav=plugin_nav, current_port=current_port, user_permission=user_perm
+        )
     except Exception as exc:
         adapter.logger.error("Status page render failed: %s", exc)
         raise web.HTTPInternalServerError(text="Failed to render status page.\n")
@@ -624,7 +626,9 @@ async def handle_console(request: web.Request) -> web.Response:
         ports = adapter._get_ports_snapshot()
         current_port = request.query.get("port")
         embed = request.query.get("embed", "").lower() in ("1", "true", "yes", "on")
-        body = adapter._render_console(plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm, embed=embed)  # type: ignore[attr-defined]
+        body = adapter._render_console(  # type: ignore[attr-defined]
+            plugin_nav=plugin_nav, ports=ports, current_port=current_port, user_permission=user_perm, embed=embed
+        )
     except Exception as exc:
         adapter.logger.error("Console render failed: %s", exc)
         raise web.HTTPInternalServerError(text="Failed to render console page.\n")
@@ -3866,7 +3870,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
         Resolution order:
           - self._client_meta (websocket manager)
-          - console_manager.client_to_manager mapping: if manager is TcpServerAdapter, try to find the client session and its address
+          - console_manager.client_to_manager mapping: if manager is
+            TcpServerAdapter, try to find the client session and its address
           - Fallback to websocket if client_id looks like 'ws:'
         """
         meta: Dict[str, Any] = {}

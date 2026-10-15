@@ -1304,7 +1304,8 @@ class OpenMuxServer:
             await asyncio.wait_for(adapter.stop(), timeout=self._RELOAD_STOP_TIMEOUT_S)
         except asyncio.TimeoutError:
             self.logger.error(
-                f"[reload-full:{req_id}] Timeout stopping {aname} ({atype}) after {self._RELOAD_STOP_TIMEOUT_S:.1f}s; continuing",
+                f"[reload-full:{req_id}] Timeout stopping {aname} ({atype}) "
+                f"after {self._RELOAD_STOP_TIMEOUT_S:.1f}s; continuing",
                 exc_info=False,
             )
             return ("timeout", aname, atype)

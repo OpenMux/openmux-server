@@ -207,9 +207,8 @@ class TcpClientAdapter(BaseClientAdapter):
                 }
                 self.logger.debug("Authenticated via public key %s", chal_key_id)
                 return True
-            self.logger.error(
-                f"Public key authentication failed: {last_line.decode(errors='ignore').strip() if last_line else 'no response'}"
-            )
+            last_line_text = last_line.decode(errors="ignore").strip() if last_line else "no response"
+            self.logger.error(f"Public key authentication failed: {last_line_text}")
             return False
         except Exception as e:
             self.logger.error("Public key authentication error: %s", e)

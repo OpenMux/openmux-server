@@ -763,7 +763,11 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 continue
             # Body is one JSON line; the readiness key is additive — older
             # peers ignore it (same tolerance convention as status_message).
-            body = f"PORT_STATUS:{port_name}\n{json.dumps({'status_message': status_message or '', 'readiness': readiness}, separators=(',', ':'))}"
+            status_body = {
+                "status_message": status_message or "",
+                "readiness": readiness,
+            }
+            body = f"PORT_STATUS:{port_name}\n{json.dumps(status_body, separators=(',', ':'))}"
             try:
                 seq = self._next_frame_seq(cid)
                 frame = self.proto.create_control_frame(0, seq, body)
@@ -912,7 +916,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         matches proxies whose origin is this node, where this outlet has that
         local name (outlet federation).
         """
-        body = f"POWER:STATE:{port_name}\n{json.dumps({'ref': self._local_power_ref(port_name, str(outlet)), 'on': on}, separators=(',', ':'))}"
+        power_body = {"ref": self._local_power_ref(port_name, str(outlet)), "on": on}
+        body = f"POWER:STATE:{port_name}\n{json.dumps(power_body, separators=(',', ':'))}"
         for cid, conn in list(self.connections.items()):
             if not self._is_conn_authenticated(cid):
                 continue
@@ -3380,7 +3385,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             return base_backoff
         # Short-lived session: throttle reconnection attempts
         self.logger.warning(
-            f"MuxCon session to {peer.host}:{peer.port} ended after {session_dur:.2f}s; throttling reconnect backoff={backoff:.1f}s"
+            f"MuxCon session to {peer.host}:{peer.port} ended after {session_dur:.2f}s; "
+            f"throttling reconnect backoff={backoff:.1f}s"
         )
         await asyncio.sleep(backoff)
         return min(backoff * 2, max_backoff)
@@ -3585,7 +3591,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             "send_next": 1,
         }
         self.logger.info(
-            "Handshake OK (server-side) conn=%s remote_server_id=%s remote_instance_id=%s local_server_id=%s local_instance_id=%s caps=%s",
+            "Handshake OK (server-side) conn=%s remote_server_id=%s remote_instance_id=%s "
+            "local_server_id=%s local_instance_id=%s caps=%s",
             conn_id,
             hs.server_id,
             hs.instance_id,
@@ -3789,7 +3796,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             "send_next": 1,
         }
         self.logger.debug(
-            "Handshake OK (client-side) conn=%s remote_server_id=%s remote_instance_id=%s local_server_id=%s local_instance_id=%s raw='%s'",
+            "Handshake OK (client-side) conn=%s remote_server_id=%s remote_instance_id=%s "
+            "local_server_id=%s local_instance_id=%s raw='%s'",
             conn_id,
             ok_server_id,
             ok_instance_id,
@@ -5619,7 +5627,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 if self._auth_key_id and self._auth_priv:
                     self.logger.error(
                         f"MuxCon auth failed: server does not recognize PKID '{self._auth_key_id}'. "
-                        f"Ensure listener muxcon.auth.public_keys includes key_id='{self._auth_key_id}' with the matching public key."
+                        f"Ensure listener muxcon.auth.public_keys includes key_id='{self._auth_key_id}' "
+                        f"with the matching public key."
                     )
                 else:
                     self.logger.error(
@@ -5628,11 +5637,13 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                     )
             elif code == "bad_signature":
                 self.logger.error(
-                    "MuxCon auth failed: bad signature. Verify the initiator private key matches the server's configured public key for this key_id."
+                    "MuxCon auth failed: bad signature. Verify the initiator private key "
+                    "matches the server's configured public key for this key_id."
                 )
             elif code == "expired":
                 self.logger.warning(
-                    "MuxCon auth challenge expired before response. Check clock skew and network latency; reconnect will retry."
+                    "MuxCon auth challenge expired before response. Check clock skew and "
+                    "network latency; reconnect will retry."
                 )
             else:
                 self.logger.error("MuxCon auth failed with error: %s", payload)
@@ -6067,7 +6078,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Log a registration, falling back if the formatted message fails."""
         try:
             self.logger.debug(
-                f"[MPATH] Registered {conn_id} in group {key}; primary={grp.get('primary')} members={list(grp['conns'].keys())}"
+                f"[MPATH] Registered {conn_id} in group {key}; primary={grp.get('primary')} "
+                f"members={list(grp['conns'].keys())}"
             )
         except Exception:
             self.logger.debug(f"Registered {conn_id} in multipath group {key} primary={grp.get('primary')}")
@@ -6216,7 +6228,8 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         """Log the rekey with the new group's members, tolerating format errors."""
         try:
             self.logger.info(
-                f"[MPATH] Rekey {conn_id} {current_key} -> {new_key} primary={new_grp.get('primary')} members={list(new_grp['conns'].keys())}"
+                f"[MPATH] Rekey {conn_id} {current_key} -> {new_key} "
+                f"primary={new_grp.get('primary')} members={list(new_grp['conns'].keys())}"
             )
         except Exception:
             self.logger.info(f"[MPATH] Rekey {conn_id} {current_key} -> {new_key} primary={new_grp.get('primary')}")
