@@ -3837,17 +3837,17 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.warning("Connection %s has no valid writer; closing", conn_id)
             await self._close_connection(conn_id)
             return
+        handlers = {
+            "C": self._rl_handle_control,
+            "D": self._rl_handle_data,
+            "O": self._rl_handle_open,
+            "E": self._rl_handle_close,
+            "HB": self._rl_handle_heartbeat,
+            "A": self._rl_handle_ack,
+        }
         try:
             while not self._stop_event.is_set():
-                # Fault: freeze connection (skip reading frames but keep connection open)
-                if self._fault_state.get(conn_id, {}).get("frozen"):
-                    try:
-                        await asyncio.sleep(0.2)
-                    except asyncio.CancelledError:
-                        break
-                    continue
-                # Read next ASCII-framed protocol line
-                frame = await self._read_frame(reader, conn_id)
+                frame = await self._rl_read_next_frame(reader, conn_id)
                 if not frame:
                     break
                 ftype = frame.get("frame_type")
@@ -3856,264 +3856,10 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
                 self.logger.debug(
                     f"[{conn_id}] RX frame type={ftype} sid={stream_id} len={len(payload)} seq={frame.get('seq')}"
                 )
-                # Ordering diagnostics (lightweight): warn once if gap or reorder detected
-                try:
-                    rseq = int(frame.get("seq") or 0)
-                    last = self._rx_last_seq.get(conn_id)
-                    if last is not None:
-                        if rseq <= last and not self._rx_order_warned.get(conn_id):
-                            self.logger.warning("[%s] Out-of-order frame seq=%s last=%s", conn_id, rseq, last)
-                            self._rx_order_warned[conn_id] = True
-                        elif rseq > last + 1 and not self._rx_order_warned.get(conn_id):
-                            self.logger.warning("[%s] Sequence gap detected seq=%s last=%s", conn_id, rseq, last)
-                            self._rx_order_warned[conn_id] = True
-                    self._rx_last_seq[conn_id] = rseq
-                except Exception:  # justification: RX diagnostics best-effort; do not disrupt processing
-                    pass
-                if ftype == "C":
-                    # Update last_seen on control activity
-                    try:
-                        if conn_id in self.connections:
-                            now_ts = time.time()
-                            self.connections[conn_id]["last_seen"] = now_ts
-                            key = self._derive_peer_key_from_conn_id(conn_id)
-                            grp = self._mpath_groups.get(key)
-                            if grp and conn_id in grp["conns"]:
-                                grp["conns"][conn_id]["last_seen"] = now_ts
-                                grp["conns"][conn_id]["last_rx_seen"] = now_ts
-                            # Recompute proxy live-state for this peer after activity
-                            try:
-                                self._update_peer_proxies_live_state(key)
-                            except Exception:
-                                pass
-                    except Exception:  # justification: last_seen updates are advisory; ignore failures
-                        pass
-                    text = payload.decode("utf-8", errors="ignore")
-                    await self._process_control_command(conn_id, writer_obj, text)
-                elif ftype == "D":
-                    # Require authentication before processing data frames
-                    if not self._is_conn_authenticated(conn_id):
-                        try:
-                            seq = self._next_frame_seq(conn_id)
-                            notice = self.proto.create_control_frame(0, seq, "AUTH:REQUIRED")
-                            await self._send_protocol_frame(writer_obj, notice)
-                        except Exception:
-                            # justification: advisory notice; unauthenticated frames are rejected anyway
-                            pass
-                        continue
-                    # Update last_seen on data activity
-                    try:
-                        if conn_id in self.connections:
-                            now_ts = time.time()
-                            self.connections[conn_id]["last_seen"] = now_ts
-                            key = self._derive_peer_key_from_conn_id(conn_id)
-                            grp = self._mpath_groups.get(key)
-                            if grp and conn_id in grp["conns"]:
-                                grp["conns"][conn_id]["last_seen"] = now_ts
-                                grp["conns"][conn_id]["last_rx_seen"] = now_ts
-                            # Recompute proxy live-state for this peer after activity
-                            try:
-                                self._update_peer_proxies_live_state(key)
-                            except Exception:
-                                pass
-                    except Exception:  # justification: last_seen refresh is advisory; ignore errors to keep data path hot
-                        pass
-                    # MPH embedding removed: sequence numbers now in frame header universally
-                    # Ensure stream_id is an int before routing
-                    try:
-                        sid = int(stream_id) if stream_id is not None else 0
-                    except Exception:  # justification: invalid stream id; default to 0 for safe routing
-                        sid = 0
-                    # ACK immediately, then deliver in order per peer
-                    await self._handle_inbound_data(conn_id, sid, payload, int(frame.get("seq") or 0))
-                    # Send data ACK (peer-level) acknowledging this seq
-                    try:
-                        ack_seq = self._next_frame_seq(conn_id)
-                        ack = self.proto.create_ack_frame(int(frame.get("seq") or 0), ack_seq)
-                        await self._send_protocol_frame(writer_obj, ack)
-                    except Exception:
-                        # justification: protocol ack; the peer retransmits on timeout
-                        pass
-                elif ftype == "O":
-                    # Require authentication before accepting stream opens
-                    if not self._is_conn_authenticated(conn_id):
-                        try:
-                            seq = self._next_frame_seq(conn_id)
-                            notice = self.proto.create_control_frame(0, seq, "AUTH:REQUIRED")
-                            await self._send_protocol_frame(writer_obj, notice)
-                        except Exception:
-                            # justification: advisory notice; unauthenticated frames are rejected anyway
-                            pass
-                        continue
-                    # Update last_seen on open stream
-                    try:
-                        if conn_id in self.connections:
-                            now_ts = time.time()
-                            self.connections[conn_id]["last_seen"] = now_ts
-                            key = self._derive_peer_key_from_conn_id(conn_id)
-                            grp = self._mpath_groups.get(key)
-                            if grp and conn_id in grp["conns"]:
-                                grp["conns"][conn_id]["last_seen"] = now_ts
-                                grp["conns"][conn_id]["last_rx_seen"] = now_ts
-                            try:
-                                self._update_peer_proxies_live_state(key)
-                            except Exception:
-                                pass
-                    except Exception:  # justification: best-effort telemetry update; do not perturb stream open
-                        pass
-                    # Remote requested opening a stream to a local port name
-                    try:
-                        port_name = payload.decode("utf-8", errors="ignore").strip()
-                    except Exception:  # justification: decode failure; treat as empty port name and continue
-                        port_name = ""
-                    self.logger.info("[%s] OPEN stream %s -> %s", conn_id, stream_id, port_name)
-                    # Map server-initiated stream to local port (peer-scoped) and start pump back to remote
-                    peer_key = self._derive_peer_key_from_conn_id(conn_id)
-                    if peer_key not in self._local_session_map:
-                        self._local_session_map[peer_key] = {}
-                    try:
-                        sid = int(stream_id) if stream_id is not None else 0
-                    except Exception:  # justification: invalid stream id on OPEN; default to 0
-                        sid = 0
-                    existing_port = self._local_session_map[peer_key].get(sid)
-                    if existing_port is not None and existing_port != port_name:
-                        # The peer allocated the same stream id for two different
-                        # ports; overwriting silently stops traffic for whichever
-                        # port loses the mapping. Log loudly so this is diagnosable.
-                        self.logger.warning(
-                            f"[{conn_id}] Stream id {sid} reused for '{port_name}' while still mapped to "
-                            f"'{existing_port}'; stopping old session for '{existing_port}'"
-                        )
-                        await self._stop_local_session(peer_key, sid, reason="stream_id_reused")
-                    elif existing_port is not None:
-                        self.logger.debug(
-                            "[%s] Duplicate OPEN for stream %s -> %s; keeping existing session", conn_id, sid, port_name
-                        )
-                    self._local_session_map[peer_key][sid] = port_name
-                    # Register the federated stream as a real, tracked client on this
-                    # (origin) port - defaulting to read-only - so PortManager's normal
-                    # slot accounting/mode checks apply to federated writers exactly like
-                    # local ones (issue #52). A peer must explicitly request promotion
-                    # via a FEDRW frame, arbitrated below in _handle_fedrw_request().
-                    if port_name:
-                        pm = getattr(self, "main_port_manager", None)
-                        if pm is not None:
-                            try:
-                                fed_client_id = f"fed:{peer_key}:{sid}"
-                                await pm.add_client_to_port(port_name, fed_client_id, f"federation:{peer_key}", "read-only")
-                                # Also make this pseudo-client reachable through ConsoleManager's
-                                # generic demote/notify machinery, so a LOCALLY initiated
-                                # write-slot takeover against a federated holder actually demotes it
-                                # (and notifies the owning peer) instead of silently no-oping
-                                # (see ConsoleManager.take_write_slot).
-                                console_manager = getattr(self, "console_manager", None)
-                                if console_manager is not None:
-                                    console_manager.register_client_port(fed_client_id, port_name)
-                                    console_manager.register_client_channel(fed_client_id, self)
-                            except Exception:
-                                self.logger.debug(
-                                    "[%s] Failed to register federated client for %s", conn_id, port_name, exc_info=True
-                                )
-                    # Start background pump to send local port data back to remote stream
-                    if port_name:
-                        slot = (peer_key, sid)
-                        existing_task = self._pump_tasks.get(slot)
-                        if existing_task is not None and not existing_task.done() and existing_port == port_name:
-                            # A pump already serves this exact slot (duplicate OPEN,
-                            # or a re-OPEN of the same stream on a new path after a
-                            # reconnect). Keep it: a second pump would drain the
-                            # same port data_queue in parallel and roughly half of
-                            # every chunk would be lost (issue #54).
-                            self.logger.info(
-                                "[%s] OPEN stream %s -> %s: reusing existing pump for slot", conn_id, sid, port_name
-                            )
-                        else:
-                            if existing_task is not None and not existing_task.done():
-                                existing_task.cancel()
-                            self._pump_tasks.pop(slot, None)
-                            task = asyncio.create_task(self._pump_local_port_to_remote(peer_key, sid, port_name))
-                            self._pump_tasks[slot] = task
-                            self._tasks.append(task)
-                elif ftype == "E":
-                    # Require authentication before accepting stream closes
-                    if not self._is_conn_authenticated(conn_id):
-                        try:
-                            seq = self._next_frame_seq(conn_id)
-                            notice = self.proto.create_control_frame(0, seq, "AUTH:REQUIRED")
-                            await self._send_protocol_frame(writer_obj, notice)
-                        except Exception:
-                            # justification: advisory notice; unauthenticated frames are rejected anyway
-                            pass
-                        continue
-                    # Update last_seen on close stream
-                    try:
-                        if conn_id in self.connections:
-                            now_ts = time.time()
-                            self.connections[conn_id]["last_seen"] = now_ts
-                            key = self._derive_peer_key_from_conn_id(conn_id)
-                            grp = self._mpath_groups.get(key)
-                            if grp and conn_id in grp.get("conns", {}):
-                                grp["conns"][conn_id]["last_seen"] = now_ts
-                                grp["conns"][conn_id]["last_rx_seen"] = now_ts
-                            try:
-                                self._update_peer_proxies_live_state(key)
-                            except Exception:
-                                pass
-                    except Exception:  # justification: best-effort telemetry update; safe to ignore
-                        pass
-                    # Close stream
-                    self.logger.info("[%s] CLOSE stream %s", conn_id, stream_id)
-                    try:
-                        sid = int(stream_id) if stream_id is not None else 0
-                    except Exception:  # justification: invalid stream id on CLOSE; default to 0
-                        sid = 0
-                    try:
-                        peer_key = self._derive_peer_key_from_conn_id(conn_id)
-                        if peer_key in self._session_map and sid in self._session_map[peer_key]:
-                            self._session_map[peer_key].pop(sid, None)
-                        # Stop the origin-side session slot: cancel the pump, drop the
-                        # stream mapping and free the tracked federated client (issue #52)
-                        # so its slot (read-only or read-write) is freed on this port.
-                        await self._stop_local_session(peer_key, sid, reason="stream_close")
-                    except Exception:  # justification: session cleanup is best-effort during close
-                        pass
-                elif ftype == "HB":
-                    # Heartbeat command channel; treat as control with HB payload
-                    self.logger.debug("[%s] HEARTBEAT FRAME", conn_id)
-                    try:
-                        if conn_id in self.connections:
-                            now_ts = time.time()
-                            self.connections[conn_id]["last_seen"] = now_ts
-                            # Also refresh multipath group's last_seen so failover logic doesn't misclassify as stale
-                            try:
-                                key = self._derive_peer_key_from_conn_id(conn_id)
-                                grp = self._mpath_groups.get(key)
-                                if grp and conn_id in grp.get("conns", {}):
-                                    grp["conns"][conn_id]["last_seen"] = now_ts
-                                    grp["conns"][conn_id]["last_rx_seen"] = now_ts
-                                # Heartbeat seen; update proxies live-state for this peer
-                                try:
-                                    self._update_peer_proxies_live_state(key)
-                                except Exception:
-                                    pass
-                            except Exception:  # justification: mpath last_seen refresh is advisory
-                                pass
-                    except Exception:  # justification: best-effort heartbeat bookkeeping; non-critical
-                        pass
-                    # HB frames have payload like REQ:<ts> or ACK:<ts>
-                    text = payload.decode("utf-8", errors="ignore")
-                    await self._process_control_command(conn_id, writer_obj, text)
-                elif ftype == "A":
-                    # Data ACK: payload contains acked DATA seq number
-                    try:
-                        acked = int(payload.decode("utf-8", errors="ignore").strip() or 0)
-                        peer_key = self._derive_peer_key_from_conn_id(conn_id)
-                        buf = self._peer_sendbuf.get(peer_key)
-                        if buf and acked in buf:
-                            buf.pop(acked, None)
-                    except Exception:
-                        # justification: optional retx bookkeeping; the data was delivered
-                        pass
+                self._rl_rx_diagnostics(conn_id, frame)
+                handler = handlers.get(ftype)
+                if handler is not None:
+                    await handler(conn_id, writer_obj, frame)
         except asyncio.CancelledError:
             # justification: loop exits on cancellation; nothing more to clean up
             pass
@@ -4122,6 +3868,288 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         finally:
             # Cleanup
             await self._close_connection(conn_id)
+
+    def _rl_is_frozen(self, conn_id: str) -> bool:
+        """True while the connection is fault-frozen (kept open, reads skipped)."""
+        return bool(self._fault_state.get(conn_id, {}).get("frozen"))
+
+    async def _rl_read_next_frame(self, reader: asyncio.StreamReader, conn_id: str) -> Optional[Dict[str, Any]]:
+        """Wait through the fault-freeze window, then read one frame.
+
+        Polls while the connection is fault-frozen. A stop during the wait
+        yields None (so the caller breaks); a cancellation during the freeze
+        wait propagates to the loop's CancelledError arm, which tears the
+        connection down - the same outcome as the old inline `break`.
+        """
+        while self._rl_is_frozen(conn_id):
+            # Fault: freeze connection (skip reading frames but keep connection open)
+            await asyncio.sleep(0.2)
+            if self._stop_event.is_set():
+                return None
+        return await self._read_frame(reader, conn_id)
+
+    def _rl_rx_diagnostics(self, conn_id: str, frame: Dict[str, Any]) -> None:
+        """Ordering diagnostics (lightweight): warn once if gap or reorder detected."""
+        try:
+            rseq = int(frame.get("seq") or 0)
+            last = self._rx_last_seq.get(conn_id)
+            if last is not None:
+                if rseq <= last and not self._rx_order_warned.get(conn_id):
+                    self.logger.warning("[%s] Out-of-order frame seq=%s last=%s", conn_id, rseq, last)
+                    self._rx_order_warned[conn_id] = True
+                elif rseq > last + 1 and not self._rx_order_warned.get(conn_id):
+                    self.logger.warning("[%s] Sequence gap detected seq=%s last=%s", conn_id, rseq, last)
+                    self._rx_order_warned[conn_id] = True
+            self._rx_last_seq[conn_id] = rseq
+        except Exception:  # justification: RX diagnostics best-effort; do not disrupt processing
+            pass
+
+    async def _rl_send_auth_required(self, writer_obj: asyncio.StreamWriter, conn_id: str) -> None:
+        """Send an AUTH:REQUIRED control notice for an unauthenticated frame."""
+        try:
+            seq = self._next_frame_seq(conn_id)
+            notice = self.proto.create_control_frame(0, seq, "AUTH:REQUIRED")
+            await self._send_protocol_frame(writer_obj, notice)
+        except Exception:
+            # justification: advisory notice; unauthenticated frames are rejected anyway
+            pass
+
+    async def _rl_handle_control(self, conn_id: str, writer_obj: asyncio.StreamWriter, frame: Dict[str, Any]) -> None:
+        # Update last_seen on control activity
+        try:
+            if conn_id in self.connections:
+                now_ts = time.time()
+                self.connections[conn_id]["last_seen"] = now_ts
+                key = self._derive_peer_key_from_conn_id(conn_id)
+                grp = self._mpath_groups.get(key)
+                if grp and conn_id in grp["conns"]:
+                    grp["conns"][conn_id]["last_seen"] = now_ts
+                    grp["conns"][conn_id]["last_rx_seen"] = now_ts
+                # Recompute proxy live-state for this peer after activity
+                try:
+                    self._update_peer_proxies_live_state(key)
+                except Exception:
+                    pass
+        except Exception:  # justification: last_seen updates are advisory; ignore failures
+            pass
+        text = (frame.get("payload") or b"").decode("utf-8", errors="ignore")
+        await self._process_control_command(conn_id, writer_obj, text)
+
+    async def _rl_handle_data(self, conn_id: str, writer_obj: asyncio.StreamWriter, frame: Dict[str, Any]) -> None:
+        # Require authentication before processing data frames
+        if not self._is_conn_authenticated(conn_id):
+            await self._rl_send_auth_required(writer_obj, conn_id)
+            return
+        # Update last_seen on data activity
+        try:
+            if conn_id in self.connections:
+                now_ts = time.time()
+                self.connections[conn_id]["last_seen"] = now_ts
+                key = self._derive_peer_key_from_conn_id(conn_id)
+                grp = self._mpath_groups.get(key)
+                if grp and conn_id in grp["conns"]:
+                    grp["conns"][conn_id]["last_seen"] = now_ts
+                    grp["conns"][conn_id]["last_rx_seen"] = now_ts
+                # Recompute proxy live-state for this peer after activity
+                try:
+                    self._update_peer_proxies_live_state(key)
+                except Exception:
+                    pass
+        except Exception:  # justification: last_seen refresh is advisory; ignore errors to keep data path hot
+            pass
+        stream_id = frame.get("stream_id")
+        payload = frame.get("payload") or b""
+        # MPH embedding removed: sequence numbers now in frame header universally
+        # Ensure stream_id is an int before routing
+        try:
+            sid = int(stream_id) if stream_id is not None else 0
+        except Exception:  # justification: invalid stream id; default to 0 for safe routing
+            sid = 0
+        seq = int(frame.get("seq") or 0)
+        # ACK immediately, then deliver in order per peer
+        await self._handle_inbound_data(conn_id, sid, payload, seq)
+        # Send data ACK (peer-level) acknowledging this seq
+        try:
+            ack_seq = self._next_frame_seq(conn_id)
+            ack = self.proto.create_ack_frame(seq, ack_seq)
+            await self._send_protocol_frame(writer_obj, ack)
+        except Exception:
+            # justification: protocol ack; the peer retransmits on timeout
+            pass
+
+    async def _rl_handle_open(self, conn_id: str, writer_obj: asyncio.StreamWriter, frame: Dict[str, Any]) -> None:
+        # Require authentication before accepting stream opens
+        if not self._is_conn_authenticated(conn_id):
+            await self._rl_send_auth_required(writer_obj, conn_id)
+            return
+        # Update last_seen on open stream
+        try:
+            if conn_id in self.connections:
+                now_ts = time.time()
+                self.connections[conn_id]["last_seen"] = now_ts
+                key = self._derive_peer_key_from_conn_id(conn_id)
+                grp = self._mpath_groups.get(key)
+                if grp and conn_id in grp["conns"]:
+                    grp["conns"][conn_id]["last_seen"] = now_ts
+                    grp["conns"][conn_id]["last_rx_seen"] = now_ts
+                # Recompute proxy live-state for this peer after activity
+                try:
+                    self._update_peer_proxies_live_state(key)
+                except Exception:
+                    pass
+        except Exception:  # justification: best-effort telemetry update; do not perturb stream open
+            pass
+        # Remote requested opening a stream to a local port name
+        try:
+            port_name = (frame.get("payload") or b"").decode("utf-8", errors="ignore").strip()
+        except Exception:  # justification: decode failure; treat as empty port name and continue
+            port_name = ""
+        self.logger.info("[%s] OPEN stream %s -> %s", conn_id, frame.get("stream_id"), port_name)
+        # Map server-initiated stream to local port (peer-scoped) and start pump back to remote
+        peer_key = self._derive_peer_key_from_conn_id(conn_id)
+        if peer_key not in self._local_session_map:
+            self._local_session_map[peer_key] = {}
+        try:
+            sid = int(frame.get("stream_id")) if frame.get("stream_id") is not None else 0
+        except Exception:  # justification: invalid stream id on OPEN; default to 0
+            sid = 0
+        await self._rl_open_session(conn_id, peer_key, sid, port_name)
+
+    async def _rl_open_session(self, conn_id: str, peer_key: str, sid: int, port_name: str) -> None:
+        """Record the stream->port mapping and register the federated client."""
+        existing_port = self._local_session_map[peer_key].get(sid)
+        if existing_port is not None and existing_port != port_name:
+            # The peer allocated the same stream id for two different
+            # ports; overwriting silently stops traffic for whichever
+            # port loses the mapping. Log loudly so this is diagnosable.
+            self.logger.warning(
+                f"[{conn_id}] Stream id {sid} reused for '{port_name}' while still mapped to "
+                f"'{existing_port}'; stopping old session for '{existing_port}'"
+            )
+            await self._stop_local_session(peer_key, sid, reason="stream_id_reused")
+        elif existing_port is not None:
+            self.logger.debug("[%s] Duplicate OPEN for stream %s -> %s; keeping existing session", conn_id, sid, port_name)
+        self._local_session_map[peer_key][sid] = port_name
+        # Register the federated stream as a real, tracked client on this
+        # (origin) port - defaulting to read-only - so PortManager's normal
+        # slot accounting/mode checks apply to federated writers exactly like
+        # local ones (issue #52). A peer must explicitly request promotion
+        # via a FEDRW frame, arbitrated below in _handle_fedrw_request().
+        if port_name:
+            pm = getattr(self, "main_port_manager", None)
+            if pm is not None:
+                try:
+                    fed_client_id = f"fed:{peer_key}:{sid}"
+                    await pm.add_client_to_port(port_name, fed_client_id, f"federation:{peer_key}", "read-only")
+                    # Also make this pseudo-client reachable through ConsoleManager's
+                    # generic demote/notify machinery, so a LOCALLY initiated
+                    # write-slot takeover against a federated holder actually demotes it
+                    # (and notifies the owning peer) instead of silently no-oping
+                    # (see ConsoleManager.take_write_slot).
+                    console_manager = getattr(self, "console_manager", None)
+                    if console_manager is not None:
+                        console_manager.register_client_port(fed_client_id, port_name)
+                        console_manager.register_client_channel(fed_client_id, self)
+                except Exception:
+                    self.logger.debug("[%s] Failed to register federated client for %s", conn_id, port_name, exc_info=True)
+        await self._rl_ensure_open_pump(conn_id, peer_key, sid, port_name, existing_port)
+
+    async def _rl_ensure_open_pump(self, conn_id: str, peer_key: str, sid: int, port_name: str, existing_port) -> None:
+        """Start (or keep) the background pump that sends local port data to remote."""
+        if port_name:
+            slot = (peer_key, sid)
+            existing_task = self._pump_tasks.get(slot)
+            if existing_task is not None and not existing_task.done() and existing_port == port_name:
+                # A pump already serves this exact slot (duplicate OPEN,
+                # or a re-OPEN of the same stream on a new path after a
+                # reconnect). Keep it: a second pump would drain the
+                # same port data_queue in parallel and roughly half of
+                # every chunk would be lost (issue #54).
+                self.logger.info("[%s] OPEN stream %s -> %s: reusing existing pump for slot", conn_id, sid, port_name)
+            else:
+                if existing_task is not None and not existing_task.done():
+                    existing_task.cancel()
+                self._pump_tasks.pop(slot, None)
+                task = asyncio.create_task(self._pump_local_port_to_remote(peer_key, sid, port_name))
+                self._pump_tasks[slot] = task
+                self._tasks.append(task)
+
+    async def _rl_handle_close(self, conn_id: str, writer_obj: asyncio.StreamWriter, frame: Dict[str, Any]) -> None:
+        # Require authentication before accepting stream closes
+        if not self._is_conn_authenticated(conn_id):
+            await self._rl_send_auth_required(writer_obj, conn_id)
+            return
+        # Update last_seen on close stream
+        try:
+            if conn_id in self.connections:
+                now_ts = time.time()
+                self.connections[conn_id]["last_seen"] = now_ts
+                key = self._derive_peer_key_from_conn_id(conn_id)
+                grp = self._mpath_groups.get(key)
+                if grp and conn_id in grp.get("conns", {}):
+                    grp["conns"][conn_id]["last_seen"] = now_ts
+                    grp["conns"][conn_id]["last_rx_seen"] = now_ts
+                try:
+                    self._update_peer_proxies_live_state(key)
+                except Exception:
+                    pass
+        except Exception:  # justification: best-effort telemetry update; safe to ignore
+            pass
+        # Close stream
+        self.logger.info("[%s] CLOSE stream %s", conn_id, frame.get("stream_id"))
+        try:
+            sid = int(frame.get("stream_id")) if frame.get("stream_id") is not None else 0
+        except Exception:  # justification: invalid stream id on CLOSE; default to 0
+            sid = 0
+        try:
+            peer_key = self._derive_peer_key_from_conn_id(conn_id)
+            if peer_key in self._session_map and sid in self._session_map[peer_key]:
+                self._session_map[peer_key].pop(sid, None)
+            # Stop the origin-side session slot: cancel the pump, drop the
+            # stream mapping and free the tracked federated client (issue #52)
+            # so its slot (read-only or read-write) is freed on this port.
+            await self._stop_local_session(peer_key, sid, reason="stream_close")
+        except Exception:  # justification: session cleanup is best-effort during close
+            pass
+
+    async def _rl_handle_heartbeat(self, conn_id: str, writer_obj: asyncio.StreamWriter, frame: Dict[str, Any]) -> None:
+        # Heartbeat command channel; treat as control with HB payload
+        self.logger.debug("[%s] HEARTBEAT FRAME", conn_id)
+        try:
+            if conn_id in self.connections:
+                now_ts = time.time()
+                self.connections[conn_id]["last_seen"] = now_ts
+                # Also refresh multipath group's last_seen so failover logic doesn't misclassify as stale
+                try:
+                    key = self._derive_peer_key_from_conn_id(conn_id)
+                    grp = self._mpath_groups.get(key)
+                    if grp and conn_id in grp.get("conns", {}):
+                        grp["conns"][conn_id]["last_seen"] = now_ts
+                        grp["conns"][conn_id]["last_rx_seen"] = now_ts
+                    # Heartbeat seen; update proxies live-state for this peer
+                    try:
+                        self._update_peer_proxies_live_state(key)
+                    except Exception:
+                        pass
+                except Exception:  # justification: mpath last_seen refresh is advisory
+                    pass
+        except Exception:  # justification: best-effort heartbeat bookkeeping; non-critical
+            pass
+        # HB frames have payload like REQ:<ts> or ACK:<ts>
+        text = (frame.get("payload") or b"").decode("utf-8", errors="ignore")
+        await self._process_control_command(conn_id, writer_obj, text)
+
+    async def _rl_handle_ack(self, conn_id: str, writer_obj: asyncio.StreamWriter, frame: Dict[str, Any]) -> None:
+        # Data ACK: payload contains acked DATA seq number
+        try:
+            acked = int((frame.get("payload") or b"").decode("utf-8", errors="ignore").strip() or 0)
+            peer_key = self._derive_peer_key_from_conn_id(conn_id)
+            buf = self._peer_sendbuf.get(peer_key)
+            if buf and acked in buf:
+                buf.pop(acked, None)
+        except Exception:
+            # justification: optional retx bookkeeping; the data was delivered
+            pass
 
     def _mpath_has_live_path(self, pk: str, now: float, stale_window: float) -> bool:
         # Whether a peer group has any non-frozen, non-stale path
