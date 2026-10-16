@@ -9,7 +9,9 @@ raw+structured terminal view IS implemented, as a vertical (left/right) split
 rather than the top/bottom stacking originally sketched below — a draggable
 `#actionTermSplitter` divider resizes an xterm.js-based `#actionTermPane`
 docked to the right of the main `#term` console (see "UI surface" and "Live
-view" notes below). Phase 4's structured-event late-join
+view" notes below). The split can also be stacked (top/bottom) from a button
+in the pane's header row so narrow displays keep the pane's full width; the
+choice is remembered per browser like the pane's width (issue #95). Phase 4's structured-event late-join
 is implemented (a port's actions catalog response includes `active_run` when
 one is in progress, the console page shows a persistent "Script running — click
 to open" strip whose click re-opens the split-pane transcript view (joining a
@@ -84,7 +86,13 @@ stays in the overlay itself. Closing the `#actionTermPane` (✕ button) only
 hides it — the run's WS stream keeps updating in the
 background, and the strip stays visible so it is clear the port's read-write
 slot is still held. The pane's width is draggable via `#actionTermSplitter` and
-persisted across reloads (`localStorage` key `omx_action_term_width`).
+persisted across reloads (`localStorage` key `omx_action_term_width`). A button
+in the pane's header row toggles the split orientation: **side** (default,
+left/right, pane width draggable) or **stack** (top/bottom, so the pane gets
+the console's full width — the better layout on narrow displays), the pane's
+height draggable in stack mode and persisted the same way (`localStorage` key
+omx_action_pane_height), and the remembered orientation is restored on the
+next open of the pane (issue #95).
 
 
 ## Objective
@@ -226,9 +234,21 @@ two panes side by side, split vertically (left/right, not top/bottom):
   a pending prompt belongs to, but is otherwise a separate, paused overlay state, not
   a step of the progress bar's own sequence.
 
-The split is a draggable divider (`#actionTermSplitter`, `cursor: col-resize`), clamped to
-`[220px, container width - 220px]` and persisted via `localStorage`. The pane is
-toggleable via its own ✕ button so it can be hidden without killing its WebSocket/Terminal
+The split is a draggable divider (`#actionTermSplitter`, `cursor: col-resize`
+in side mode, `row-resize` in stack mode), clamped to
+`[220px, container width - 220px]` (width) or `[220px, container height -
+220px]` (height) and persisted across reloads, re-applied when the pane opens.
+**Split orientation (issue #95):** a button in the pane's header row toggles
+the split between **side** (default; `#term-container` row layout, pane to the
+right, width draggable) and **stack** (column layout, pane below the console
+at full width, height draggable). On narrow displays the side split leaves the
+console too few characters wide; stack mode keeps the pane the console's full
+width. The choice is persisted under `localStorage`
+(`omx_action_pane_orientation`, restored before the pane is first shown; the
+pane's per-orientation size under `omx_action_term_width` /
+`omx_action_pane_height`). The pane's outcome banner and the operator prompt
+share its vertical space in both orientations.
+The pane is toggleable via its own ✕ button so it can be hidden without killing its WebSocket/Terminal
 instance — output keeps buffering while hidden, and a thin persistent strip ("Action
 running: `factory_reset` — step 3/8") stays visible so it's clear something is still
 active and holding the lock.

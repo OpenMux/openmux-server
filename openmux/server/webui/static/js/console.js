@@ -32,6 +32,11 @@ try {
   // Opening/closing the pane does not resize #term-container itself, so the
   // pane needs its own observer to re-fit after a display or width change.
   ro.observe(document.getElementById('actionTermPane'));
+  // The outcome banner and progress bar appear and vanish inside the pane while
+  // its outer size stays put, so the #actionTerm box they shrink (or grow) is
+  // observed directly too - a grid still fitted to the old box would otherwise
+  // overflow the pane (issue #95, stacked layout).
+  ro.observe(document.getElementById('actionTerm'));
 } catch (_) {}
 
 const qs = new URLSearchParams(window.location.search);
@@ -786,8 +791,7 @@ function openActionTermPane() {
   // and after a short delay, by which time the metrics are real.
   actionTermSplitter.style.display = 'block';
   actionTermPane.style.display = 'flex';
-  const savedWidth = parseInt(localStorage.getItem(ACTION_TERM_WIDTH_KEY), 10);
-  if (savedWidth) actionTermPane.style.width = savedWidth + 'px';
+  syncActionPaneSize(); // remembered size (or 40%/45% default) for the current orientation
   ensureActionTerm();
   fitTerminal();
   fitActionTerminal();
@@ -817,7 +821,80 @@ function closeActionTermPane() {
 }
 if (actionTermClose) actionTermClose.addEventListener('click', () => closeActionTermPane());
 
-// Draggable vertical divider between #term and #actionTermPane; width persists across reloads.
+// Split orientation (issue #95): "side" keeps the action pane to the right of
+// the console, "stack" puts it below so the pane gets the console's full width
+// - the better layout on narrow displays where the console gets too few
+// characters wide. The choice is remembered per browser (same localStorage
+// pattern as the pane size). The drag divider below follows the orientation.
+const ACTION_PANE_ORIENTATION_KEY = 'omx_action_pane_orientation';
+const ACTION_PANE_STACK_HEIGHT_KEY = 'omx_action_pane_height';
+const actionTermOrientation = document.getElementById('actionTermOrientation');
+// DevTools-style dock icons (outlined frame + filled dock bar), shown in
+// `currentColor` so they follow the .btn text color. The icon names name the
+// DOCK TARGET of a click (like Chrome DevTools), not the current layout.
+const ACTION_PANE_ICON = {
+  dockBottom: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="vertical-align:middle" aria-hidden="true">'
+    + '<rect x="1.5" y="1.5" width="13" height="13" stroke="currentColor"></rect>'
+    + '<rect x="3" y="10.5" width="10" height="3" fill="currentColor"></rect></svg>',
+  dockRight: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="vertical-align:middle" aria-hidden="true">'
+    + '<rect x="1.5" y="1.5" width="13" height="13" stroke="currentColor"></rect>'
+    + '<rect x="10.5" y="3" width="3" height="10" fill="currentColor"></rect></svg>',
+};
+// Sets the pane's inline size for the current orientation: the remembered
+// size (clamped, same bounds as the drag) or a 40% / 45% starting share.
+// "side" sizes by width (height stays auto, full container height); "stack"
+// sizes by height (width stays auto, full container width).
+function syncActionPaneSize() {
+  const container = document.getElementById('term-container');
+  const stack = actionTermPane.classList.contains('action-pane-stack');
+  const savedSize = parseInt(localStorage.getItem(stack ? ACTION_PANE_STACK_HEIGHT_KEY : ACTION_TERM_WIDTH_KEY), 10);
+  if (stack) {
+    const maxH = container.clientHeight - 220;
+    const h = savedSize ? Math.min(Math.max(220, savedSize), Math.max(220, maxH)) : Math.round(container.clientHeight * 0.45);
+    actionTermPane.style.width = 'auto';
+    actionTermPane.style.height = Math.max(220, Math.min(h, Math.max(220, maxH))) + 'px';
+  } else {
+    actionTermPane.style.removeProperty('height');
+    actionTermPane.style.width = savedSize ? Math.max(220, Math.min(savedSize, container.clientWidth - 220)) + 'px' : '40%';
+  }
+}
+function applyActionPaneOrientation(orientation, persist) {
+  if (orientation !== 'side' && orientation !== 'stack') orientation = 'side';
+  if (persist) {
+    try { localStorage.setItem(ACTION_PANE_ORIENTATION_KEY, orientation); } catch (_) {}
+  }
+  const container = document.getElementById('term-container');
+  container.classList.toggle('row', orientation === 'side');
+  container.classList.toggle('stack', orientation === 'stack');
+  actionTermPane.classList.toggle('action-pane-side', orientation === 'side');
+  actionTermPane.classList.toggle('action-pane-stack', orientation === 'stack');
+  if (actionTermOrientation) {
+    // Names the dock TARGET of a click (like Chrome DevTools), not the current
+    // layout: in side mode show "dock below", in stack mode show "dock right".
+    if (orientation === 'side') {
+      actionTermOrientation.innerHTML = ACTION_PANE_ICON.dockBottom;
+      actionTermOrientation.title = 'Dock the action pane below the console';
+    } else {
+      actionTermOrientation.innerHTML = ACTION_PANE_ICON.dockRight;
+      actionTermOrientation.title = 'Dock the action pane to the right of the console';
+    }
+  }
+  syncActionPaneSize();
+  fitTerminal();
+  fitActionTerminal();
+  requestAnimationFrame(() => { fitTerminal(); fitActionTerminal(); });
+}
+function toggleActionPaneOrientation() {
+  applyActionPaneOrientation(actionTermPane.classList.contains('action-pane-side') ? 'stack' : 'side', true);
+}
+if (actionTermOrientation) actionTermOrientation.addEventListener('click', toggleActionPaneOrientation);
+// Restore the remembered orientation before the pane is ever shown, so the
+// first open already uses it.
+applyActionPaneOrientation(localStorage.getItem(ACTION_PANE_ORIENTATION_KEY), false);
+
+// Draggable divider between #term and #actionTermPane; the sized axis follows
+// the orientation (width in side mode, height in stack mode), and the size
+// persists across reloads per orientation.
 if (actionTermSplitter) {
   let dragging = false;
   actionTermSplitter.addEventListener('mousedown', (e) => {
@@ -827,10 +904,17 @@ if (actionTermSplitter) {
   });
   window.addEventListener('mousemove', (e) => {
     if (!dragging) return;
+    const stack = actionTermPane.classList.contains('action-pane-stack');
     const containerRect = document.getElementById('term-container').getBoundingClientRect();
-    let width = containerRect.right - e.clientX;
-    width = Math.max(220, Math.min(width, containerRect.width - 220));
-    actionTermPane.style.width = width + 'px';
+    let size = stack ? containerRect.bottom - e.clientY : containerRect.right - e.clientX;
+    size = Math.max(220, Math.min(size, containerRect[stack ? 'height' : 'width'] - 220));
+    if (stack) {
+      actionTermPane.style.height = size + 'px';
+      actionTermPane.style.removeProperty('width');
+    } else {
+      actionTermPane.style.width = size + 'px';
+      actionTermPane.style.removeProperty('height');
+    }
     fitTerminal();
     fitActionTerminal();
   });
@@ -838,7 +922,9 @@ if (actionTermSplitter) {
     if (!dragging) return;
     dragging = false;
     actionTermSplitter.classList.remove('dragging');
-    try { localStorage.setItem(ACTION_TERM_WIDTH_KEY, parseInt(actionTermPane.style.width, 10)); } catch (_) {}
+    const key = actionTermPane.classList.contains('action-pane-stack') ? ACTION_PANE_STACK_HEIGHT_KEY : ACTION_TERM_WIDTH_KEY;
+    const size = parseInt(actionTermPane.classList.contains('action-pane-stack') ? actionTermPane.style.height : actionTermPane.style.width, 10);
+    try { localStorage.setItem(key, size); } catch (_) {}
   });
 }
 

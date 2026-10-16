@@ -149,6 +149,16 @@ Changes since v1.0.3 (2026-09-17).
 
 ### Web console and observability
 
+- **The Port Action split pane can now be stacked, not only side-by-side.** A
+  button in the action pane's header row toggles the split orientation:
+  **side** (default; pane docked to the right of the console, width
+  draggable) or **stack** (pane below the console at full width, height
+  draggable) — the stack layout keeps the pane from being squeezed into too
+  few characters on narrow displays. The divider flips between
+  `col-resize` and `row-resize` to match, and the remembered orientation,
+  width, and height persist across reloads in the browser (`localStorage`).
+  See `docs/design/port_actions.md` (issue #95).
+
 - **The About page shows the Debian package version for .deb installs.** A
   Debian package stamps the built wheel with the distro's upstream version
   (the tag base, e.g. `1.0.3` - the commit distance lives in the Debian
