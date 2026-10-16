@@ -208,7 +208,20 @@ class DataLogger:
         queue = self.queue
         assert queue is not None  # _ensure_task sets it before creating this task
         while True:
-            ev = await queue.get()
+            try:
+                ev = await queue.get()
+            except GeneratorExit:
+                # The loop is gone and GC is closing this coroutine; exit
+                # quietly instead of raising (issue #89).
+                return
+            except RuntimeError:
+                # `queues.Queue.get()` calls `getter.cancel()` while handling
+                # a GeneratorExit, and that `call_soon()` raises "Event loop
+                # is closed" when the task is GC'd after its loop closed
+                # (issue #89). A close() before the loop closes is the normal
+                # path; this guard covers the GC-timing race where a record()
+                # re-spawns the writer during loop teardown.
+                return
             try:
                 port_obj = getattr(ev, "port_obj", None)
                 path = self._resolve_path_for_port(ev.port, port_obj)
@@ -393,6 +406,46 @@ class DataLogger:
                     self._line_buffers.pop(key, None)
         except Exception:  # justification: stale-handle cleanup must never break records
             pass
+
+    async def close(self) -> None:
+        """Cancel the writer task and drop the loop-bound queue and file handles.
+
+        Must be awaited while the loop that owns the writer task is still
+        running, so the task can be cancelled and awaited (and its file
+        handles flushed) before that loop closes. Calling `close()` on a
+        writer that was created on a different loop is a no-op for the task
+        (it cannot be awaited across loops); its queue and task references
+        are still reset so the next `record()` on the running loop rebuilds
+        cleanly, matching `_ensure_task`'s rebuild-on-loop-swap contract.
+
+        Idempotent: safe to call when no writer was ever started, or twice.
+        """
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        task = self._task
+        if task is not None and not task.done() and (self._task_loop is None or self._task_loop is loop):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                # justification: the writer was cancelled on purpose to end the loop
+                pass
+            except Exception:
+                self.logger.error("DataLogger writer task failed to stop cleanly", exc_info=True)
+        self._task = None
+        self._task_loop = None
+        self.queue = None
+        self._queue_loop = None
+        for key, fh in list(self._files.items()):
+            try:
+                fh.close()
+            except Exception:  # justification: best-effort close of per-port handles
+                pass
+            self._files.pop(key, None)
+            self._line_buffers.pop(key, None)
 
     def _resolve_format_for_port(self, port_name: str, port_obj: Optional[Any]) -> str:
         """Resolve output format for a port.

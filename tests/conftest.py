@@ -9,6 +9,7 @@ import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 
 # Add the project root to the Python path so we can import openmux
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -27,6 +28,29 @@ logging.basicConfig(level=logging.CRITICAL)
 
 # Enable asyncio debugging
 os.environ["PYTHONASYNCIODBG"] = "1"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _drain_data_logger_on_loop_teardown():
+    """Close the DataLogger writer task during the test loop teardown (issue #89).
+
+    `DataLogger` is a process-wide singleton that keeps one writer task per
+    event loop. pytest-asyncio runs every test (sync and async alike) on a
+    fresh per-test loop and closes it right after the test, so a writer task
+    left running on that loop is destroyed by GC after the loop closes and
+    its pending `queue.get()` fires `call_soon()` on a closed loop (an
+    "Event loop is closed" unraisable attributed to an arbitrary later test).
+    pytest-asyncio drives this autouse async fixture on the same per-test
+    loop, and its teardown is verified to run while that loop is still open
+    and current, so `close()` cancels the writer task and awaits it cleanly.
+    """
+    yield
+    try:
+        from openmux.server.data_logger import DataLogger
+
+        await DataLogger.get().close()
+    except Exception:  # justification: teardown must never fail the test
+        pass
 
 
 # Optional: announce current running test to stderr to help identify hangs.

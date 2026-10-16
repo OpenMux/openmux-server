@@ -1184,6 +1184,16 @@ class OpenMuxServer:
         except Exception:
             # justification: shutdown cleanup; the stop already handles and logs its own failures
             pass
+        # Close the DataLogger writer so its task is cancelled and awaited on
+        # the still-running loop, not left to GC after the loop closes
+        # (issue #89). Idempotent; a no-op if logging was never started.
+        try:
+            from openmux.server.data_logger import DataLogger
+
+            await DataLogger.get().close()
+        except Exception:
+            # justification: shutdown cleanup; best-effort writer drain
+            pass
 
     # Full-reload phase timeouts (seconds); a hung adapter must not block the
     # reload forever (issue: hung stop/start would wedge the whole reload)

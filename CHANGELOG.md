@@ -135,6 +135,18 @@ Changes since v1.0.3 (2026-09-17).
   in the log ("Retrying MuxCon peer ... attempt N"). No config change is
   required.
 
+### Reliability fixes
+
+- **A restarted or stopped `command` port no longer abandons a live child
+  process.** `command` ports that were stopped while the previous command was
+  still running (a PTY or pipe child) left the old process running with no
+  owner: its file handles and transport outlived the server's event loop and
+  were reclaimed by the garbage collector, which printed an "Event loop is
+  closed" error to the server log. Stopping a port now always terminates the
+  child, waits for it to exit with a bounded timeout, and closes its
+  transports. A stuck child is force-killed after that timeout. No config
+  change is required.
+
 ### Web console and observability
 
 - **The About page shows the Debian package version for .deb installs.** A

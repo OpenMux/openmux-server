@@ -132,6 +132,7 @@ _SPAWN_ENV_UNWANTED = (
     "KITTY_WINDOW_ID",
     "VTE_VERSION",
 )
+_MAX_REAP_WAIT_S = 2.0
 
 
 def _spawn_build_env(port: "CommandPort") -> Dict[str, str]:
@@ -979,6 +980,11 @@ class CommandPort:
         """
         try:
             if not self.process:
+                # The process vanished before the monitor saw it; clear the run
+                # flag so an exit we never observed cannot hold the port open.
+                # (issue #89, defensive: a port left `is_running` with a
+                # disappeared child is stuck and would leak its transport.)
+                self.is_running = False
                 return
             exit_code = await self.process.wait()
             self.process_active = False
@@ -1068,15 +1074,23 @@ class CommandPort:
 
         Cleans up PTY readers, stdout tasks, writers, and resets runtime
         state to configured baseline, ready for a future restart/spawn.
-        Safe to call multiple times.
+        Safe to call multiple times. A live child is always terminated and
+        reaped, even when ``is_running`` is already false (the monitor may
+        have cleared the flag on a normal exit while the child object
+        lingers, issue #89).
         """
-        if not self.is_running:
+        # Reap a live child even when the port no longer claims to be running
+        # (the monitor may have already cleared is_running on a normal exit
+        # while the child object lingers, issue #89); a stopped port with no
+        # process makes both calls no-ops.
+        if not self.is_running and (self.process is None):
             return
         try:
-            self.state = PortState.DESTROYING
-            self.logger.info("Stopping command port %s", self.name)
-            # Cancel any pending idle-stop task first
-            self._cancel_idle_stop_task()
+            if self.is_running:
+                self.state = PortState.DESTROYING
+                self.logger.info("Stopping command port %s", self.name)
+                # Cancel any pending idle-stop task first
+                self._cancel_idle_stop_task()
             if self._monitor_task:
                 self._monitor_task.cancel()
                 self._monitor_task = None
@@ -1088,6 +1102,7 @@ class CommandPort:
                 self._read_task = None
             await self._close_stdin()
             self._terminate_process()
+            await self._reap_process()
             self.logger.info("Command port %s stopped", self.name)
         except Exception as e:
             self.logger.error("Error stopping command port %s: %s", self.name, e, exc_info=True)
@@ -1146,7 +1161,14 @@ class CommandPort:
             pass
 
     def _terminate_process(self) -> None:
-        """Terminate the child (process group for PTY ports) best-effort."""
+        """Terminate the child best-effort.
+
+        PTY children run in their own session (``os.setsid`` preexec) and are
+        killed by process group. Pipe children are plain members of the server
+        process group - a single ``terminate()`` is intentional and does not
+        use ``killpg``, which would signal the OpenMux server itself
+        (issue #89: a missed terminate leaked live ``sleep 30`` children).
+        """
         if not self.process:
             return
         try:
@@ -1156,8 +1178,67 @@ class CommandPort:
                     os.killpg(pgid, signal.SIGTERM)
                 except Exception:  # justification: fallback to terminate if killpg fails
                     self.process.terminate()
+            else:
+                self.process.terminate()
         except Exception:  # justification: process may already have exited; termination best-effort
             pass
+
+    def _force_kill(self, proc: Any) -> None:
+        """SIGKILL the child (process group for PTY ports) best-effort."""
+        try:
+            if self.use_pty:
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except Exception:  # justification: fallback to single-process kill
+                    proc.kill()
+            else:
+                proc.kill()
+        except Exception:  # justification: process may have exited between wait and kill
+            pass
+
+    async def _reap_process(self) -> None:
+        """Reap the child and close its stdio transport while the loop runs.
+
+        ``stop()`` terminates the child, but the ``BaseSubprocessTransport``
+        it owns is only closed once the child has exited AND every pipe has
+        been released. A stdin pipe that no client ever wrote (``self._writer``
+        is None, so ``_close_stdin`` is skipped) stays open forever, so the
+        transport outlives the process and is finalized by GC after the event
+        loop has already closed - surfacing an "Event loop is closed"
+        unraisable (issue #89). Awaiting the exit here and closing the
+        transport explicitly releases it while the loop is still running.
+        Escalates to SIGKILL after the bounded wait so a stuck child cannot
+        stall a stop beyond ``_MAX_REAP_WAIT_S``.
+        """
+        proc = self.process
+        if proc is None:
+            return
+        try:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=_MAX_REAP_WAIT_S)
+            except asyncio.TimeoutError:
+                self._force_kill(proc)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=_MAX_REAP_WAIT_S)
+                except asyncio.TimeoutError:
+                    self.logger.error(
+                        "Child pid %s of %s did not exit after SIGKILL; dropping transport reference",
+                        proc.pid,
+                        self.name,
+                    )
+        except Exception:  # justification: reap is best-effort cleanup during stop
+            pass
+        # A normal exit only closes the transport once all pipes are released;
+        # an unwritten stdin pipe keeps it open, so close it explicitly (also
+        # kills a still-running child, which makes the close() a safe fallback
+        # if the reaps above did not finish it).
+        transport = getattr(proc, "_transport", None)
+        if transport is not None and not transport.is_closing():
+            try:
+                transport.close()
+            except Exception:  # justification: transport may already be closed; best-effort
+                pass
 
     def _reset_stop_state(self) -> None:
         """Reset runtime state to the configured baseline after a stop."""
