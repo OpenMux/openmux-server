@@ -182,6 +182,15 @@ Changes since v1.0.3 (2026-09-17).
   gains `visibility: hidden` so an invisible sidebar can never be clickable.
   No config change is required.
 
+- **A new Port Action assignment applies without a server reload**
+  (issue #92). Adding a new action script directory or a new `action_ports`
+  grant in `server.yaml` (by hand or from the Config Editor Actions view) now
+  shows up on the port's next catalog read and next run launch. The plugin
+  re-reads the `port_actions` section from the running config on every use,
+  so a soft reload or a Config Editor save is enough - a full reload is no
+  longer required. Removing a grant or a directory also takes effect on the
+  next use. No config change is required.
+
 ## [1.0.3]
 
 Changes since v1.0.2 (2026-08-27).

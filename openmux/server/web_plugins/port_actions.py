@@ -30,6 +30,11 @@ precomputed once, so a port added later is covered without a config reload. A
 port with no grant (or an action id not listed for it) exposes no actions,
 matching the design doc's allow-list security model.
 
+The section is re-read from the running config on every use (see
+`_live_section()`), so a grant or directory saved from the Config Editor or
+picked up by a soft reload applies on the port's next use, without a server
+reload (issue #92).
+
 A grant is also the loader's scope: a script file is imported when its
 filename (without the `.py` extension) matches a grant's id - see
 `_load_catalog()`. A file whose `ACTION` id differs from its filename is not
@@ -173,6 +178,42 @@ def _sync_action_paths(actions_dirs: Optional[List[str]]) -> None:
 STATE_APP_KEY: Final = web.AppKey("openmux_port_actions_state", _PortActionsState)
 
 
+def _running_config(adapter) -> Optional[Dict[str, Any]]:
+    """Return the running server config dict, or None when unreachable.
+
+    Probes the same `console_manager` attachment points
+    `config_editor._find_config_manager()` uses: the back-reference to the
+    server (`console_manager.server.config_manager`, set by main.py) first,
+    then `console_manager.port_manager.config_manager`. The returned dict is
+    the ConfigManager's live view, so a Config Editor save or a soft reload
+    (both run `load_config`/`save_config`) is visible without any further
+    reload.
+    """
+    console_manager = getattr(adapter, "console_manager", None)
+    if console_manager is None:
+        return None
+    for holder in (getattr(console_manager, "server", None), getattr(console_manager, "port_manager", None), console_manager):
+        cm = getattr(holder, "config_manager", None)
+        cfg = getattr(cm, "config", None)
+        if isinstance(cfg, dict):
+            return cfg
+    return None
+
+
+def _live_section(adapter) -> Dict[str, Any]:
+    """Resolve the current `port_actions` section (issue #92).
+
+    Prefers the running config, where a save or a soft reload already landed;
+    falls back to the snapshot captured at `register_plugin()` time when the
+    running ConfigManager is not reachable (e.g. a bare plugin test).
+    """
+    cfg = _running_config(adapter)
+    if cfg is not None:
+        section = cfg.get("port_actions")
+        return section if isinstance(section, dict) else {}
+    return (getattr(adapter, "server_config", None) or {}).get("port_actions") or {}
+
+
 def _evict_stale_siblings(state: _PortActionsState) -> None:
     """Drop cached sibling-helper modules that no longer point at a current directory.
 
@@ -303,7 +344,27 @@ def _rebuild_catalog(
     return catalog, mtimes, errors
 
 
-def _refresh_catalog(state: _PortActionsState) -> None:
+def _apply_section(state: _PortActionsState, section: Dict[str, Any]) -> bool:
+    """Apply the live `port_actions` section to `state`; report a change.
+
+    A grant or directory added or removed in the config (saved from the
+    Config Editor or picked up by a soft reload) changes the import scope
+    (`action_ports` is the loader's scope), so the catalog must rebuild when
+    this reports a change - on the very next use, without a server reload
+    (issue #92).
+    """
+    raw_ports = section.get("action_ports") or {}
+    new_ports = {k: list(v) for k, v in raw_ports.items()} if isinstance(raw_ports, dict) else {}
+    new_dirs = _normalize_action_dirs(section.get("actions_dir"))
+    changed = (new_ports != state.action_ports) or (new_dirs != (state.actions_dir or []))
+    if changed:
+        state.action_ports = new_ports
+        state.actions_dir = new_dirs
+        logger.info("Port actions config changed (action_ports/actions_dir); catalog scope updated")
+    return changed
+
+
+def _refresh_catalog(state: _PortActionsState, section: Optional[Dict[str, Any]] = None) -> None:
     """Re-import action scripts that changed on disk, including sibling helper modules.
 
     Cheap when nothing changed: this only `stat()`s each `.py` file in the
@@ -312,17 +373,23 @@ def _refresh_catalog(state: _PortActionsState) -> None:
     re-imports the action scripts from its directory - and the file-level load
     error list (issue #43) stays current alongside the catalog. A script with
     a syntax error is logged and skipped, keeping whatever version last loaded
-    successfully. Called before serving the catalog or the health list and
-    before launching a run, so edits take effect on a script's very next use -
-    no server reload needed.
+    successfully. When `section` is given, a change to `action_ports` or
+    `actions_dir` in it also triggers a rebuild (issue #92). Called before
+    serving the catalog or the health list and before launching a run, so
+    edits take effect on a script's very next use - no server reload needed.
     """
-    if not state.actions_dir:
+    section_changed = _apply_section(state, section) if section is not None else False
+    # Cheap no-op when nothing changed on disk and no config change: a
+    # directory created after startup and an edited script both show up in the
+    # mtime scan on the next use, without a server reload. A config change
+    # always rebuilds, because a grant or directory change is a scope change
+    # the mtime map alone would not reflect (issue #92). An emptied
+    # `actions_dir` clears the catalog: a removal must not leave a stale one.
+    if not state.actions_dir and not section_changed:
         return
-    # A directory created after startup becomes importable (and loadable) on
-    # its next use, without a server reload.
     _sync_action_paths(state.actions_dir)
     current_mtimes = _catalog_file_mtimes(state.actions_dir)
-    if current_mtimes == state.script_mtimes:
+    if current_mtimes == state.script_mtimes and not section_changed:
         return
     _evict_stale_siblings(state)
     state.catalog, state.catalog_mtimes, state.load_errors = _rebuild_catalog(state, current_mtimes)
@@ -411,7 +478,7 @@ async def _handle_list_actions(request: web.Request) -> web.Response:
     state = request.app[STATE_APP_KEY]
     adapter._require_permission(request, ("read-write", "admin"))
     port_name = request.match_info["port_name"]
-    _refresh_catalog(state)
+    _refresh_catalog(state, _live_section(adapter))
     actions = [_action_summary(a) for a in _allowed_actions(state, port_name).values()]
     active_run = state.runner.get_active_run(port_name) if state.runner else None
     return web.json_response(
@@ -433,7 +500,7 @@ async def _handle_action_health(request: web.Request) -> web.Response:
     adapter = get_web_adapter(request)
     state = request.app[STATE_APP_KEY]
     adapter._require_permission(request, ("read-write", "admin"))
-    _refresh_catalog(state)
+    _refresh_catalog(state, _live_section(adapter))
     return web.json_response({"action_load_errors": _load_errors_payload(state)})
 
 
@@ -445,7 +512,7 @@ async def _handle_run_action(request: web.Request) -> web.Response:
         raise web.HTTPForbidden(text="CSRF check failed")
     port_name = request.match_info["port_name"]
     action_id = request.match_info["action_id"]
-    _refresh_catalog(state)
+    _refresh_catalog(state, _live_section(adapter))
     action = _allowed_actions(state, port_name).get(action_id)
     if action is None:
         raise web.HTTPNotFound(text="Action not available on this port")

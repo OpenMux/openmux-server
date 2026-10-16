@@ -925,7 +925,8 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         'logging.log_dir': 'restart',
         'logging.max_log_size': 'restart',
         'logging.log_backup_count': 'restart',
-        // action catalog is re-checked on every use; no reload needed
+        // action catalog is re-checked on every use; no reload needed (the
+        // action_ports table is LIVE_TABLE_ROOTS below)
         'port_actions.actions_dir': 'live',
         // Client listener: host/port/enable are material (rebind); the
         // capacity and timeout bounds are checked on the next handshake and
@@ -953,6 +954,9 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
       // connection; already-attached sessions keep their mode). If a new field is
       // added that only takes effect on port re-creation, add it here.
       const FULL_RELOAD_ONLY_COLUMNS = new Set();
+      // Table roots whose per-row fields are re-read from the live config on the
+      // next action use: no reload applies them (issue #92).
+      const LIVE_TABLE_ROOTS = new Set(['port_actions.action_ports']);
       const RELOAD_TIPS = {
         soft: 'Applied by Soft Reload (or a Full Reload).',
         full: 'Needs a Full Reload. A Soft Reload does not update this.',
@@ -964,6 +968,7 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         const v = RELOAD_REQUIREMENTS[rootId + '.' + key];
         if(v) return v;
         if(SOFT_RELOAD_TABLE_ROOTS.has(rootId)) return FULL_RELOAD_ONLY_COLUMNS.has(key) ? 'full' : 'soft';
+        if(LIVE_TABLE_ROOTS.has(rootId)) return 'live';
         return null;
       }
       function makeReloadHint(kind, tip){

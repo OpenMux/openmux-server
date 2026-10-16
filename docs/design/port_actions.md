@@ -492,7 +492,10 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
   `action_ports` from `adapter.server_config["port_actions"]` (the full raw server
   config, wired onto the `WebConsoleAdapter` by `main.py` right after adapter creation -
   see `WebConsoleAdapter.server_config` in `openmux/server/web_console.py`), not from
-  its own `web_console.plugins` entry. `openmux/server/adapters/factory.py`'s
+  its own `web_console.plugins` entry. After start, `_live_section()` re-reads the
+  section from the running ConfigManager on each use, so a saved or soft-reloaded
+  config applies without a server reload (issue #92, "Hot reload of the
+  `port_actions` section" below). `openmux/server/adapters/factory.py`'s
   fail-fast startup check treats `port_actions` as a recognized non-adapter top-level
   section (alongside `server`/`authentication`/`logging`), so a bare `port_actions:`
   section with no matching adapter plugin doesn't abort startup.
@@ -551,6 +554,15 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
    server (re)load. A script that fails to import (for example a syntax error) is logged
    and skipped, and the catalog keeps the last version of that script that loaded
    successfully.
+- **Hot reload of the `port_actions` section (issue #92)**: the same per-use
+   re-check re-reads the `port_actions` config section from the running server
+   config before every catalog listing, health listing, and run launch - the
+   ConfigManager's live view, which a Config Editor save and a soft reload both
+   already update. A grant or directory added, removed, or edited in the config
+   therefore applies on the port's very next use, with no server (re)load and
+   no browser reload of the console page. The `action_ports` grants are the
+   loader's scope, so a new grant in the saved config also imports the new
+   script file, and a removed grant drops its action from the next catalog.
 - **Action-centric layout**: `_allowed_actions()` computes a port's effective allow-list
   from `action_ports`, matching each entry's port list against the requested port name.
   A port-centric `port_actions: {port_name: [action_id, ...]}` layout was considered and

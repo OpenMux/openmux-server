@@ -11,6 +11,7 @@ from aiohttp import ClientSession, TCPConnector
 
 from openmux.server.adapters.loopback import LoopbackAdapter
 from openmux.server.auth_manager import AuthManager
+from openmux.server.config_manager import ConfigManager
 from openmux.server.console_manager import ConsoleManager
 from openmux.server.port_manager import PortManager
 from openmux.server.web_console import WebConsoleAdapter
@@ -27,6 +28,7 @@ async def _start_console(
     enable_ui: bool = False,
     max_read_write_users: int = 1,
     actions_dir=None,
+    live_config_manager=None,
 ):
     pm = PortManager([])
     loop_adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "p1", "max_read_write_users": max_read_write_users}]})
@@ -61,6 +63,12 @@ async def _start_console(
     web_adapter.server_config = config
     web_adapter.set_auth_manager(auth)
     web_adapter.set_console_manager(cm)
+    # Optional live ConfigManager reachable through the same chain main.py wires
+    # (console_manager.server.config_manager) - the running-config probe that
+    # port_actions uses to pick up saved config without a reload (issue #92).
+    if live_config_manager is not None:
+        live_config_manager.config = dict(config)
+        cm.server = type("_ServerStub", (), {"config_manager": live_config_manager})()
     assert await web_adapter.start()
     bound_port = int(web_adapter._http_site._server.sockets[0].getsockname()[1])
     return web_adapter, pm, loop_adapter, bound_port
@@ -974,6 +982,102 @@ async def test_broken_action_flagged_stale_and_error_clears_on_fix(tmp_path: Pat
                 data = await resp.json()
                 assert [a["id"] for a in data["actions"]] == ["stale_action"]
                 assert data.get("action_load_errors") == []
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_saved_action_ports_grant_applies_without_reload(tmp_path: Path):
+    """A new action script plus a new `action_ports` grant saved from the Config
+    Editor (a `save_config`/`load_config` pair, exactly what the editor's Save
+    runs) shows on the port on the next catalog request - no server reload
+    (issue #92). The running ConfigManager is the live source the plugin reads.
+    """
+    dir_custom = tmp_path / "new_action_actions"
+    dir_custom.mkdir()
+    _write_action(dir_custom, "new_action")
+
+    (tmp_path / "server.yaml").write_text("server:\n  id: test\n", encoding="utf-8")
+    (tmp_path / "authentication.yaml").write_text("users: []\n", encoding="utf-8")
+    cm = ConfigManager(str(tmp_path / "server.yaml"))
+    cm.load_config()  # establishes sidecar paths + authentication config
+    cm.config = None
+
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {}, live_config_manager=cm)
+    base = f"http://127.0.0.1:{bound_port}"
+    first = f"{base}/api/ports/p1/actions"
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            # The grant is saved: disk + in-memory live config both carry it.
+            payload = {
+                "server": {"id": "test"},
+                "port_actions": {
+                    "actions_dir": str(dir_custom),
+                    "action_ports": {"new_action": ["p1"]},
+                },
+                "authentication": {"users": USERS},
+            }
+            assert cm.save_config(payload) is True
+            cm.load_config()
+            assert cm.config["port_actions"]["action_ports"] == {"new_action": ["p1"]}
+
+            async with session.get(first, headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+            assert [a["id"] for a in data["actions"]] == ["new_action"]
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_saved_action_ports_removal_drops_action_without_reload(tmp_path: Path):
+    """Removing a grant from the live config (the editor deleting the row) also
+    applies on the next use: the port's catalog empties and the action becomes
+    unrunnable - the scope is the live `action_ports`, not a startup snapshot
+    (issue #92)."""
+    dir_custom = tmp_path / "removed_action_actions"
+    dir_custom.mkdir()
+    _write_action(dir_custom, "remove_me")
+
+    (tmp_path / "server.yaml").write_text("server:\n  id: test\n", encoding="utf-8")
+    (tmp_path / "authentication.yaml").write_text("users: []\n", encoding="utf-8")
+    cm = ConfigManager(str(tmp_path / "server.yaml"))
+    cm.load_config()
+    cm.config = None
+
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(
+        0, {"remove_me": ["p1"]}, actions_dir=[str(dir_custom)], live_config_manager=cm
+    )
+    base = f"http://127.0.0.1:{bound_port}"
+    first = f"{base}/api/ports/p1/actions"
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            # Baseline: the original save is live before the console starts serving.
+            payload = {
+                "server": {"id": "test"},
+                "port_actions": {"actions_dir": [str(dir_custom)], "action_ports": {"remove_me": ["p1"]}},
+                "authentication": {"users": USERS},
+            }
+            assert cm.save_config(payload) is True
+            cm.load_config()
+            async with session.get(first, headers=AUTH_HEADER) as resp:
+                data = await resp.json()
+            assert [a["id"] for a in data["actions"]] == ["remove_me"]
+
+            # The editor deletes the row: the live section loses the grant.
+            payload["port_actions"]["action_ports"] = {}
+            assert cm.save_config(payload) is True
+            cm.load_config()
+            async with session.get(first, headers=AUTH_HEADER) as resp:
+                data = await resp.json()
+            assert data["actions"] == []
+            # The ungranted action is no longer launchable on the port.
+            async with session.post(
+                f"{base}/api/ports/p1/actions/remove_me/run", headers=AUTH_HEADER, json={"params": {}}
+            ) as resp:
+                assert resp.status == 404
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()
