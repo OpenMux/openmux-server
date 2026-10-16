@@ -172,6 +172,16 @@ Changes since v1.0.3 (2026-09-17).
   on the server. The CLI client's old unimplemented playback `p`/`P` escape
   commands are removed. No config change is required.
 
+- **Toggling the menu now collapses the sidebar when a custom width is set**
+  (issue #91). v1.0.3 made the sidebar width user-resizable and stored the
+  chosen width as an inline style. An inline style overrides the collapse
+  rule's `width: 0`, so in any browser that had a saved width the menu only
+  faded - it never shrank, and the invisible buttons kept working. The user
+  width now reaches the element as the `--sidebar-width` custom property and
+  the collapse rule always beats the published width; the collapse rule also
+  gains `visibility: hidden` so an invisible sidebar can never be clickable.
+  No config change is required.
+
 ## [1.0.3]
 
 Changes since v1.0.2 (2026-08-27).

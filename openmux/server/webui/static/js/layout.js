@@ -3,6 +3,31 @@
   const toggle = document.getElementById('sidebarToggle');
   const KEY = 'omx_sidebar_collapsed';
 
+  // Sidebar width: user-resizable via the right-edge handle, persisted per
+  // browser (omx_sidebar_width), same drag pattern as actionTermSplitter in
+  // console.js. The min/max clamp keeps the list usable and the main pane alive.
+  const SIDEBAR_WIDTH_KEY = 'omx_sidebar_width';
+  const SIDEBAR_MIN_W = 160;
+  const SIDEBAR_MAX_W = 600;
+  // Remembered custom width in px; 0 means "no custom width, use the CSS
+  // default". The value lives in this variable, never read back from the
+  // element: the element's rendered width is not a source of truth (#91).
+  let sidebarWidth = 0;
+  function clampSidebarWidth(w) {
+      const max = Math.min(SIDEBAR_MAX_W, Math.floor(window.innerWidth * 0.6));
+      return Math.max(SIDEBAR_MIN_W, Math.min(w, max));
+  }
+  // JS never sets the element width directly: it publishes the user width
+  // as the --sidebar-width custom property and CSS does all the sizing
+  // (`.sidebar` uses the var when set; the more specific `.sidebar.collapsed`
+  // always wins with `width: 0`). A direct `style.width` write is exactly
+  // what broke the collapse in issue #91 - an inline style outranks every
+  // stylesheet rule, so a stored width made the class `width: 0` inert.
+  function applySidebarWidth() {
+      if (sidebarWidth > 0) sidebar.style.setProperty('--sidebar-width', sidebarWidth + 'px');
+      else sidebar.style.removeProperty('--sidebar-width');
+  }
+
   function setCollapsed(collapsed) {
     if (collapsed) {
       sidebar.classList.add('collapsed');
@@ -11,6 +36,7 @@
       sidebar.classList.remove('collapsed');
       localStorage.removeItem(KEY);
     }
+    applySidebarWidth();
     // Trigger resize for terminal if present
     if (window.fitTerminal) setTimeout(window.fitTerminal, 250);
   }
@@ -26,20 +52,11 @@
     });
   }
 
-  // Sidebar width: user-resizable via the right-edge handle, persisted per
-  // browser (omx_sidebar_width), same drag pattern as actionTermSplitter in
-  // console.js. The min/max clamp keeps the list usable and the main pane alive.
-  const SIDEBAR_WIDTH_KEY = 'omx_sidebar_width';
-  const SIDEBAR_MIN_W = 160;
-  const SIDEBAR_MAX_W = 600;
-  function clampSidebarWidth(w) {
-      const max = Math.min(SIDEBAR_MAX_W, Math.floor(window.innerWidth * 0.6));
-      return Math.max(SIDEBAR_MIN_W, Math.min(w, max));
-  }
   try {
       const savedW = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
-      if (savedW >= SIDEBAR_MIN_W && savedW <= SIDEBAR_MAX_W) sidebar.style.width = clampSidebarWidth(savedW) + 'px';
+      if (savedW >= SIDEBAR_MIN_W && savedW <= SIDEBAR_MAX_W) sidebarWidth = clampSidebarWidth(savedW);
   } catch (_) {}
+  applySidebarWidth();
 
   const resizeHandle = document.getElementById('sidebar-resize-handle');
   if (resizeHandle) {
@@ -51,14 +68,17 @@
       });
       document.addEventListener('mousemove', (e) => {
           if (!resizing) return;
-          sidebar.style.width = clampSidebarWidth(e.clientX) + 'px';
+          sidebarWidth = clampSidebarWidth(e.clientX);
+          applySidebarWidth();
           try { if (window.fitTerminal) window.fitTerminal(); } catch (_) {}
       });
       document.addEventListener('mouseup', () => {
           if (!resizing) return;
           resizing = false;
           sidebar.classList.remove('resizing');
-          try { localStorage.setItem(SIDEBAR_WIDTH_KEY, parseInt(sidebar.style.width, 10)); } catch (_) {}
+          if (sidebarWidth > 0) {
+              try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth)); } catch (_) {}
+          }
       });
   }
 

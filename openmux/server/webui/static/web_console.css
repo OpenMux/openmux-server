@@ -87,8 +87,15 @@ html, body { height: 100%; margin: 0; background: var(--bg-app); color: var(--te
 
 /* Layout Wrapper */
 .app-layout { display: flex; height: 100vh; overflow: hidden; }
-.sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; transition: width 0.2s ease, opacity 0.2s ease; flex-shrink: 0; white-space: nowrap; position: relative; }
-.sidebar.collapsed { width: 0; border-right: none; opacity: 0; overflow: hidden; }
+/* width: the user-selected width reaches this rule through the
+   --sidebar-width custom property that layout.js publishes on the element;
+   240px is the default while no custom width is set. */
+.sidebar { width: var(--sidebar-width, 240px); background: var(--bg-sidebar); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; transition: width 0.2s ease, opacity 0.2s ease; flex-shrink: 0; white-space: nowrap; position: relative; }
+/* The higher specificity (.sidebar.collapsed > .sidebar) is load-bearing:
+   the collapse must keep winning over the JS-published --sidebar-width
+   (issue #91). visibility: hidden keeps an invisible sidebar unclickable -
+   opacity alone still accepts clicks. */
+.sidebar.collapsed { width: 0; border-right: none; opacity: 0; overflow: hidden; visibility: hidden; }
 .main-content { flex: 1; display: flex; flex-direction: column; overflow: auto; min-width: 0; position: relative; }
 
 /* Header */
