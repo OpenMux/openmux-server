@@ -159,6 +159,16 @@ Changes since v1.0.3 (2026-09-17).
   width, and height persist across reloads in the browser (`localStorage`).
   See `docs/design/port_actions.md` (issue #95).
 
+- **Running Port Actions now open their live view automatically.** Entering
+  a port's console while an action is running opens the action pane with the
+  run's full event history and streams it live (previously only a bottom-right
+  "Script running — click to open" chip appeared; the same now happens when a
+  run starts while you are already on the port). Closing the pane (✕) keeps
+  that run closed for the tab (the chip remains as the manual reopen), and a
+  closed, still-running run no longer holds a background connection in an
+  idle tab. The user's own launched runs keep streaming after a pane close as
+  before. See `docs/design/port_actions.md` (issue #90).
+
 - **The About page shows the Debian package version for .deb installs.** A
   Debian package stamps the built wheel with the distro's upstream version
   (the tag base, e.g. `1.0.3` - the commit distance lives in the Debian

@@ -13,10 +13,10 @@ view" notes below). The split can also be stacked (top/bottom) from a button
 in the pane's header row so narrow displays keep the pane's full width; the
 choice is remembered per browser like the pane's width (issue #95). Phase 4's structured-event late-join
 is implemented (a port's actions catalog response includes `active_run` when
-one is in progress, the console page shows a persistent "Script running — click
-to open" strip whose click re-opens the split-pane transcript view (joining a
-run this tab has not yet joined), and `/ws/actions/<run_id>` replays a run's
-full structured-event history
+one is in progress, the console page then opens the split-pane transcript view
+automatically (joining, not re-launching, a run this tab has not joined yet)
+with the persistent "click to open" strip as the manual reopen after a pane
+close, and `/ws/actions/<run_id>` replays a run's full structured-event history
 before switching to live streaming) — the raw-byte scrollback ring buffer for
 a late joiner is NOT implemented, since the raw port terminal already
 broadcasts live to every attached client regardless of mode (see "Live view"
@@ -261,12 +261,16 @@ they need a way in without starting a second run:
   `action_id`, `started_at`, `status`, ...) whenever `ActionRunner.get_active_run(port_name)`
   returns a run — no separate poll/endpoint was added, and no `get_status()`/`notify_meta_updated`
   wiring was needed for this since the existing per-port actions fetch already happens at the
-  right time (page load). The console page shows a "Script running: `<name>` — click to open"
-  strip (reusing the same persistent `#actionRunStrip` chip from phase 3) when `active_run` is
-  present and this tab hasn't itself started a run; clicking it opens the action
-  pane for that run and connects to that run's WS stream (`joinActiveRun()` in
-  `console.js`) instead of starting a new run - pane only, never the run panel
-  or the params overlay (the Actions button owns that).
+  right time (page load). The console page opens the action pane automatically for a run that
+  is running on the port when a user lands on it (issue #90): it joins that run and streams
+  its full structured-event history plus live updates, instead of starting a new run
+  (`autoJoinActiveRun()`/`joinActiveRun()` in `console.js`) — pane only, never the run panel
+  or the params overlay (the Actions button owns that). A run the user closed (✕ on the pane)
+  is remembered for the tab (`sessionStorage`): the persistent `#actionRunStrip` "click to
+  open" chip stays as the manual reopen, and auto-open does not re-open that run. Newer runs
+  on the port still auto-open. Closing an auto-joined pane also drops that run's WS stream,
+  so an idle tab holds no long-lived run connection; a run this tab launched keeps streaming
+  in the background as before.
 - Joining opens the same split-pane `#actionTermPane` described in phase 3 above,
   connecting to the *same* `/ws/actions/<run_id>` the run is already using — it does not
   start a new run.
@@ -294,13 +298,15 @@ they need a way in without starting a second run:
   sending `{"type": "action_run", "event": ..., "run_id":..., "action_id":...,
   "action_name":..., "operator_client_id":...}` over the client's *existing* main port
   WebSocket (the same `OMXCTRL `-prefixed control-frame channel used for `client_mode`/
-  `meta`, not a new connection). `console.js`'s `ws.onmessage` handler shows/hides the
-  same persistent `#actionRunStrip` "click to open" chip used for late-join (above) —
-  from this viewer's perspective there's no difference between "a run was already active
-  when I opened the page" and "a run just started while I was already looking", both
-  surface the same strip. A client that already has its own `/ws/actions/<run_id>`
-  stream open (the launcher, or someone who already joined) ignores this broadcast, since
-  it's already seeing the run's real event stream directly.
+  `meta`, not a new connection). `console.js`'s `ws.onmessage` handler auto-opens the
+  action pane on `action_started` (the same path as the on-entry join, above), so from
+  this viewer's perspective there's no difference between "a run was already active when
+  I opened the page" and "a run just started while I was already looking" — both open the
+  pane; a dismissed run keeps only the persistent `#actionRunStrip` "click to open" chip.
+  On `action_finished` the handler hides the strip for a run this tab never opened itself.
+  A client that already has its own `/ws/actions/<run_id>` stream open (the launcher, or
+  someone who already joined) ignores this broadcast, since it's already seeing the run's
+  real event stream directly.
 
 ## Operator input (human-in-the-loop scripts)
 A script should be able to pause and wait on a human, not just on device output — e.g.

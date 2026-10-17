@@ -602,10 +602,11 @@ async function loadActionsCatalog() {
     actionsCatalog = Array.isArray(data.actions) ? data.actions : [];
     actionsToggle.style.display = actionsCatalog.length ? '' : 'none';
     portActiveRun = data.active_run || null;
-    if (portActiveRun && !currentActionsWs) {
+    // pendingJoinRun is kept for every auto-join path: it feeds the strip's manual
+    // reopen (the ✕ path clears the stream, so the strip must be able to rejoin).
+    if (portActiveRun) {
       pendingJoinRun = data.active_run;
-      const label = (actionsCatalog.find((a) => a.id === pendingJoinRun.action_id) || {}).name || pendingJoinRun.action_id;
-      showActionStrip(`Script running: ${label} \u2014 click to open`);
+      autoJoinActiveRun(data.active_run);
     }
   } catch (_) {
     actionsCatalog = [];
@@ -805,19 +806,31 @@ function openActionTermPane() {
   // otherwise sit on top of the pane's operator-input box.
   hideActionStrip();
 }
-// Only hides the pane - the run's WS stream keeps updating in the background (same
-// "closing only hides" pattern as the Actions overlay/persistent strip). Re-shows the
-// strip if a run is still active, since it's now the only visible "still running" cue.
+// Hides the pane. A run this tab LAUNCHED (launchedRunId) keeps streaming in the
+// background, like before. A live run this tab only auto-JOINED (issue #90) is
+// dismissed on close: it is remembered as dismissed for the tab, and a still-live
+// run's stream is dropped so the idle tab holds no long-lived connection. A
+// FINISHED run's stream is kept: it carries the run's history replay, which is the
+// transcript the strip re-shows when the pane is opened again. pendingJoinRun /
+// currentRunId keep the strip able to reopen (strip click, see its handler above).
 function closeActionTermPane() {
   actionTermSplitter.style.display = 'none';
   actionTermPane.style.display = 'none';
   setTimeout(fitTerminal, 0);
-  // The strip is the pane's reopen affordance - show it whenever there is
-  // something to reopen: a run this tab streams, or the transcript of a run
-  // this tab has watched (finish included - the strip click re-opens the
-  // pane via a history replay, see the strip handler below).
-  if (currentActionsWs) showActionStrip(lastActionStripText || 'Action running\u2026');
-  else if (currentRunId) showActionStrip(lastActionStripText || 'Action finished \u2014 click to open');
+  if (currentActionsWs && currentRunId && currentRunId !== launchedRunId) {
+    const label = (currentAction && (currentAction.name || currentAction.id)) || 'action';
+    dismissActionRun(currentRunId);
+    if (currentRunId && !currentRunFinished) {
+      closeActionRunStream();
+      showActionStrip(`Script running: ${label} \u2014 click to open`);
+    } else {
+      showActionStrip(lastActionStripText || `Action finished: ${label}`);
+    }
+  } else if (currentActionsWs) {
+    showActionStrip(lastActionStripText || 'Action running\u2026');
+  } else if (currentRunId) {
+    showActionStrip(lastActionStripText || 'Action finished \u2014 click to open');
+  }
 }
 if (actionTermClose) actionTermClose.addEventListener('click', () => closeActionTermPane());
 
@@ -984,6 +997,61 @@ function openActionRunPanel(action) {
 }
 
 actionsRunBack.addEventListener('click', () => { showActionsListView(); });
+
+// --- Auto-open the action pane on a port with a running action (issue #90) ---
+// Closing a joined pane (✕) dismisses that run: remembered per tab (sessionStorage:
+// survives a reload; a fresh tab still auto-opens) plus a still-live run's stream
+// is dropped so the idle tab holds no long-lived connection (see closeActionTermPane).
+// Capped (insertion order) to bound memory.
+const DISMISSED_ACTION_RUNS_KEY = 'omx_dismissed_action_runs';
+function _loadDismissedActionRuns() {
+  try {
+    const list = JSON.parse(sessionStorage.getItem(DISMISSED_ACTION_RUNS_KEY) || '[]');
+    return new Set(Array.isArray(list) ? list : []);
+  } catch (_) { return new Set(); }
+}
+const dismissedActionRuns = _loadDismissedActionRuns();
+// The run_id this tab launched (the Run button path, deep-link autorun included).
+// Only that run's stream survives a pane close; an auto-joined run's stream drops
+// when its pane is closed, so idle tabs do not hold long-lived run connections.
+let launchedRunId = null;
+function _persistDismissedActionRuns() {
+  try { sessionStorage.setItem(DISMISSED_ACTION_RUNS_KEY, JSON.stringify([...dismissedActionRuns])); } catch (_) {}
+}
+function dismissActionRun(runId) {
+  if (!runId) return;
+  dismissedActionRuns.add(runId);
+  while (dismissedActionRuns.size > 50) {
+    dismissedActionRuns.delete(dismissedActionRuns.values().next().value);
+  }
+  _persistDismissedActionRuns();
+}
+// Auto-open the action pane for `activeRun` (join + stream), so a running script is
+// visible the moment a user lands on the port (issue #90) - not buried in the
+// bottom-right chip. No-op when this tab already streams a run, and a dismissed
+// run falls back to the chip only.
+function autoJoinActiveRun(activeRun) {
+  // Already-streaming tabs are untouched: a join here would close the tab's own
+  // run stream (streamActionRun always resets it) and re-send the replay.
+  // Covers the launcher and any current joiner - e.g. an operator who took over
+  // the prompt and closed the pane, which must not be re-opened on a refresh.
+  if (!activeRun || currentActionsWs) return;
+  // A just-finished run: the catalog may still report it as active for a moment
+  // after the finished broadcast. Joining would re-show the pane, replay the
+  // finished transcript, then stream nothing - so skip it.
+  if (currentRunId === activeRun.run_id && currentRunFinished) return;
+  if (dismissedActionRuns.has(activeRun.run_id)) {
+    const label = (actionsCatalog.find((a) => a.id === activeRun.action_id) || {}).name || activeRun.action_id;
+    showActionStrip(`Script running: ${label} \u2014 click to open`);
+    return;
+  }
+  // joinActiveRun sets currentAction/operator and opens the pane with the full
+  // event history + live stream (the same path the strip's click uses). No floating
+  // overlay here - the pane is the visible affordance, and we don't steal focus.
+  // pendingJoinRun is deliberately kept: the strip's manual rejoin after a ✕
+  // close (which drops this stream) needs it to re-open the pane.
+  joinActiveRun(activeRun);
+}
 
 function collectActionParams() {
   const params = {};
@@ -1277,6 +1345,7 @@ async function launchCurrentAction() {
     setActionsRunStatus(`Running (run ${data.run_id})`, false);
     showActionStrip(`Action running: ${currentAction.name || currentAction.id}`);
     streamActionRun(data.run_id);
+    launchedRunId = data.run_id; // a self-launched run keeps streaming after a pane close
     currentRunOperatorClientId = myClientId; // the launcher starts out as the operator
     updateOperatorTakeOverUI();
   } catch (e) {
@@ -1336,9 +1405,9 @@ function hideActionStrip() {
 }
 // Late join (docs/design/port_actions.md "Late join"): stream a run this tab does
 // not have open yet, opening the action pane with the run's full event history
-// plus live updates. Deliberately pane-only - it does not open the overlay's
-// run panel ("properties" window), which the Actions button owns, so the strip
-// click has exactly one behavior regardless of state.
+// plus live updates. Pane only - the run panel / properties overlay stays the
+// Actions button's to open. The launcher of the run never calls this (it streams
+// via streamActionRun() directly), so this is the join path for every other tab.
 function joinActiveRun(activeRun) {
   currentAction = actionsCatalog.find((a) => a.id === activeRun.action_id) || { id: activeRun.action_id, name: activeRun.action_id, params: [] };
   streamActionRun(activeRun.run_id);
@@ -1354,7 +1423,11 @@ if (actionRunStrip) actionRunStrip.addEventListener('click', () => {
   //   - a run this tab does not stream yet -> join it (pane + full WS stream);
   //   - a finished run this tab watched -> replay its transcript (pane + history);
   //   - a run this tab already streams -> just re-show the pane.
-  if (pendingJoinRun && !currentActionsWs) { joinActiveRun(pendingJoinRun); pendingJoinRun = null; return; }
+  if (pendingJoinRun && !currentActionsWs) {
+    // A manual reopen wins over a remembered ✕ (issue #90): forget the dismissal.
+    if (pendingJoinRun.run_id) { dismissedActionRuns.delete(pendingJoinRun.run_id); _persistDismissedActionRuns(); }
+    joinActiveRun(pendingJoinRun); pendingJoinRun = null; return;
+  }
   if (!currentActionsWs && currentRunId) { streamActionRun(currentRunId); return; }
   openActionTermPane();
 });
@@ -1679,8 +1752,10 @@ function connectSelected() {
           if (currentActionsWs) return;
           if (msg.event === 'action_started') {
             pendingJoinRun = { run_id: msg.run_id, action_id: msg.action_id, operator_client_id: msg.operator_client_id };
-            const label = (actionsCatalog.find((a) => a.id === msg.action_id) || {}).name || msg.action_name || msg.action_id;
-            showActionStrip(`Script running: ${label} \u2014 click to open`);
+            // A run that starts while this viewer is already on the port auto-opens
+            // the pane too (issue #90), matching the on-entry behavior; a dismissed
+            // run keeps only the chip (autoJoinActiveRun falls back to it).
+            autoJoinActiveRun(pendingJoinRun);
           } else if (msg.event === 'action_finished' && pendingJoinRun && pendingJoinRun.run_id === msg.run_id) {
             pendingJoinRun = null;
             hideActionStrip();
