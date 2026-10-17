@@ -19,7 +19,7 @@ Usage example:
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
@@ -116,6 +116,9 @@ class DataLogger:
         self._line_buffers: Dict[str, bytearray] = {}
         # Direction filters cache: port_name -> set({'in','out'})
         self._direction_cache = {}
+        # Active log mirrors: source port name -> mirror destination port name
+        # (see set_mirror(); issue #94).
+        self._mirror_map: Dict[str, str] = {}
 
     def _default_path(self, port_name: str) -> Optional[Path]:
         """Return default log path for a port.
@@ -556,8 +559,41 @@ class DataLogger:
             except asyncio.QueueFull:
                 # justification: backpressure: dropping is the intended overflow policy
                 pass
+            mirror = self._mirror_map.get(port_name)
+            if mirror is not None:
+                # Duplicate into the mirror's log (issue #94, see set_mirror()).
+                # `replace()` builds a fresh LogEvent without the setattr'd
+                # `port_obj`, so the copy resolves to the mirror name's default
+                # path/format instead of the source port's overrides.
+                try:
+                    self.queue.put_nowait(replace(ev, port=mirror))
+                except asyncio.QueueFull:
+                    # justification: backpressure: dropping is the intended overflow policy
+                    pass
         except Exception:
             self.logger.error("Error recording data event", exc_info=True)
+
+    def set_mirror(self, src_port: str, dst_port: str) -> None:
+        """Duplicate every later record for `src_port` into `dst_port`'s log too.
+
+        Used by the Port Action runner while a script runs (issue #94) so the
+        run's own transcript file also holds the port's console stream. The
+        source port's direction filter and empty-data rule apply; the copy is
+        written under the mirror name's default path/format (it carries no port
+        object, so the source port's `log_file`/`log_format` overrides do not
+        follow). Setting a mirror replaces any existing mirror for `src_port`.
+        """
+        self._mirror_map[src_port] = dst_port
+
+    def clear_mirror(self, src_port: str, dst_port: Optional[str] = None) -> None:
+        """Remove `src_port`'s mirror; with `dst_port` given, only when it still matches.
+
+        The `dst_port` guard keeps cleanup from an ending action run safe when a
+        newer run on the same port already installed its own mirror.
+        """
+        if dst_port is not None and self._mirror_map.get(src_port) != dst_port:
+            return
+        self._mirror_map.pop(src_port, None)
 
     def invalidate_port_cache(self, port_name: str) -> None:
         """Invalidate cached direction filters for a port.

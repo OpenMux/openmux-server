@@ -173,10 +173,14 @@ class ActionSession:
 
     async def send(self, text: str) -> None:
         """Write `text` to the port as-is (no newline added)."""
+        # Log the send BEFORE issuing the write: an instant-echo port (loopback)
+        # echoes inside `write_to_port`, so logging after the await would queue
+        # the echo ahead of this line in the run's transcript (issue #94 report).
+        # The line also survives a rejected write, recording what was attempted.
+        self._debug(f"send: {_truncate(text)!r}")
         ok = await self.port_manager.write_to_port(self.port_name, text.encode("utf-8"), client_id=self.client_id)
         if not ok:
             raise ActionSessionError(f"Write to port {self.port_name} was rejected (client {self.client_id} not read-write?)")
-        self._debug(f"send: {_truncate(text)!r}")
 
     async def sendline(self, text: str) -> None:
         """Write `text` followed by a newline."""

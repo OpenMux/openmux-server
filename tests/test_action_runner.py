@@ -16,12 +16,19 @@ ECHO_PROBE_PATH = str(Path(__file__).resolve().parents[1] / "openmux" / "server"
 class DummyDataLogger:
     def __init__(self):
         self.meta_events: List[Dict[str, Any]] = []
+        self.mirror_calls: List[Any] = []
 
     def record(self, *args, **kwargs):
         pass
 
     def record_meta(self, port_name, event, client_id=None, meta=None, port_obj=None):
         self.meta_events.append({"port": port_name, "event": event, "client_id": client_id, "meta": meta})
+
+    def set_mirror(self, src_port, dst_port):
+        self.mirror_calls.append(("set", src_port, dst_port))
+
+    def clear_mirror(self, src_port, dst_port=None):
+        self.mirror_calls.append(("clear", src_port, dst_port))
 
 
 @pytest.fixture
@@ -58,7 +65,59 @@ async def test_successful_run_against_loopback_port(dummy_logger):
     # Structured events were recorded under a per-run synthetic log port name.
     events = [e for e in dummy_logger.meta_events if e["port"] == run.log_port_name]
     assert any(e["event"] == "done" for e in events)
+    # Issue #94: the run installed a port->transcript log mirror and cleared it again.
+    assert ("set", "p1", run.log_port_name) in dummy_logger.mirror_calls
+    assert ("clear", "p1", run.log_port_name) in dummy_logger.mirror_calls
     await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_transcript_mirrors_the_port_console_log(tmp_path):
+    """Issue #94: while a run is active, the port's own log stream is duplicated into
+    the run's transcript file, so the per-run file holds the device conversation too.
+    Uses the real DataLogger (tmp_path base dir) instead of the dummy."""
+    from openmux.server.data_logger import DataLogger
+
+    dl = DataLogger.get()
+    previous_base = dl.base_dir
+    dl.set_base_dir(str(tmp_path))
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    runner = ActionRunner(pm)
+    try:
+        run = await runner.start_run(action, "p1", {"text": "hello"}, username="tester")
+        assert run.status == "success"
+        # Wait for the async writer to flush every queued event, then close handles.
+        if dl.queue is not None:
+            await dl.queue.join()
+        await dl.close()
+
+        transcript = tmp_path / "ports" / f"{run.log_port_name}.log"
+        port_log = tmp_path / "ports" / "p1.log"
+        transcript_text = transcript.read_text(encoding="utf-8")
+        port_text = port_log.read_text(encoding="utf-8")
+        # The mirrored device output (loopback echo of the sent line) is in the run transcript...
+        assert "hello" in transcript_text
+        # Ordering: the `send:` debug line comes before the echoed device line - an
+        # instant-echo port echoes inside the write, so logging the send only after
+        # the write await queued the echo first (issue #94 report).
+        send_pos = transcript_text.find("send: 'hello")
+        echo_pos = transcript_text.find("hello[ENTER]")
+        assert 0 <= send_pos < echo_pos
+        # ...as are the run's own structured events and the mirrored lifecycle meta
+        # (the action client's disconnect, which the port log records after the mirror is set).
+        assert "action_started" in transcript_text
+        assert "action_finished" in transcript_text
+        assert "client_disconnected" in transcript_text
+        # The port's own log keeps its copy of the data and never gets run-only events.
+        assert "hello" in port_text
+        assert "action_finished" not in port_text
+        # The mirror is gone once the run ends.
+        assert dl._mirror_map.get("p1") is None
+    finally:
+        await dl.close()
+        dl.set_base_dir(previous_base)
+        await adapter.stop()
 
 
 @pytest.mark.asyncio

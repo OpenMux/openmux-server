@@ -157,6 +157,16 @@ Changes since v1.0.3 (2026-09-17).
 
 ### Web console and observability
 
+- **The per-run Port Action transcript now also holds the device log.** While
+  an action script runs, the port's own console stream (port output and
+  lifecycle events, subject to the port's `log_direction` filter) is now
+  duplicated into the run's transcript file under
+  `logs/ports/<port>_action_<action>_<ts>_<run_id>.log` (see
+  `docs/design/port_actions.md`, "Persisted log"). The `send:` line is now logged
+  before the write is issued, so it appears before the device's echo of that text
+  instead of after it. The port's own log file is unchanged, and the duplication
+  stops when the run ends. No config change is required (issue #94).
+
 - **The Port Action split pane can now be stacked, not only side-by-side.** A
   button in the action pane's header row toggles the split orientation:
   **side** (default; pane docked to the right of the console, width

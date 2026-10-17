@@ -83,6 +83,53 @@ def test_get_log_path_follows_base_dir(data_logger, tmp_path):
     assert data_logger.get_log_path("p1") == tmp_path / "ports" / "p1.log"
 
 
+@pytest.mark.asyncio
+async def test_mirror_duplicates_records_into_mirror_log(data_logger, tmp_path):
+    """issue #94: with a mirror set, records for the source port also land in the
+    mirror destination's file; clearing stops the duplication."""
+    data_logger.set_base_dir(str(tmp_path))
+    src = tmp_path / "ports" / "mux01.log"
+    dst = tmp_path / "ports" / "mux01_action_echo_20260101_abcd.log"
+    try:
+        data_logger.set_mirror("mux01", "mux01_action_echo_20260101_abcd")
+        data_logger.record(port_name="mux01", data=b"hello\n", direction="in", client_id="c1")
+        await data_logger.queue.join()
+        assert src.read_text(encoding="utf-8").count("hello") == 1
+        assert dst.read_text(encoding="utf-8").count("hello") == 1
+
+        # clear_mirror(dst_port=...) only clears while the destination still matches.
+        data_logger.clear_mirror("mux01", "some-other-run")
+        data_logger.record(port_name="mux01", data=b"again\n", direction="in", client_id="c1")
+        await data_logger.queue.join()
+        assert dst.read_text(encoding="utf-8").count("again") == 1
+
+        data_logger.clear_mirror("mux01", "mux01_action_echo_20260101_abcd")
+        data_logger.record(port_name="mux01", data=b"last\n", direction="in", client_id="c1")
+        await data_logger.queue.join()
+        assert src.read_text(encoding="utf-8").count("last") == 1
+        assert "last" not in dst.read_text(encoding="utf-8")
+    finally:
+        await data_logger.close()
+
+
+@pytest.mark.asyncio
+async def test_mirror_resolves_default_path_not_source_overrides(data_logger, tmp_path):
+    """issue #94: the mirrored copy carries no port object, so it lands at the mirror
+    name's default path even when the source port has a `log_file` override."""
+    data_logger.set_base_dir(str(tmp_path))
+    override = tmp_path / "elsewhere" / "custom.log"
+    port_obj = SimpleNamespaceLike(config={"log_file": str(override)})
+    try:
+        data_logger.set_mirror("mux01", "mux01_mirror_dst")
+        data_logger.record(port_name="mux01", data=b"payload\n", direction="in", client_id=None, port_obj=port_obj)
+        await data_logger.queue.join()
+        assert override.read_text(encoding="utf-8").count("payload") == 1
+        dst = tmp_path / "ports" / "mux01_mirror_dst.log"
+        assert dst.read_text(encoding="utf-8").count("payload") == 1
+    finally:
+        await data_logger.close()
+
+
 class SimpleNamespaceLike:
     """Minimal stand-in for a port object with a config dict."""
 

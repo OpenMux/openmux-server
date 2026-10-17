@@ -411,8 +411,7 @@ sends this frame after a confirmation prompt.
 `DataLogger` resolves a port's log file from either a `port_obj.config["log_file"]`
 override or the default `{log_dir}/ports/{port_name}.log` (the log dir from the
 `OPENMUX_LOG_DIR` env/file/systemd chain, dev default `logs/`), keyed by whatever `port_name`
-string is passed to `record()`. No
-DataLogger change is needed: route action traffic through
+string is passed to `record()`. Route action traffic through
 `DataLogger.get().record(port_name=run.log_port_name, ...)` to get a fully separate,
 self-contained transcript file per run
 (`{log_dir}/ports/{port_name}_action_{action_id}_{started_YYYYMMDDHHMMSS}_{run_id}.log`),
@@ -427,11 +426,26 @@ terminal view shows, not just the script's own `session.log()` calls.
 `_format_event_for_log()` renders each structured event as one line,
 mirroring `console.js`'s terminal "detail" text; keep both in sync if either changes.
 
+While a run is active, `ActionRunner._execute()` also calls
+`DataLogger.set_mirror(port_name, run.log_port_name)` (issue #94). The logger then
+duplicates every record it takes for the port — the device data lines and the
+lifecycle meta (`client_connected`/`client_disconnected` etc.) — into the run's
+transcript, not only into the port's own log file. The copy follows the port's
+`log_direction` filter; the port's own `log_file`/`log_format` overrides do not
+follow it, because the copy resolves its path/format by the mirror name alone
+(default path, default format — the same file and format the run's own events use).
+The `finally` block calls `clear_mirror(port_name, run.log_port_name)` last, after
+the action client detached, so that meta still lands in the transcript. The second
+argument keeps cleanup from an ending run safe when a newer run on the same port
+already installed its own mirror.
+
 `ActionRunner._log_debug()` writes extra debug-only lines straight to the same
 transcript file via `DataLogger.record_meta()`, bypassing `_publish()` entirely - these
 never touch `run.events` or WS subscribers, so they never reach the live console, only
 the on-disk file. Covers: the operator's answer to a `prompt()` (`operator_answered`),
-`session.send()`/`sendline()` text (`send`), `session.expect()`'s matched text or the
+`session.send()`/`sendline()` text — logged before the write is issued, so it lands
+before an instant echo of that text in the transcript; a rejected write still leaves
+the line, recording what was attempted (`send`) —, `session.expect()`'s matched text or the
 buffered-but-unmatched text at timeout (`expect_matched`/`expect_timeout`), the script's
 own `session.debug(message)` calls (untruncated, the script's own debug channel), and,
 on an unhandled script exception, the port's remaining read buffer and the full Python

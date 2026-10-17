@@ -330,6 +330,14 @@ class ActionRunner:
         port_name = run.port_name
         try:
             await self._attach_read_write(run, requesting_client_id)
+            # Issue #94: while the run holds the port, mirror the port's own log
+            # stream (device data and lifecycle meta, subject to the port's
+            # log_direction filters) into the run's transcript file, so the
+            # per-run file is a self-contained record of the device conversation.
+            try:
+                DataLogger.get().set_mirror(port_name, run.log_port_name)
+            except Exception:
+                logger.error("Failed to enable log mirroring for run %s", run.run_id, exc_info=True)
             self._notify(port_name, "action_started", run)
             self._publish(run.run_id, {"event": "action_started", "run_id": run.run_id, "ts": time.time()})
             await self._broadcast_action_run_event(run, action, "action_started")
@@ -415,6 +423,14 @@ class ActionRunner:
             )
             await self._broadcast_action_run_event(run, action, "action_finished")
             self._subscribers.pop(run.run_id, None)
+            # Last, so the action client's own detach meta still reaches the run
+            # transcript. The `log_port_name` guard leaves a newer run's mirror
+            # on the same port untouched.
+            try:
+                DataLogger.get().clear_mirror(port_name, run.log_port_name)
+            except Exception:
+                # justification: best-effort mirror teardown; the run already finished
+                logger.debug("Failed to clear log mirror for run %s", run.run_id, exc_info=True)
 
     def _federated_port(self, port_name: str) -> Optional[Any]:
         """Return the port object if `port_name` is a federated (muxcon) port, else None.

@@ -34,6 +34,12 @@ class DummyDataLogger:
     def record_meta(self, port_name, event, client_id=None, meta=None, port_obj=None):
         self.meta_events.append({"port": port_name, "event": event, "client_id": client_id, "meta": meta})
 
+    def set_mirror(self, src_port, dst_port):
+        pass
+
+    def clear_mirror(self, src_port, dst_port=None):
+        pass
+
 
 @pytest.fixture
 def dummy_logger(monkeypatch):
