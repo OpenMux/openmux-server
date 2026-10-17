@@ -1011,6 +1011,18 @@ function _loadDismissedActionRuns() {
   } catch (_) { return new Set(); }
 }
 const dismissedActionRuns = _loadDismissedActionRuns();
+// Resolves once this browser knows its own console WS `client_id` (the first
+// `client_mode` control frame after attach), or after a bounded wait when the
+// console WS never attaches. `autoJoinActiveRun()` waits on it so the run WS it
+// opens always carries the id - see the comment there. It is only consulted
+// during page load, so a one-shot with a fixed cap is enough (the cap is only a
+// fallback for a console that cannot attach at all; any later manual join already
+// has the id). The id also changes on every console reconnect (it is the per-WS
+// connection id) - later streams pick the new one up naturally.
+let _clientIdReadyResolvers = [];
+const clientIdReady = new Promise((resolve) => { _clientIdReadyResolvers.push(resolve); });
+setTimeout(() => { _clientIdReadyResolvers.splice(0).forEach((resolve) => resolve()); }, 2500);
+let clientIdDeferred = false;
 // The run_id this tab launched (the Run button path, deep-link autorun included).
 // Only that run's stream survives a pane close; an auto-joined run's stream drops
 // when its pane is closed, so idle tabs do not hold long-lived run connections.
@@ -1050,7 +1062,32 @@ function autoJoinActiveRun(activeRun) {
   // overlay here - the pane is the visible affordance, and we don't steal focus.
   // pendingJoinRun is deliberately kept: the strip's manual rejoin after a ✕
   // close (which drops this stream) needs it to re-open the pane.
-  joinActiveRun(activeRun);
+  joinActiveRunWhenIdentified(activeRun);
+}
+// Open the run stream as a joined viewer only once this browser knows its own
+// console `client_id` (see `clientIdReady` above): the run WS carries it as the
+// operator identity, and the server ignores `operator_take_over`/`operator_input`
+// frames sent over a stream opened without it. On a page load the catalog fetch
+// can beat the console WS's first `client_mode` frame, so joining straight away
+// would open a pane whose take-over/prompt answers silently do nothing. While
+// waiting, the strip is the interim cue (joinActiveRun hides it when the pane
+// opens); once identified, re-entering the normal page-load path
+// (`loadActionsCatalog` -> `autoJoinActiveRun`) re-checks everything fresh: the
+// run may have finished, been dismissed, or been joined manually in the
+// meantime. The 2500 ms `clientIdReady` fallback still joins without an id
+// (streaming works, only the operator identity is missing) - matching the old
+// behavior for a console that cannot attach at all.
+function joinActiveRunWhenIdentified(activeRun) {
+  if (myClientId) { joinActiveRun(activeRun); return; }
+  // Defer at most once per page load: once the clientIdReady cap fired with no id
+  // (the console WS never attached), join anyway so the pane still streams - only
+  // the operator identity stays missing, matching the pre-wait behavior. Without
+  // this flag the cap->relaunch below could loop forever on such a console.
+  if (clientIdDeferred) { joinActiveRun(activeRun); return; }
+  clientIdDeferred = true;
+  const label = (actionsCatalog.find((a) => a.id === activeRun.action_id) || {}).name || activeRun.action_id;
+  showActionStrip(`Script running: ${label} \u2014 click to open`);
+  clientIdReady.then(() => loadActionsCatalog());
 }
 
 function collectActionParams() {
@@ -1426,7 +1463,7 @@ if (actionRunStrip) actionRunStrip.addEventListener('click', () => {
   if (pendingJoinRun && !currentActionsWs) {
     // A manual reopen wins over a remembered ✕ (issue #90): forget the dismissal.
     if (pendingJoinRun.run_id) { dismissedActionRuns.delete(pendingJoinRun.run_id); _persistDismissedActionRuns(); }
-    joinActiveRun(pendingJoinRun); pendingJoinRun = null; return;
+    joinActiveRunWhenIdentified(pendingJoinRun); pendingJoinRun = null; return;
   }
   if (!currentActionsWs && currentRunId) { streamActionRun(currentRunId); return; }
   openActionTermPane();
@@ -1698,7 +1735,11 @@ function connectSelected() {
         }
         if (msg && msg.type === 'client_mode') {
           clientMode = (msg.mode === 'read-write') ? 'read-write' : 'read-only';
-          if (msg.client_id) myClientId = msg.client_id;
+          if (msg.client_id) {
+            myClientId = msg.client_id;
+            // Unblocks a page-load auto-join waiting on the id (see clientIdReady above).
+            if (_clientIdReadyResolvers.length) _clientIdReadyResolvers.splice(0).forEach((resolve) => resolve());
+          }
           updateCtrlMenuButtons();
           if (Array.isArray(msg.rw_holders) || msg.max_rw_users !== undefined) updateRoMenuInfo(msg.rw_holders || [], msg.max_rw_users);
           if (msg.takeover) {
