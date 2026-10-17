@@ -260,14 +260,24 @@ class ActionRunner:
         being a WS client with an identified `client_id`, matching the allow-list-only
         security model used elsewhere in this feature. The previous operator is notified
         the same way every other viewer learns about it: an `operator_changed` structured
-        event on the run's own live event stream. Returns False for an unknown/finished
-        run or an empty `new_client_id`.
+        event on the run's own live event stream.
+
+        A pending read-write restore (issue #90: the launcher was self-demoted, see
+        `_attach_read_write`) follows the role: the operator at finish is the client
+        `_detach_and_restore` promotes, so `auto_demoted_client_id` moves to
+        `new_client_id`. If the new operator disconnects before the run ends, the
+        `still_attached` check in `_detach_and_restore` leaves the slot unclaimed
+        (first-come first-served), same as before.
+
+        Returns False for an unknown/finished run or an empty `new_client_id`.
         """
         run = self.runs.get(run_id)
         if run is None or run.status != "running" or not new_client_id:
             return False
         previous = run.operator_client_id
         run.operator_client_id = new_client_id
+        if run.auto_demoted_client_id and run.auto_demoted_client_id != new_client_id:
+            run.auto_demoted_client_id = new_client_id
         self._publish(
             run_id,
             {

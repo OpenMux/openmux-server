@@ -369,7 +369,15 @@ become the operator; there is no extra permission check beyond having a `client_
 (any connected, identified viewer may take over), matching this design's
 allow-list-only security model. `console.js`'s `#actionTermTakeOver` button (shown
 only when the current client isn't the run's operator) sends this frame and shows a
-brief toast to a previous operator who just lost that role.- **Implemented**: non-operators cannot interact with a pending prompt at all, not just
+brief toast to a previous operator who just lost that role.
+A pending read-write restore follows the role (issue #90): when the launcher was
+self-demoted at launch (`auto_demoted_client_id` set), `take_over_operator()` moves
+that pending restore to the new operator. The run holds the read-write slot while it
+runs, so the transfer changes nothing mid-run; at finish,
+`_detach_and_restore()` promotes the operator at that moment. If that client
+disconnected before the run ended, its `still_attached` check skips the promotion and
+the slot stays first-come first-served, same as before.
+- **Implemented**: non-operators cannot interact with a pending prompt at all, not just
   "answers are ignored server-side" (the pre-existing security behavior) — the operator-
   input controls themselves (`#actionsOperatorInput`/Send, every button, the `<select>`/
   its Send button, every radio input/its Send button) are visually and functionally

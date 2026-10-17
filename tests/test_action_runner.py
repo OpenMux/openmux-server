@@ -382,6 +382,107 @@ async def test_take_over_operator_requires_a_client_id(dummy_logger):
     await adapter.stop()
 
 
+@pytest.mark.asyncio
+async def test_take_over_operator_moves_pending_read_write_restore(dummy_logger):
+    """Issue #90: a pending auto-restore follows the operator role - the taker-overer
+    gets the read-write slot at finish, not the original launcher."""
+    pm, adapter = await _make_pm(max_rw=1)
+    await pm.add_client_to_port("p1", client_id="human1", username="alice", mode="read-write")
+    await pm.add_client_to_port("p1", client_id="human2", username="bob", mode="read-only")
+    action = load_action_from_file(CONFIRM_PROBE_PATH)
+    console_manager = DummyConsoleManager()
+    runner = ActionRunner(pm, console_manager=console_manager)
+
+    run = runner.launch_run(action, "p1", {"text": "hello"}, username="tester", requesting_client_id="human1")
+    queue = runner.subscribe(run.run_id)
+
+    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+    while event.get("event") != "waiting_for_operator":
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+    # The launcher held the only read-write slot, so launching self-demoted it (issue #90).
+    assert run.auto_demoted_client_id == "human1"
+
+    assert runner.take_over_operator(run.run_id, "human2") is True
+    assert run.auto_demoted_client_id == "human2"
+
+    assert runner.submit_operator_input(run.run_id, "yes", requesting_client_id="human2") is True
+    task = runner._tasks.get(run.run_id)
+    if task is not None:
+        await task
+
+    assert run.status == "success"
+    assert pm.get_client_mode("human2", "p1") == "read-write"
+    assert pm.get_client_mode("human1", "p1") == "read-only"
+    restore_frames = [f for f in console_manager.frames if f["reason"] == "action_restored"]
+    assert restore_frames == [
+        {"client_id": "human2", "type": "client_mode", "ok": True, "mode": "read-write", "reason": "action_restored"}
+    ]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_take_over_operator_restore_skipped_when_taker_detaches(dummy_logger):
+    """Issue #90: if the taker-overer disconnects before the run finishes, the slot is
+    left unclaimed (first-come first-served) - the departed promise restores nobody."""
+    pm, adapter = await _make_pm(max_rw=1)
+    await pm.add_client_to_port("p1", client_id="human1", username="alice", mode="read-write")
+    await pm.add_client_to_port("p1", client_id="human2", username="bob", mode="read-only")
+    action = load_action_from_file(CONFIRM_PROBE_PATH)
+    runner = ActionRunner(pm)
+
+    run = runner.launch_run(action, "p1", {"text": "hello"}, username="tester", requesting_client_id="human1")
+    queue = runner.subscribe(run.run_id)
+
+    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+    while event.get("event") != "waiting_for_operator":
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+
+    assert runner.take_over_operator(run.run_id, "human2") is True
+    await pm.remove_client_from_port("p1", "human2")
+
+    assert runner.submit_operator_input(run.run_id, "yes", requesting_client_id="human2") is True
+    task = runner._tasks.get(run.run_id)
+    if task is not None:
+        await task
+
+    assert run.status == "success"
+    assert pm.get_client_mode("human2", "p1") is None
+    assert pm.get_client_mode("human1", "p1") == "read-only"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_take_over_operator_restore_survives_launcher_disconnect(dummy_logger):
+    """Issue #90: the pending restore belongs to the operator role, not the launcher -
+    when the launcher disconnects mid-run, the connected taker-overer still restores."""
+    pm, adapter = await _make_pm(max_rw=1)
+    await pm.add_client_to_port("p1", client_id="human1", username="alice", mode="read-write")
+    await pm.add_client_to_port("p1", client_id="human2", username="bob", mode="read-only")
+    action = load_action_from_file(CONFIRM_PROBE_PATH)
+    runner = ActionRunner(pm)
+
+    run = runner.launch_run(action, "p1", {"text": "hello"}, username="tester", requesting_client_id="human1")
+    queue = runner.subscribe(run.run_id)
+
+    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+    while event.get("event") != "waiting_for_operator":
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+
+    assert runner.take_over_operator(run.run_id, "human2") is True
+    # The launcher (original operator) disconnects; the promise must follow the role.
+    await pm.remove_client_from_port("p1", "human1")
+
+    assert runner.submit_operator_input(run.run_id, "yes", requesting_client_id="human2") is True
+    task = runner._tasks.get(run.run_id)
+    if task is not None:
+        await task
+
+    assert run.status == "success"
+    assert pm.get_client_mode("human2", "p1") == "read-write"
+    assert pm.get_client_mode("human1", "p1") is None
+    await adapter.stop()
+
+
 SETUP_WIZARD_PATH = str(
     Path(__file__).resolve().parents[1] / "openmux" / "server" / "actions" / "examples" / "setup_wizard.py"
 )

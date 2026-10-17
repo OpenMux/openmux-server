@@ -135,6 +135,14 @@ Changes since v1.0.3 (2026-09-17).
   in the log ("Retrying MuxCon peer ... attempt N"). No config change is
   required.
 
+- **Port Actions: "Take over as operator" also takes the pending read-write
+  restore.** When a run self-demoted its launcher at launch, the read-write
+  slot was restored to the launcher at finish even after another client took
+  over as operator. The pending restore now follows the operator role: the
+  operator at finish gets the slot back. If that client disconnected before
+  the run ended, the slot stays first-come first-served as before. No config
+  change is required. See `docs/design/port_actions.md` (issue #90).
+
 ### Reliability fixes
 
 - **A restarted or stopped `command` port no longer abandons a live child
