@@ -230,6 +230,20 @@ Changes since v1.0.3 (2026-09-17).
   idle tab. The user's own launched runs keep streaming after a pane close as
   before. See `docs/design/port_actions.md` (issue #90).
 
+- **A finished Port Action stays visible until its operator closes it.** The
+  pane ✕ now only hides the view for the current browser tab (it always did;
+  the tooltip and the new "Close run" button make the split explicit). A
+  finished run stays open for every viewer of the port - auto-opened on entry,
+  chip "Action finished: <status> - click to open" - until its operator
+  presses "Close run" ("Take over as operator" first for a non-operator).
+  Closing is visible to all (the pane stamps "Closed") and a new run on the
+  port auto-closes a previous open one. Run endpoints: POST
+  `/api/ports/<port>/actions/<action>/runs/<run_id>/close` and `.../takeover`;
+  the actions catalog reports the open run as `open_finished_run`. A server
+  restart clears open runs (the per-run log files stay). No config change is
+  required. See `docs/design/port_actions.md` ("Closed (acked) run state",
+  issue #90).
+
 - **The About page shows the Debian package version for .deb installs.** A
   Debian package stamps the built wheel with the distro's upstream version
   (the tag base, e.g. `1.0.3` - the commit distance lives in the Debian

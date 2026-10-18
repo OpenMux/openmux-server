@@ -68,9 +68,12 @@
             <span id="actionTermStatus" class="tag"></span>
             <!-- Split-orientation toggle (issue #95); console.js sets the DevTools-style dock icon + title -->
             <button id="actionTermOrientation" class="btn" type="button" title="Dock the action pane (below / right)" aria-label="Dock the action pane below or to the right of the console"></button>
-            <button id="actionTermTakeOver" class="btn" type="button" style="display:none" title="Become the operator who can answer this run's prompts">Take over as operator</button>
+            <button id="actionTermTakeOver" class="btn" type="button" style="display:none" title="Become the run's operator: answer its prompts while it runs, and close it after it finishes">Take over as operator</button>
             <button id="actionTermStop" class="btn" type="button" style="display:none" title="Stop this running action script">Stop</button>
-            <button id="actionTermClose" class="btn" type="button" title="Close (the run keeps going in the background)">✕</button>
+            <!-- "Close run" (issue #90 slice 2): the operator's ack that settles a finished run for
+                 every viewer. Distinct from the pane's ✕, which only hides the pane for this tab. -->
+            <button id="actionTermCloseRun" class="btn" type="button" style="display:none" title="Close this finished run for everyone. Until you do, its transcript stays visible on this port.">Close run</button>
+            <button id="actionTermClose" class="btn" type="button" title="Hide this pane (the run keeps going; a finished run stays visible here until its operator closes it)">✕</button>
           </div>
         </div>
         <!-- Optional step/percent progress bar, driven by the script's own session.progress()

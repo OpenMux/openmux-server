@@ -610,6 +610,147 @@ async def test_cancel_run_stops_a_running_action(dummy_logger):
     # The port's read-write slot is released, same as any other run outcome.
     assert pm.get_client_mode(run.client_id, "p1") is None
     assert runner.get_active_run("p1") is None
+
+
+# --- Issue #90 slice 2: a finished run stays open (visible to all) until its
+# operator closes (acks) it; closing broadcasts `action_run: closed` to the port.
+
+
+@pytest.mark.asyncio
+async def test_finished_run_stays_open_until_closed(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    runner = ActionRunner(pm)
+
+    run = await runner.start_run(action, "p1", {"text": "hi"}, username="tester")
+
+    # Finished, lock released, but the run is still the port's open run.
+    assert run.status == "success"
+    assert runner.get_active_run("p1") is None
+    assert runner.get_open_finished_run("p1") is run
+    assert run.summary()["closed"] is False
+    assert run.summary()["closed_at"] is None
+
+    assert runner.close_run("does-not-exist") == "unknown"
+    assert runner.close_run(run.run_id) == "closed"
+    assert runner.get_open_finished_run("p1") is None
+    assert run.summary()["closed"] is True
+    assert run.summary()["closed_at"] is not None
+    assert runner.close_run(run.run_id) == "already_closed"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_finished_open_run_does_not_block_new_run_and_is_auto_closed(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    console_manager = DummyConsoleManager()
+    runner = ActionRunner(pm, console_manager=console_manager)
+
+    first = await runner.start_run(action, "p1", {"text": "one"}, username="tester")
+    assert runner.get_open_finished_run("p1") is first
+
+    # Starting a new run beside a finished-unclosed one is allowed (the open run
+    # never holds the lock) and auto-closes the previous run for everyone.
+    second = runner.launch_run(action, "p1", {"text": "two"}, username="tester2")
+    assert runner.get_active_run("p1") is second
+    assert first.closed_at is not None
+    assert runner.get_open_finished_run("p1") is None
+
+    await runner._tasks[second.run_id]
+    await asyncio.sleep(0)  # let the fire-and-forget closed broadcast deliver
+
+    closed = [b for b in console_manager.broadcasts if b["event"] == "closed"]
+    assert closed == [
+        {
+            "port_name": "p1",
+            "type": "action_run",
+            "event": "closed",
+            "run_id": first.run_id,
+            "action_id": "echo_probe",
+            "closed_by": "",
+        }
+    ]
+    # The finished broadcast now carries the outcome so a tab that never joined the
+    # run can word its finished-state chip from the broadcast alone.
+    finished = [b for b in console_manager.broadcasts if b["event"] == "action_finished"]
+    assert finished[0]["status"] == "success"
+    assert finished[0]["error"] is None
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_close_run_operator_permission_matrix(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    runner = ActionRunner(pm)
+
+    run = await runner.start_run(action, "p1", {"text": "hi"}, username="tester", requesting_client_id="op1")
+    assert run.operator_client_id == "op1"
+
+    assert runner.close_run(run.run_id, requesting_client_id="other") == "denied"
+    assert run.closed_at is None  # a denied close changes nothing
+    assert runner.close_run(run.run_id, requesting_client_id="op1") == "closed"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_finished_run_without_operator_may_be_closed_by_anyone(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    runner = ActionRunner(pm)
+
+    run = await runner.start_run(action, "p1", {"text": "hi"}, username="tester")  # no client_id -> no operator
+    assert run.operator_client_id is None
+
+    assert runner.close_run(run.run_id, requesting_client_id="whoever") == "closed"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_close_run_rejects_a_still_running_run(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(SLOW_NOOP_PATH)
+    runner = ActionRunner(pm)
+
+    run = runner.launch_run(action, "p1", {"seconds": 30.0}, username="tester", requesting_client_id="op1")
+    # Wait until the script itself is running (same pattern as test_cancel_run_stops_a_
+    # running_action): cancelling while still attaching would kill _execute before the
+    # cancelled-outcome handling runs.
+    queue = runner.subscribe(run.run_id)
+    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+    while event.get("event") != "sleeping":
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+
+    assert runner.close_run(run.run_id, requesting_client_id="op1") == "running"
+    assert runner.close_run(run.run_id, requesting_client_id="other") == "running"  # status checked before operator
+
+    assert runner.cancel_run(run.run_id, requesting_client_id="op1") is True
+    await runner._tasks[run.run_id]
+    # A cancelled run is finished: it now waits open for its operator to close it.
+    assert run.status == "cancelled"
+    assert runner.get_open_finished_run("p1") is run
+    assert runner.close_run(run.run_id, requesting_client_id="op1") == "closed"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_takeover_of_finished_open_run_allows_closing(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    runner = ActionRunner(pm)
+
+    run = await runner.start_run(action, "p1", {"text": "hi"}, username="tester", requesting_client_id="op1")
+    assert runner.close_run(run.run_id, requesting_client_id="user2") == "denied"
+
+    # The ticket's path: take over the finished-open run, then close it.
+    assert runner.take_over_operator(run.run_id, "user2") is True
+    assert run.operator_client_id == "user2"
+    assert any(e.get("event") == "operator_changed" and e.get("operator_client_id") == "user2" for e in run.events)
+
+    assert runner.close_run(run.run_id, requesting_client_id="user2") == "closed"
+    # Closing is final: a closed run can no longer be taken over.
+    assert runner.take_over_operator(run.run_id, "user3") is False
     await adapter.stop()
 
 

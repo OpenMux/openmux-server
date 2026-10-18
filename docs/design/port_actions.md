@@ -30,7 +30,10 @@ force-take reassignment IS also implemented: any connected viewer can send
 (including the previous operator) learns about it via an `operator_changed`
 structured event on the run's own live event stream. A run's operator can also stop it
 mid-execution (`{"type": "cancel_run"}` on the same WebSocket, a `#actionTermStop`
-button next to the pane's close button — see "Stopping a run" below). Phase 6's
+button next to the pane's close button — see "Stopping a run" below). Issue #90's
+late-join work (auto-open on entry, slice 1) and the closed/ack run state
+(a finished run stays visible to every viewer of the port until its operator
+closes it — see "Closed (acked) run state" below, slice 2) are implemented. Phase 6's
 deep-linking is implemented: `?action=<id>` (+ bare `&<param_name>=<value>` per
 declared param, + `&autorun=1`) pre-fills and optionally auto-launches an action's run
 form on page load, going through the exact same `launchCurrentAction()`/run-API call a
@@ -305,7 +308,10 @@ they need a way in without starting a second run:
   this viewer's perspective there's no difference between "a run was already active when
   I opened the page" and "a run just started while I was already looking" — both open the
   pane; a dismissed run keeps only the persistent `#actionRunStrip` "click to open" chip.
-  On `action_finished` the handler hides the strip for a run this tab never opened itself.
+  On `action_finished` (which since issue #90 slice 2 also carries `status`/`error`) the
+  handler re-words the strip to "Action finished: <status> — click to open" for a run this
+  tab never opened itself: the finished run stays acknowledged-visible, so the chip is
+  only ever hidden by a `closed` notice (see "Closed (acked) run state" below).
   A client that already has its own `/ws/actions/<run_id>` stream open (the launcher, or
   someone who already joined) ignores this broadcast, since it's already seeing the run's
   real event stream directly.
@@ -429,6 +435,52 @@ callers are silently ignored. A viewer sends `{"type": "cancel_run"}` upstream o
 `operator_take_over`). The console page's `#actionTermStop` button (next to the pane's
 ✕ close button, hidden for non-operators the same way the operator-input controls are)
 sends this frame after a confirmation prompt.
+
+## Closed (acked) run state (issue #90 slice 2)
+A finished run used to disappear quickly: its `active_run` entry cleared, and a viewer
+that never opened the pane lost every cue. That hides the outcome from anyone who
+arrives late. A run therefore has three lifecycle states now: `running` → `finished`
+(open — `closed_at` unset) → `closed` (`closed_at` set).
+
+**Implemented** (`runner.py`, `web_plugins/port_actions.py`, `console.js`,
+`console.html.j2`):
+- **State**: `ActionRun.closed_at` marks the ack; `ActionRunner.close_run(run_id,
+  requesting_client_id=...)` returns `"closed" | "denied" | "running" |
+  "already_closed" | "unknown"`. Only the run's operator may close it; a run with no
+  operator assigned (e.g. a CLI launch via `scripts/run_action.py`) is closeable by any
+  permitted caller — the same rule `cancel_run()` uses while running.
+- **Open-finished registry**: `_execute()`'s `finally` registers the finished run in
+  `_open_finished_by_port[port]` in the same synchronous step that releases the
+  one-run-at-a-time lock. The open-finished map NEVER participates in the lock check:
+  a finished run never blocks the next launch. `get_open_finished_run(port_name)` is
+  the mirror of `get_active_run()`; runs live only in memory, so a server restart
+  clears any open run (its transcript remains in the port's log files).
+- **Auto-close**: `launch_run()` auto-closes the port's still-open finished run before
+  starting — the same settle an operator close does, including the broadcast. Clients
+  treat a close as a stamp, never a re-open trigger.
+- **Takeover of a finished run**: `take_over_operator()` also works on a finished-open
+  run (denied once closed) — the ticket's "take over as operator, then close" path. A
+  *pending read-write restore* only applies while the run is still running; a finished
+  run already restored its launcher.
+- **API**: `POST /api/ports/<port>/actions/<action>/runs/<run_id>/close` and
+  `.../takeover` (auth + CSRF + `{"client_id": ...}` body like the run endpoint; 403 on
+  a denied close, 409 on running/already-closed). They ride HTTP POSTs, not the run WS:
+  that stream closes itself right after `action_finished`, so a pane showing a finished
+  transcript usually has no open socket left. The catalog (`GET .../actions`) gained
+  `open_finished_run` (a `summary()` or `None`); `active_run` keeps meaning "running".
+- **Closed broadcast**: closing (operator or auto) fans out
+  `{"type": "action_run", "event": "closed", "run_id", "action_id", "closed_by"}` over
+  the port's main WS channel (`closed_by` is the closing client id, `""` for an
+  auto-close). The operator close fires it after the HTTP response returns; the
+  auto-close fires it as a background task. It never opens anything.
+- **Client rules**: `console.js` mirrors three separate layers — run lifecycle
+  (global), tab view (showing / chip / dismissed-this-tab), and role (operator /
+  non-operator). The pane ✕ ALWAYS means "hide for me" (it dismisses for the tab,
+  including for a finished-open run); the global action is the `#actionTermCloseRun`
+  "Close run" button. The strip shows for running AND finished runs and clears only on
+  `closed`. A closed run's shown pane stamps `Closed` (tag, no buttons, transcript stays
+  readable, toast names whether you or another user closed it); the closing click
+  auto-hides the closer's own pane. A closed run is never auto-opened again.
 
 ## Persisted log
 `DataLogger` resolves a port's log file from either a `port_obj.config["log_file"]`

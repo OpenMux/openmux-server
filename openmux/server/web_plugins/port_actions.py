@@ -481,10 +481,15 @@ async def _handle_list_actions(request: web.Request) -> web.Response:
     _refresh_catalog(state, _live_section(adapter))
     actions = [_action_summary(a) for a in _allowed_actions(state, port_name).values()]
     active_run = state.runner.get_active_run(port_name) if state.runner else None
+    open_finished_run = state.runner.get_open_finished_run(port_name) if state.runner else None
     return web.json_response(
         {
             "actions": actions,
             "active_run": active_run.summary() if active_run else None,
+            # Issue #90 slice 2: the port's finished-but-not-closed run, visible to every
+            # viewer until its operator closes (acks) it. Separate from `active_run`,
+            # which keeps meaning "running" and still gates the one-run-at-a-time lock.
+            "open_finished_run": open_finished_run.summary() if open_finished_run else None,
             "action_load_errors": _load_errors_payload(state),
         }
     )
@@ -549,6 +554,87 @@ async def _handle_list_runs(request: web.Request) -> web.Response:
     ]
     runs.sort(key=lambda r: r["started_at"], reverse=True)
     return web.json_response({"runs": runs})
+
+
+def _run_or_404(request: web.Request) -> Any:
+    """Resolve a run from the path for the close/takeover routes (issue #90 slice 2).
+
+    The path names port + action + run so the routes live under the same tree as the
+    run history; a run whose port/action differ from the path is a mismatched URL and
+    404s like an unknown run.
+    """
+    state = request.app[STATE_APP_KEY]
+    if state.runner is None:
+        raise web.HTTPServiceUnavailable(text="Action runner not initialized")
+    run = state.runner.runs.get(request.match_info["run_id"])
+    if run is None or run.port_name != request.match_info["port_name"] or run.action_id != request.match_info["action_id"]:
+        raise web.HTTPNotFound(text="Unknown run")
+    return run
+
+
+async def _request_client_id(request: web.Request) -> Optional[str]:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return body.get("client_id") if isinstance(body, dict) else None
+
+
+async def _handle_close_run(request: web.Request) -> web.Response:
+    """Close (ack) a finished run for everyone (issue #90 slice 2).
+
+    Only the run's operator may close it; a run with no operator (e.g. a CLI launch)
+    is closeable by any read-write/admin caller. Auth/CSRF match `_handle_run_action`.
+    """
+    adapter = get_web_adapter(request)
+    adapter._require_permission(request, ("read-write", "admin"))
+    if not adapter._check_csrf(request):
+        raise web.HTTPForbidden(text="CSRF check failed")
+    run = _run_or_404(request)
+    state = request.app[STATE_APP_KEY]
+    requesting_client_id = await _request_client_id(request)
+    result = state.runner.close_run(run.run_id, requesting_client_id=requesting_client_id)
+    if result == "closed":
+        # The closed notice fans out after the response: closing must not wait on
+        # console clients. Same frame as the new-run auto-close, plus who closed it.
+        asyncio.ensure_future(state.runner.broadcast_run_closed(run, requesting_client_id))
+        return web.json_response({"ok": True, "run_id": run.run_id, "closed_at": run.closed_at})
+    if result == "denied":
+        return web.json_response(
+            {"error": True, "message": "Only the run's operator can close it; take over as operator first"},
+            status=403,
+        )
+    if result == "running":
+        return web.json_response({"error": True, "message": "The run is still running; stop it first"}, status=409)
+    if result == "already_closed":
+        return web.json_response({"error": True, "message": "The run is already closed"}, status=409)
+    raise web.HTTPNotFound(text="Unknown run")
+
+
+async def _handle_takeover_finished_run(request: web.Request) -> web.Response:
+    """Take over a finished-but-not-closed run to become the client allowed to close it
+    (issue #90 slice 2). Mirrors the WS `operator_take_over` frame, which a finished
+    run no longer has a stream to carry (its run WS closes after `action_finished`).
+    A still-running run answers 409 pointing at that existing WS path.
+    """
+    adapter = get_web_adapter(request)
+    adapter._require_permission(request, ("read-write", "admin"))
+    if not adapter._check_csrf(request):
+        raise web.HTTPForbidden(text="CSRF check failed")
+    run = _run_or_404(request)
+    state = request.app[STATE_APP_KEY]
+    requesting_client_id = await _request_client_id(request)
+    if not requesting_client_id:
+        raise web.HTTPBadRequest(text="client_id is required")
+    if run.status == "running":
+        return web.json_response(
+            {"error": True, "message": "The run is still running; take over over its run stream instead"},
+            status=409,
+        )
+    if run.closed_at is not None:
+        return web.json_response({"error": True, "message": "The run is already closed"}, status=409)
+    state.runner.take_over_operator(run.run_id, requesting_client_id)
+    return web.json_response({"ok": True, "run_id": run.run_id, "operator_client_id": run.operator_client_id})
 
 
 def _dispatch_run_ws_frame(
@@ -673,6 +759,10 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     app.router.add_get(base, _handle_list_actions)
     app.router.add_post(base + "/{action_id}/run", _handle_run_action)
     app.router.add_get(base + "/{action_id}/runs", _handle_list_runs)
+    # Issue #90 slice 2: close (ack) / takeover of a finished run ride HTTP POSTs, not
+    # the run WS - that stream closes itself right after `action_finished`.
+    app.router.add_post(base + "/{action_id}/runs/{run_id}/close", _handle_close_run)
+    app.router.add_post(base + "/{action_id}/runs/{run_id}/takeover", _handle_takeover_finished_run)
     app.router.add_get("/ws/actions/{run_id}", _handle_ws_run_events)
     # Portless: the load errors are directory-scoped, not port-scoped (issue #43).
     app.router.add_get("/api/port-actions/health", _handle_action_health)

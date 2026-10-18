@@ -572,6 +572,15 @@ let pendingJoinRun = null;
 // Gates the Run button: while the port has a run, starting another one must be
 // blocked client-side (the server still enforces it with a 400 for other tabs).
 let portActiveRun = null;
+// The port's finished-but-not-closed run (catalog `open_finished_run`, issue #90
+// slice 2). A finished run stays visible to every viewer of the port until its
+// operator closes (acks) it; this drives the pane's "Close run" button and the
+// finished-state auto-open/chip. Separate from portActiveRun, which keeps meaning
+// "running" and still gates the Run button.
+let portOpenFinishedRun = null;
+// Whether the run currently shown in the pane has been closed/acked - its buttons
+// stay hidden and its transcript just stays readable (issue #90 slice 2).
+let currentRunClosed = false;
 
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -602,16 +611,24 @@ async function loadActionsCatalog() {
     actionsCatalog = Array.isArray(data.actions) ? data.actions : [];
     actionsToggle.style.display = actionsCatalog.length ? '' : 'none';
     portActiveRun = data.active_run || null;
+    portOpenFinishedRun = data.open_finished_run || null;
     // pendingJoinRun is kept for every auto-join path: it feeds the strip's manual
     // reopen (the ✕ path clears the stream, so the strip must be able to rejoin).
     if (portActiveRun) {
       pendingJoinRun = data.active_run;
       autoJoinActiveRun(data.active_run);
+    } else if (portOpenFinishedRun) {
+      // Issue #90 slice 2: a finished-but-unclosed run opens the pane here too, so a
+      // user arriving after the script ended still sees transcript + outcome until
+      // the operator closes it. Manual join via the strip; ✕ dismisses (slice-1 rules).
+      pendingJoinRun = portOpenFinishedRun;
+      autoShowOpenFinishedRun(portOpenFinishedRun);
     }
   } catch (_) {
     actionsCatalog = [];
     actionsToggle.style.display = 'none';
     portActiveRun = null;
+    portOpenFinishedRun = null;
   }
   updateActionsRunButton();
 }
@@ -680,6 +697,9 @@ function setActionTag(text, colorClass) {
 }
 const actionTermTakeOver = document.getElementById('actionTermTakeOver');
 const actionTermStop = document.getElementById('actionTermStop');
+// "Close run" (issue #90 slice 2): the global ack of a finished run - distinct from the
+// pane's ✕, which only hides the pane for this tab.
+const actionTermCloseRun = document.getElementById('actionTermCloseRun');
 const actionTermClose = document.getElementById('actionTermClose');
 // Prominent run-outcome banner (GitHub issue feedback: the small actionTermStatus tag
 // alone wasn't obvious enough) - populated/shown only once action_finished arrives.
@@ -727,8 +747,12 @@ const ACTION_TERM_WIDTH_KEY = 'omx_action_term_width';
 // operator_input frames the running script accepts, notified to everyone via the
 // `operator_changed` event so a previous operator learns they lost that role live.
 function updateOperatorTakeOverUI() {
+  // A finished-but-not-closed run shown in this pane (issue #90 slice 2): the run WS
+  // is gone by now, so button visibility keys off portOpenFinishedRun, not the stream.
+  const openFinishedShown = !!portOpenFinishedRun && portOpenFinishedRun.run_id === currentRunId && !currentRunClosed;
   if (actionTermTakeOver) {
-    const show = !!currentActionsWs && !!currentRunOperatorClientId && currentRunOperatorClientId !== myClientId;
+    const show = (!!currentActionsWs || openFinishedShown)
+      && !!currentRunOperatorClientId && currentRunOperatorClientId !== myClientId;
     actionTermTakeOver.style.display = show ? '' : 'none';
   }
   // Stopping a run is operator-only (docs/design/port_actions.md "Stopping a run") - a
@@ -736,6 +760,10 @@ function updateOperatorTakeOverUI() {
   // Also hidden once the run has finished (see GitHub issue #46) - stopping a completed/
   // failed run makes no sense.
   if (actionTermStop) actionTermStop.style.display = (!!currentActionsWs && !currentRunFinished && isCurrentOperator()) ? '' : 'none';
+  // Closing (acking) a finished run (issue #90 slice 2): operator only (or any user
+  // when no operator was ever assigned, e.g. a CLI launch); hidden once the run is
+  // closed - closing is final.
+  if (actionTermCloseRun) actionTermCloseRun.style.display = (openFinishedShown && isCurrentOperator()) ? '' : 'none';
   applyOperatorInputDisabledState();
 }
 
@@ -758,9 +786,72 @@ function applyOperatorInputDisabledState() {
   if (actionsOperatorRadioEl) actionsOperatorRadioEl.querySelectorAll('input').forEach((r) => { r.disabled = !enabled; });
   if (actionsOperatorReadonlyNote) actionsOperatorReadonlyNote.style.display = enabled ? 'none' : '';
 }
+function markRunClosed(runId, hidePaneForCloser) {
+  // Stamp a closed (acked) run (issue #90 slice 2): pending cues disappear, open
+  // panes show the "Closed" tag with no buttons (transcript stays readable), and a
+  // closing click hides the closer's own pane - the run is settled for everyone.
+  let affected = false;
+  if (portOpenFinishedRun && portOpenFinishedRun.run_id === runId) { portOpenFinishedRun = null; affected = true; }
+  if (pendingJoinRun && pendingJoinRun.run_id === runId) { pendingJoinRun = null; hideActionStrip(); affected = true; }
+  if (currentRunId === runId && !currentRunClosed) {
+    currentRunClosed = true;
+    setActionTag('Closed', 'muted');
+    hideOperatorPrompt();
+    updateOperatorTakeOverUI();
+    affected = true;
+  }
+  if (affected && hidePaneForCloser) closeActionTermPane();
+  return affected;
+}
+
 if (actionTermTakeOver) actionTermTakeOver.addEventListener('click', () => {
-  if (!currentActionsWs || currentActionsWs.readyState !== WebSocket.OPEN) return;
-  try { currentActionsWs.send(JSON.stringify({ type: 'operator_take_over' })); } catch (_) {}
+  if (currentActionsWs && currentActionsWs.readyState === WebSocket.OPEN) {
+    // A live run: the takeover rides the run's own stream (existing path).
+    try { currentActionsWs.send(JSON.stringify({ type: 'operator_take_over' })); } catch (_) {}
+    return;
+  }
+  // A finished-but-not-closed run (issue #90 slice 2): its run WS is gone, so the
+  // takeover rides the same HTTP POST as the close it unlocks.
+  if (!currentRunId || !currentAction || !portOpenFinishedRun || portOpenFinishedRun.run_id !== currentRunId) return;
+  const port = currentPort();
+  if (!port) return;
+  fetch(`${getBasePath()}/api/ports/${encodeURIComponent(port)}/actions/${encodeURIComponent(currentAction.id)}/runs/${encodeURIComponent(currentRunId)}/takeover`, {
+    method: 'POST', credentials: 'same-origin', headers: actionsHeaders(), body: JSON.stringify({ client_id: myClientId }),
+  }).then(async (res) => {
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      currentRunOperatorClientId = myClientId;
+      if (portOpenFinishedRun && portOpenFinishedRun.run_id === currentRunId) {
+        portOpenFinishedRun = Object.assign({}, portOpenFinishedRun, { operator_client_id: myClientId });
+      }
+      showActionToast('You are now the operator of this run');
+      updateOperatorTakeOverUI();
+      return;
+    }
+    if (res.status === 409) { markRunClosed(currentRunId); showActionToast(data.message || 'The run is already closed'); }
+    else showActionToast(data.message || `Take over failed (${res.status})`);
+  }).catch((e) => showActionToast(`Take over failed: ${e}`));
+});
+if (actionTermCloseRun) actionTermCloseRun.addEventListener('click', () => {
+  // Close (ack) the finished run for everyone (issue #90 slice 2). Auth/CSRF match the
+  // launch POST; the shared `closed` broadcast stamps any other tab that shows it.
+  if (!currentRunId || !currentAction || !portOpenFinishedRun || portOpenFinishedRun.run_id !== currentRunId) return;
+  const port = currentPort();
+  if (!port) return;
+  fetch(`${getBasePath()}/api/ports/${encodeURIComponent(port)}/actions/${encodeURIComponent(currentAction.id)}/runs/${encodeURIComponent(currentRunId)}/close`, {
+    method: 'POST', credentials: 'same-origin', headers: actionsHeaders(), body: JSON.stringify({ client_id: myClientId }),
+  }).then(async (res) => {
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      // The closer's own pane auto-hides (the run is settled; the transcript lives on
+      // in the port's logs). Any 409 here means someone else closed it first.
+      markRunClosed(currentRunId, true);
+      return;
+    }
+    if (res.status === 403) showActionToast(data.message || 'Only the run\u2019s operator can close it \u2014 take over as operator first');
+    else if (res.status === 409) { markRunClosed(currentRunId); showActionToast(data.message || 'The run is already closed'); }
+    else showActionToast(data.message || `Close failed (${res.status})`);
+  }).catch((e) => showActionToast(`Close failed: ${e}`));
 });
 if (actionTermStop) actionTermStop.addEventListener('click', () => {
   if (!currentActionsWs || currentActionsWs.readyState !== WebSocket.OPEN) return;
@@ -817,6 +908,11 @@ function closeActionTermPane() {
   actionTermSplitter.style.display = 'none';
   actionTermPane.style.display = 'none';
   setTimeout(fitTerminal, 0);
+  if (currentRunClosed) {
+    // A closed (acked) run leaves no chip behind for anyone (issue #90 slice 2).
+    hideActionStrip();
+    return;
+  }
   if (currentActionsWs && currentRunId && currentRunId !== launchedRunId) {
     const label = (currentAction && (currentAction.name || currentAction.id)) || 'action';
     dismissActionRun(currentRunId);
@@ -829,6 +925,12 @@ function closeActionTermPane() {
   } else if (currentActionsWs) {
     showActionStrip(lastActionStripText || 'Action running\u2026');
   } else if (currentRunId) {
+    // A finished-but-unclosed run this tab only joined (issue #90 slice 2): its stream
+    // already ended, so the branch above never fired - record the ✕ here, or a reload
+    // would auto-open the same run forever and break the dismissal promise.
+    if (portOpenFinishedRun && portOpenFinishedRun.run_id === currentRunId && currentRunId !== launchedRunId) {
+      dismissActionRun(currentRunId);
+    }
     showActionStrip(lastActionStripText || 'Action finished \u2014 click to open');
   }
 }
@@ -1077,7 +1179,7 @@ function autoJoinActiveRun(activeRun) {
 // meantime. The 2500 ms `clientIdReady` fallback still joins without an id
 // (streaming works, only the operator identity is missing) - matching the old
 // behavior for a console that cannot attach at all.
-function joinActiveRunWhenIdentified(activeRun) {
+function joinActiveRunWhenIdentified(activeRun, chipText) {
   if (myClientId) { joinActiveRun(activeRun); return; }
   // Defer at most once per page load: once the clientIdReady cap fired with no id
   // (the console WS never attached), join anyway so the pane still streams - only
@@ -1086,8 +1188,25 @@ function joinActiveRunWhenIdentified(activeRun) {
   if (clientIdDeferred) { joinActiveRun(activeRun); return; }
   clientIdDeferred = true;
   const label = (actionsCatalog.find((a) => a.id === activeRun.action_id) || {}).name || activeRun.action_id;
-  showActionStrip(`Script running: ${label} \u2014 click to open`);
+  showActionStrip(chipText || `Script running: ${label} \u2014 click to open`);
   clientIdReady.then(() => loadActionsCatalog());
+}
+
+// Issue #90 slice 2: opening the pane for a finished-but-not-closed run works like
+// `autoJoinActiveRun()` (same per-tab guards: never interrupt a stream this tab runs,
+// never re-open a run this tab dismissed), but the interim chip words the outcome
+// instead of "running", and the run cannot start streaming anything new - the join is
+// a history replay (the run WS replays and closes after `action_finished`).
+function autoShowOpenFinishedRun(openRun) {
+  if (!openRun || currentActionsWs) return;
+  if (currentRunId === openRun.run_id && currentRunFinished) return; // already showing it
+  const label = (actionsCatalog.find((a) => a.id === openRun.action_id) || {}).name || openRun.action_id;
+  const chip = `Action finished: ${openRun.status || openRun.run_id} \u2014 click to open`;
+  if (dismissedActionRuns.has(openRun.run_id)) {
+    showActionStrip(chip);
+    return;
+  }
+  joinActiveRunWhenIdentified(openRun, chip);
 }
 
 function collectActionParams() {
@@ -1107,6 +1226,8 @@ function streamActionRun(runId) {
   closeActionRunStream();
   currentRunId = runId; // closeActionRunStream() above resets it for the old stream
   currentRunFinished = false;
+  currentRunClosed = false; // a re-streamed transcript may be of a since-closed run; the
+  // replay's action_finished + the catalog's open_finished_run re-decide the buttons
   hideActionResultBanner();
   hideActionProgressBar();
   actionTermTitle.textContent = (currentAction && (currentAction.name || currentAction.id)) || 'Action';
@@ -1174,7 +1295,17 @@ function streamActionRun(runId) {
       } else {
         setActionsRunStatus(`Finished: ${msg.status || 'unknown'}`, false);
       }
-      currentRunOperatorClientId = null;
+      // Issue #90 slice 2: the run stays open (ackable) after finishing. Record it as
+      // this port's open-finished run - transcript, outcome, and the operator who may
+      // close it - and KEEP currentRunOperatorClientId (the old reset hid the takeover
+      // path a non-operator needs to earn the right to close). The server-side close
+      // (`closed` broadcast) is what finally clears this.
+      portOpenFinishedRun = {
+        run_id: msg.run_id || currentRunId,
+        action_id: (currentAction && currentAction.id) || '',
+        operator_client_id: currentRunOperatorClientId,
+        status: msg.status,
+      };
       updateOperatorTakeOverUI();
       loadRunHistory();
       if (portActiveRun && portActiveRun.run_id === currentRunId) portActiveRun = null;
@@ -1786,9 +1917,9 @@ function connectSelected() {
           return;
         }
         if (msg && msg.type === 'action_run') {
-          // Live "script started/finished" notice for consoles that haven't joined this
-          // run themselves (see docs/design/port_actions.md "Live view") - a client that
-          // already has the run's own WS stream open handles it via streamActionRun()
+          // Live "script started/finished/closed" notice for consoles that haven't joined
+          // this run themselves (see docs/design/port_actions.md "Live view") - a client
+          // that already has the run's own WS stream open handles it via streamActionRun()
           // instead, so skip here to avoid clobbering that richer live state.
           if (currentActionsWs) return;
           if (msg.event === 'action_started') {
@@ -1798,8 +1929,31 @@ function connectSelected() {
             // run keeps only the chip (autoJoinActiveRun falls back to it).
             autoJoinActiveRun(pendingJoinRun);
           } else if (msg.event === 'action_finished' && pendingJoinRun && pendingJoinRun.run_id === msg.run_id) {
-            pendingJoinRun = null;
-            hideActionStrip();
+            // Issue #90 slice 2: the finished run stays open for every viewer until its
+            // operator closes it, so the chip is NOT hidden here - it re-words to the
+            // outcome and keeps `pendingJoinRun` so clicking it still opens the transcript.
+            portOpenFinishedRun = {
+              run_id: msg.run_id,
+              action_id: msg.action_id,
+              operator_client_id: msg.operator_client_id,
+              status: msg.status,
+            };
+            pendingJoinRun.status = msg.status;
+            showActionStrip(`Action finished: ${msg.status || 'unknown'} \u2014 click to open`);
+          } else if (msg.event === 'closed') {
+            // The run was closed/acked - by its operator, or auto-closed when a new run
+            // started (closed_by then ""). Stamp existing state only: a close NEVER
+            // re-opens anything (issue #90 slice 2).
+            const wasShown = currentRunId === msg.run_id;
+            const byMe = !!msg.closed_by && msg.closed_by === myClientId;
+            // byMe also hides this tab's own pane: whoever closed the run does not keep
+            // it open. Either order of arrival (this broadcast vs the tab's own POST
+            // response answering first) must yield exactly one auto-hide, so the flag
+            // rides here too - markRunClosed only hides while it still changes state.
+            markRunClosed(msg.run_id, byMe);
+            if (wasShown) {
+              showActionToast(byMe ? 'Run closed by you' : 'Run closed by another user');
+            }
           }
           return;
         }

@@ -44,6 +44,10 @@ class ActionRun:
     status: str = "running"  # running | success | failed | timeout | cancelled
     started_at: float = field(default_factory=time.time)
     ended_at: Optional[float] = None
+    # Set when the run's operator closes (acks) a finished run (issue #90 slice 2).
+    # A finished run with closed_at == None stays open: visible to every viewer of the
+    # port until it is closed, but it never holds the port's one-run-at-a-time lock.
+    closed_at: Optional[float] = None
     error: Optional[str] = None
     auto_demoted_client_id: Optional[str] = None
     exception: Optional[BaseException] = field(default=None, repr=False, compare=False)
@@ -74,6 +78,8 @@ class ActionRun:
             "status": self.status,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
+            "closed_at": self.closed_at,
+            "closed": self.closed_at is not None,
             "error": self.error,
             "operator_client_id": self.operator_client_id,
         }
@@ -118,6 +124,9 @@ class ActionRunner:
         self.console_manager = console_manager
         self.runs: Dict[str, ActionRun] = {}
         self._active_by_port: Dict[str, str] = {}
+        # The port's finished-but-not-yet-closed run (issue #90 slice 2), kept separate
+        # from _active_by_port so it never participates in the one-run-per-port lock check.
+        self._open_finished_by_port: Dict[str, str] = {}
         self._tasks: Dict[str, "asyncio.Task[None]"] = {}
         self._subscribers: Dict[str, list] = {}
         self._sessions: Dict[str, ActionSession] = {}
@@ -125,6 +134,16 @@ class ActionRunner:
     def get_active_run(self, port_name: str) -> Optional[ActionRun]:
         """Return the in-progress `ActionRun` for `port_name`, if any."""
         run_id = self._active_by_port.get(port_name)
+        return self.runs.get(run_id) if run_id else None
+
+    def get_open_finished_run(self, port_name: str) -> Optional[ActionRun]:
+        """Return the port's finished-but-not-closed run (issue #90 slice 2), if any.
+
+        Surfaced to the console as the catalog's `open_finished_run` so a viewer who
+        arrives after the run ended still sees its transcript and outcome until the
+        operator closes it. Never blocks a new launch (see `launch_run`).
+        """
+        run_id = self._open_finished_by_port.get(port_name)
         return self.runs.get(run_id) if run_id else None
 
     def launch_run(
@@ -145,6 +164,17 @@ class ActionRunner:
         """
         if self.get_active_run(port_name) is not None:
             raise PortBusyError(f"An action is already running on port {port_name}")
+
+        # A new run settles the port's still-open finished run for everyone (issue #90
+        # slice 2): it is auto-closed the same way an operator close would be, but the
+        # broadcast must not re-open anyone's pane - the client's 'closed' handler only
+        # stamps existing state. Fire-and-forget: launch_run stays synchronous.
+        prior_id = self._open_finished_by_port.pop(port_name, None)
+        if prior_id is not None:
+            prior = self.runs.get(prior_id)
+            if prior is not None and prior.closed_at is None:
+                prior.closed_at = time.time()
+                asyncio.ensure_future(self.broadcast_run_closed(prior, ""))
 
         validated = validate_params(action, params)
 
@@ -254,8 +284,55 @@ class ActionRunner:
         task.cancel()
         return True
 
+    def close_run(self, run_id: str, *, requesting_client_id: Optional[str] = None) -> str:
+        """Close (ack) a finished run for everyone (issue #90 slice 2).
+
+        Only the run's operator may close it; a run with no operator assigned (e.g. a
+        CLI launch) may be closed by any caller - same rule as `cancel_run`. Returns a
+        result code the web handler maps to a status: "closed" | "denied" | "running"
+        | "already_closed" | "unknown". A still-running run cannot be closed (stop it
+        first); closing is final - a closed run is never reported again and starts
+        nothing.
+        """
+        run = self.runs.get(run_id)
+        if run is None:
+            return "unknown"
+        if run.status == "running":
+            return "running"
+        if run.closed_at is not None:
+            return "already_closed"
+        if run.operator_client_id is not None and run.operator_client_id != requesting_client_id:
+            return "denied"
+        run.closed_at = time.time()
+        if self._open_finished_by_port.get(run.port_name) == run_id:
+            del self._open_finished_by_port[run.port_name]
+        return "closed"
+
+    async def broadcast_run_closed(self, run: ActionRun, closed_by: Optional[str]) -> None:
+        """Push an `action_run: closed` notice to every viewer of the run's port.
+
+        Tells attached consoles the execution is finished and closed (acknowledged),
+        not merely hidden from one pane (issue #90 slice 2). `closed_by` is the
+        closing client id, or "" for the auto-close that starts-with-a-new-run does.
+        """
+        if self.console_manager is None or not hasattr(self.console_manager, "broadcast_control_frame_to_port"):
+            return
+        try:
+            await self.console_manager.broadcast_control_frame_to_port(
+                run.port_name,
+                {
+                    "type": "action_run",
+                    "event": "closed",
+                    "run_id": run.run_id,
+                    "action_id": run.action_id,
+                    "closed_by": closed_by or "",
+                },
+            )
+        except Exception:
+            logger.debug("Failed to broadcast action_run closed for run %s", run.run_id, exc_info=True)
+
     def take_over_operator(self, run_id: str, new_client_id: str) -> bool:
-        """Reassign who may answer this run's prompts (mirrors "Take control").
+        """Reassign who owns this run (mirrors "Take control").
 
         Any connected viewer may take over - there is no separate permission check beyond
         being a WS client with an identified `client_id`, matching the allow-list-only
@@ -263,21 +340,27 @@ class ActionRunner:
         the same way every other viewer learns about it: an `operator_changed` structured
         event on the run's own live event stream.
 
+        Also works on a finished-but-not-closed run (issue #90 slice 2): ownership of
+        an open run is what lets another user close it after it ended - the ticket's
+        "take over as operator, then close" path. A *closed* run can no longer be taken
+        over.
+
         A pending read-write restore (issue #90: the launcher was self-demoted, see
         `_attach_read_write`) follows the role: the operator at finish is the client
         `_detach_and_restore` promotes, so `auto_demoted_client_id` moves to
         `new_client_id`. If the new operator disconnects before the run ends, the
         `still_attached` check in `_detach_and_restore` leaves the slot unclaimed
-        (first-come first-served), same as before.
+        (first-come first-served), same as before. The restore has already run for a
+        finished run, so the transfer only applies while the run is still running.
 
-        Returns False for an unknown/finished run or an empty `new_client_id`.
+        Returns False for an unknown/closed run or an empty `new_client_id`.
         """
         run = self.runs.get(run_id)
-        if run is None or run.status != "running" or not new_client_id:
+        if run is None or run.closed_at is not None or not new_client_id:
             return False
         previous = run.operator_client_id
         run.operator_client_id = new_client_id
-        if run.auto_demoted_client_id and run.auto_demoted_client_id != new_client_id:
+        if run.status == "running" and run.auto_demoted_client_id and run.auto_demoted_client_id != new_client_id:
             run.auto_demoted_client_id = new_client_id
         self._publish(
             run_id,
@@ -435,7 +518,12 @@ class ActionRunner:
         finally:
             run.ended_at = time.time()
             await self._detach_and_restore(run)
+            # Release the one-run lock and register the finished-but-not-closed state in
+            # one synchronous step (issue #90 slice 2): a launch that interleaves here
+            # either sees the lock held (before the pop) or sees the open-finished entry
+            # (after) and auto-closes it. No await may sit between the two lines.
             self._active_by_port.pop(port_name, None)
+            self._open_finished_by_port[port_name] = run.run_id
             self._sessions.pop(run.run_id, None)
             self._notify(port_name, "action_finished", run)
             self._publish(
@@ -556,17 +644,21 @@ class ActionRunner:
         if self.console_manager is None or not hasattr(self.console_manager, "broadcast_control_frame_to_port"):
             return
         try:
-            await self.console_manager.broadcast_control_frame_to_port(
-                run.port_name,
-                {
-                    "type": "action_run",
-                    "event": event,
-                    "run_id": run.run_id,
-                    "action_id": run.action_id,
-                    "action_name": action.name,
-                    "operator_client_id": run.operator_client_id,
-                },
-            )
+            payload = {
+                "type": "action_run",
+                "event": event,
+                "run_id": run.run_id,
+                "action_id": run.action_id,
+                "action_name": action.name,
+                "operator_client_id": run.operator_client_id,
+            }
+            if event == "action_finished":
+                # Issue #90 slice 2: a viewer who never joined the run words its
+                # finished-state chip from this broadcast (the run stays open for
+                # everyone until its operator closes it).
+                payload["status"] = run.status
+                payload["error"] = run.error
+            await self.console_manager.broadcast_control_frame_to_port(run.port_name, payload)
         except Exception:
             logger.debug("Failed to broadcast action_run event %s for run %s", event, run.run_id, exc_info=True)
 

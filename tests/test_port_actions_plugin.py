@@ -1081,3 +1081,193 @@ async def test_saved_action_ports_removal_drops_action_without_reload(tmp_path: 
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()
+
+
+# --- Issue #90 slice 2: a finished run stays open (catalog `open_finished_run`) until
+# its operator closes (acks) it via POST .../runs/<run_id>/close; takeover of a
+# finished run rides .../runs/<run_id>/takeover. Both broadcast `action_run: closed`.
+
+
+async def _wait_open_finished_run(session, bound_port, port_name="p1", timeout=5.0):
+    """Poll the actions catalog until the finished-but-unclosed run shows up."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        async with session.get(f"http://127.0.0.1:{bound_port}/api/ports/{port_name}/actions", headers=AUTH_HEADER) as resp:
+            data = await resp.json()
+        if data.get("open_finished_run"):
+            return data["open_finished_run"]
+        await asyncio.sleep(0.05)
+    raise AssertionError("open_finished_run never appeared in the catalog")
+
+
+@pytest.mark.asyncio
+async def test_open_finished_run_lifecycle_and_close_by_operator():
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}, "client_id": "launcher1"},
+            ) as resp:
+                assert resp.status == 200
+                run_id = (await resp.json())["run_id"]
+
+            summary = await _wait_open_finished_run(session, bound_port)
+            assert summary["run_id"] == run_id
+            assert summary["closed"] is False
+            # The finish released the lock while the run stays visible:
+            async with session.get(f"http://127.0.0.1:{bound_port}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert (await resp.json())["active_run"] is None
+
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/runs/{run_id}/close",
+                headers=AUTH_HEADER,
+                json={"client_id": "launcher1"},
+            ) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["ok"] is True
+
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                async with session.get(f"http://127.0.0.1:{bound_port}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                    data = await resp.json()
+                if data["open_finished_run"] is None:
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                raise AssertionError("open_finished_run survived the close")
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_takeover_then_close_sequence_and_error_paths():
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}, "client_id": "launcher1"},
+            ) as resp:
+                run_id = (await resp.json())["run_id"]
+            await _wait_open_finished_run(session, bound_port)
+
+            close_url = f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/runs/{run_id}/close"
+            # A non-operator must take over first.
+            async with session.post(close_url, headers=AUTH_HEADER, json={"client_id": "user2"}) as resp:
+                assert resp.status == 403
+            async with session.post(close_url, headers=AUTH_HEADER, json={"client_id": "user2"}) as resp:
+                assert "take over as operator" in (await resp.json())["message"]
+
+            takeover_url = f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/runs/{run_id}/takeover"
+            async with session.post(takeover_url, headers=AUTH_HEADER, json={"client_id": "user2"}) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["operator_client_id"] == "user2"
+
+            async with session.post(close_url, headers=AUTH_HEADER, json={"client_id": "user2"}) as resp:
+                assert resp.status == 200
+            # Closing is final: a second close 409s, and so does a takeover after close.
+            async with session.post(close_url, headers=AUTH_HEADER, json={"client_id": "user2"}) as resp:
+                assert resp.status == 409
+            async with session.post(takeover_url, headers=AUTH_HEADER, json={"client_id": "user2"}) as resp:
+                assert resp.status == 409
+            # Unknown / mismatched run paths 404.
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/runs/nosuchrun/close",
+                headers=AUTH_HEADER,
+                json={"client_id": "user2"},
+            ) as resp:
+                assert resp.status == 404
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/other/actions/echo_probe/runs/{run_id}/close",
+                headers=AUTH_HEADER,
+                json={"client_id": "user2"},
+            ) as resp:
+                assert resp.status == 404
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_close_broadcast_reaches_attached_port_viewer():
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]}, max_read_write_users=2)
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            action_run_events = []
+
+            async def _collect_until_closed(ws):
+                async for msg in ws:
+                    if not (isinstance(msg.data, str) and msg.data.startswith("OMXCTRL ")):
+                        continue
+                    payload = json.loads(msg.data[len("OMXCTRL ") :])
+                    if payload.get("type") == "action_run":
+                        action_run_events.append(payload)
+                        if payload.get("event") == "closed":
+                            return
+
+            async with session.ws_connect(f"http://127.0.0.1:{bound_port}/ws/p1?meta=1", headers=AUTH_HEADER) as viewer_ws:
+                collector = asyncio.create_task(_collect_until_closed(viewer_ws))
+                async with session.post(
+                    f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                    headers=AUTH_HEADER,
+                    json={"params": {"text": "hi"}, "client_id": "launcher1"},
+                ) as resp:
+                    run_id = (await resp.json())["run_id"]
+                # The finished broadcast now carries the outcome for chip wording.
+                await asyncio.wait_for(
+                    _wait_open_finished_run(session, bound_port),
+                    timeout=5.0,
+                )
+                async with session.post(
+                    f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/runs/{run_id}/close",
+                    headers=AUTH_HEADER,
+                    json={"client_id": "launcher1"},
+                ) as resp:
+                    assert resp.status == 200
+                await asyncio.wait_for(collector, timeout=5.0)
+
+            assert [e["event"] for e in action_run_events] == ["action_started", "action_finished", "closed"]
+            assert action_run_events[1]["status"] == "success"
+            assert action_run_events[2]["run_id"] == run_id
+            assert action_run_events[2]["closed_by"] == "launcher1"
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_new_run_starts_beside_unclosed_finished_run_and_autocloses_it():
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "one"}, "client_id": "launcher1"},
+            ) as resp:
+                first_id = (await resp.json())["run_id"]
+            await _wait_open_finished_run(session, bound_port)
+
+            # No 400: a finished-unclosed run never holds the one-run-per-port lock.
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "two"}, "client_id": "launcher1"},
+            ) as resp:
+                assert resp.status == 200
+            second_summary = await _wait_open_finished_run(session, bound_port)
+            assert second_summary["run_id"] != first_id
+            # The auto-close settled the first run: closing it again 409s.
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/runs/{first_id}/close",
+                headers=AUTH_HEADER,
+                json={"client_id": "launcher1"},
+            ) as resp:
+                assert resp.status == 409
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
