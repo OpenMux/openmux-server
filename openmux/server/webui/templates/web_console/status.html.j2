@@ -9,8 +9,6 @@
     {% if server_version %}
       <span class="muted" title="OpenMux server version">OpenMux v{{ server_version }}{% if server_uptime %} · up {{ server_uptime }}{% endif %}</span>
     {% endif %}
-    <span class="tag ok" id="statusLiveState" title="Live updates from the server" style="display:none;">live</span>
-    <button class="btn" id="autoRefreshToggle" type="button" title="Toggle auto-refresh">Auto Refresh: Off</button>
   </div>
 {% endblock %}
 
@@ -19,8 +17,9 @@
      renders server-side here and as HTML fragments for the live update path
      (issue #85: GET /api/status/fragments + /ws/status). The header, MOTD
      card, and sort links are not live regions: they update on full loads.
-     The Auto Refresh toggle (issue #85) opens /ws/status and swaps the
-     marked regions in place; no window.location.reload() is used. #}
+     The page is always live (like the Power pages): status.js opens
+     /ws/status on load and swaps the marked regions in place; no
+     window.location.reload() is used and there is no toggle (issue #86). #}
   {% include "status_content.html.j2" %}
 {% endblock %}
 

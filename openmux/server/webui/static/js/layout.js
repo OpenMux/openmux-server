@@ -377,3 +377,33 @@
   window.applyPortLabels = applyPortLabels;
   applyPortLabels();
 })();
+
+// "Live data" badge (issue #86): the single place the header badge is shown.
+// A page with a page-level WebSocket opts in by calling window.omxSetLive():
+//   omxSetLive(true)  - socket open: green, "updates over WebSocket, no reload"
+//   omxSetLive(false) - socket closed: red, "data may be stale", after a 1 s
+//                       debounce so a fast reconnect never flickers red (same
+//                       window as console.js' WS-down banner debounce)
+// Once opted in the badge stays visible (green or red), so a dropped socket is
+// noticeable. Terminal pages never call this, so the badge never shows there.
+(function () {
+  const badge = document.getElementById('liveDataBadge');
+  if (!badge) return;
+  const GREEN = { cls: 'ok', tip: 'Live data: updates over WebSocket, no reload' };
+  const RED = { cls: 'bad', tip: 'Live data: disconnected, data may be stale' };
+  const RED_DEBOUNCE_MS = 1000;
+  let redTimer = null;
+  function apply(state) {
+    badge.classList.remove('ok', 'bad');
+    badge.classList.add(state.cls);
+    badge.title = state.tip;
+    badge.textContent = '\u25CF Live data';
+    badge.style.display = '';
+  }
+  window.omxSetLive = function (open) {
+    if (redTimer) { clearTimeout(redTimer); redTimer = null; }
+    if (open === true) { apply(GREEN); return; }
+    // false: show red only if the socket stays closed past the debounce window.
+    redTimer = setTimeout(() => { redTimer = null; apply(RED); }, RED_DEBOUNCE_MS);
+  };
+})();

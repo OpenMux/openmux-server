@@ -157,6 +157,15 @@ Changes since v1.0.3 (2026-09-17).
   the run ended, the slot stays first-come first-served as before. No config
   change is required. See `docs/design/port_actions.md` (issue #90).
 
+- **The Status page is always live; the Auto Refresh toggle is gone.** The
+  toggle predates the WebSocket: it used to trigger a `window.location.reload()`
+  every 5 s, which lost scroll position and collapsed Details rows, so opting
+  out made sense. Since live updates swap regions in place (#85) and the
+  "Live data" badge shows the socket state (#86), the page now always opens
+  `/ws/status` on load, like the Power pages. The header button is removed and
+  the per-browser `omx_status_autorefresh` preference is cleared on first load.
+  No config change is required (issue #86).
+
 ### Reliability fixes
 
 - **A restarted or stopped `command` port no longer abandons a live child
@@ -169,17 +178,25 @@ Changes since v1.0.3 (2026-09-17).
   transports. A stuck child is force-killed after that timeout. No config
   change is required.
 
+
 ### Web console and observability
 
+- **Live pages now show a red/green "Live data" badge in the header.** The
+  Power list, Power detail, and System Status pages show the badge green while
+  their WebSocket is open and red ("data may be stale") when it drops; a fast
+  reconnect within 1 s never flickers red. The badge lives once in the page
+  layout and pages opt in through a shared `omxSetLive()` helper in `layout.js`;
+  terminal pages never show it. No config change is required (issue #86).
+
 - **The Status page auto-refresh is live; the page no longer reloads.**
-  Turning on **Auto Refresh** now opens a `/ws/status` WebSocket (like the
+  The page opens a `/ws/status` WebSocket on load (like the
   Power pages) instead of reloading every 5 s. A port or federation change
   (server meta-event, up to one poke per 2 s) makes the page re-fetch its
   regions from the new `GET /api/status/fragments` endpoint and swap them in
   place. Scroll position, expanded Details rows, and the sort query survive
-  every refresh. If the socket drops, the page retries silently every 3 s
-  while the toggle is on; a closed socket falls back to nothing (the static
-  page stays until you reload). A `GET /api/status` JSON endpoint (status,
+  every refresh. If the socket drops, the page retries silently every 3 s;
+  the "Live data" badge turns red meanwhile (issue #86). A `GET /api/status`
+  JSON endpoint (status,
   ports, federation, multipath, web clients) was added with the same
   protection. No config change is required (issue #85).
 

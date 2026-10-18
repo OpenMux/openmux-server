@@ -112,6 +112,9 @@
     function connect() {
       var scheme = location.protocol === "https:" ? "wss" : "ws";
       var ws = new WebSocket(scheme + "://" + location.host + base + "/ws/power");
+      // Issue #86: shared "Live data" header badge (green while open, red after
+      // the helper's debounce while closed; layout.js never hides it again).
+      ws.onopen = function () { if (window.omxSetLive) window.omxSetLive(true); };
       ws.onmessage = function (ev) {
         try {
           var msg = JSON.parse(ev.data);
@@ -120,9 +123,14 @@
           }
         } catch (_) { /* ignore malformed frame */ }
       };
-      ws.onclose = function () { setTimeout(connect, 3000); };
+      ws.onclose = function () {
+        if (window.omxSetLive) window.omxSetLive(false);
+        setTimeout(connect, 3000);
+      };
       ws.onerror = function () { try { ws.close(); } catch (_) {} };
     }
+    // Opt in before the first connect: a socket that never opens stays red.
+    if (window.omxSetLive) window.omxSetLive(false);
     connect();
   })();
   </script>

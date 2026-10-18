@@ -1,20 +1,21 @@
 (function () {
-  // Status page auto-refresh (issue #85): live updates instead of the old
-  // window.location.reload() loop. With Auto Refresh ON the page opens
-  // /ws/status and swaps the OMX-STATUS-FRAGMENT regions in place on each
-  // server poke (re-fetching /api/status/fragments, like the Power pages
-  // re-fetch /api/power). With the toggle OFF no WebSocket is opened at all
-  // (deliberate: the page is then a plain static render). Scroll position and
-  // expanded per-port Details survive an update because nothing reloads.
-  const REFRESH_KEY = 'omx_status_autorefresh';
+  // Status page live updates (issue #85; always-on per issue #86 follow-up):
+  // the page opens /ws/status on load - like the Power pages, no toggle -
+  // and swaps the OMX-STATUS-FRAGMENT regions in place on each server poke
+  // (re-fetching /api/status/fragments, like the Power pages re-fetch
+  // /api/power). Scroll position and expanded per-port Details survive an
+  // update because nothing reloads. The old Auto Refresh button predates the
+  // WebSocket (it triggered a window.location.reload() every 5 s); with
+  // in-place updates its cost/benefit disappeared, so it is gone. Pre-#86
+  // browsers may still hold its per-browser pref key; delete the stale key.
+  try {
+    localStorage.removeItem('omx_status_autorefresh');
+  } catch (e) {}
   const RETRY_MS = 3000;
-  const btn = document.getElementById('autoRefreshToggle');
-  const liveBadge = document.getElementById('statusLiveState');
   // Regions the fragment endpoint returns, mapped to their container ids.
   const REGION_IDS = { summary: 'statusSummary', ports: 'portsTbody', federation: 'federationArea', clients: 'clientsTbody' };
   let ws = null;
   let retryTimer = null;
-  let wanted = false; // tracks the toggle; drives (re)connect decisions
   let fetching = false;
   let refetchQueued = false;
 
@@ -23,12 +24,10 @@
     return meta ? meta.getAttribute('content') || '' : '';
   }
 
-  function updateButton(enabled) {
-    if (btn) btn.textContent = 'Auto Refresh: ' + (enabled ? 'On' : 'Off');
-  }
-
-  function setLive(on) {
-    if (liveBadge) liveBadge.style.display = on ? '' : 'none';
+  function setLive(open) {
+    // Shared header badge (issue #86): green while the socket is open, red
+    // (after the helper's debounce) while it is closed.
+    if (window.omxSetLive) window.omxSetLive(open);
   }
 
   // Remember which Details (±) rows are open so a fragment swap can restore
@@ -90,7 +89,7 @@
   }
 
   function connect() {
-    if (!wanted || ws || retryTimer) return;
+    if (ws || retryTimer) return;
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(scheme + '://' + location.host + getBasePath() + '/ws/status');
     ws.onopen = () => setLive(true);
@@ -105,8 +104,8 @@
     ws.onclose = () => {
       ws = null;
       setLive(false);
-      // Silent retry while the toggle stays on (same pattern as power.js).
-      if (wanted && !retryTimer) {
+      // Silent retry (same pattern as the Power pages).
+      if (!retryTimer) {
         retryTimer = setTimeout(() => {
           retryTimer = null;
           connect();
@@ -120,50 +119,11 @@
     };
   }
 
-  function disconnect() {
-    if (retryTimer) {
-      clearTimeout(retryTimer);
-      retryTimer = null;
-    }
-    if (ws) {
-      const sock = ws;
-      ws = null; // detach first so onclose does not schedule a retry
-      try {
-        sock.close();
-      } catch (e) {}
-    }
-    setLive(false);
-  }
+  // Opt in before the first connect: a socket that never opens turns the
+  // badge red after the helper's debounce (issue #86).
+  setLive(false);
+  connect();
 
-  function start() {
-    wanted = true;
-    updateButton(true);
-    connect();
-  }
-
-  function stop() {
-    wanted = false;
-    updateButton(false);
-    disconnect();
-  }
-
-  function toggleRefresh() {
-    if (localStorage.getItem(REFRESH_KEY)) {
-      localStorage.removeItem(REFRESH_KEY);
-      stop();
-    } else {
-      localStorage.setItem(REFRESH_KEY, '1');
-      start();
-    }
-  }
-
-  if (btn) btn.addEventListener('click', toggleRefresh);
-  // Initialize from saved state
-  if (localStorage.getItem(REFRESH_KEY)) {
-    start();
-  } else {
-    updateButton(false);
-  }
   // Details (±) toggles. Delegated on the document so buttons arriving with a
   // fragment swap keep working without re-wiring.
   try {
