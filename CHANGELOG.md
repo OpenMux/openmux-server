@@ -10,6 +10,20 @@ Changes since v1.0.3 (2026-09-17).
 
 ### New
 
+- **Action scripts can control the port's power feeds.** The action script's
+  `session` object gains `list_power()`, `power_on(ref=None)`, and
+  `power_off(ref=None)`: a script can list the outlets feeding its port (the
+  same data as the web power menu) and switch them. `ref` is one outlet ref
+  (`"rack1.3"`), a list of refs, or omitted for every feed this port declares
+  in its `power:` list. A script can only touch its own port's feeds; the
+  switch runs as the operator who started the run, under the same permission
+  and group gates as the web and console power surfaces, and keeps the
+  `POWER CONTROL` audit line and the `[POWER]` console notices. Refusals and
+  failures raise `ActionPowerError`; federated (remote-owned) outlets are
+  refused with a typed error. Switches of other ports' feeds or whole PDUs are
+  out of scope. See `docs/design/port_actions.md` ("Power control") and the
+  `power_probe` example script. No config change is required (issue #93).
+
 - **PDU power `command` driver.** The `power:` section gains `driver: command`:
   configure CLI commands that read outlet states and switch outlets, so GPIO scripts on a Raspberry Pi, custom USB power devices, or any other user-wired tool works as a PDU backend. Commands run without a shell, in a sanitized environment, with a per-command timeout (the command's process group is killed on timeout); per-outlet state commands run under a bounded concurrency (`max_parallel`, default 4); repeated device-wide read failures put the driver into a read backoff (30 s doubling to a 5 min cap) so a dead device is not hammered. Outlets are declared in the PDU's top-level `outlets` list: one PDU-level set template (`on_cmd`/`off_cmd`, with a `{outlet_id}` placeholder) plus one batch `state_cmd` (prints `<id> <state>` per outlet), or per-outlet `on_cmd`/`off_cmd`/`state_cmd`/`state_pattern` on an outlet entry; per-outlet values win. See `docs/configuration/adapters.md` (PDU Power, "Command driver").
 

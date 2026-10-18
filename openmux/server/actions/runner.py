@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional
 
 from openmux.server.actions.errors import ActionTimeoutError, PortBusyError
 from openmux.server.actions.registry import ActionScript, redact_params, validate_params
-from openmux.server.actions.session import ActionSession
+from openmux.server.actions.session import ActionSession, _PowerContext
+from openmux.server.adapters.power_command import find_power_adapter
 from openmux.server.data_logger import DataLogger
 
 logger = logging.getLogger("openmux.server.actions.runner")
@@ -318,6 +319,27 @@ class ActionRunner:
         except Exception:
             logger.error("Failed to record debug info for run %s", run.run_id, exc_info=True)
 
+    def _build_power_context(self, run: ActionRun) -> Optional[_PowerContext]:
+        """Return the run's power context, or None when power control is unavailable.
+
+        The active PDU adapter (issue #93); None when none is configured or the
+        runner has no console manager to search. A configured-but-disabled PDU
+        section still returns a context: `set_outlet` refuses with its own
+        "power management is disabled" error, which the session reports as
+        `ActionPowerError`.
+        """
+        if self.console_manager is None:
+            return None
+        try:
+            pdu = find_power_adapter(self.console_manager)
+        except Exception:
+            # justification: optional capability; scripts get a typed error instead
+            logger.debug("Power adapter lookup failed for run %s", run.run_id, exc_info=True)
+            return None
+        if pdu is None:
+            return None
+        return _PowerContext(pdu=pdu, username=run.username, client_id=run.client_id)
+
     async def _execute(
         self,
         run: ActionRun,
@@ -346,6 +368,11 @@ class ActionRunner:
                 port_name,
                 run.client_id,
                 params=validated,
+                # Issue #93: power control for session.power_*(). Looked up once
+                # per run (never cached) so a soft reload of `power:` applies to
+                # the next run. None when no PDU adapter is active: list_power()
+                # then reports unavailable and the switch calls raise.
+                power_context=self._build_power_context(run),
                 on_input_wait=lambda prompt, kind, choices, step, color: self._publish(
                     run.run_id,
                     {

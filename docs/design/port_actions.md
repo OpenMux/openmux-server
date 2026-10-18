@@ -48,7 +48,7 @@ its routes.**
 
 Implementation: `openmux/server/actions/` (`session.py`, `registry.py`,
 `runner.py`), example scripts in `openmux/server/actions/examples/` (`echo_probe.py`,
-`slow_noop.py`, `confirm_probe.py`, `select_probe.py`, `setup_wizard.py`), CLI entry
+`slow_noop.py`, `confirm_probe.py`, `select_probe.py`, `setup_wizard.py`, `power_probe.py`), CLI entry
 point in `scripts/run_action.py`, web plugin in
 `openmux/server/web_plugins/port_actions.py`, console-page UI in
 `openmux/server/webui/templates/web_console/console.html.j2` (Actions button/overlay) and
@@ -119,7 +119,9 @@ an action attaches to `PortManager` exactly like a console client does, through
   inbound text seen so far without waiting for a pattern match — it drains any
   already-queued chunks first, so a script can inspect the current output (e.g. to
   branch on it) without needing an `expect()` call; pass `consume=True` to also drop
-  the returned text from the buffer. See [action_session.md](action_session.md) for
+  the returned text from the buffer. A port with PDU feeds can also switch them:
+  `session.list_power()`, `await session.power_on(ref)`, `await session.power_off(ref)`
+  (see "Power control" below). See [action_session.md](action_session.md) for
   the full `ActionSession` API reference.
 - `session.params` is a dict of the user-supplied inputs, validated against the
   `ACTION` metadata's declared parameter types before the script runs.
@@ -389,6 +391,27 @@ the slot stays first-come first-served, same as before.
   `operator_changed` event) drives this; `sendOperatorInput()` also keeps a
   server-adjacent client-side guard (`isCurrentOperator()`) as defense-in-depth in case
   a control is somehow triggered anyway.
+
+## Power control
+A script may need to power-cycle the device it is talking to — for example a
+recovery script that waits for a boot prompt and hard-resets the device when
+the prompt never arrives (issue #93).
+
+**Implemented**: `session` gains `list_power()`, `power_on(ref=None)`, and
+`power_off(ref=None)` (see [action_session.md](action_session.md),
+"Power control"). The calls cover only the outlets declared in this port's
+`power:` list: a script on port A cannot switch an outlet that feeds port B.
+Omitting `ref` means every feed of this port (there is no separate
+power-all call); passing a list switches several. Every switch runs through
+`PduAdapter.set_outlet` as the operator who started the run, under the run's
+`action:<run-id>` client id, so the `POWER CONTROL` audit line, the
+`[POWER]` console notices, and the port-log meta events fire unchanged. The
+same two gates protect a switch as every other power surface: the operator
+holds read-write (already true at launch) and may drive every console the
+outlet feeds (admin bypasses). Refusals and failures raise
+`ActionPowerError`. A federated outlet ref is refused: its relay needs a live
+anchored console session. `openmux/server/actions/examples/power_probe.py`
+shows the calls; it no-ops cleanly when no PDU is configured.
 
 ## Stopping a run
 An operator needs a way to abort a stuck or mistaken run without waiting for its

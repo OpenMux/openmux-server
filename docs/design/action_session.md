@@ -128,6 +128,38 @@ rejecting one from the wrong client, is `ActionRunner`'s job, not
 `ActionSession`'s — the session itself has exactly one pending-input queue
 and does not check identity.
 
+### Power control
+
+Power calls switch the PDU outlets that feed this session's port (issue #93).
+The runner injects the active PDU adapter and the operator identity when it
+starts the run; scripts never pass a user or a client id.
+
+| call | returns |
+|---|---|
+| `session.list_power()` | `{"available": False}` when no PDU adapter is active or the port declares no `power:` feeds (not an error); otherwise `{"available": True, "feeds": [{ref, on, watts}], "feeds_on", "feeds_total", "state", "all_power_lost"}` — the same payload as the web power menu. |
+| `await session.power_on(ref=None)` | see below |
+| `await session.power_off(ref=None)` | see below |
+
+`ref` forms for both switch calls:
+- one string (`"rack1.3"`): switches that outlet; returns the `set_outlet`
+  result `{ok, reading, impact}`. `impact["losing_power"]` lists the consoles
+  that lose ALL their feeds, so a script can warn before a power-off.
+- a list of refs, or omitted: switches every outlet of the list, or of this
+  port's whole `power:` list when omitted. An outlet already in the target
+  state is skipped; one refused outlet does not stop the rest. Returns
+  `{"changed": [...], "skipped": [...], "failed": [{ref, error}]}`.
+
+Every ref — explicit or omitted — must be one of this port's declared feeds.
+A script running on port A cannot touch an outlet that feeds port B.
+Federated refs (`origin::ref`) are refused with `ActionPowerError`: the relay
+needs the console session that launched it, which a script does not have.
+
+Switch failures raise `ActionPowerError` (carries `.ref`): the operator may
+not drive a console the outlet feeds (group check), the switch failed, or the
+ref is out of scope. Switches run as the operator who started the run, so the
+`POWER CONTROL` audit line and the `[POWER]` notices on affected consoles
+work exactly as on the other power surfaces.
+
 ## Example
 ```python
 session.progress("connecting", 10)

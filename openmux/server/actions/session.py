@@ -10,10 +10,12 @@ sees exactly the bytes a normal read-write console client would see.
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from openmux.server.actions.choices import Choice, normalize_choices
-from openmux.server.actions.errors import ActionSessionError, ActionTimeoutError
+from openmux.server.actions.errors import ActionPowerError, ActionSessionError, ActionTimeoutError
+from openmux.server.adapters.pdu import split_remote_ref
 
 # Accent colors a script can request for the operator-input prompt border/flash (see
 # `prompt()`'s `color` param and docs/design/port_actions.md, "Operator input").
@@ -30,6 +32,22 @@ def _truncate(text: str, limit: int = 2000) -> str:
     return text[:limit] + f"...(truncated, {len(text)} chars total)"
 
 
+@dataclass
+class _PowerContext:
+    """PDU adapter + operator identity for one session's power calls (issue #93).
+
+    The runner builds one per run (the active PDU adapter, the run's username,
+    and the run's `action:<run-id>` client id for the POWER CONTROL audit line)
+    and injects it into `ActionSession`. None (no active PDU adapter) makes
+    `list_power()` report `{"available": False}` and the switch calls raise
+    `ActionPowerError`.
+    """
+
+    pdu: Any
+    username: str
+    client_id: str
+
+
 class ActionSession:
     """Send/expect interface bound to one port attachment (one `client_id`)."""
 
@@ -39,6 +57,7 @@ class ActionSession:
         port_name: str,
         client_id: str,
         params: Optional[Dict[str, Any]] = None,
+        power_context: Optional[_PowerContext] = None,
         on_input_wait: Optional[
             Callable[[Optional[str], str, Optional[List[Dict[str, str]]], Optional[str], str], None]
         ] = None,
@@ -75,6 +94,9 @@ class ActionSession:
         # live console, so it's safe to be noisier than the operator-facing events above.
         self._on_debug = on_debug
         self._current_step: Optional[str] = None
+        # PDU power control for this session's port (issue #93); None until the
+        # runner injects it (see `_PowerContext`).
+        self._power = power_context
 
     def _debug(self, message: str) -> None:
         if self._on_debug is not None:
@@ -311,3 +333,137 @@ class ActionSession:
     def submit_operator_input(self, text: str) -> None:
         """Feed operator-supplied text to a pending `wait_for_input`/`confirm` call."""
         self._operator_input.put_nowait(text)
+
+    # --- power control (issue #93; docs/design/port_actions.md "Power control") ---------
+
+    def list_power(self) -> Dict[str, Any]:
+        """Return this port's power feeds (same payload as the web power menu).
+
+        Returns ``{"available": False}`` - not an error - when no PDU adapter is
+        active or the port declares no ``power:`` feeds. Otherwise returns
+        ``{"available": True, "feeds": [{ref, on, watts}], "feeds_on",
+        "feeds_total", "state", "all_power_lost"}``
+        (`PduAdapter.port_power_payload`).
+        """
+        if self._power is None:
+            return {"available": False}
+        payload = self._power.pdu.port_power_payload(self.port_name)
+        if payload is None:
+            return {"available": False}
+        return {"available": True, **payload}
+
+    async def power_on(self, ref: Any = None) -> Any:
+        """Power on one outlet, a list of outlets, or (ref omitted) all of this port's feeds."""
+        return await self._power_switch(ref, True)
+
+    async def power_off(self, ref: Any = None) -> Any:
+        """Power off one outlet, a list, or (ref omitted) all of this port's feeds.
+
+        There is no separate power-all call: omitting `ref` switches every feed
+        this port declares.
+        """
+        return await self._power_switch(ref, False)
+
+    async def _power_switch(self, ref: Any, on: bool) -> Any:
+        """Shared switch path for `power_on()`/`power_off()`.
+
+        Single ref (a plain string): returns the `set_outlet` result
+        ``{ok, reading, impact}`` - ``impact["losing_power"]`` lists the consoles
+        that lose ALL feeds, so a script can warn before a power-off. Raises
+        `ActionPowerError` on refusal or failure.
+        List or omitted ref: switches each of this port's feeds; an outlet
+        already in the target state is skipped and one refusal does not stop the
+        rest; returns ``{"changed": [...], "skipped": [...],
+        "failed": [{"ref", "error"}]}``.
+        Every ref - explicit or omitted - must be a feed THIS port declares.
+        """
+        ctx = self._power
+        if ctx is None:
+            raise ActionPowerError("power control is not available on this server (no active PDU adapter)")
+        refs = self._power_target_refs(ref)
+        if ref is not None and not isinstance(ref, (list, tuple)):
+            return await self._power_switch_one(ctx, refs[0], on)
+        return await self._power_switch_many(ctx, refs, on)
+
+    def _power_target_refs(self, ref: Any) -> List[str]:
+        """Normalize a `ref` argument to the ordered, deduped list of target refs.
+
+        Raises `ActionPowerError` when the list form is empty, the omitted form
+        matches no feed, a ref is not one of THIS port's declared feeds (a
+        script on port A must not touch port B's outlet), or a ref is
+        remote-owned (the ``origin::`` prefix; relaying needs a live anchored
+        console session, which a script does not have).
+        """
+        ctx = self._power
+        declared = ctx.pdu.port_power_map(self.port_name)
+        if ref is None:
+            wanted = list(declared)
+            if not wanted:
+                raise ActionPowerError(f"port '{self.port_name}' declares no power feeds")
+        elif isinstance(ref, (list, tuple)):
+            wanted = [str(r) for r in ref]
+            if not wanted:
+                raise ActionPowerError("ref list is empty")
+        else:
+            wanted = [str(ref)]
+        out: List[str] = []
+        for candidate in wanted:
+            if split_remote_ref(candidate) is not None:
+                raise ActionPowerError(
+                    f"{candidate}: cannot switch a federated outlet from an action script "
+                    "(the relay needs the console session that launched it)",
+                    ref=candidate,
+                )
+            if candidate not in declared:
+                raise ActionPowerError(
+                    f"{candidate} is not a power feed of port '{self.port_name}'",
+                    ref=candidate,
+                )
+            if candidate not in out:
+                out.append(candidate)
+        return out
+
+    async def _power_switch_one(self, ctx: _PowerContext, ref: str, on: bool) -> Dict[str, Any]:
+        """Switch one in-scope ref; raise `ActionPowerError` on refusal or failure.
+
+        Applies the same group gate as every other power surface: the operator
+        must be allowed to drive every console the outlet feeds (admin
+        bypasses). The switch runs as the operator with the run's client id, so
+        the POWER CONTROL audit line and the `[POWER]` notices work unchanged.
+        """
+        blocked = ctx.pdu._power_blocked_ports(ref, ctx.username)
+        if blocked:
+            raise ActionPowerError(
+                f"{ref} feeds consoles outside your groups ({', '.join(blocked)}); switching it needs admin",
+                ref=ref,
+            )
+        try:
+            result = await ctx.pdu.set_outlet(ref, on, user=ctx.username, client_id=ctx.client_id)
+        except Exception as exc:
+            raise ActionPowerError(f"{ref}: {exc}", ref=ref) from exc
+        if not result.get("ok"):
+            raise ActionPowerError(f"{ref}: {result.get('error', 'switch failed')}", ref=ref)
+        return result
+
+    async def _power_switch_many(self, ctx: _PowerContext, refs: List[str], on: bool) -> Dict[str, Any]:
+        """Switch a ref list, skipping outlets already in the target state.
+
+        One refused outlet does not stop the rest; per-ref outcomes are
+        collected into ``{"changed", "skipped", "failed"}``.
+        """
+        states = ctx.pdu.feed_states(self.port_name)
+        changed: List[str] = []
+        skipped: List[str] = []
+        failed: List[Dict[str, str]] = []
+        for ref in refs:
+            current = states.get(ref)
+            if current is not None and current == on:
+                skipped.append(ref)
+                continue
+            try:
+                await self._power_switch_one(ctx, ref, on)
+            except ActionPowerError as exc:
+                failed.append({"ref": ref, "error": str(exc)})
+            else:
+                changed.append(ref)
+        return {"changed": changed, "skipped": skipped, "failed": failed}

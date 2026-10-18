@@ -657,3 +657,109 @@ async def test_cancel_run_on_finished_run_returns_false(dummy_logger):
 
     assert runner.cancel_run(run.run_id) is False
     await adapter.stop()
+
+
+# --- power context injection (issue #93) ----------------------------------------
+
+
+class PowerAdapterStub:
+    """A unified adapter advertising adapter_type "power" for find_power_adapter."""
+
+    def __init__(self):
+        self.calls = []
+        self.feeds = {"p1": ["rack1.1"]}
+        self.states = {"rack1.1": True}
+
+    def get_adapter_type(self):
+        return "power"
+
+    def port_power_map(self, port_name):
+        return list(self.feeds.get(port_name, []))
+
+    def port_power_payload(self, port_name):
+        refs = self.feeds.get(port_name)
+        if not refs:
+            return None
+        return {
+            "feeds": [{"ref": r, "on": self.states.get(r), "watts": None} for r in refs],
+            "feeds_on": sum(1 for r in refs if self.states.get(r) is True),
+            "feeds_total": len(refs),
+            "state": "all",
+            "all_power_lost": False,
+        }
+
+    def feed_states(self, port_name):
+        return {r: self.states.get(r) for r in self.feeds.get(port_name, [])}
+
+    def _power_blocked_ports(self, ref, username):
+        return []
+
+    async def set_outlet(self, ref, on, user=None, client_id=None):
+        self.calls.append((ref, on, user, client_id))
+        self.states[ref] = on
+        return {"ok": True, "reading": {"ref": ref, "on": on}, "impact": {"losing_power": [], "staying_up": []}}
+
+
+class PowerConsoleManager(DummyConsoleManager):
+    def __init__(self, port_manager):
+        super().__init__()
+        self.port_manager = port_manager
+
+
+async def _switcher_script(session):
+    power = session.list_power()
+    session.log(f"power_available={power.get('available')}")
+    if power.get("available"):
+        await session.power_off("rack1.1")
+
+
+@pytest.mark.asyncio
+async def test_run_injects_power_context_when_pdu_adapter_active(dummy_logger):
+    """The session's power calls run against the found PDU adapter as the
+    operator, audited under the run's action:<run-id> client id."""
+    pm, adapter = await _make_pm()
+    power = PowerAdapterStub()
+    pm.set_unified_adapters(list(pm.unified_adapters) + [power])
+    cm = PowerConsoleManager(pm)
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    action.run_func = _switcher_script
+    runner = ActionRunner(pm, console_manager=cm)
+
+    run = await runner.start_run(action, "p1", {"text": "x"}, username="operator9")
+
+    assert run.status == "success"
+    assert any(e.get("event") == "power_available=True" for e in run.events)
+    assert power.calls == [("rack1.1", False, "operator9", run.client_id)]
+    assert run.client_id == f"action:{run.run_id}"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_without_pdu_adapter_reports_power_unavailable(dummy_logger):
+    """No adapter_type "power" in the unified adapters: list_power() says
+    unavailable and the run still succeeds."""
+    pm, adapter = await _make_pm()
+    cm = PowerConsoleManager(pm)
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    action.run_func = _switcher_script
+    runner = ActionRunner(pm, console_manager=cm)
+
+    run = await runner.start_run(action, "p1", {"text": "x"}, username="operator9")
+
+    assert run.status == "success"
+    assert any(e.get("event") == "power_available=False" for e in run.events)
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_without_console_manager_reports_power_unavailable(dummy_logger):
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    action.run_func = _switcher_script
+    runner = ActionRunner(pm)  # console_manager=None -> no adapter lookup possible
+
+    run = await runner.start_run(action, "p1", {"text": "x"}, username="operator9")
+
+    assert run.status == "success"
+    assert any(e.get("event") == "power_available=False" for e in run.events)
+    await adapter.stop()

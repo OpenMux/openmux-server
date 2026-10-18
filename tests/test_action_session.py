@@ -3,8 +3,8 @@ import asyncio
 import pytest
 import pytest_asyncio
 
-from openmux.server.actions.errors import ActionSessionError, ActionTimeoutError
-from openmux.server.actions.session import ActionSession
+from openmux.server.actions.errors import ActionPowerError, ActionSessionError, ActionTimeoutError
+from openmux.server.actions.session import ActionSession, _PowerContext
 
 
 class FakePort:
@@ -313,3 +313,206 @@ async def test_prompt_passes_last_progress_step_to_on_input_wait(pm):
     session.submit_operator_input("yes")
     await session.confirm("reboot now?", timeout=1.0)
     assert seen == ["flashing firmware"]
+
+
+# --- power control (issue #93) -------------------------------------------------
+
+
+class DummyPdu:
+    """Stands in for PduAdapter in session power-control tests (issue #93)."""
+
+    def __init__(self, feeds=None, states=None, blocked=None, failures=None, raising=()):
+        self.feeds = feeds or {}  # port_name -> [refs]
+        self.states = states or {}  # ref -> True/False/None
+        self.blocked = blocked or {}  # ref -> [ports the user may not drive]
+        self.failures = failures or {}  # ref -> error text (ok=False result)
+        self.raising = set(raising)  # refs whose set_outlet raises
+        self.calls = []  # (ref, on, user, client_id)
+
+    def port_power_map(self, port_name):
+        return list(self.feeds.get(port_name, []))
+
+    def port_power_payload(self, port_name):
+        refs = self.feeds.get(port_name)
+        if not refs:
+            return None
+        on = sum(1 for r in refs if self.states.get(r) is True)
+        state = "all" if on == len(refs) else ("none" if on == 0 else "some")
+        return {
+            "feeds": [{"ref": r, "on": self.states.get(r), "watts": None} for r in refs],
+            "feeds_on": on,
+            "feeds_total": len(refs),
+            "state": state,
+            "all_power_lost": state == "none",
+        }
+
+    def feed_states(self, port_name):
+        return {r: self.states.get(r) for r in self.feeds.get(port_name, [])}
+
+    def _power_blocked_ports(self, ref, username):
+        return list(self.blocked.get(ref, []))
+
+    async def set_outlet(self, ref, on, user=None, client_id=None):
+        self.calls.append((ref, on, user, client_id))
+        if ref in self.raising:
+            raise ValueError(f"driver exploded for {ref}")
+        if ref in self.failures:
+            return {
+                "ok": False,
+                "error": self.failures[ref],
+                "impact": {"change": "off", "losing_power": [], "staying_up": []},
+            }
+        self.states[ref] = on
+        return {
+            "ok": True,
+            "reading": {"ref": ref, "on": on},
+            "impact": {"change": "on" if on else "off", "losing_power": [], "staying_up": []},
+        }
+
+
+def _power_session(pm, pdu, port_name="p1", username="tester", run_client_id="action:r1"):
+    return ActionSession(
+        pm,
+        port_name,
+        "c1",
+        power_context=_PowerContext(pdu=pdu, username=username, client_id=run_client_id),
+    )
+
+
+def test_list_power_unavailable_without_context(pm):
+    assert ActionSession(pm, "p1", "c1").list_power() == {"available": False}
+
+
+def test_list_power_unavailable_when_port_has_no_feeds(pm):
+    pdu = DummyPdu(states={"rack1.1": True})
+    session = _power_session(pm, pdu)
+    assert session.list_power() == {"available": False}
+
+
+def test_list_power_available_returns_payload(pm):
+    pdu = DummyPdu(feeds={"p1": ["rack1.1", "rack1.2"]}, states={"rack1.1": True, "rack1.2": False})
+    session = _power_session(pm, pdu)
+    out = session.list_power()
+    assert out["available"] is True
+    assert out["feeds_total"] == 2 and out["feeds_on"] == 1 and out["state"] == "some"
+
+
+@pytest.mark.asyncio
+async def test_power_on_single_ref_passes_operator_identity(pm):
+    pdu = DummyPdu(feeds={"p1": ["rack1.1"]}, states={"rack1.1": False})
+    session = _power_session(pm, pdu, username="opsue", run_client_id="action:xyz")
+    result = await session.power_on("rack1.1")
+    assert result["ok"] is True
+    assert pdu.calls == [("rack1.1", True, "opsue", "action:xyz")]
+
+
+@pytest.mark.asyncio
+async def test_power_off_single_ref_returns_impact(pm):
+    pdu = DummyPdu(feeds={"p1": ["rack1.1"]}, states={"rack1.1": True})
+    session = _power_session(pm, pdu)
+    result = await session.power_off("rack1.1")
+    assert result["ok"] is True
+    assert "impact" in result
+
+
+@pytest.mark.asyncio
+async def test_power_raises_without_injected_context(pm):
+    with pytest.raises(ActionPowerError, match="not available"):
+        await ActionSession(pm, "p1", "c1").power_on("rack1.1")
+
+
+@pytest.mark.asyncio
+async def test_power_refuses_group_blocked_outlet(pm):
+    pdu = DummyPdu(feeds={"p1": ["rack1.1"]}, states={"rack1.1": True}, blocked={"rack1.1": ["p2"]})
+    session = _power_session(pm, pdu)
+    with pytest.raises(ActionPowerError, match="outside your groups") as excinfo:
+        await session.power_off("rack1.1")
+    assert excinfo.value.ref == "rack1.1"
+    assert pdu.calls == []
+
+
+@pytest.mark.asyncio
+async def test_power_raises_on_failed_switch(pm):
+    pdu = DummyPdu(feeds={"p1": ["rack1.1"]}, states={"rack1.1": False}, failures={"rack1.1": "PDU offline"})
+    session = _power_session(pm, pdu)
+    with pytest.raises(ActionPowerError, match="PDU offline") as excinfo:
+        await session.power_on("rack1.1")
+    assert excinfo.value.ref == "rack1.1"
+
+
+@pytest.mark.asyncio
+async def test_power_wraps_backend_exception(pm):
+    pdu = DummyPdu(feeds={"p1": ["rack1.1"]}, raising=["rack1.1"])
+    session = _power_session(pm, pdu)
+    with pytest.raises(ActionPowerError, match="driver exploded"):
+        await session.power_on("rack1.1")
+
+
+@pytest.mark.asyncio
+async def test_power_refuses_ref_of_another_port(pm):
+    pdu = DummyPdu(feeds={"p1": ["rack1.1"], "p2": ["rack1.9"]}, states={"rack1.9": False})
+    session = _power_session(pm, pdu)
+    with pytest.raises(ActionPowerError, match="not a power feed"):
+        await session.power_on("rack1.9")
+    assert pdu.calls == []
+
+
+@pytest.mark.asyncio
+async def test_power_refuses_federated_ref(pm):
+    pdu = DummyPdu(feeds={"p1": ["node2::rack1.1"]}, states={"node2::rack1.1": False})
+    session = _power_session(pm, pdu)
+    with pytest.raises(ActionPowerError, match="federated outlet"):
+        await session.power_on("node2::rack1.1")
+
+
+@pytest.mark.asyncio
+async def test_power_omitted_ref_skips_outlets_already_in_state(pm):
+    pdu = DummyPdu(
+        feeds={"p1": ["rack1.1", "rack1.2", "rack1.3"]}, states={"rack1.1": True, "rack1.2": False, "rack1.3": None}
+    )
+    session = _power_session(pm, pdu)
+    result = await session.power_off(ref=None)
+    # rack1.2 is already off -> skipped; rack1.1 is on -> switched; rack1.3 is
+    # unknown -> switched (unknown never counts as "already in state").
+    assert result["skipped"] == ["rack1.2"]
+    assert result["changed"] == ["rack1.1", "rack1.3"]
+    assert result["failed"] == []
+
+
+@pytest.mark.asyncio
+async def test_power_list_form_dedupes_refs(pm):
+    pdu = DummyPdu(feeds={"p1": ["rack1.1"]}, states={"rack1.1": False})
+    session = _power_session(pm, pdu)
+    result = await session.power_on(["rack1.1", "rack1.1"])
+    assert result["changed"] == ["rack1.1"]
+    assert pdu.calls == [("rack1.1", True, "tester", "action:r1")]
+
+
+@pytest.mark.asyncio
+async def test_power_rejects_empty_ref_list(pm):
+    pdu = DummyPdu(feeds={"p1": ["rack1.1"]})
+    session = _power_session(pm, pdu)
+    with pytest.raises(ActionPowerError, match="empty"):
+        await session.power_on([])
+
+
+@pytest.mark.asyncio
+async def test_power_omitted_ref_without_feeds_raises(pm):
+    pdu = DummyPdu(feeds={})
+    session = _power_session(pm, pdu)
+    with pytest.raises(ActionPowerError, match="no power feeds"):
+        await session.power_off()
+
+
+@pytest.mark.asyncio
+async def test_power_many_one_failure_does_not_stop_the_rest(pm):
+    pdu = DummyPdu(
+        feeds={"p1": ["rack1.1", "rack1.2", "rack1.3"]},
+        states={"rack1.1": False, "rack1.2": False, "rack1.3": False},
+        failures={"rack1.2": "PDU offline"},
+        blocked={"rack1.3": ["p9"]},
+    )
+    session = _power_session(pm, pdu)
+    result = await session.power_on(ref=None)
+    assert result["changed"] == ["rack1.1"]
+    assert sorted(f["ref"] for f in result["failed"]) == ["rack1.2", "rack1.3"]
