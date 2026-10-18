@@ -93,6 +93,8 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Reload hint | The badge in the Config Editor that marks what applies a field change: LIVE (no reload), SOFT, FULL, SIGHUP, or RESTART (process restart). | reload requirement mark |
 | Login MOTD | The public message of the day from `web_console.motd`, shown on the login page. | notice, banner (for this text) |
 | Logged-in MOTD | The message of the day from `web_console.logged_in_motd`, shown at the top of the status page. May hold sensitive text. | notice, banner (for this text) |
+| Status fragment | One HTML region of the status page (`summary`, `ports`, `federation`, `clients`). `GET /api/status/fragments` returns them and the status page swaps each one in place during live auto-refresh (issue #85). | status chunk, status region |
+| Status poke | The `status_change` frame the server sends on `/ws/status` when port or federation data changes. It carries no data; the status page reacts by re-fetching its fragments. | status push, status event |
 
 ## Authentication and Security
 

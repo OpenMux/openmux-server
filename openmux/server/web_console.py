@@ -984,6 +984,112 @@ async def handle_api_ports(request: web.Request) -> web.Response:
         return web.json_response({"ports": []})
 
 
+# Live status page (issue #85): the markers in status_content.html.j2 delimit
+# the regions the Auto Refresh toggle swaps in place; the fragments endpoint
+# renders them and the /ws/status socket pokes viewers to re-fetch.
+_STATUS_FRAGMENT_RE = re.compile(r"<!--OMX-STATUS-FRAGMENT:BEGIN:(\w+)-->(.*?)<!--OMX-STATUS-FRAGMENT:END:\1-->", re.S)
+STATUS_FRAGMENT_NAMES = ("summary", "ports", "federation", "clients")
+
+
+def _extract_status_fragments(html_text: str) -> Dict[str, str]:
+    """Split rendered status markup into ``{name: inner_html}`` at the markers.
+
+    A region whose marker pair is missing (template edited without markers)
+    yields no entry; the client keeps the server-rendered content for it.
+    """
+    fragments: Dict[str, str] = {}
+    for match in _STATUS_FRAGMENT_RE.finditer(html_text):
+        fragments[match.group(1)] = match.group(2)
+    return fragments
+
+
+def _status_fragments_payload(adapter: "WebConsoleAdapter", request: web.Request) -> Dict[str, Any]:
+    """Build the status payload for a fragment request, honoring its sort query.
+
+    Mirrors `_render_status_page` so swapped rows keep the page's current sort
+    order (`sidebar_ports`/`status_path` exist only for the full-page template).
+    """
+    ports = adapter._get_ports_snapshot()
+    payload = _assemble_status_payload(adapter, preloaded_ports=ports)
+    payload["sidebar_ports"] = payload.get("ports", [])
+    sort_key, sort_dir, preserved_query = _extract_sort_params(request)
+    payload["ports"] = _sort_ports_list(payload.get("ports", []), sort_key, sort_dir == "desc")
+    payload["sort_key"] = sort_key
+    payload["sort_dir"] = sort_dir
+    payload["sort_query"] = preserved_query
+    payload["status_path"] = _prefixed_path(adapter._effective_base_path(request), "/status")
+    return payload
+
+
+async def handle_api_status(request: web.Request) -> web.Response:
+    """Return the aggregated status payload as JSON (issue #85).
+
+    The same data the status page renders: ``status``, ``ports``,
+    ``federation``, ``multipath``, ``web_clients`` (the WebStatus
+    ``/api/status`` shape, collected via `_assemble_status_payload`).
+    """
+    adapter = _get_adapter(request)
+    if not request.get("username"):
+        raise web.HTTPUnauthorized()
+    try:
+        return web.json_response(_assemble_status_payload(adapter))
+    except Exception as e:
+        adapter.logger.error("/api/status error: %s", e, exc_info=True)
+        return web.json_response({"error": True, "message": "Failed to collect status"}, status=500)
+
+
+async def handle_api_status_fragments(request: web.Request) -> web.Response:
+    """Return the status page's live regions as HTML fragments (issue #85).
+
+    ``{"fragments": {"summary": ..., "ports": ..., "federation": ..., "clients": ...}}``
+    rendered from the same markup the full page uses, sorted per the request's
+    ``sort``/``dir`` query so swapped rows keep the page's order.
+    """
+    adapter = _get_adapter(request)
+    if not request.get("username"):
+        raise web.HTTPUnauthorized()
+    try:
+        fragments = adapter._render_status_fragments(_status_fragments_payload(adapter, request))
+        return web.json_response({"fragments": fragments})
+    except Exception as e:
+        adapter.logger.error("/api/status/fragments error: %s", e, exc_info=True)
+        return web.json_response({"error": True, "message": "Failed to render status fragments"}, status=500)
+
+
+async def handle_ws_status(request: web.Request) -> web.WebSocketResponse:
+    """Live-update poke stream for the status page (issue #85).
+
+    Send-only for the client: one ``{"event": "status_change"}`` frame on
+    connect (freshness after a reload or reconnect) and one per coalesced
+    port-meta change. The viewer re-fetches /api/status/fragments on each
+    frame, like the Power pages re-fetch /api/power. Registered before
+    ``/ws/{port_name}`` so the static path wins (same as ``/ws/power``).
+    """
+    adapter = _get_adapter(request)
+    if not request.get("username"):
+        raise web.HTTPUnauthorized()
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    cid = f"statusws:{id(ws)}"
+    adapter._status_ws_clients[cid] = ws
+    try:
+        await ws.send_str(json.dumps({"event": "status_change"}, separators=(",", ":")))
+        async for _msg in ws:
+            # Ignore client frames; iterating detects the close and ends the stream.
+            pass
+    except Exception:
+        # justification: the client is gone; cleanup below still runs
+        pass
+    finally:
+        adapter._status_ws_clients.pop(cid, None)
+        try:
+            await ws.close()
+        except Exception:
+            # justification: shutdown cleanup; the transport may already be closed
+            pass
+    return ws
+
+
 async def handle_api_reload(request: web.Request) -> web.Response:
     """Reload selected configuration sections online (multi-adapter).
 
@@ -1893,6 +1999,14 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self._client_meta = {}  # client_id -> {ip, username}
         # Event-driven meta push support
         self._meta_subscribers = {}  # port_name -> set(client_id)
+        # Live status page (issue #85): client_id -> /ws/status WebSocketResponse,
+        # a single coalescing push task, and the last push timestamp for the
+        # debounce window. Pokes carry no data; the client re-fetches
+        # /api/status/fragments on each one.
+        self._status_ws_clients: Dict[str, Any] = {}
+        self._status_ws_push_task = None
+        self._status_ws_last_push = 0.0
+        self._status_ws_min_interval = 2.0
         self._meta_debounce = {}  # port_name -> last_broadcast_ts
         self._meta_min_interval = 0.3
         # Template engine will be prepared on start
@@ -2354,6 +2468,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
         app.router.add_post("/login", handle_login)
         app.router.add_get("/logout", handle_logout)
         app.router.add_get("/api/ports", handle_api_ports)
+        app.router.add_get("/api/status", handle_api_status)
+        app.router.add_get("/api/status/fragments", handle_api_status_fragments)
         app.router.add_post("/api/reload", handle_api_reload)
         # Power (PDU) API + live socket routes are core: registered always
         # so a soft reload of the `power:` section needs no restart; the
@@ -2362,6 +2478,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
         app.router.add_post(r"/api/power/outlets/{outlet_ref:.+}", _power_monitor._handle_set_outlet)
         app.router.add_get("/ws/power", _power_monitor._handle_ws_power)
         app.router.add_get("/api/csrf", self._handle_api_csrf)
+        # Static paths win over /ws/{port_name} (registration order): a port
+        # literally named "status" is shadowed here, same precedent as "power".
+        app.router.add_get("/ws/status", handle_ws_status)
         app.router.add_get("/ws/{port_name}", handle_ws)
         app.router.add_get("/ws/{server_id}/{port_name}", handle_ws_fqpn)
         # Health/Probe endpoints
@@ -2372,6 +2491,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
     async def stop(self) -> None:
         self._set_running(False)
+        # Pending live-status poke (issue #85): the viewers go away with the
+        # console, so a scheduled push has nobody to serve.
+        if self._status_ws_push_task is not None:
+            self._status_ws_push_task.cancel()
+            self._status_ws_push_task = None
         try:
             # Close HTTP server
             # New dual-server cleanup first
@@ -2629,6 +2753,33 @@ class WebConsoleAdapter(BaseGenericAdapter):
         """
         assert self._jinja_env is not None
         tmpl = self._jinja_env.get_template("status.html.j2")
+        html_text = tmpl.render(**self._status_template_vars(data, plugin_nav, current_port, user_permission))
+        return html_text.encode("utf-8")
+
+    def _render_status_fragments(self, data: Dict[str, Any]) -> Dict[str, str]:
+        """Render the status page's live-update regions as HTML fragments (issue #85).
+
+        Renders 'status_content.html.j2' (the same markup the full page includes)
+        with the identical template context, then splits it at the
+        OMX-STATUS-FRAGMENT comment markers. Backs GET /api/status/fragments.
+        """
+        assert self._jinja_env is not None
+        tmpl = self._jinja_env.get_template("status_content.html.j2")
+        html_text = tmpl.render(**self._status_template_vars(data))
+        return _extract_status_fragments(html_text)
+
+    def _status_template_vars(
+        self,
+        data: Dict[str, Any],
+        plugin_nav: Optional[list[Dict[str, Any]]] = None,
+        current_port: Optional[str] = None,
+        user_permission: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build the Jinja context for the status markup (issue #85 split).
+
+        Shared by `_render_status()` (full page) and `_render_status_fragments()`
+        (live regions) so both render byte-identical markup for their regions.
+        """
         server_version = _get_dist_version()
         try:
             server_uptime = (
@@ -2670,7 +2821,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         sort_dir = data.get("sort_dir") or "asc"
         sort_query = data.get("sort_query") or ""
         status_path = data.get("status_path") or "/"
-        html_text = tmpl.render(
+        return dict(
             data=data,
             ports=ports,
             sidebar_ports=sidebar_ports,
@@ -2701,7 +2852,6 @@ class WebConsoleAdapter(BaseGenericAdapter):
             server_uptime=server_uptime,
             motd=self.logged_in_motd,
         )
-        return html_text.encode("utf-8")
 
     @staticmethod
     def _add_ports_to_map(target: Dict[str, list], key: str, ports_list: list) -> None:
@@ -2876,6 +3026,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
             # state from the `power` block the meta frame carries below.
             if isinstance(changes, dict) and changes.get("event") == "power_outlet_changed" and subs:
                 self._push_power_notice(port_name, changes)
+            # Live status page (issue #85): poke every /ws/status viewer on any
+            # port meta change, independent of the per-port console subscribers.
+            self._kick_status_ws()
             if not subs:
                 return
             # Check if we should bypass debounce for connection state changes
@@ -2901,6 +3054,49 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             # justification: best-effort meta push; the next event retries
             pass
+
+    def _kick_status_ws(self) -> None:
+        """Schedule one coalesced live-update poke for the status page (issue #85).
+
+        Called from the port-meta listener; frames carry no data, so a burst of
+        port events collapses into a single ``status_change`` push per client
+        (and at most one per ``_status_ws_min_interval``). A viewer re-fetches
+        /api/status/fragments on the poke, like the Power pages' pattern.
+        """
+        if not self._status_ws_clients:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = self._status_ws_push_task
+        if task is not None and not task.done():
+            return  # a poke is already scheduled; this event is coalesced into it
+        last = float(self._status_ws_last_push or 0.0)
+        delay = max(0.0, float(self._status_ws_min_interval) - (time.time() - last)) if last > 0 else 0.0
+        self._status_ws_push_task = loop.create_task(self._status_ws_push_later(delay))
+
+    async def _status_ws_push_later(self, delay: float) -> None:
+        """Sleep out the debounce window, then poke every /ws/status viewer once."""
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._status_ws_last_push = time.time()
+            frame = json.dumps({"event": "status_change"}, separators=(",", ":"))
+            for cid in list(self._status_ws_clients.keys()):
+                ws = self._status_ws_clients.get(cid)
+                if ws is None:
+                    continue
+                try:
+                    await ws.send_str(frame)
+                except Exception:
+                    # Dead viewer: drop it so later pokes skip it (cleanup is best-effort).
+                    self._status_ws_clients.pop(cid, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # justification: best-effort live push; the next meta event retries
+            self.logger.debug("status ws poke failed", exc_info=True)
 
     def _schedule_meta_broadcast(self, port_name: str, changes: Optional[Dict[str, Any]], immediate: bool) -> None:
         """Broadcast a meta update now, or schedule a debounced one.

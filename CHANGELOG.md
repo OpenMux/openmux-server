@@ -157,6 +157,18 @@ Changes since v1.0.3 (2026-09-17).
 
 ### Web console and observability
 
+- **The Status page auto-refresh is live; the page no longer reloads.**
+  Turning on **Auto Refresh** now opens a `/ws/status` WebSocket (like the
+  Power pages) instead of reloading every 5 s. A port or federation change
+  (server meta-event, up to one poke per 2 s) makes the page re-fetch its
+  regions from the new `GET /api/status/fragments` endpoint and swap them in
+  place. Scroll position, expanded Details rows, and the sort query survive
+  every refresh. If the socket drops, the page retries silently every 3 s
+  while the toggle is on; a closed socket falls back to nothing (the static
+  page stays until you reload). A `GET /api/status` JSON endpoint (status,
+  ports, federation, multipath, web clients) was added with the same
+  protection. No config change is required (issue #85).
+
 - **The per-run Port Action transcript now also holds the device log.** While
   an action script runs, the port's own console stream (port output and
   lifecycle events, subject to the port's `log_direction` filter) is now
