@@ -900,12 +900,15 @@ class OpenMuxClient:
         if not connection:
             return False
 
-        # Create console UI
+        # Create console UI. This entry point never attaches a port, so the
+        # session gets the interactive `mux> ` command mode (issue #88) when
+        # the adapter keeps a server-side command phase (TCP only).
         console = ConsoleUI(
             connection,
             reconnect_mode=reconnect_mode,
             backoff_initial=backoff_initial,
             backoff_max=backoff_max,
+            command_mode=True,
         )
 
         # Run console

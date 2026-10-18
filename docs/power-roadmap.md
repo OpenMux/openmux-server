@@ -138,11 +138,13 @@ can be delivered in any order.
       the console-group check, run by `PduAdapter.handle_power_frame` on both
       listener wirings (client listener and web console). The client's old
       unimplemented playback `p`/`P` placeholders are removed.
-- [ ] **Typed CLI POWER parsing.** Replace the free-text `command.split()`
+- [x] **Typed CLI POWER parsing.** Replace the free-text `command.split()`
       handler with structured parsing for the `POWER` command forms.
       Merged into [issue #88](https://github.com/OpenMux/openmux-server/issues/88)
       (client listener command-phase UX), where the structured parsing is one
-      of the work items — close this box when that ticket closes.
+      of the work items. Done: `parse_power_command` in
+      `openmux/server/adapters/power_command.py`; every reply string is
+      unchanged.
 
 Deferred (not scheduled): **Power metrics history** — keeping watts/amps and
 on-state over time as queryable history with a chart on the Power page. It is

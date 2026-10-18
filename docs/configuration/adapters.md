@@ -332,6 +332,19 @@ client_listener:
   connection_timeout: 30
 ```
 
+Session behavior:
+- After authentication the session waits in its command phase (`LIST`,
+  `CONNECT:<port>`, `DISCONNECT`, `QUIT`, `POWER ...`). A blank line does
+  nothing; only `QUIT`, a closed connection, or an error ends the session.
+- The OpenMux CLI client shows a `mux> ` prompt on top of this phase. The
+  server itself never sends a prompt and never echoes; a raw client (for
+  example telnet) sees no extra bytes. See
+  [../design/cli_command_mode.md](../design/cli_command_mode.md).
+- A CLI client can leave a port without losing its session: it sends the
+  `{"type": "detach"}` control frame (the same out-of-band channel as the
+  read-write requests). The server answers with the `DISCONNECTED:<port>` line
+  plus a `detached` ack, and the session returns to its command phase.
+
 ## MuxCon Federation (`muxcon`)
 
 Federates multiple OpenMux servers. Can both listen for peers and initiate outbound connections. TLS is supported including optional TOFU and pinning.
@@ -554,6 +567,8 @@ POWER rack1                 # list one PDU's outlets
 POWER rack1.3               # report one outlet
 POWER rack1.3 off           # switch an outlet (needs read-write)
 ```
+The first token must be exactly `POWER`. Any other first token answers the
+`ERROR:POWER: usage:` line instead of a listing.
 Switching an outlet off prints `WARNING:` lines naming the consoles that would lose ALL power, and `NOTE:` lines naming the consoles that stay up on other feeds.
 
 Who may switch is scoped to console groups: switching needs `read-write` or `admin`, plus the entitlement to open every console the outlet feeds (the same console-access rules as attach time: `read_write_groups`/`read_only_groups` and `access_default`). A read-write user whose groups do not cover one of the outlet's consoles sees an `ERROR:POWER` line (CLI, telnet, SSH) or a 403 (web API) naming that console; switching an outlet that feeds any console outside the user's groups requires `admin`. An outlet that feeds no console stays switchable by any read-write user. The check runs on every switch path (web API, client-listener `POWER`, and the `p` power menu on the telnet, SSH, and CLI clients).

@@ -372,6 +372,7 @@ The client uses a two‑character escape sequence to issue local commands.
 - Default escape introducer: `Ctrl+E` then `c` (displayed at startup as `Escape sequence: Ctrl+E c`).
 - After the introducer, type one of the following commands:
   - `.`: Disconnect
+  - `d`: Detach from the port and return to the `mux> ` prompt (TCP sessions)
   - `a`: Attach read‑write
   - `s`: Switch to spy (read‑only)
   - `i`: Show connection info
@@ -391,6 +392,17 @@ The client uses a two‑character escape sequence to issue local commands.
 Notes:
 - `Ctrl+C` is forwarded to the remote by default (not intercepted).
 - When disconnected, you can use `Ctrl+E` followed directly by a command (skip the `c`) for convenience.
+
+## Command Mode (Server Sessions)
+
+Running the client without a port (`openmux -s <server>`) starts in command
+mode. The client shows a `mux> ` prompt and echoes what you type. Type `help`
+for the command list. `list` shows the console ports, `connect <port>` attaches
+to one, `power` shows or switches the power feeds of your console, and `quit`
+ends the session. A blank line does nothing. While attached to a port, the
+control menu (`Ctrl+E` then `c`) offers `d`: it detaches from the port and
+returns you to the prompt without ending the session. See
+`docs/design/cli_command_mode.md`.
 
 ## Security Notes
 

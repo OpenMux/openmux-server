@@ -33,6 +33,10 @@ from .power_command import find_power_adapter, run_power_command
 # a port. A control frame is a single line: b"\x00OMXCTRL " + json + b"\n".
 CTRL_MARKER = b"\x00OMXCTRL "
 
+#: Largest control frame accepted inside a forwarded chunk; a longer line is
+#: device data that happens to start with the marker, forwarded as data.
+_CTRL_FRAME_MAX = 65536
+
 
 def _to_int(value: Any, default: int) -> int:
     """Coerce to int, falling back to ``default`` on bad input."""
@@ -442,9 +446,14 @@ class TcpServerAdapter(BaseGenericAdapter):
         # Command handling phase (line-based mode)
         await self.handle_command_phase(client)
 
-        # If connected to a port, switch to character mode
-        if client.connected_port:
+        # If connected to a port, switch to character mode. An explicit detach
+        # (issue #88) returns the session to the command phase on the same
+        # connection; every other character-mode exit ends the session as before.
+        while client.connected and client.connected_port:
             await self.handle_character_mode(client)
+            if client.connected and client.detach_requested:
+                client.detach_requested = False
+                await self.handle_command_phase(client)
 
     async def authenticate_client_char_mode(self, client: "ClientSession") -> bool:
         """Authenticate client using line emulation over char stream.
@@ -596,6 +605,8 @@ class TcpServerAdapter(BaseGenericAdapter):
         Continuously collects line-mode commands and dispatches them to
         ``process_client_command`` until the client either attaches to a
         port (transition to character mode), disconnects, or an error occurs.
+        A blank line is a no-op (issue #88): it never ends the session. Only
+        EOF (``None`` from the line collector), ``QUIT``, or an error does.
 
         Args:
             client: Active client session wrapper.
@@ -603,10 +614,16 @@ class TcpServerAdapter(BaseGenericAdapter):
         while client.connected and not client.connected_port:
             try:
                 command_line = await self.collect_line_from_chars(client)
-                if not command_line:
+                if command_line is None:  # EOF or overflow: end the session
                     break
 
-                await self.process_client_command(client, command_line.strip())
+                command = command_line.strip()
+                if not command:
+                    # Issue #88: a blank line re-prompts (the phase stays
+                    # silent), it must never disconnect the client.
+                    continue
+
+                await self.process_client_command(client, command)
 
             except asyncio.TimeoutError:
                 self.logger.warning("Client %s timeout in command phase", client.client_id)
@@ -703,8 +720,13 @@ class TcpServerAdapter(BaseGenericAdapter):
         if not client.connected_port:
             return
 
-        if await self._handle_control_frame(client, data):
-            return
+        # Control frames may sit anywhere inside the chunk: TCP coalesces
+        # writes, so a detach frame can arrive stuck behind keystrokes typed
+        # moments earlier (issue #88). Split them out; forward the rest.
+        if CTRL_MARKER in data or client._ctrl_rx_frag:
+            data = await self._extract_control_frames(client, data)
+            if not data:
+                return
 
         if self.console_manager and hasattr(self.console_manager, "port_manager"):
             try:
@@ -729,6 +751,40 @@ class TcpServerAdapter(BaseGenericAdapter):
                         pass
             except Exception as e:
                 self.logger.error("Error writing chunk to port %s: %s", client.connected_port, e, exc_info=True)
+
+    async def _extract_control_frames(self, client: "ClientSession", data: bytes) -> bytes:
+        """Split OMXCTRL control frames out of a raw chunk (issue #88).
+
+        Every complete frame (``CTRL_MARKER`` through the next newline) is
+        passed to ``_handle_control_frame`` exactly as a whole-chunk frame
+        would be. A trailing half-frame waits in ``client._ctrl_rx_frag`` for
+        the next chunk; a frame over ``_CTRL_FRAME_MAX`` is treated as port
+        data instead of being buffered forever. Returns the remaining
+        port-data bytes.
+        """
+        if client._ctrl_rx_frag:
+            data = client._ctrl_rx_frag + data
+            client._ctrl_rx_frag = b""
+        out = bytearray()
+        i = 0
+        while True:
+            idx = data.find(CTRL_MARKER, i)
+            if idx == -1:
+                break
+            nl = data.find(b"\n", idx)
+            if nl == -1:
+                out += data[i:idx]
+                if len(data) - idx <= _CTRL_FRAME_MAX:
+                    client._ctrl_rx_frag = data[idx:]
+                else:
+                    out += data[idx:]  # oversized: not a frame, keep as data
+                i = len(data)
+                break
+            out += data[i:idx]
+            await self._handle_control_frame(client, data[idx : nl + 1])
+            i = nl + 1
+        out += data[i:]
+        return bytes(out)
 
     def _ctrl_parse_request(self, data: bytes) -> Optional[Dict[str, Any]]:
         """Decode one control frame into its JSON request dict.
@@ -842,7 +898,28 @@ class TcpServerAdapter(BaseGenericAdapter):
             return await self._ctrl_force_reply(client, port_name, req)
         if req_type == "query_rw_holders":
             return await self._ctrl_holders_reply(port_name)
+        if req_type == "detach":
+            return await self._ctrl_detach_reply(client)
         return None
+
+    async def _ctrl_detach_reply(self, client: "ClientSession") -> Dict[str, Any]:
+        """detach: release the port and return the session to its command phase (issue #88).
+
+        Replies the same text lines the ``DISCONNECT`` line command uses
+        (protocol stability) plus a typed ``detached`` ack the CLI client
+        waits on. Setting ``detach_requested`` is what lets the loop in
+        ``handle_client_protocol`` re-enter the command phase; no other
+        character-mode exit does.
+        """
+        port_name = client.connected_port
+        if not port_name:
+            await client.send_line("ERROR:DISCONNECT:No port connected")
+            return {"type": "detached", "ok": False, "port": None}
+        client.detach_requested = True
+        client.mode = None
+        await self.disconnect_client_from_port(client)
+        await client.send_line(f"DISCONNECTED:{port_name}")
+        return {"type": "detached", "ok": True, "port": port_name}
 
     async def _ctrl_send_reply(self, client: "ClientSession", resp: Dict[str, Any]) -> None:
         """Record the resulting access mode and best-effort send the reply frame."""
@@ -1547,6 +1624,13 @@ class ClientSession:
         self.mode: Optional[str] = None
         # Set once a blocked write has been reported, to avoid repeating the notice per keystroke
         self._write_blocked_notified: bool = False
+        # Set by an explicit detach (issue #88): the protocol loop returns the
+        # session to its command phase after character mode ends. Every other
+        # character-mode exit (disconnect, port removal) still ends the session.
+        self.detach_requested: bool = False
+        # Partial OMXCTRL control frame received with no terminating newline
+        # yet; completed by the next chunk (issue #88 framing).
+        self._ctrl_rx_frag: bytes = b""
 
     async def receive_char(self) -> Optional[bytes]:
         """Receive exactly one byte (unless disconnected).

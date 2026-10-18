@@ -33,6 +33,21 @@ Changes since v1.0.3 (2026-09-17).
 
 ### Behavior changes (no config change required)
 
+- **The CLI client greets server sessions with a `mux> ` prompt.** Starting
+  the client without a port (`openmux -s <server>`) now shows a prompt with
+  local echo instead of the raw stream. `help` lists the commands; `list`
+  shows the ports, `connect <port>` attaches, `quit` ends the session, and a
+  blank line does nothing. The prompt and echo are client-side; the wire
+  protocol is unchanged. While attached, the control menu (`Ctrl+E` then `c`)
+  gains `d`: it detaches from the port and returns to the prompt, so the
+  session survives a port switch. See `docs/design/cli_command_mode.md`
+  (issue #88).
+- **A blank line no longer closes the client-listener command phase.** Raw
+  TCP clients (for example telnet) that press Enter on an empty line stay
+  connected; only `QUIT`, a closed connection, or an error ends the session.
+  `POWER` now needs the exact first token `POWER`: a word like `POWERSXYZ`
+  answers the usage line instead of the full outlet list (issue #88).
+
 - **The web Power pages and API are core, not a plugin.** The standalone
   `/power` and `/power/{pdu}` pages, `GET /api/power`,
   `POST /api/power/outlets/{ref}`, and `GET /ws/power` are now registered by

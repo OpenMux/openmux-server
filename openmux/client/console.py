@@ -19,6 +19,7 @@ authentication responsibilities to the provided adapter.
 
 import asyncio
 import io
+import json
 import logging
 import os
 import sys
@@ -27,6 +28,27 @@ import tty
 from typing import Any, Dict, List, Optional, Tuple
 
 from .adapters import BaseClientAdapter
+
+#: Interactive command-mode prompt (issue #88). Client-side by design: the
+#: server command phase stays prompt-free, so raw TCP clients see no new bytes.
+COMMAND_PROMPT = "mux> "
+
+#: Notice printed for `disconnect` / detach while not attached to any port.
+NOT_ATTACHED_NOTICE = '[Not attached. Type "connect <port>", or "quit" to end the session]'
+
+#: Command-mode help text. The code block in docs/design/cli_command_mode.md
+#: holds the identical lines; a test pins the two together so they cannot drift.
+COMMAND_MODE_HELP_LINES = [
+    "Commands:",
+    "  help, h, ?          Show this help",
+    "  list, l             List console ports",
+    "  connect <port>, c   Attach to a port",
+    "  disconnect          Leave a port (while attached: press Ctrl+E c d)",
+    "  power [args]        Power: power [<pdu>[.<outlet>] [on|off]]",
+    "  quit, exit, q       End the session",
+    "Blank line does nothing. While attached, keystrokes go to the port.",
+    "The control menu (shown at startup) controls the session.",
+]
 
 
 class ConsoleUI:
@@ -44,6 +66,7 @@ class ConsoleUI:
         reconnect_mode: str = "off",
         backoff_initial: float = 1.0,
         backoff_max: float = 30.0,
+        command_mode: bool = False,
     ):
         """Initialize a new console UI instance.
 
@@ -58,6 +81,10 @@ class ConsoleUI:
             backoff_initial: Initial delay in seconds before first retry in
                 auto reconnect mode.
             backoff_max: Maximum delay in seconds between retries.
+            command_mode: Offer the interactive ``mux> `` command mode for an
+                unattached TCP session (issue #88). Only honored when the
+                adapter reports ``supports_command_phase``; ignored entirely
+                by WebSocket sessions and port-attached runs.
         """
         self.connection = connection
         self.is_running = False
@@ -110,6 +137,22 @@ class ConsoleUI:
         # Normalize CR to LF on outgoing input (Enter often yields CR in raw mode)
         # Can be disabled with OPENMUX_CLIENT_NORMALIZE_CRLF=0
         self.normalize_crlf = os.environ.get("OPENMUX_CLIENT_NORMALIZE_CRLF", "1").lower() in ("1", "true", "yes")
+        # Interactive command mode (issue #88): an unattached TCP server
+        # session shows a prompt with local echo instead of dumping the user
+        # into the raw stream. Switches off when a port attaches, and a
+        # detach (escape `d`) switches it back on.
+        self.command_mode = bool(command_mode and getattr(connection, "supports_command_phase", False))
+        # Current command-mode input line; kept as raw bytes so echo and
+        # backspace stay byte-correct for multi-byte input.
+        self._cmd_line = bytearray()
+        # Part of a server reply line received between reads in command mode.
+        self._cmd_rx = b""
+        # True while a forwarded command waits for its reply. The prompt is
+        # written again once the reply stream has been quiet for a few polls:
+        # command-phase replies have no completion framing, and the background
+        # loop must stay the sole reader of the connection (single-reader rule).
+        self._cmd_awaiting_reply = False
+        self._cmd_quiet_polls = 0
 
     async def run(self) -> bool:
         """Run the interactive UI event loop.
@@ -139,6 +182,12 @@ class ConsoleUI:
             # TCP adapter learns this synchronously during CONNECT) and warn
             # the user if the session starts out read-only.
             self._sync_access_mode()
+
+            # Interactive command mode (issue #88): show the discovery hint
+            # and the first prompt. Command replies re-prompt via the read loop.
+            if self.command_mode:
+                sys.stdout.write('\r\nType "help" for commands.\r\n' + COMMAND_PROMPT)
+                sys.stdout.flush()
 
             # Start read task
             read_task = asyncio.create_task(self._read_from_server())
@@ -261,11 +310,13 @@ class ConsoleUI:
             return await self._read_eof()
         # Empty payload means timeout/no data; continue polling
         if data == b"" or data == "":
+            self._command_reply_settle()
             return False
         # Record stream activity so the power menu can wait for the
         # stream to settle (a live [POWER] notice is payload that
         # renders here) before it re-renders the feed list.
         self._stream_activity += 1
+        self._cmd_quiet_polls = 0
         # Reflect any access-mode change the adapter learned while
         # decoding a control-frame response (e.g. after a promote/demote).
         self._sync_access_mode()
@@ -359,6 +410,10 @@ class ConsoleUI:
 
     def _read_render(self, data) -> bool:
         """Normalize and render one payload. Returns True on a SHUTDOWN (break)."""
+        if self.command_mode:
+            # Command mode renders server replies line-wise and watches for
+            # the attach confirmation (issue #88).
+            return self._read_render_command(data)
         if isinstance(data, str):
             # Check for shutdown message
             if "SERVER:SHUTDOWN" in data:
@@ -394,6 +449,117 @@ class ConsoleUI:
         if normalized_data:
             self._received_any_data = True
         return False
+
+    def _read_render_command(self, data) -> bool:
+        """Render command-phase replies line-wise; switch mode on attach (issue #88).
+
+        Server replies are line-framed in the command phase, so buffer to line
+        ends and format each. A complete ``CONNECTED:<port>:<mode>`` line means
+        the session attached: print the notice, record the port on the adapter,
+        leave command mode, and render any bytes after the line through the
+        normal path (they are port stream data).
+        """
+        if isinstance(data, str):
+            data = data.encode("utf-8", errors="ignore")
+        elif isinstance(data, memoryview):
+            data = data.tobytes()
+        if b"SERVER:SHUTDOWN" in data:
+            sys.stdout.write("\r\n[Server shutdown]\r\n")
+            sys.stdout.flush()
+            self.is_running = False
+            return True
+        buf = self._cmd_rx + data
+        lines = buf.split(b"\n")
+        self._cmd_rx = lines.pop()  # possibly incomplete tail, kept for the next chunk
+        out = bytearray()
+        for idx, raw in enumerate(lines):
+            line = raw.rstrip(b"\r")
+            if line.startswith(b"CONNECTED:"):
+                # Everything after this line is port stream data: collect the
+                # raw bytes (the stored segments still carry their own CRs)
+                # before _command_attached clears the pending buffer.
+                rest = list(lines[idx + 1 :])
+                if self._cmd_rx:
+                    rest.append(self._cmd_rx)
+                raw_tail = b"\n".join(rest)
+                self._cmd_rx = b""
+                if out:
+                    sys.stdout.buffer.write(bytes(out))
+                    sys.stdout.buffer.flush()
+                    self._received_any_data = True
+                    out = bytearray()
+                self._command_attached(line)
+                if raw_tail:
+                    return self._read_render(bytes(raw_tail))
+                return False
+            out += self._format_command_reply_line(line) + b"\r\n"
+        if out:
+            sys.stdout.buffer.write(bytes(out))
+            sys.stdout.buffer.flush()
+            self._received_any_data = True
+        return False
+
+    def _format_command_reply_line(self, line: bytes) -> bytes:
+        """Format one full command-phase reply line (currently only LIST)."""
+        if line.startswith(b"LIST:{"):
+            return self._format_list_line(line)
+        return line
+
+    def _format_list_line(self, line: bytes) -> bytes:
+        """Render ``LIST:{json}`` as one line per port; keep the raw line when unparseable."""
+        try:
+            payload = json.loads(line[5:].decode("utf-8", errors="ignore"))
+            ports = payload.get("ports") or []
+            rows = []
+            for p in ports:
+                if not isinstance(p, dict):
+                    rows.append(f"  {p}")
+                    continue
+                name = str(p.get("name") or "")
+                desc = str(p.get("description") or "")
+                if not name:
+                    continue
+                rows.append(f"  {name}  -  {desc}" if desc else f"  {name}")
+            if not rows:
+                return b"(no ports)"
+            return "\r\n".join(rows).encode("utf-8")
+        except Exception:
+            return line
+
+    def _command_attached(self, line: bytes) -> None:
+        """Leave command mode after a ``CONNECTED:<port>:<mode>`` server line."""
+        parts = line.decode("utf-8", errors="ignore").split(":")
+        port_name = parts[1] if len(parts) > 1 else ""
+        mode = "read-write" if len(parts) > 2 and parts[2] == "READ_WRITE" else "read-only"
+        self.command_mode = False
+        self._cmd_awaiting_reply = False
+        self._cmd_rx = b""
+        try:
+            # Mirror what the adapter's own connect_to_port records, so info
+            # dumps and manual reconnect behave the same after a typed connect.
+            self.connection.current_port = port_name
+            self.connection.access_mode = mode
+        except Exception:
+            # justification: adapter view mirror is best-effort; input forwarding works without it
+            pass
+        self._sync_access_mode()
+        sys.stdout.write(f"\r\n[Connected to {port_name} ({mode})]\r\n")
+        sys.stdout.flush()
+
+    def _command_reply_settle(self) -> None:
+        """Re-prompt when a forwarded command's reply stream has been quiet (issue #88).
+
+        Command-phase replies are not completion-framed, so "answered" means
+        this many consecutive idle read polls (~0.1 s each). Only the settle
+        logic touches the prompt here; the background loop stays the reader.
+        """
+        if not self.command_mode or not self._cmd_awaiting_reply:
+            return
+        self._cmd_quiet_polls += 1
+        if self._cmd_quiet_polls >= 3:
+            self._cmd_awaiting_reply = False
+            sys.stdout.write(COMMAND_PROMPT)
+            sys.stdout.flush()
 
     async def _auto_reconnect_loop(self):
         """Attempt automatic reconnection with exponential backoff.
@@ -468,6 +634,13 @@ class ConsoleUI:
                 # Consume escape sequences in place; the remaining bytes are the payload
                 await self._drain_escape_bytes(buf)
 
+                # Command mode (issue #88): keystrokes feed the local line
+                # editor with echo; nothing reaches the connection until Enter
+                # submits a complete command line.
+                if self.command_mode:
+                    await self._drain_command_input(buf)
+                    continue
+
                 # Decide when to flush: when payload exists and enough time has elapsed
                 now = asyncio.get_event_loop().time()
                 payload = self._prepare_payload_for_send(bytes(buf))
@@ -502,6 +675,117 @@ class ConsoleUI:
                 # Do not include this byte in payload
                 continue
             i += 1
+
+    async def _drain_command_input(self, buf: bytearray) -> None:
+        """Feed buffered keystrokes (escape bytes removed) to the command line editor."""
+        while buf:
+            b = bytes(buf[:1])
+            del buf[:1]
+            await self._command_key_byte(b)
+
+    async def _command_key_byte(self, b: bytes) -> None:
+        """Handle one command-mode keystroke: local echo, line editing, submit (issue #88).
+
+        Ctrl+C cancels the current line (it never ends the session here);
+        Backspace/Delete erase one echoed character; Enter submits (a blank
+        line re-prompts and sends nothing); other control bytes are dropped.
+        """
+        if not b:
+            return
+        if b == b"\x03":  # Ctrl+C cancels the line
+            self._cmd_line.clear()
+            sys.stdout.write("\r\n" + COMMAND_PROMPT)
+            sys.stdout.flush()
+            return
+        if b in (b"\x7f", b"\x08"):  # Backspace / Delete
+            if self._cmd_line:
+                self._cmd_line.pop()
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+            return
+        if b in (b"\r", b"\n"):
+            sys.stdout.write("\r\n")
+            sys.stdout.flush()
+            line = bytes(self._cmd_line).decode("utf-8", errors="ignore").strip()
+            self._cmd_line.clear()
+            if not line:
+                # Blank line: deliberate no-op, re-prompt, zero wire bytes.
+                sys.stdout.write(COMMAND_PROMPT)
+                sys.stdout.flush()
+                return
+            await self._handle_command_line(line)
+            return
+        if 0x20 <= b[0] < 0x7F or b[0] >= 0x80:  # printable (incl. UTF-8 lead/continuation bytes)
+            self._cmd_line.extend(b)
+            sys.stdout.buffer.write(b)
+            sys.stdout.buffer.flush()
+            return
+        # Every other control byte is dropped in command mode.
+
+    async def _handle_command_line(self, line: str) -> None:
+        """Interpret one submitted command-mode line and act on it (issue #88).
+
+        Wire forms (``LIST``, ``CONNECT:<port>``, ``DISCONNECT``, ``QUIT``,
+        ``POWER ...``) pass through unchanged; word forms are case-insensitive
+        sugar forwarded as the same wire lines. Unknown lines are refused
+        locally and never reach the server. The full vocabulary lives in
+        docs/design/cli_command_mode.md.
+        """
+        upper = line.upper()
+        if upper in ("HELP", "H", "?"):
+            self._write_command_help()
+            return
+        if upper in ("QUIT", "EXIT", "Q"):
+            await self._esc_cmd_disconnect()
+            return
+        if upper in ("LIST", "L"):
+            await self._send_command_line("LIST")
+            return
+        if upper == "DISCONNECT":
+            self._write_notice(NOT_ATTACHED_NOTICE)
+            return
+        if upper in ("C", "CONNECT") or upper.startswith(("CONNECT:", "CONNECT ", "C ")):
+            await self._command_connect(line)
+            return
+        if upper == "POWER" or upper.startswith("POWER "):
+            await self._send_command_line("POWER" + line[5:])
+            return
+        self._write_notice(f'[Unknown command: "{line}" \u2014 type "help"]')
+
+    async def _command_connect(self, line: str) -> None:
+        """Normalize `connect <port>`, `c <port>` and `CONNECT:<port>` to the wire line."""
+        if line.upper().startswith("CONNECT:"):
+            target = line.split(":", 1)[1].strip()
+        else:
+            parts = line.split(maxsplit=1)
+            target = parts[1].strip() if len(parts) > 1 else ""
+        if not target:
+            self._write_notice('[Usage: connect <port>]\r\n[Run "list" to see ports]')
+            return
+        await self._send_command_line(f"CONNECT:{target}")
+
+    async def _send_command_line(self, text: str) -> None:
+        """Forward one wire line from command mode and arm the quiet-stream re-prompt."""
+        sent = False
+        try:
+            sent = bool(await self.connection.send_data(text + "\n"))
+        except Exception:
+            sent = False
+        if not sent:
+            self._write_notice("[Send failed - connection down]")
+            return
+        self._cmd_awaiting_reply = True
+        self._cmd_quiet_polls = 0
+
+    def _write_command_help(self) -> None:
+        """Print the command-mode help text (issue #88) and re-prompt."""
+        sys.stdout.write("\r\n" + "\r\n".join(COMMAND_MODE_HELP_LINES) + "\r\n" + COMMAND_PROMPT)
+        sys.stdout.flush()
+
+    def _write_notice(self, text: str) -> None:
+        """Print bracketed local notice(s); a local command re-prompts immediately."""
+        sys.stdout.write("\r\n" + text + "\r\n" + (COMMAND_PROMPT if self.command_mode else ""))
+        sys.stdout.flush()
 
     def _prepare_payload_for_send(self, payload: bytes) -> bytes:
         """Normalize CR to LF if enabled, so newlines are consistent on the wire."""
@@ -971,6 +1255,9 @@ class ConsoleUI:
         """Mapping of command mnemonic to its async handler method."""
         return {
             ".": self._esc_cmd_disconnect,
+            # Detach from the port and keep the session (issue #88): the server
+            # returns the TCP session to its command phase (`mux> ` prompt).
+            "d": self._esc_cmd_detach_port,
             "a": self._esc_cmd_request_write,
             "s": self._esc_cmd_release_write,
             "f": self._esc_cmd_take,
@@ -1032,6 +1319,77 @@ class ConsoleUI:
             # justification: shutdown cleanup; the adapter close is idempotent
             pass
         self.is_running = False
+
+    async def _esc_cmd_detach_port(self) -> None:
+        """Detach from the attached port and return to the `mux> ` prompt (issue #88).
+
+        The server releases the port, answers the `detach` control frame with
+        `detached`, and returns the session to its command phase. This handler
+        never reads the stream itself: the adapter's read path stores the ack
+        in `last_detach_reply` (single-reader rule, same shape as the power
+        menu) and this handler only polls it.
+        """
+        if not getattr(self.connection, "current_port", None):
+            sys.stdout.write(f"\r\n{NOT_ATTACHED_NOTICE}\r\n")
+            sys.stdout.flush()
+            return
+        sent = False
+        try:
+            self.connection.last_detach_reply = None
+            sent = bool(await self.connection.detach_port())
+        except Exception:
+            sent = False
+        if not sent:
+            sys.stdout.write("\r\n[Detach not supported on this connection]\r\n")
+            sys.stdout.flush()
+            return
+        reply = await self._wait_detach_reply()
+        if reply is None:
+            sys.stdout.write("\r\n[Detach timed out]\r\n")
+            sys.stdout.flush()
+            return
+        if not reply.get("ok"):
+            sys.stdout.write("\r\n[Detach refused by server]\r\n")
+            sys.stdout.flush()
+            return
+        port_name = str(reply.get("port") or getattr(self.connection, "current_port", "") or "port")
+        try:
+            # Clear the adapter's attach view so reconnect/info behave as unattached.
+            self.connection.current_port = None
+            self.connection.access_mode = None
+        except Exception:
+            # justification: adapter view mirror is best-effort; the detach already succeeded
+            pass
+        self._last_synced_access_mode = None
+        self.read_only_mode = False
+        sys.stdout.write(f"\r\n[Detached from {port_name}]\r\n")
+        sys.stdout.flush()
+        if getattr(self.connection, "supports_command_phase", False):
+            # The server side is back in its command phase: offer the prompt
+            # again so the user can pick another port without reconnecting.
+            self.command_mode = True
+            self._cmd_rx = b""
+            self._cmd_awaiting_reply = False
+            sys.stdout.write(COMMAND_PROMPT)
+            sys.stdout.flush()
+
+    async def _wait_detach_reply(self) -> Optional[Dict[str, Any]]:
+        """Poll for the `detached` ack while the background loop stays the reader.
+
+        Returns the ack dict, or None on timeout or disconnect. Mirrors the
+        power menu's reply wait (20 ms poll, bounded) and never calls read_data.
+        """
+        deadline = 5.0
+        waited = 0.0
+        while waited < deadline:
+            reply = getattr(self.connection, "last_detach_reply", None)
+            if reply is not None:
+                return reply
+            if not self.connection.is_connected:
+                return None
+            await asyncio.sleep(0.02)
+            waited += 0.02
+        return None
 
     async def _esc_cmd_request_write(self) -> None:
         """Request read-write access from the server."""
@@ -1168,6 +1526,7 @@ class ConsoleUI:
         help_text = (
             "\r\n[OpenMux Console Commands]\r\n"
             + ".         disconnect\r\n"
+            + "d         detach from the port (return to the mux> prompt)\r\n"
             + "a         request read-write access\r\n"
             + "f         take the write slot (prompt: holder id, or Enter for latest)\r\n"
             + "s         release read-write access / switch to read-only\r\n"

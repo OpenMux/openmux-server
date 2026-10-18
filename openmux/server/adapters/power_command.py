@@ -14,7 +14,7 @@ listeners all write identical text.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .listener_common import read_prompt_line
 
@@ -71,6 +71,30 @@ def format_power_notice(changes: Dict[str, Any]) -> str:
     return "\r\n[POWER] feed " + outlet + " is now " + state + "\r\n"
 
 
+#: Reply shown for any malformed POWER line. Single source for the parser and
+#: `run_power_command` so the wording can never drift between them.
+POWER_USAGE = "ERROR:POWER: usage: POWER [<pdu>[.<outlet>] [on|off]]"
+
+
+def parse_power_command(command: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Parse one typed POWER line into ``(arg, verb, error)`` (issue #88).
+
+    Accepted forms (token shapes only): ``POWER``, ``POWER <ref>``,
+    ``POWER <ref> <verb>``. The first token must be exactly ``POWER`` (the
+    old lenient ``split()`` treated ``POWERSXYZ`` as a bare list). Whether
+    ``arg`` names a PDU or an outlet ref is decided later by lookup, so
+    federated refs (which contain dots, e.g. ``peerO::rack9.1``) keep
+    working. ``verb`` is lower-cased; ``arg`` keeps its case. On a shape
+    error both values are ``None`` and ``error`` carries the usage line.
+    """
+    parts = command.split()
+    if not parts or parts[0] != "POWER" or len(parts) > 3:
+        return None, None, POWER_USAGE
+    arg = parts[1] if len(parts) >= 2 else None
+    verb = parts[2].lower() if len(parts) >= 3 else None
+    return arg, verb, None
+
+
 async def run_power_command(
     console_manager: Any,
     command: str,
@@ -100,12 +124,10 @@ async def run_power_command(
     if pdu is None or getattr(pdu, "enabled", True) is False:
         await send_line("ERROR:POWER: power management is not configured")
         return False
-    parts = command.split()
-    if len(parts) > 3:
-        await send_line("ERROR:POWER: usage: POWER [<pdu>[.<outlet>] [on|off]]")
+    arg, verb, parse_error = parse_power_command(command)
+    if parse_error:
+        await send_line(parse_error)
         return False
-    arg = parts[1] if len(parts) >= 2 else None
-    verb = parts[2].lower() if len(parts) >= 3 else None
     if verb is not None:
         return await _switch_outlet(pdu, send_line, arg, verb, username, auth_manager, client_id)
     return await _list_power(pdu, send_line, arg)

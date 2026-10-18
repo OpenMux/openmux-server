@@ -75,6 +75,14 @@ async def test_dot_close_error_is_swallowed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_d_detaches_port(monkeypatch):
+    ui = _ui()
+    monkeypatch.setattr(ui, "_esc_cmd_detach_port", AsyncMock())
+    await _cmd(ui, "d", monkeypatch)
+    ui._esc_cmd_detach_port.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_a_requests_read_write(monkeypatch):
     ui = _ui()
     monkeypatch.setattr(ui, "_request_access_mode", AsyncMock())

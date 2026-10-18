@@ -45,6 +45,8 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Signal line | A RS-232 control line (DTR, RTS) that the serial adapter can drive on request, per the port's `dtr` / `rts` signal-line policy (issue #63). | control line (keep "control line" for the general RS-232 term) |
 | Loopback port | A port that echoes data back to the client for testing. | test port |
 | Command port | A port backed by a local shell command or process. | shell port |
+| Command mode | The interactive `mux> ` prompt the CLI client shows for a TCP client-listener session without an attached port. | prompt mode |
+| Detach | Release a client session from its port and keep the session in its command phase. "Disconnect" ends the session; "detach" does not. | unhook, release (for this action) |
 | TCP initiator port | A port that makes an outbound TCP connection to a remote host, with a pluggable protocol handler (plain, conserver, openmux). | client initiator (legacy name), openmux client port (legacy name) |
 | Client listener | The adapter that accepts inbound console-protocol client connections. | — |
 | Telnet listener | The adapter that accepts inbound Telnet client connections to a port. | — |

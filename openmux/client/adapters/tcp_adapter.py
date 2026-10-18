@@ -32,6 +32,10 @@ if TYPE_CHECKING:
 # Out-of-band control frame marker; must match openmux.server.adapters.client_listener.CTRL_MARKER
 CTRL_MARKER = b"\x00OMXCTRL "
 
+#: Largest embedded control frame to buffer while framing; a longer line is
+#: device data that starts with the marker (mirrors the server's cap, #88).
+_CTRL_FRAME_MAX = 65536
+
 
 class TcpClientAdapter(BaseClientAdapter):
     """Standard TCP adapter implementation.
@@ -40,6 +44,10 @@ class TcpClientAdapter(BaseClientAdapter):
     asyncio streams. Protocol messages are newline terminated UTF‑8 sequences
     following the server console/port semantics.
     """
+
+    #: The TCP protocol keeps its line-command phase for the whole session,
+    #: so the console can offer interactive command mode (issue #88).
+    supports_command_phase = True
 
     def __init__(self, host: str, port: int, config: Optional[Dict[str, Any]] = None):
         """Initialize adapter state (no network I/O performed).
@@ -65,6 +73,9 @@ class TcpClientAdapter(BaseClientAdapter):
         # Reconnect state
         self.current_port = None
         self._last_auth = None
+        # Partial OMXCTRL control frame received with no terminating newline
+        # yet; completed by the next read chunk (issue #88 framing).
+        self._ctrl_rx_frag = b""
 
     async def connect(self) -> bool:
         """Open the underlying TCP (optionally TLS) connection.
@@ -93,6 +104,9 @@ class TcpClientAdapter(BaseClientAdapter):
             else:
                 self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
                 self.logger.debug("Using unencrypted connection")
+
+            # Fresh socket: drop any half-frame from a previous connection.
+            self._ctrl_rx_frag = b""
 
             # Wait for authentication prompt
             data = await self.reader.readline()
@@ -422,6 +436,14 @@ class TcpClientAdapter(BaseClientAdapter):
         """Ask the server for the current read-write holder(s) of the attached port."""
         return await self._send_control_frame({"type": "query_rw_holders"})
 
+    async def detach_port(self) -> bool:
+        """Ask the server to detach from the port and return to the command phase (issue #88).
+
+        The ack (`{"type": "detached", ...}`) is intercepted by the read path
+        and stored in `last_detach_reply`; the console polls it.
+        """
+        return await self._send_control_frame({"type": "detach"})
+
     async def _send_power_control(self, payload: Dict[str, Any]) -> bool:
         """Send one power control frame on the control channel (NUL-prefixed)."""
         return await self._send_control_frame(payload)
@@ -464,8 +486,8 @@ class TcpClientAdapter(BaseClientAdapter):
                 self.is_connected = False
                 self.is_authenticated = False
                 return None  # Caller interprets as closed
-            if data.startswith(CTRL_MARKER):
-                return self._process_control_frame(data)
+            if CTRL_MARKER in data or self._ctrl_rx_frag:
+                return self._split_control_frames(data)
             return data
 
         except asyncio.TimeoutError:
@@ -475,19 +497,56 @@ class TcpClientAdapter(BaseClientAdapter):
             self.is_connected = False
             return b""
 
+    def _split_control_frames(self, data: bytes) -> bytes:
+        """Split OMXCTRL control frames out of a read chunk (issue #88).
+
+        TCP coalesces writes, so a frame can follow port data (the detach ack
+        arrives right after its ``DISCONNECTED:`` line) or trail a keystroke
+        echo. Each complete frame (``CTRL_MARKER`` to the next newline) goes
+        to ``_process_control_frame``; its human-readable bytes, any port
+        data, and the frames' stream order are preserved in the result. A
+        trailing half-frame waits in ``_ctrl_rx_frag`` for the next chunk;
+        more than ``_CTRL_FRAME_MAX`` bytes after a marker is device data and
+        passes through.
+        """
+        if self._ctrl_rx_frag:
+            data = self._ctrl_rx_frag + data
+            self._ctrl_rx_frag = b""
+        elif CTRL_MARKER not in data:
+            return data
+        out = bytearray()
+        i = 0
+        while True:
+            idx = data.find(CTRL_MARKER, i)
+            if idx == -1:
+                break
+            nl = data.find(b"\n", idx)
+            if nl == -1:
+                out += data[i:idx]
+                if len(data) - idx <= _CTRL_FRAME_MAX:
+                    self._ctrl_rx_frag = data[idx:]
+                else:
+                    out += data[idx:]  # oversized: not a frame, keep as data
+                i = len(data)
+                break
+            out += data[i:idx]
+            out += self._process_control_frame(data[idx : nl + 1])
+            i = nl + 1
+        out += data[i:]
+        return bytes(out)
+
     def _process_control_frame(self, data: bytes) -> bytes:
-        """Parse an inbound access-mode control frame and format a status message.
+        """Parse one complete control frame and format a status message.
+
+        Framing is done by ``_split_control_frames``: ``data`` is exactly one
+        frame from ``CTRL_MARKER`` through its terminating newline.
 
         Args:
-            data: Raw chunk starting with `CTRL_MARKER`.
+            data: One control frame starting with `CTRL_MARKER`.
 
         Returns:
             bytes: Human-readable status text to display, or `b""` if nothing
-            needs to be shown. Any bytes following the control frame's
-            terminating newline within the same read are not recovered; this
-            is an accepted tradeoff given control frames are small, distinct
-            writes (mirrors similar substring-based framing elsewhere in the
-            client, e.g. the shutdown-message detection).
+            needs to be shown.
         """
         try:
             line = data[len(CTRL_MARKER) :].split(b"\n", 1)[0]
@@ -498,6 +557,11 @@ class TcpClientAdapter(BaseClientAdapter):
             return b""
         if payload.get("type") in ("power_feeds", "power_switch"):
             self.last_power_reply = payload
+            return b""
+        if payload.get("type") == "detached":
+            # Detach ack (issue #88): the console polls last_detach_reply and
+            # prints its own notice, so nothing renders from here.
+            self.last_detach_reply = payload
             return b""
         _msg_type, message = format_control_response(self, payload)
         return message.encode("utf-8") if message else b""
@@ -538,6 +602,7 @@ class TcpClientAdapter(BaseClientAdapter):
             self.is_authenticated = False
             self.reader = None
             self.writer = None
+            self._ctrl_rx_frag = b""
 
     # Protocol-specific implementation methods
 

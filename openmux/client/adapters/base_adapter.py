@@ -24,6 +24,11 @@ class BaseClientAdapter(ABC):
     * Surface identifying/protocol metadata (session id, negotiated version)
     """
 
+    #: True only for adapters whose server keeps a line-command phase for the
+    #: whole session (TCP). The console enables interactive command mode for
+    #: these; the WebSocket session attaches to one port and has none.
+    supports_command_phase = False
+
     def __init__(self, host: str, port: int, config: Optional[Dict[str, Any]] = None):
         """Construct a new adapter instance (not yet connected).
 
@@ -60,6 +65,12 @@ class BaseClientAdapter(ABC):
         # request. (Plain `[POWER]` live-notice text still flows through the
         # normal read path and is rendered live.)
         self.last_power_reply = None
+
+        # Detach control (issue #88): when the read path sees a `detached`
+        # OMXCTRL ack it stores the payload here and swallows it; the console
+        # polls this after sending a detach request (same pattern as
+        # `last_power_reply`). Cleared by the console before each request.
+        self.last_detach_reply: Optional[Dict[str, Any]] = None
 
     @abstractmethod
     async def connect(self) -> bool:
@@ -196,6 +207,19 @@ class BaseClientAdapter(ABC):
         Returns:
             bool: True if the request was sent; False if unsupported or the
             request could not be sent.
+        """
+        return False
+
+    async def detach_port(self) -> bool:
+        """Ask the server to detach this session from its port (issue #88).
+
+        The session survives the detach: the server returns it to its command
+        phase, so the user can attach to another port without reconnecting.
+
+        Returns:
+            bool: True if the request was sent; the ``detached`` ack arrives
+            asynchronously via the read path (``last_detach_reply``). False if
+            unsupported or the request could not be sent.
         """
         return False
 
