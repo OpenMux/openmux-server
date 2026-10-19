@@ -196,6 +196,17 @@ Changes since v1.0.3 (2026-09-17).
 
 ### Web console and observability
 
+- **The Status and Power pages stop reconnecting their live WebSocket when
+  the login session dies.** The pages retried a fixed every 3 s forever. A
+  server restart clears login sessions, so every retry was then rejected:
+  the page never recovered and kept hitting the server indefinitely. The
+  retry now backs off (1 s to 60 s, in a shared `omxReconnect()` policy in
+  `layout.js`) and, after a second failed attempt, checks one authenticated
+  `/api/` request: a 401 (server restarted or session expired) stops the
+  loop and turns the "Live data" badge into "Signed out - click to sign in
+  again"; any other answer keeps the backoff, so the page still recovers on
+  its own when a down server returns. No config change is required.
+
 - **Live pages now show a red/green "Live data" badge in the header.** The
   Power list, Power detail, and System Status pages show the badge green while
   their WebSocket is open and red ("data may be stale") when it drops; a fast

@@ -407,3 +407,94 @@
     redTimer = setTimeout(() => { redTimer = null; apply(RED); }, RED_DEBOUNCE_MS);
   };
 })();
+
+// Background reconnect policy for the silent page-level WebSocket loops
+// (Status, Power list, Power detail). The old loops retried a fixed 3 s
+// forever, which caused two problems:
+//   * a long server outage was hammered every 3 s with no backoff;
+//   * after a server restart the login session (held in server memory) no
+//     longer exists, so every reconnect is rejected: the loop never
+//     recovered and kept spamming the server indefinitely.
+// The policy adds capped backoff (1 s to 60 s) and, from the second failed
+// attempt on, asks one cheap authenticated /api/* request what happened
+// before the next try:
+//   401    our login session is gone (restart or expiry): stop
+//          reconnecting and turn the "Live data" badge into a
+//          reload-to-sign-in link;
+//   else   server down or answering strangely: keep reconnecting - the
+//          page recovers on its own when the server returns.
+// Loops call window.omxReconnect(connect) in ws.onclose and
+// window.omxReconnectReset() in ws.onopen.
+(function () {
+  const DELAYS_MS = [1000, 2000, 5000, 10000, 30000, 60000];
+  const PROBE_PATH = '/api/status/fragments'; // core route on every install
+  let attempt = 0; // consecutive failed reconnects since the last open
+  let timer = null;
+  let stopped = false;
+  let generation = 0; // invalidates a scheduled attempt after a reset
+  function getBasePath() {
+    const meta = document.querySelector('meta[name="omx-base-path"]');
+    return meta ? meta.getAttribute('content') || '' : '';
+  }
+  function probeAuth() {
+    // /api/* answers 401 (never a login redirect) when the session is gone,
+    // so one fetch distinguishes "logged out" from "server down" without
+    // redirect handling. A rejected fetch means the server is unreachable,
+    // which is not an auth failure: keep reconnecting.
+    return fetch(getBasePath() + PROBE_PATH, { credentials: 'same-origin' }).then(function (r) {
+      return r.status === 401 ? 'auth' : 'continue';
+    });
+  }
+  function showSignedOut() {
+    const badge = document.getElementById('liveDataBadge');
+    if (!badge) return;
+    badge.classList.remove('ok');
+    badge.classList.add('bad');
+    badge.textContent = '\u21bb Signed out \u2013 click to sign in again';
+    badge.title =
+      'The server no longer recognizes this login session (a server restart clears sessions). ' +
+      'Background reconnect stopped so the page does not spam the server. Click to reload and sign in again.';
+    badge.style.cursor = 'pointer';
+    badge.style.display = '';
+    badge.onclick = function () {
+      window.location.reload();
+    };
+  }
+  window.omxReconnect = function (connect) {
+    if (stopped || timer) return;
+    const delay = DELAYS_MS[Math.min(attempt, DELAYS_MS.length - 1)];
+    attempt += 1;
+    const gen = generation;
+    timer = setTimeout(function () {
+      timer = null;
+      if (gen !== generation || stopped) return;
+      if (attempt < 2) {
+        connect();
+        return;
+      }
+      probeAuth()
+        .then(function (verdict) {
+          if (gen !== generation) return;
+          if (verdict === 'auth') {
+            stopped = true;
+            showSignedOut();
+            return;
+          }
+          connect();
+        })
+        .catch(function () {
+          if (gen !== generation || stopped) return;
+          connect(); // probe itself failed (server unreachable): keep trying
+        });
+    }, delay);
+  };
+  window.omxReconnectReset = function () {
+    attempt = 0;
+    stopped = false;
+    generation += 1;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+})();

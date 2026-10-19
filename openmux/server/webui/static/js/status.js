@@ -11,11 +11,13 @@
   try {
     localStorage.removeItem('omx_status_autorefresh');
   } catch (e) {}
-  const RETRY_MS = 3000;
+  // Reconnect timing lives in the shared layout.js policy (omxReconnect):
+  // capped backoff, and a stop with a "Signed out" badge once the server no
+  // longer accepts our session (e.g. after a server restart). An earlier
+  // fixed 3 s retry spammed the server forever in that case.
   // Regions the fragment endpoint returns, mapped to their container ids.
   const REGION_IDS = { summary: 'statusSummary', ports: 'portsTbody', federation: 'federationArea', clients: 'clientsTbody' };
   let ws = null;
-  let retryTimer = null;
   let fetching = false;
   let refetchQueued = false;
 
@@ -89,10 +91,13 @@
   }
 
   function connect() {
-    if (ws || retryTimer) return;
+    if (ws) return;
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(scheme + '://' + location.host + getBasePath() + '/ws/status');
-    ws.onopen = () => setLive(true);
+    ws.onopen = () => {
+      setLive(true);
+      if (window.omxReconnectReset) window.omxReconnectReset();
+    };
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
@@ -104,13 +109,8 @@
     ws.onclose = () => {
       ws = null;
       setLive(false);
-      // Silent retry (same pattern as the Power pages).
-      if (!retryTimer) {
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          connect();
-        }, RETRY_MS);
-      }
+      // Shared policy: backoff + stop when the login session died (layout.js).
+      if (window.omxReconnect) window.omxReconnect(connect);
     };
     ws.onerror = () => {
       try {

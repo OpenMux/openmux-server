@@ -114,7 +114,11 @@
       var ws = new WebSocket(scheme + "://" + location.host + base + "/ws/power");
       // Issue #86: shared "Live data" header badge (green while open, red after
       // the helper's debounce while closed; layout.js never hides it again).
-      ws.onopen = function () { if (window.omxSetLive) window.omxSetLive(true); };
+      // Reconnect uses the shared layout.js policy (omxReconnect): capped
+      // backoff, and a stop with a "Signed out" badge once the server no longer
+      // accepts our session (a server restart cleared it; the old fixed 3 s
+      // retry then spammed the server forever).
+      ws.onopen = function () { if (window.omxSetLive) window.omxSetLive(true); if (window.omxReconnectReset) window.omxReconnectReset(); };
       ws.onmessage = function (ev) {
         try {
           var msg = JSON.parse(ev.data);
@@ -125,7 +129,7 @@
       };
       ws.onclose = function () {
         if (window.omxSetLive) window.omxSetLive(false);
-        setTimeout(connect, 3000);
+        if (window.omxReconnect) window.omxReconnect(connect); else setTimeout(connect, 3000);
       };
       ws.onerror = function () { try { ws.close(); } catch (_) {} };
     }
