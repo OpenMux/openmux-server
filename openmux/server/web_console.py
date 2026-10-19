@@ -2003,13 +2003,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self._client_meta = {}  # client_id -> {ip, username}
         # Event-driven meta push support
         self._meta_subscribers = {}  # port_name -> set(client_id)
-        # Live status page (issue #85): a single coalescing push task and the
-        # last push timestamp for the debounce window. The nudge is a
-        # `status_change` frame on the shared /ws/events hub; it carries no
-        # data, and the status page re-fetches /api/status/fragments on it.
-        self._status_change_push_task = None
-        self._status_change_last_push = 0.0
-        self._status_change_min_interval = 2.0
+        # Live page nudges on the shared /ws/events hub: one coalescing task
+        # and last-push timestamp per topic ("status_change" -> the status
+        # page re-fetches /api/status/fragments; "power_changed" -> the Power
+        # pages re-fetch /api/power). Frames carry no data (issue #85; the
+        # Power nudge replaced the dedicated /ws/power socket).
+        self._site_nudges: Dict[str, Dict[str, Any]] = {}
         # Site-wide event fan-out (/ws/events): small JSON frames (first
         # producer: Port Actions run status for the sidebar annotations) to
         # every open tab. Frames are nudges; pages re-fetch their REST data on
@@ -2479,15 +2478,15 @@ class WebConsoleAdapter(BaseGenericAdapter):
         app.router.add_get("/api/status", handle_api_status)
         app.router.add_get("/api/status/fragments", handle_api_status_fragments)
         app.router.add_post("/api/reload", handle_api_reload)
-        # Power (PDU) API + live socket routes are core: registered always
-        # so a soft reload of the `power:` section needs no restart; the
-        # handlers reply 404 when no PDU adapter is active.
+        # Power (PDU) API routes are core: registered always so a soft reload
+        # of the `power:` section needs no restart; the handlers reply 404
+        # when no PDU adapter is active. Live outlet updates ride the shared
+        # /ws/events site socket ("power_changed" nudges).
         app.router.add_get("/api/power", _power_monitor._handle_api_power)
         app.router.add_post(r"/api/power/outlets/{outlet_ref:.+}", _power_monitor._handle_set_outlet)
-        app.router.add_get("/ws/power", _power_monitor._handle_ws_power)
         app.router.add_get("/api/csrf", self._handle_api_csrf)
         # Static paths win over /ws/{port_name} (registration order): a port
-        # literally named "events" is shadowed here, same precedent as "power".
+        # literally named "events" is shadowed here.
         app.router.add_get("/ws/events", handle_ws_events)
         app.router.add_get("/ws/{port_name}", handle_ws)
         app.router.add_get("/ws/{server_id}/{port_name}", handle_ws_fqpn)
@@ -2499,11 +2498,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
     async def stop(self) -> None:
         self._set_running(False)
-        # Pending live-status nudge (issue #85): the viewers go away with the
+        # Pending live nudges (issue #85): the viewers go away with the
         # console, so a scheduled push has nobody to serve.
-        if self._status_change_push_task is not None:
-            self._status_change_push_task.cancel()
-            self._status_change_push_task = None
+        for _nudge in self._site_nudges.values():
+            if _nudge.get("task") is not None:
+                _nudge["task"].cancel()
+        self._site_nudges.clear()
         try:
             # Close HTTP server
             # New dual-server cleanup first
@@ -3048,10 +3048,13 @@ class WebConsoleAdapter(BaseGenericAdapter):
             # state from the `power` block the meta frame carries below.
             if isinstance(changes, dict) and changes.get("event") == "power_outlet_changed" and subs:
                 self._push_power_notice(port_name, changes)
-            # Live status page (issue #85): publish a coalesced status_change
-            # site event on any port meta change, independent of the per-port
-            # console subscribers.
-            self._kick_status_change()
+            # Live status page (issue #85): nudge every status viewer on any
+            # port meta change, independent of the per-port console subscribers.
+            self._kick_site_nudge("status_change")
+            # Power pages (replaced the dedicated /ws/power socket): outlet
+            # changes nudge the Power pages to re-fetch /api/power.
+            if isinstance(changes, dict) and changes.get("event") == "power_outlet_changed":
+                self._kick_site_nudge("power_changed")
             if not subs:
                 return
             # Check if we should bypass debounce for connection state changes
@@ -3078,15 +3081,18 @@ class WebConsoleAdapter(BaseGenericAdapter):
             # justification: best-effort meta push; the next event retries
             pass
 
-    def _kick_status_change(self) -> None:
-        """Schedule one coalesced ``status_change`` site event for the status page (issue #85).
+    # Minimum spacing per coalesced site nudge topic; unlisted topics use 2.0 s.
+    _SITE_NUDGE_INTERVALS = {"status_change": 2.0, "power_changed": 1.0}
 
-        Called from the port-meta listener; the frame carries no data, so a
-        burst of port events collapses into a single push (and at most one per
-        ``_status_change_min_interval``). The status page re-fetches
-        /api/status/fragments on the frame; the frame fans out to every
-        /ws/events tab through `SiteEventHub` (the old dedicated /ws/status
-        socket was migrated here, so dead-peer pruning is the hub's job).
+    def _kick_site_nudge(self, topic: str) -> None:
+        """Schedule one coalesced ``{"type": topic}`` nudge frame on /ws/events.
+
+        Called from the port-meta listener; nudge frames carry no data, so a
+        burst of events collapses into a single publish per topic (and at most
+        one per ``_SITE_NUDGE_INTERVALS`` entry). Pages re-fetch their REST
+        endpoint on the frame and on every socket (re)open, so a dropped nudge
+        delays a refresh but never strands a page. Dead-peer pruning is the
+        hub's job, not this coalescer's.
         """
         if not self._site_events.client_count():
             return
@@ -3094,25 +3100,27 @@ class WebConsoleAdapter(BaseGenericAdapter):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        task = self._status_change_push_task
+        state = self._site_nudges.setdefault(topic, {"task": None, "last": 0.0})
+        task = state["task"]
         if task is not None and not task.done():
             return  # a nudge is already scheduled; this event is coalesced into it
-        last = float(self._status_change_last_push or 0.0)
-        delay = max(0.0, float(self._status_change_min_interval) - (time.time() - last)) if last > 0 else 0.0
-        self._status_change_push_task = loop.create_task(self._status_change_push_later(delay))
+        min_interval = float(self._SITE_NUDGE_INTERVALS.get(topic, 2.0))
+        last = float(state["last"] or 0.0)
+        delay = max(0.0, min_interval - (time.time() - last)) if last > 0 else 0.0
+        state["task"] = loop.create_task(self._site_nudge_later(topic, state, delay))
 
-    async def _status_change_push_later(self, delay: float) -> None:
-        """Sleep out the debounce window, then publish one ``status_change`` frame."""
+    async def _site_nudge_later(self, topic: str, state: Dict[str, Any], delay: float) -> None:
+        """Sleep out the debounce window, then publish one nudge frame."""
         try:
             if delay > 0:
                 await asyncio.sleep(delay)
-            self._status_change_last_push = time.time()
-            self.publish_site_event({"type": "status_change"})
+            state["last"] = time.time()
+            self.publish_site_event({"type": topic})
         except asyncio.CancelledError:
             raise
         except Exception:
             # justification: best-effort live push; the next meta event retries
-            self.logger.debug("status_change site event failed", exc_info=True)
+            self.logger.debug("site nudge %s failed", topic, exc_info=True)
 
     def _schedule_meta_broadcast(self, port_name: str, changes: Optional[Dict[str, Any]], immediate: bool) -> None:
         """Broadcast a meta update now, or schedule a debounced one.

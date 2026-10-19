@@ -38,16 +38,22 @@ def test_layout_js_helper_has_two_states():
     assert re.search(r"setTimeout\(\(\) => \{ redTimer = null; apply\(RED\); \}, RED_DEBOUNCE_MS\)", LAYOUT_JS)
 
 
-def test_power_pages_call_helper_from_socket_lifecycle():
+def test_power_pages_drive_helper_from_site_events():
+    """Migrated off the dedicated /ws/power socket: the pages own NO socket.
+
+    The shared /ws/events socket in layout.js drives them via the
+    omx-site-event / -open / -close signals, same contract as status.js.
+    """
     for page, label in ((POWER_LIST, "power_list"), (POWER_DETAIL, "power_detail")):
-        assert "window.omxSetLive(true)" in page, f"{label}: onopen must set green"
-        assert "window.omxSetLive(false)" in page, f"{label}: onclose must set red state"
-        # Opt-in runs before the top-level connect() call (a socket that never
-        # opens must still turn the badge red), not only from onclose.
-        opt_in = page.index("if (window.omxSetLive) window.omxSetLive(false);")
-        top_level_connect = re.search(r"\n\s*connect\(\);", page)
-        assert top_level_connect, f"{label}: no top-level connect() call found"
-        assert opt_in < top_level_connect.start(), f"{label}: must opt in before connecting"
+        assert "window.omxSetLive(true)" in page, f"{label}: site-open must set green"
+        assert "window.omxSetLive(false)" in page, f"{label}: site-close must set red state"
+        assert "new WebSocket(" not in page, f"{label}: page must not open a socket"
+        assert '"/ws/' not in page and "'/ws/" not in page, f"{label}: no server ws path"
+        for event in ('"omx-site-event"', '"omx-site-event-open"', '"omx-site-event-close"'):
+            assert f"addEventListener({event}" in page, f"{label}: must listen for {event}"
+        assert "power_changed" in page, f"{label}: must react to the power_changed nudge"
+        # Initial badge state honors the site socket's current state.
+        assert "window.omxSiteLive" in page, f"{label}: must seed from omxSiteLive"
 
 
 def test_status_page_uses_shared_helper_and_has_no_toggle():

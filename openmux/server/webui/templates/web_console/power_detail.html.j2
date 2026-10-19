@@ -101,9 +101,10 @@
 {% block scripts %}
   <script>
   // Outlet switching: POST /api/power/outlets/<ref> with the CSRF token.
-  // Live updates arrive over /ws/power; we re-render rows from /api/power
-  // on every frame. A warning line in the terminal is shown via alert for
-  // errors; the shared "Live data" header badge shows the socket state (issue #86).
+  // Live updates ride the shared /ws/events site socket (layout.js): the
+  // coalesced power_changed nudge re-renders rows from /api/power. This page
+  // holds no socket of its own; the shared "Live data" header badge follows
+  // the site socket's open/close signals (issue #86).
   (function () {
     var base = "{{ base_path }}" || "";
     var pduName = {{ pdu.name|tojson }};
@@ -232,32 +233,28 @@
       doToggle(ref, on);
     });
 
-    // Live updates
-    function connect() {
-      var scheme = location.protocol === "https:" ? "wss" : "ws";
-      var ws = new WebSocket(scheme + "://" + location.host + base + "/ws/power");
-      // Issue #86: shared "Live data" header badge (green while open, red after
-      // the helper's debounce while closed; layout.js never hides it again).
-      // Reconnect uses the shared layout.js policy (omxReconnect): capped
-      // backoff, and a stop with a "Signed out" badge once the server no longer
-      // accepts our session (a server restart cleared it; the old fixed 3 s
-      // retry then spammed the server forever).
-      ws.onopen = function () { if (window.omxSetLive) window.omxSetLive(true); if (window.omxReconnectReset) window.omxReconnectReset(); };
-      ws.onmessage = function (ev) {
-        try {
-          var msg = JSON.parse(ev.data);
-          if (msg.event === "power_snapshot" || msg.event === "outlet_changed") refresh();
-        } catch (_) { /* ignore malformed frame */ }
-      };
-      ws.onclose = function () {
-        if (window.omxSetLive) window.omxSetLive(false);
-        if (window.omxReconnect) window.omxReconnect(connect); else setTimeout(connect, 3000);
-      };
-      ws.onerror = function () { try { ws.close(); } catch (_) {} };
+    // Live updates ride the site socket layout.js owns. The open event also
+    // re-renders (freshness after reload/reconnect; the old dedicated socket
+    // sent a snapshot on connect for the same reason).
+    window.addEventListener("omx-site-event", function (ev) {
+      var d = ev && ev.detail;
+      if (d && d.type === "power_changed") refresh();
+    });
+    window.addEventListener("omx-site-event-open", function () {
+      if (window.omxSetLive) window.omxSetLive(true);
+      refresh();
+    });
+    window.addEventListener("omx-site-event-close", function () {
+      if (window.omxSetLive) window.omxSetLive(false);
+    });
+    // Initial state: refresh now if the site socket is already up; otherwise
+    // opt in red (a socket that never opens stays red) until the open event.
+    if (window.omxSiteLive) {
+      if (window.omxSetLive) window.omxSetLive(true);
+      refresh();
+    } else if (window.omxSetLive) {
+      window.omxSetLive(false);
     }
-    // Opt in before the first connect: a socket that never opens stays red.
-    if (window.omxSetLive) window.omxSetLive(false);
-    connect();
   })();
   </script>
 {% endblock %}

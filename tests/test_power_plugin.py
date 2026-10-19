@@ -1,11 +1,12 @@
 """Tests for the PDU power web routes (core web console).
 
 Boots a real WebConsoleAdapter in-process on 127.0.0.1 with a dummy PDU
-adapter and a loopback port, then exercises the HTTP + WS routes:
-permission gates, CSRF, the outlet-toggle impact payload, and the
-snapshot-then-frames live socket. The routes are core: the web console
-registers them itself (the handlers live in web_plugins/power_monitor.py
-for layout only), so no plugin entry is involved.
+adapter and a loopback port, then exercises the HTTP routes and the live
+nudge: permission gates, CSRF, the outlet-toggle impact payload, and the
+``power_changed`` site event on /ws/events (the old dedicated /ws/power
+socket was migrated there). The routes are core: the web console registers
+them itself (the handlers live in web_plugins/power_monitor.py for layout
+only), so no plugin entry is involved.
 """
 
 import base64
@@ -395,21 +396,26 @@ async def test_set_outlet_requires_csrf_with_session_cookie():
 
 
 @pytest.mark.asyncio
-async def test_ws_power_snapshot_then_change_frame():
+async def test_power_change_nudges_the_site_socket():
+    """An outlet change publishes a coalesced power_changed frame on /ws/events.
+
+    The dedicated /ws/power socket was migrated onto the shared site socket;
+    the nudge carries no data, the pages re-fetch /api/power on it. A port
+    meta change rides with it, so accept frames until the power one arrives.
+    """
     ctx = await _start(0)
     try:
         _, _, _, pdu, port = ctx
         async with ClientSession(connector=TCPConnector(ssl=False)) as session:
-            async with session.ws_connect(f"http://127.0.0.1:{port}/ws/power", headers=_hdr("ro")) as ws:
-                first = json.loads((await ws.receive()).data)
-                assert first["event"] == "power_snapshot"
-                assert first["snapshot"]["pdus"][0]["name"] == "rack1"
-                # Trigger a change while the socket is open
+            async with session.ws_connect(f"http://127.0.0.1:{port}/ws/events", headers=_hdr("ro")) as ws:
                 await pdu.set_outlet("rack1.1", False)
-                second = json.loads((await ws.receive(timeout=5)).data)
-                assert second["event"] == "outlet_changed"
-                assert second["ref"] == "rack1.1"
-                assert second["on"] is False
+                seen = []
+                for _ in range(5):
+                    frame = json.loads((await ws.receive(timeout=5)).data)
+                    seen.append(frame.get("type"))
+                    if frame.get("type") == "power_changed":
+                        break
+                assert "power_changed" in seen, f"no power_changed nudge, saw: {seen}"
     finally:
         await _stop(ctx)
 

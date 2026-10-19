@@ -218,6 +218,15 @@ Changes since v1.0.3 (2026-09-17).
   keep one live socket instead of two. A custom page that connected to
   `/ws/status` must switch to `/ws/events`. No config change is required.
 
+- **The Power pages now receive their live nudges on the shared site socket
+  too.** Outlet changes used a dedicated `/ws/power` WebSocket (snapshot on
+  connect, one frame per change). That socket is removed; an outlet change
+  now publishes a coalesced `{"type": "power_changed"}` nudge on `/ws/events`
+  (at most one per second) and the Power pages re-fetch `/api/power` on it,
+  like before. Outlet switching (`POST /api/power/outlets/<ref>`) is
+  unchanged. A custom page that connected to `/ws/power` must switch to
+  `/ws/events`. No config change is required.
+
 - **The Status and Power pages stop reconnecting their live WebSocket when
   the login session dies.** The pages retried a fixed every 3 s forever. A
   server restart clears login sessions, so every retry was then rejected:

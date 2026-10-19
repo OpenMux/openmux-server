@@ -3,7 +3,7 @@
 Covers the three new moving parts:
 - `_extract_status_fragments()` — marker-based split of the rendered markup.
 - `handle_api_status_fragments()` — auth gate + fragment JSON with sort honored.
-- `WebConsoleAdapter._kick_status_change()` — coalesced `status_change` site
+- `WebConsoleAdapter._kick_site_nudge()` — coalesced `status_change` site
   events for the status page (issue #85, migrated from the removed
   /ws/status socket onto the shared /ws/events hub; hub fan-out itself is
   covered by tests/server/test_site_events.py).
@@ -203,33 +203,36 @@ async def test_fragments_endpoint_error_is_500_json(monkeypatch):
     assert json.loads(resp.body)["error"] is True
 
 
-# --- _kick_status_change coalescing (bound to a stub holder) -----------------------
+# --- _kick_site_nudge coalescing (bound to a stub holder) -------------------------
 
 
 class _KickStub:
     """Exercises the real kick/push methods against stub state (hub-based)."""
 
-    _kick_status_change = wc.WebConsoleAdapter._kick_status_change
-    _status_change_push_later = wc.WebConsoleAdapter._status_change_push_later
+    _kick_site_nudge = wc.WebConsoleAdapter._kick_site_nudge
+    _site_nudge_later = wc.WebConsoleAdapter._site_nudge_later
+    # 0 debounce for a deterministic test; production uses 2 s / 1 s.
+    _SITE_NUDGE_INTERVALS = {"status_change": 0.0, "power_changed": 0.0}
 
     def __init__(self, site_listeners=1):
         self.published = []
         self._site_events = SimpleNamespace(client_count=lambda: site_listeners)
-        self._status_change_push_task = None
-        self._status_change_last_push = 0.0
-        # 0 debounce for a deterministic test; production default is 2s.
-        self._status_change_min_interval = 0.0
+        self._site_nudges = {}
         self.logger = logging.getLogger("kittest")
 
     def publish_site_event(self, event):
         self.published.append(event)
 
+    def _pending(self, topic="status_change"):
+        state = self._site_nudges.get(topic)
+        return state and state["task"]
+
 
 @pytest.mark.asyncio
 async def test_kick_without_site_listeners_is_noop():
     s = _KickStub(site_listeners=0)
-    s._kick_status_change()
-    assert s._status_change_push_task is None
+    s._kick_site_nudge("status_change")
+    assert s._pending() is None
     assert s.published == []
 
 
@@ -238,19 +241,30 @@ async def test_kick_coalesces_burst_into_one_event():
     s = _KickStub()
     # A burst of meta events: the pending-task guard admits exactly one push.
     for _ in range(5):
-        s._kick_status_change()
-    await s._status_change_push_task
+        s._kick_site_nudge("status_change")
+    await s._pending()
     assert s.published == [{"type": "status_change"}]
 
 
 @pytest.mark.asyncio
 async def test_kick_after_a_completed_push_publishes_again():
     s = _KickStub()
-    s._kick_status_change()
-    await s._status_change_push_task
-    s._kick_status_change()
-    await s._status_change_push_task
+    s._kick_site_nudge("status_change")
+    await s._pending()
+    s._kick_site_nudge("status_change")
+    await s._pending()
     assert s.published == [{"type": "status_change"}, {"type": "status_change"}]
+
+
+@pytest.mark.asyncio
+async def test_kick_topics_coalesce_independently():
+    s = _KickStub()
+    s._kick_site_nudge("status_change")
+    s._kick_site_nudge("power_changed")
+    s._kick_site_nudge("status_change")  # coalesced into the pending status push
+    await s._pending("status_change")
+    await s._pending("power_changed")
+    assert sorted(e["type"] for e in s.published) == ["power_changed", "status_change"]
 
 
 # --- route registration order ------------------------------------------------------
@@ -275,4 +289,5 @@ def test_routes_registered_with_expected_paths_and_ws_precedence(tmp_path):
     assert "/api/status" in paths
     assert "/api/status/fragments" in paths
     assert "/ws/status" not in paths, "the migrated socket must not come back"
+    assert "/ws/power" not in paths, "the migrated power socket must not come back"
     assert paths.index("/ws/events") < paths.index("/ws/{port_name}")

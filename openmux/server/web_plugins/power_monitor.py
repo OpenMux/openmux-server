@@ -5,7 +5,11 @@ Route handlers for the standalone Power surface:
 - `GET /power/{pdu_name}`     - per-PDU outlet page
 - `GET /api/power`            - full power snapshot JSON
 - `POST /api/power/outlets/{outlet_ref}`  - switch one outlet (read-write or admin, CSRF)
-- `GET /ws/power`             - live outlet-change frames (snapshot first)
+
+Live outlet updates do not use a dedicated socket: the web console publishes
+a coalesced ``{"type": "power_changed"}`` nudge on the shared `/ws/events`
+site socket, and the Power pages re-fetch `/api/power` on it (see
+``openmux/server/site_events.py``).
 
 The routes are CORE: the web console registers them unconditionally
 (`WebConsoleAdapter.start`), so they follow a `power:` section added or
@@ -20,12 +24,7 @@ The in-session console power badge/menu is served by the core web console
 itself (OMXCTRL power frames) and does not use these handlers.
 """
 
-import asyncio
-import contextlib
-import json
-from typing import Any, Dict, Optional
-
-from aiohttp import WSMsgType, web
+from aiohttp import web
 
 from . import get_web_adapter
 
@@ -184,83 +183,3 @@ async def _handle_set_outlet(request: web.Request) -> web.StreamResponse:
         status = 404 if ("not configured" in msg or "invalid outlet ref" in msg or "unknown outlet" in msg) else 409
         return web.json_response({"error": True, "message": msg, "impact": result.get("impact")}, status=status)
     return web.json_response({"ok": True, "reading": result.get("reading"), "impact": result.get("impact")})
-
-
-async def _ws_power_send_snapshot(ws: web.WebSocketResponse, pdu) -> None:
-    """Send one full snapshot frame (best-effort)."""
-    try:
-        await ws.send_str(json.dumps({"event": "power_snapshot", "snapshot": pdu.get_power_snapshot()}))
-    except Exception:
-        # justification: the client is gone; cleanup still runs
-        pass
-
-
-async def _ws_power_read_client(ws: web.WebSocketResponse, queue: "asyncio.Queue", flag: Dict[str, bool]) -> None:
-    """Read client frames; flag a refresh request; sentinel when the socket ends."""
-    try:
-        async for msg in ws:
-            if msg.type != WSMsgType.TEXT:
-                continue
-            try:
-                data = json.loads(msg.data)
-            except Exception:
-                continue
-            if isinstance(data, dict) and data.get("type") == "power_refresh_request":
-                flag["refresh"] = True
-    except Exception:
-        # justification: reader-side errors end the stream; the sentinel below handles cleanup
-        pass
-    # Socket closed or errored: release the writer loop
-    queue.put_nowait(None)
-
-
-async def _ws_power_finish(ws: web.WebSocketResponse, pdu, reader_task: asyncio.Task, on_change) -> None:
-    """Unsubscribe and close the socket (best-effort cleanup)."""
-    reader_task.cancel()
-    with contextlib.suppress(Exception):
-        await reader_task
-    pdu.unregister_state_listener(on_change)
-    try:
-        await ws.close()
-    except Exception:
-        # justification: shutdown cleanup; the transport may already be closed
-        pass
-
-
-async def _handle_ws_power(request: web.Request) -> web.WebSocketResponse:
-    """Live outlet-change stream: snapshot first, then one frame per change.
-
-    Frames are plain JSON (same style as the port-actions run stream):
-    ``{"event": "power_snapshot", "snapshot": {...}}`` on connect, then
-    ``{"event": "outlet_changed", "ref": ..., "on": ...}`` per change.
-    Accepts ``{"type": "power_refresh_request"}`` for a fresh snapshot.
-    """
-    adapter, pdu = _get_power_adapter(request)
-    username = request.get("username")
-    if not username:
-        raise web.HTTPUnauthorized()
-    ws = web.WebSocketResponse(heartbeat=30)
-    await ws.prepare(request)
-    queue: "asyncio.Queue[Optional[Dict[str, Any]]]" = asyncio.Queue()
-    flag: Dict[str, bool] = {"refresh": False}
-
-    def _on_change(ref: str, on: Optional[bool], affected: list) -> None:
-        queue.put_nowait({"event": "outlet_changed", "ref": ref, "on": on})
-
-    pdu.register_state_listener(_on_change)
-    reader_task = asyncio.ensure_future(_ws_power_read_client(ws, queue, flag))
-    try:
-        await _ws_power_send_snapshot(ws, pdu)
-        while True:
-            frame = await queue.get()
-            if frame is None:
-                break
-            if flag["refresh"]:
-                flag["refresh"] = False
-                await _ws_power_send_snapshot(ws, pdu)
-            await ws.send_str(json.dumps(frame))
-    except Exception:
-        # justification: the client is gone; cleanup below still runs
-        pass
-    await _ws_power_finish(ws, pdu, reader_task, _on_change)
-    return ws

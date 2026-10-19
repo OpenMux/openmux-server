@@ -577,15 +577,16 @@ Reload behavior: a soft reload re-applies the `power:` section without a restart
 
 Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power") edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `outlets` as id + description rows, and `options` as JSON). The panel keeps any driver-specific keys already present on an outlet entry when it saves; add those keys by editing the YAML directly.
 
-Web console: the standalone `/power` page, the per-PDU pages, the
-`/api/power` routes, and the `/ws/power` socket are core. The web console
-registers them always, so no `web_console.plugins` entry is needed. A
-`power:` section added or removed on a soft reload takes effect without a
-restart. Each route replies 404 ("Power management is not configured")
-while no PDU adapter is active. The "Power" sidebar item is emitted live
-per page when a PDU adapter is enabled, like the in-session badge, the
-power menu, and the live `[POWER]` notices. No web power surface depends
-on a plugin.
+Web console: the standalone `/power` page, the per-PDU pages, and the
+`/api/power` routes are core. The web console registers them always, so no
+`web_console.plugins` entry is needed. Live outlet updates ride the shared
+`/ws/events` site socket (a coalesced `power_changed` nudge per change; the
+old dedicated `/ws/power` socket is removed). A `power:` section added or
+removed on a soft reload takes effect without a restart. Each route replies
+404 ("Power management is not configured") while no PDU adapter is active.
+The "Power" sidebar item is emitted live per page when a PDU adapter is
+enabled, like the in-session badge, the power menu, and the live `[POWER]`
+notices. No web power surface depends on a plugin.
 
 Example:
 ```yaml
