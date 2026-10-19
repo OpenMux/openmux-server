@@ -244,7 +244,7 @@ def test_peer_proxies_keys_raises():
     # 4186/4188: (self._peer_proxies or {}).keys() raises -> pass
     ad = _adapter()
     ad._mpath_groups = {}
-    ad._peer_proxies = _RaiseEverything() # type: ignore[reportAttributeAccessIssue]
+    ad._peer_proxies = _RaiseEverything()  # type: ignore[reportAttributeAccessIssue]
     run(ad)  # peer_keys empty -> no-op; must not raise
 
 
@@ -330,5 +330,5 @@ def test_outer_proxy_fetch_raises():
     # 4253/4255: (self._peer_proxies or {}).get(pk) in the for loop raises -> outer pass
     ad = _adapter()
     ad._mpath_groups = {"pk1": _grp({"c1": _conn(_now())})}
-    ad._peer_proxies = _RaiseEverything() # type: ignore[reportAttributeAccessIssue]
+    ad._peer_proxies = _RaiseEverything()  # type: ignore[reportAttributeAccessIssue]
     run(ad)  # must not raise

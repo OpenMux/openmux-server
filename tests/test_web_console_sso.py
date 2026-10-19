@@ -290,7 +290,9 @@ def test_sso_verify_v1e_expired(monkeypatch):
     """S8b: a v1e claim outside the skew window returns None."""
     a = _sso_adapter()
     priv = Ed25519PrivateKey.generate()
-    monkeypatch.setattr(a, "_find_muxcon_adapter", lambda: SimpleNamespace(_auth_pubkeys={"k1": priv.public_key()}, server_id="local"))
+    monkeypatch.setattr(
+        a, "_find_muxcon_adapter", lambda: SimpleNamespace(_auth_pubkeys={"k1": priv.public_key()}, server_id="local")
+    )
     now = int(time.time())
     claims = {"user": "u", "node": "local", "iat": now - 100000, "exp": now - 99000}
     assert a._verify_sso_header(_v1e_header("k1", claims, priv)) is None
@@ -313,7 +315,9 @@ def test_sso_verify_v1e_node_rejected(monkeypatch):
     """S10: a v1e claim whose node is neither local nor an active peer is rejected."""
     a = _sso_adapter()
     monkeypatch.setattr(
-        a, "_find_muxcon_adapter", lambda: SimpleNamespace(_auth_pubkeys={"k1": None}, server_id="local", connections={"c": {"server_id": "other"}})
+        a,
+        "_find_muxcon_adapter",
+        lambda: SimpleNamespace(_auth_pubkeys={"k1": None}, server_id="local", connections={"c": {"server_id": "other"}}),
     )
     now = int(time.time())
     claims = {"user": "u", "node": "intruder", "iat": now, "exp": now + 60}
@@ -324,7 +328,9 @@ def test_sso_verify_v1e_node_peer_allowed_rejects_bad_kid(monkeypatch):
     """S11: node matches an active peer (allowed) but the kid has no public key -> None."""
     a = _sso_adapter()
     monkeypatch.setattr(
-        a, "_find_muxcon_adapter", lambda: SimpleNamespace(_auth_pubkeys={}, server_id="local", connections={"c": {"server_id": "peerX"}})
+        a,
+        "_find_muxcon_adapter",
+        lambda: SimpleNamespace(_auth_pubkeys={}, server_id="local", connections={"c": {"server_id": "peerX"}}),
     )
     now = int(time.time())
     claims = {"user": "u", "node": "peerX", "iat": now, "exp": now + 60}
@@ -336,7 +342,9 @@ def test_sso_verify_v1e_sig_fail(monkeypatch):
     priv = Ed25519PrivateKey.generate()
     other = Ed25519PrivateKey.generate()
     a = _sso_adapter()
-    monkeypatch.setattr(a, "_find_muxcon_adapter", lambda: SimpleNamespace(_auth_pubkeys={"k1": priv.public_key()}, server_id="local"))
+    monkeypatch.setattr(
+        a, "_find_muxcon_adapter", lambda: SimpleNamespace(_auth_pubkeys={"k1": priv.public_key()}, server_id="local")
+    )
     now = int(time.time())
     claims = {"user": "u", "node": "local", "iat": now, "exp": now + 60}
     # signed by a DIFFERENT key than the registered public key

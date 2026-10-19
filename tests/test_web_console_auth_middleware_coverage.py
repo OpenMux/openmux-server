@@ -18,6 +18,7 @@ Covers every previously-uncovered branch:
 Coverage-first: all tests must pass on the pre-refactor code before any
 refactoring is applied.
 """
+
 import base64 as _b64
 import time
 import types
@@ -26,8 +27,8 @@ from unittest.mock import MagicMock
 import aiohttp.web as web
 import pytest
 
-from openmux.server.web_plugins import ADAPTER_APP_KEY
 import openmux.server.web_console as wc
+from openmux.server.web_plugins import ADAPTER_APP_KEY
 
 _COOKIE = "omxsid"
 
