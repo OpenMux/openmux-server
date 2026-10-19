@@ -196,6 +196,20 @@ Changes since v1.0.3 (2026-09-17).
 
 ### Web console and observability
 
+- **A Port Action result now marks its console in the sidebar until you
+  acknowledge it.** While a run is active its console item shows a pulsing dot;
+  when it ends the dot stays and shows the outcome: green (`success`), red
+  (`failed`), amber (`timeout`), with the action, time, and error in the
+  tooltip. Closing the finished run (its "Close" button in the Actions view)
+  removes the dot - for every open tab at once, over a new global site socket
+  (`/ws/events`, one per browser tab) that future live features can also use.
+  Starting a new run on the port replaces the dot the same way. The page
+  re-fetches `GET /api/port-actions/status` on (re)connect and on every
+  close/cancel frame, so a dropped frame never strands a dot; a cancelled run
+  shows no dot. Dots are in-memory only: a server restart clears them. No
+  config change is required. See `docs/design/port_actions.md` ("Sidebar status
+  annotations").
+
 - **The Status and Power pages stop reconnecting their live WebSocket when
   the login session dies.** The pages retried a fixed every 3 s forever. A
   server restart clears login sessions, so every retry was then rejected:

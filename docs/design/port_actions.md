@@ -706,6 +706,58 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
   YAML. Each `action_ports` entry is edited as one row (action id + comma-separated
   port list, `*` for all ports) in `openmux/server/webui/static/js/config_editor.js`.
 
+## Sidebar status annotations
+
+The sidebar console list annotates a console item while its port has a Port
+Actions result that nobody has acknowledged yet. A dot shows the state: green
+for `success`, red for `failed`, amber for `timeout`, and a pulse while a run
+is active. The tooltip names the action, the state, the time, and the error
+text. The dot stays until someone closes the run (see "Close (a run)" above);
+a port with nothing awaiting acknowledgement shows no dot, so the feature needs
+no configuration: an ungranted port can never hold a run and stays quiet by
+itself. The example script `status_probe.py` is a non-interactive health check
+built for this flow.
+
+Data rule (one entry per port):
+
+1. A running action wins: the dot pulses.
+2. Else the port's finished run that is still open (not yet closed) sets the
+   dot - its state and `ended_at` (issue #90 slice 2).
+3. Closing removes the annotation: the operator's Close button, or a new run
+   starting on the port (which auto-closes the open run). The dot disappears
+   at once and never returns after a reload.
+4. A `cancelled` run never annotates: cancelling says nothing about the port,
+   and starting that run already acknowledged the previous outcome. The port
+   stays quiet until the next finished run.
+
+How the data reaches the sidebar:
+
+- Bootstrap: `GET /api/port-actions/status` returns
+  `{"ports": {"<port>": {"action_id", "state", "run_id", "ts", "error"}}}`.
+  Every authenticated user may read it; the sidebar also renders for read-only
+  users, so this route does not require `read-write`.
+- Live: `ActionRunner` emits `action_status` frames
+  (`{"type": "action_status", "port", "action_id", "run_id", "state", "ts",
+  "error"}`) through an optional `site_event_publisher` callback. The plugin
+  passes the web console adapter's `publish_site_event()`, which fans frames
+  out on `/ws/events`: one global site-event socket per browser tab
+  (`openmux/server/site_events.py`, class `SiteEventHub`). Frames are nudges,
+  not data - the same reliability model as the status poke. The page re-fetches
+  the status endpoint on every socket (re)open, and a `cancelled` or `closed`
+  frame also triggers a re-fetch, so a dropped frame delays a dot but never
+  strands it. A re-fetch that omits a port clears that port's dot, unless a
+  live frame landed after the re-fetch started (client clock check).
+- Client side: `layout.js` owns the socket and dispatches each frame as an
+  `omx-site-event` CustomEvent on `window`; `port_status.js` keeps the
+  port-to-state map and hands it to `layout.js` via
+  `window.omxSetPortStatuses()`. `applyPortLabels()` renders the dot inside its
+  existing pass, because it owns the item label text. Dot map entries compare
+  `ts`, so a bootstrap response in flight cannot overwrite a fresher frame.
+
+The state is in server memory only, like the run registry itself: restarting the
+server clears the dots until the next run. A `scripts/run_action.py` one-shot
+run executes in its own process and does not annotate a running server.
+
 ## Rollout phases
 1. Script format + `session` expect wrapper + subprocess runner, no UI (CLI-triggerable
    only), single-port lock via existing read-write slot mechanism.

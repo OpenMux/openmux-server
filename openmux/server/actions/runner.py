@@ -10,7 +10,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from openmux.server.actions.errors import ActionTimeoutError, PortBusyError
 from openmux.server.actions.registry import ActionScript, redact_params, validate_params
@@ -116,12 +116,22 @@ class ActionRunner:
     port's own read-write-slot capacity check enforced by `PortManager`.
     """
 
-    def __init__(self, port_manager: Any, console_manager: Optional[Any] = None):
+    def __init__(
+        self,
+        port_manager: Any,
+        console_manager: Optional[Any] = None,
+        site_event_publisher: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ):
         self.port_manager = port_manager
         # Optional: lets self-demote/auto-restore notify the affected browser client
         # directly (see docs/design/port_actions.md "Locking"); runner still works
         # without it, just without that client-facing notification.
         self.console_manager = console_manager
+        # Optional: forwards `action_status` frames to the web console's site event
+        # hub (/ws/events) so the sidebar console list can annotate run outcomes
+        # (see docs/design/port_actions.md "Sidebar status annotations"). The CLI
+        # runner (scripts/run_action.py) passes nothing and stays silent.
+        self.site_event_publisher = site_event_publisher
         self.runs: Dict[str, ActionRun] = {}
         self._active_by_port: Dict[str, str] = {}
         # The port's finished-but-not-yet-closed run (issue #90 slice 2), kept separate
@@ -284,6 +294,25 @@ class ActionRunner:
         task.cancel()
         return True
 
+    def iter_active_runs(self):
+        """Yield each in-progress `ActionRun`, one per busy port (registry view)."""
+        for run_id in self._active_by_port.values():
+            run = self.runs.get(run_id)
+            if run is not None:
+                yield run
+
+    def iter_open_finished_runs(self):
+        """Yield each port's finished-but-not-closed `ActionRun` (issue #90 slice 2).
+
+        These are the runs still awaiting their operator's close; the sidebar
+        status endpoint annotates ports from exactly this registry, so closing
+        or superseding a run removes its dot everywhere.
+        """
+        for run_id in self._open_finished_by_port.values():
+            run = self.runs.get(run_id)
+            if run is not None:
+                yield run
+
     def close_run(self, run_id: str, *, requesting_client_id: Optional[str] = None) -> str:
         """Close (ack) a finished run for everyone (issue #90 slice 2).
 
@@ -306,6 +335,11 @@ class ActionRunner:
         run.closed_at = time.time()
         if self._open_finished_by_port.get(run.port_name) == run_id:
             del self._open_finished_by_port[run.port_name]
+        # Sidebar annotations (docs/design/port_actions.md "Sidebar status
+        # annotations"): an outcome dot stays until its run is closed, so every
+        # site viewer must learn about the close. The client answers a `closed`
+        # frame with a status re-fetch, like `cancelled`.
+        self._emit_site_status(run, "closed")
         return "closed"
 
     async def broadcast_run_closed(self, run: ActionRun, closed_by: Optional[str]) -> None:
@@ -446,6 +480,7 @@ class ActionRunner:
             self._notify(port_name, "action_started", run)
             self._publish(run.run_id, {"event": "action_started", "run_id": run.run_id, "ts": time.time()})
             await self._broadcast_action_run_event(run, action, "action_started")
+            self._emit_site_status(run, "running")
             session = ActionSession(
                 self.port_manager,
                 port_name,
@@ -537,6 +572,10 @@ class ActionRunner:
                 },
             )
             await self._broadcast_action_run_event(run, action, "action_finished")
+            # Emit for every outcome, `cancelled` included: a cancelled run ends its own
+            # "running" pulse but is not an outcome for the port, so the client answers a
+            # `cancelled` frame with a status re-fetch (the previous outcome shows again).
+            self._emit_site_status(run, run.status)
             self._subscribers.pop(run.run_id, None)
             # Last, so the action client's own detach meta still reaches the run
             # transcript. The `log_port_name` guard leaves a newer run's mirror
@@ -546,6 +585,31 @@ class ActionRunner:
             except Exception:
                 # justification: best-effort mirror teardown; the run already finished
                 logger.debug("Failed to clear log mirror for run %s", run.run_id, exc_info=True)
+
+    def _emit_site_status(self, run: ActionRun, state: str) -> None:
+        """Publish one `action_status` frame for `run` to the site event hub.
+
+        Small frame on purpose (the client only re-fetches on it); best-effort:
+        annotations re-sync from `GET /api/port-actions/status` whenever a
+        browser (re)connects, so a lost frame never strands the UI.
+        """
+        if self.site_event_publisher is None:
+            return
+        try:
+            self.site_event_publisher(
+                {
+                    "type": "action_status",
+                    "port": run.port_name,
+                    "action_id": run.action_id,
+                    "run_id": run.run_id,
+                    "state": state,
+                    "ts": time.time(),
+                    "error": run.error,
+                }
+            )
+        except Exception:
+            # justification: site annotation fan-out is advisory; the UI re-syncs on reload
+            logger.debug("Site event publish failed for run %s", run.run_id, exc_info=True)
 
     def _federated_port(self, port_name: str) -> Optional[Any]:
         """Return the port object if `port_name` is a federated (muxcon) port, else None.

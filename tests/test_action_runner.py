@@ -904,3 +904,135 @@ async def test_run_without_console_manager_reports_power_unavailable(dummy_logge
     assert run.status == "success"
     assert any(e.get("event") == "power_available=False" for e in run.events)
     await adapter.stop()
+
+
+# --- Sidebar status annotations: `site_event_publisher` frames
+# (docs/design/port_actions.md, "Sidebar status annotations")
+
+
+@pytest.mark.asyncio
+async def test_site_event_publisher_sees_running_then_success(dummy_logger):
+    pm, adapter = await _make_pm()
+    frames: List[Dict[str, Any]] = []
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    runner = ActionRunner(pm, site_event_publisher=frames.append)
+
+    run = await runner.start_run(action, "p1", {"text": "hello"}, username="tester")
+
+    assert [f["state"] for f in frames] == ["running", "success"]
+    for frame in frames:
+        assert frame["type"] == "action_status"
+        assert frame["port"] == "p1"
+        assert frame["action_id"] == "echo_probe"
+        assert frame["run_id"] == run.run_id
+        assert isinstance(frame["ts"], float)
+        assert frame["error"] is None
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_site_event_publisher_sees_failed_frame_with_error(dummy_logger):
+    pm, adapter = await _make_pm()
+    frames: List[Dict[str, Any]] = []
+
+    async def _boom(session):
+        raise RuntimeError("script bug")
+
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    action.run_func = _boom
+    runner = ActionRunner(pm, site_event_publisher=frames.append)
+
+    with pytest.raises(RuntimeError):
+        await runner.start_run(action, "p1", {"text": "hi"}, username="tester")
+
+    assert [f["state"] for f in frames] == ["running", "failed"]
+    assert frames[1]["error"] == "script bug"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_site_event_publisher_sees_timeout_state(dummy_logger):
+    pm, adapter = await _make_pm()
+    frames: List[Dict[str, Any]] = []
+
+    async def _hang(session):
+        await asyncio.sleep(30)
+
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    action.run_func = _hang
+    action.timeout = 0.05
+    runner = ActionRunner(pm, site_event_publisher=frames.append)
+
+    with pytest.raises(Exception):
+        await runner.start_run(action, "p1", {"text": "hi"}, username="tester")
+
+    assert [f["state"] for f in frames] == ["running", "timeout"]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_emits_cancelled_state_frame(dummy_logger):
+    """`cancelled` ends the run's own "running" pulse; the client resolves it by
+    re-fetching the status endpoint (the previous outcome shows again)."""
+    pm, adapter = await _make_pm()
+    frames: List[Dict[str, Any]] = []
+    action = load_action_from_file(SLOW_NOOP_PATH)
+    runner = ActionRunner(pm, site_event_publisher=frames.append)
+
+    run = runner.launch_run(action, "p1", {"seconds": 30.0}, username="tester", requesting_client_id="human1")
+    queue = runner.subscribe(run.run_id)
+    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+    while event.get("event") != "sleeping":
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+
+    assert runner.cancel_run(run.run_id, requesting_client_id="human1") is True
+    task = runner._tasks.get(run.run_id)
+    if task is not None:
+        await task
+
+    assert [f["state"] for f in frames] == ["running", "cancelled"]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_site_event_publisher_exception_does_not_break_run(dummy_logger):
+    pm, adapter = await _make_pm()
+
+    def _bad_publisher(frame):
+        raise RuntimeError("hub exploded")
+
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    runner = ActionRunner(pm, site_event_publisher=_bad_publisher)
+
+    run = await runner.start_run(action, "p1", {"text": "hello"}, username="tester")
+
+    assert run.status == "success"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_closing_a_finished_run_emits_closed_state_frame(dummy_logger):
+    """Closing is the annotation's end for every viewer (sidebar dots): the
+    runner emits a terminal `closed` site frame after the outcome frame."""
+    pm, adapter = await _make_pm()
+    frames = []
+
+    action = load_action_from_file(ECHO_PROBE_PATH)
+    runner = ActionRunner(pm, site_event_publisher=frames.append)
+
+    run = await runner.start_run(action, "p1", {"text": "hello"}, username="tester")
+    assert run.status == "success"
+
+    # No operator was assigned (no requesting_client_id), so any caller may close.
+    assert runner.close_run(run.run_id) == "closed"
+    assert [f["state"] for f in frames] == ["running", "success", "closed"]
+    closed = frames[-1]
+    assert closed["port"] == "p1"
+    assert closed["action_id"] == "echo_probe"
+    assert closed["run_id"] == run.run_id
+    assert closed["error"] is None
+
+    # A repeat close is refused before any frame is emitted.
+    assert runner.close_run(run.run_id) == "already_closed"
+    assert len(frames) == 3
+    await adapter.stop()

@@ -97,6 +97,8 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Logged-in MOTD | The message of the day from `web_console.logged_in_motd`, shown at the top of the status page. May hold sensitive text. | notice, banner (for this text) |
 | Status fragment | One HTML region of the status page (`summary`, `ports`, `federation`, `clients`). `GET /api/status/fragments` returns them and the status page swaps each one in place during live auto-refresh (issue #85). | status chunk, status region |
 | Status poke | The `status_change` frame the server sends on `/ws/status` when port or federation data changes. It carries no data; the status page reacts by re-fetching its fragments. | status push, status event |
+| Site event hub | The fan-out point (`SiteEventHub`) behind `/ws/events`: one global socket per browser tab. Producers publish small JSON frames with a `type` key; each page re-fetches its REST data on (re)connect, so frames are nudges. | global socket, event bus |
+| Status dot | The sidebar annotation on a console item: it marks the Port Actions result awaiting acknowledgement, from the run's finish until the run is closed (see `docs/design/port_actions.md`, "Sidebar status annotations"). | status badge (for this), run indicator |
 | Close (a run) | The operator's acknowledgement that settles a finished Port Action run for every viewer (issue #90). Run states: running, finished (open), closed. Distinct from hiding the pane (✕), which only dismisses the view for one browser tab. | ack (as a verb in UI text), dismiss (for the global action), delete |
 
 ## Authentication and Security

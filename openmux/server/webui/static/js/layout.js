@@ -287,6 +287,29 @@
   };
   const PORT_LABELS_SERVER_KEY = 'omx_port_show_server';
   const PORT_LABELS_DESC_KEY = 'omx_port_show_desc';
+  // Per-port action outcome for the sidebar dots (docs/design/port_actions.md,
+  // "Sidebar status annotations"). Fed by port_status.js through
+  // window.omxSetPortStatuses(); rendered by applyPortLabels() below, which
+  // owns the item text and must therefore (re)create the dot on every pass.
+  let PORT_STATUS_BY_NAME = {};
+  const PORT_STATUS_LABELS = { success: 'success', failed: 'failed', timeout: 'timed out' };
+
+  function portStatusDotClass(state) {
+      if (state === 'success') return 'ok';
+      if (state === 'failed') return 'bad';
+      if (state === 'timeout') return 'warn';
+      if (state === 'running') return 'running';
+      return '';
+  }
+
+  function portStatusTooltip(st) {
+      const when = st.ts ? new Date(st.ts * 1000).toLocaleString() : '';
+      if (st.state === 'running') return 'action ' + st.action_id + ': running since ' + when;
+      const label = PORT_STATUS_LABELS[st.state] || st.state;
+      let text = 'last action ' + st.action_id + ': ' + label + (when ? ' at ' + when : '');
+      if (st.error) text += ' - ' + String(st.error).slice(0, 120);
+      return text;
+  }
 
   function portLabelPrefs() {
       return {
@@ -322,7 +345,8 @@
           const main = prefs.server ? origin + '::' + name : name;
           const fullText = prefs.desc && desc ? main + ' (' + desc + ')' : main;
           item.textContent = main;
-          item.title = fullText;
+          const status = PORT_STATUS_BY_NAME[name];
+          item.title = fullText + (status ? '\n' + portStatusTooltip(status) : '');
           const oldDesc = item.querySelector('.port-desc');
           if (oldDesc) oldDesc.remove();
           if (prefs.desc && desc) {
@@ -330,6 +354,16 @@
               span.className = 'port-desc';
               span.textContent = ' (' + desc + ')';
               item.appendChild(span);
+          }
+          // Status dot (port_status.js data): a colored dot after the label
+          // showing the last action outcome on this port. The textContent
+          // assignment above dropped any previous dot, so it is (re)appended
+          // here on every pass; no entry means no dot (never ran / feature off).
+          if (status) {
+              const dot = document.createElement('span');
+              dot.className = 'port-status-dot ' + portStatusDotClass(status.state);
+              dot.setAttribute('aria-hidden', 'true');
+              item.appendChild(dot);
           }
           item.setAttribute('data-sort-name', name);
           item.setAttribute('data-sort-origin', origin);
@@ -375,6 +409,12 @@
       if (menu) menu.style.display = 'none';
   });
   window.applyPortLabels = applyPortLabels;
+  // Sidebar dots entry point (port_status.js): replace the per-port status map
+  // and repaint. The map is {port_name: {action_id, state, run_id, ts, error}}.
+  window.omxSetPortStatuses = function (map) {
+      PORT_STATUS_BY_NAME = map && typeof map === 'object' ? map : {};
+      applyPortLabels();
+  };
   applyPortLabels();
 })();
 
@@ -428,10 +468,6 @@
 (function () {
   const DELAYS_MS = [1000, 2000, 5000, 10000, 30000, 60000];
   const PROBE_PATH = '/api/status/fragments'; // core route on every install
-  let attempt = 0; // consecutive failed reconnects since the last open
-  let timer = null;
-  let stopped = false;
-  let generation = 0; // invalidates a scheduled attempt after a reset
   function getBasePath() {
     const meta = document.querySelector('meta[name="omx-base-path"]');
     return meta ? meta.getAttribute('content') || '' : '';
@@ -460,41 +496,115 @@
       window.location.reload();
     };
   }
-  window.omxReconnect = function (connect) {
-    if (stopped || timer) return;
-    const delay = DELAYS_MS[Math.min(attempt, DELAYS_MS.length - 1)];
-    attempt += 1;
-    const gen = generation;
-    timer = setTimeout(function () {
-      timer = null;
-      if (gen !== generation || stopped) return;
-      if (attempt < 2) {
-        connect();
-        return;
-      }
-      probeAuth()
-        .then(function (verdict) {
-          if (gen !== generation) return;
-          if (verdict === 'auth') {
-            stopped = true;
-            showSignedOut();
+  // One policy instance per WebSocket: a page can now hold two live sockets
+  // (the status page socket and the global /ws/events site socket), and a
+  // single shared attempt/timer state silently starves whichever socket calls
+  // second, because the `timer` guard swallows its retry.
+  function makeReconnectPolicy() {
+    let attempt = 0; // consecutive failed reconnects since the last open
+    let timer = null;
+    let stopped = false;
+    let generation = 0; // invalidates a scheduled attempt after a reset
+    return {
+      reconnect: function (connect) {
+        if (stopped || timer) return;
+        const delay = DELAYS_MS[Math.min(attempt, DELAYS_MS.length - 1)];
+        attempt += 1;
+        const gen = generation;
+        timer = setTimeout(function () {
+          timer = null;
+          if (gen !== generation || stopped) return;
+          if (attempt < 2) {
+            connect();
             return;
           }
-          connect();
-        })
-        .catch(function () {
-          if (gen !== generation || stopped) return;
-          connect(); // probe itself failed (server unreachable): keep trying
-        });
-    }, delay);
+          probeAuth()
+            .then(function (verdict) {
+              if (gen !== generation) return;
+              if (verdict === 'auth') {
+                stopped = true;
+                showSignedOut();
+                return;
+              }
+              connect();
+            })
+            .catch(function () {
+              if (gen !== generation || stopped) return;
+              connect(); // probe itself failed (server unreachable): keep trying
+            });
+        }, delay);
+      },
+      reset: function () {
+        attempt = 0;
+        stopped = false;
+        generation += 1;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      },
+    };
+  }
+  window.omxMakeReconnectPolicy = makeReconnectPolicy;
+  // Shared default instance backing the original global API: consumers that
+  // predate per-socket policies (status.js) keep working unchanged.
+  const DEFAULT_POLICY = makeReconnectPolicy();
+  window.omxReconnect = function (connect) {
+    DEFAULT_POLICY.reconnect(connect);
   };
   window.omxReconnectReset = function () {
-    attempt = 0;
-    stopped = false;
-    generation += 1;
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-    }
+    DEFAULT_POLICY.reset();
   };
+})();
+
+// Global site-event socket (/ws/events): one connection per page for
+// cross-cutting updates, so features do not each open their own socket.
+// Every frame arrives as an "omx-site-event" CustomEvent (detail = parsed
+// JSON frame); each (re)connect also fires "omx-site-event-open" so
+// consumers re-fetch their bootstrap endpoint and fill frames missed while
+// disconnected. Server side: openmux/server/site_events.py; first producer:
+// Port Actions "action_status" frames feeding the sidebar dots (port_status.js).
+(function () {
+  const policy = window.omxMakeReconnectPolicy();
+  function getBasePath() {
+    const meta = document.querySelector('meta[name="omx-base-path"]');
+    return meta ? meta.getAttribute('content') || '' : '';
+  }
+  function dispatch(name, detail) {
+    try {
+      window.dispatchEvent(new CustomEvent(name, { detail: detail }));
+    } catch (e) {}
+  }
+  function connect() {
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    let ws;
+    try {
+      ws = new WebSocket(scheme + '://' + location.host + getBasePath() + '/ws/events');
+    } catch (e) {
+      policy.reconnect(connect);
+      return;
+    }
+    ws.onopen = function () {
+      policy.reset();
+      dispatch('omx-site-event-open', null);
+    };
+    ws.onmessage = function (ev) {
+      let data = null;
+      try {
+        data = JSON.parse(ev.data);
+      } catch (e) {
+        return;
+      }
+      if (data && typeof data === 'object') dispatch('omx-site-event', data);
+    };
+    ws.onclose = function () {
+      policy.reconnect(connect);
+    };
+    ws.onerror = function () {
+      try {
+        ws.close();
+      } catch (e) {}
+    };
+  }
+  connect();
 })();

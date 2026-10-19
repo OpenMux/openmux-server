@@ -162,6 +162,9 @@
       </div>
     </div>
     <script src="{{ base_path }}/static/js/layout.js"></script>
+    {# Sidebar status annotations: dots on the console list from the last
+       action outcome per port (no-op when the Port Actions plugin is absent). #}
+    <script src="{{ base_path }}/static/js/port_status.js"></script>
     {% block scripts %}{% endblock %}
   </body>
 </html>

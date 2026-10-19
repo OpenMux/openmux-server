@@ -29,6 +29,7 @@ async def _start_console(
     max_read_write_users: int = 1,
     actions_dir=None,
     live_config_manager=None,
+    users=None,
 ):
     pm = PortManager([])
     loop_adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "p1", "max_read_write_users": max_read_write_users}]})
@@ -36,7 +37,7 @@ async def _start_console(
     pm.set_unified_adapters([loop_adapter])
     assert await loop_adapter.start() is True
 
-    auth = AuthManager({"users": USERS})
+    auth = AuthManager({"users": users if users is not None else USERS})
     cm = ConsoleManager(pm, auth)
 
     config = {
@@ -1268,6 +1269,249 @@ async def test_new_run_starts_beside_unclosed_finished_run_and_autocloses_it():
                 json={"client_id": "launcher1"},
             ) as resp:
                 assert resp.status == 409
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+# --- Sidebar status annotations (docs/design/port_actions.md,
+# "Sidebar status annotations"): GET /api/port-actions/status bootstrap and the
+# /ws/events live feed.
+
+RO_USERS = USERS + [{"username": "ro", "password_hash": USERS[0]["password_hash"], "permissions": "read-only"}]
+RO_AUTH_HEADER = {"Authorization": "Basic " + base64.b64encode(b"ro:password").decode()}
+STATUS_URL = "http://127.0.0.1:{port}/api/port-actions/status"
+
+
+async def _wait_status_entry(session, bound_port, action_id, state, headers=None):
+    """Poll the status endpoint until port p1 shows `action_id`/`state`; None on timeout."""
+    for _ in range(100):
+        async with session.get(STATUS_URL.format(port=bound_port), headers=headers or AUTH_HEADER) as resp:
+            assert resp.status == 200
+            data = await resp.json()
+        entry = data.get("ports", {}).get("p1")
+        if entry and entry["action_id"] == action_id and entry["state"] == state:
+            return entry
+        await asyncio.sleep(0.02)
+    return None
+
+
+async def _wait_status_absent(session, bound_port, headers=None):
+    """Poll until port p1 carries no annotation anymore; False on timeout.
+
+    The dot's lifecycle ends with a close (or a cancel's re-fetch), so several
+    tests wait for the entry to disappear rather than change."""
+    for _ in range(100):
+        async with session.get(STATUS_URL.format(port=bound_port), headers=headers or AUTH_HEADER) as resp:
+            assert resp.status == 200
+            data = await resp.json()
+        if "p1" not in data.get("ports", {}):
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint_empty_before_any_run():
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(STATUS_URL.format(port=bound_port), headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert await resp.json() == {"ports": {}}
+            # The sidebar renders for logged-out nobody: anonymous callers get 401.
+            async with session.get(STATUS_URL.format(port=bound_port)) as resp:
+                assert resp.status == 401
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint_read_only_user_may_read():
+    """Unlike the run endpoints (read-write/admin), the annotation bootstrap is
+    readable by every authenticated user - the sidebar renders for them too."""
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]}, users=RO_USERS)
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(STATUS_URL.format(port=bound_port), headers=RO_AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert await resp.json() == {"ports": {}}
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint_reports_the_newest_finished_run_of_any_action():
+    """One entry per port: the newest finished run wins, no matter which action
+    granted on that port ran."""
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"], "slow_noop": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}},
+            ) as resp:
+                assert resp.status == 200
+            entry = await _wait_status_entry(session, bound_port, "echo_probe", "success")
+            assert entry is not None
+            assert entry["error"] is None
+            assert entry["run_id"]
+            assert entry["ts"] > 0
+            assert "started_at" not in entry  # the sidebar shape is a strict subset of run.summary()
+
+            # A newer run of a DIFFERENT action replaces the entry for the port.
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/slow_noop/run",
+                headers=AUTH_HEADER,
+                json={"params": {"seconds": 0.0}},
+            ) as resp:
+                assert resp.status == 200
+            entry = await _wait_status_entry(session, bound_port, "slow_noop", "success")
+            assert entry is not None
+
+            # ...and the newest one wins again.
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "again"}},
+            ) as resp:
+                assert resp.status == 200
+            entry = await _wait_status_entry(session, bound_port, "echo_probe", "success")
+            assert entry is not None
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint_running_wins_then_cancelled_clears_the_port():
+    """While an action runs, the port shows `running`. Cancelling it is not an
+    outcome, and starting that run already acknowledged the port's previous
+    outcome (the close-on-launch), so the port carries no annotation after."""
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"], "slow_noop": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}},
+            ) as resp:
+                assert resp.status == 200
+            assert await _wait_status_entry(session, bound_port, "echo_probe", "success") is not None
+
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/slow_noop/run",
+                headers=AUTH_HEADER,
+                json={"params": {"seconds": 30.0}},
+            ) as resp:
+                assert resp.status == 200
+            entry = await _wait_status_entry(session, bound_port, "slow_noop", "running")
+            assert entry is not None
+            assert entry["ts"] > 0
+
+            # No operator was set (launch without client_id), so any client may
+            # stop the run through its own WS - same permission rule as cancel_run.
+            async with session.ws_connect(
+                f"http://127.0.0.1:{bound_port}/ws/actions/{entry['run_id']}", headers=AUTH_HEADER
+            ) as run_ws:
+                await run_ws.send_json({"type": "cancel_run"})
+                async for _msg in run_ws:
+                    pass
+
+            # Launching slow_noop auto-closed the echo outcome, and the cancelled
+            # run itself annotates nothing: the port goes quiet. (The client
+            # answers its `cancelled` frame with exactly this re-fetch.)
+            assert await _wait_status_absent(session, bound_port) is True
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint_close_removes_the_annotation():
+    """The outcome dot lives until the run is closed (issue #90 ack): after the
+    close the endpoint reports the port again - so reloads stay clean too."""
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}, "client_id": "op1"},
+            ) as resp:
+                assert resp.status == 200
+            entry = await _wait_status_entry(session, bound_port, "echo_probe", "success")
+            assert entry is not None
+
+            # The annotation survives later reads: it expires only by closing.
+            again = await _wait_status_entry(session, bound_port, "echo_probe", "success")
+            assert again == entry
+
+            # The close must come from the run's operator (client_id above).
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/runs/{entry['run_id']}/close",
+                headers=AUTH_HEADER,
+                json={"client_id": "op1"},
+            ) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["ok"] is True
+            assert await _wait_status_absent(session, bound_port) is True
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_events_delivers_action_status_frames_end_to_end():
+    """The global /ws/events socket carries the runner's action_status frames
+    (this is what animates the sidebar dots without a page reload)."""
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.ws_connect(f"http://127.0.0.1:{bound_port}/ws/events", headers=AUTH_HEADER) as ws:
+                web_adapter.publish_site_event({"type": "ping", "n": 1})
+                async with session.post(
+                    f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                    headers=AUTH_HEADER,
+                    json={"params": {"text": "ann"}},
+                ) as resp:
+                    assert resp.status == 200
+                    run_data = await resp.json()
+
+                frames = []
+                while True:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=5.0)
+                    frames.append(json.loads(msg.data))
+                    if frames[-1].get("type") == "action_status" and frames[-1].get("state") == "success":
+                        break
+
+                assert frames[0] == {"type": "ping", "n": 1}
+                action_frames = [f for f in frames if f.get("type") == "action_status"]
+                assert [f["state"] for f in action_frames] == ["running", "success"]
+                for frame in action_frames:
+                    assert frame["port"] == "p1"
+                    assert frame["action_id"] == "echo_probe"
+                    assert frame["run_id"] == run_data["run_id"]
+
+                # The operator's close is a site event too - that is what clears
+                # the dot in every open tab without a reload.
+                async with session.post(
+                    f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/runs/{run_data['run_id']}/close",
+                    headers=AUTH_HEADER,
+                    json={"client_id": "anyone"},
+                ) as resp:
+                    assert resp.status == 200
+                while True:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=5.0)
+                    last = json.loads(msg.data)
+                    if last.get("type") == "action_status":
+                        break
+                assert last["state"] == "closed"
+                assert last["port"] == "p1"
+                assert last["run_id"] == run_data["run_id"]
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()

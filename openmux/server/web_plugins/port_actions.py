@@ -541,6 +541,60 @@ async def _handle_run_action(request: web.Request) -> web.Response:
     return web.json_response({"run_id": run.run_id, "status": run.status})
 
 
+def _status_entry(run: Any, state_name: str, ts: float) -> Dict[str, Any]:
+    """One sidebar-annotation entry for `run` (see `_handle_action_status`).
+
+    `ts` orders entries for the client's stale-frame guard: the finished case
+    uses `ended_at`, the running case `started_at`, so a later (re)bootstrap
+    can never replace a fresher live frame with an older snapshot value.
+    """
+    return {
+        "action_id": run.action_id,
+        "state": state_name,
+        "run_id": run.run_id,
+        "ts": ts,
+        "error": run.error,
+    }
+
+
+def _status_payload(state: _PortActionsState) -> Dict[str, Any]:
+    """Per-port sidebar-annotation map, read from the runner's live registries.
+
+    One entry per port: the active run when the port has one (state
+    ``running``), else the port's single finished-but-not-closed outcome
+    (``success``/``failed``/``timeout``). Closing that run - by its operator,
+    or automatically when a new run launches on the port - evicts it from the
+    registry, so the dot disappears and never returns after a reload.
+    ``cancelled`` runs annotate nothing: a launch already settled the port's
+    previous outcome, so the port stays quiet until the next finished run.
+    """
+    if state.runner is None:
+        return {"ports": {}}
+    ports: Dict[str, Dict[str, Any]] = {}
+    for run in state.runner.iter_open_finished_runs():
+        if run.status in ("success", "failed", "timeout") and run.ended_at is not None:
+            ports[run.port_name] = _status_entry(run, run.status, run.ended_at)
+    for run in state.runner.iter_active_runs():
+        ports[run.port_name] = _status_entry(run, "running", run.started_at)
+    return {"ports": ports}
+
+
+async def _handle_action_status(request: web.Request) -> web.Response:
+    """Sidebar bootstrap: the last action outcome per port (any granted action).
+
+    ``{"ports": {"<port>": {"action_id", "state", "run_id", "ts", "error"}}}``. A
+    port gets an entry only once it had a run, so un-granted ports stay quiet
+    without extra configuration. Every authenticated user may read it (the
+    sidebar renders for read-only users too) - unlike the run endpoints, which
+    stay read-write/admin. Live updates ride ``action_status`` frames on
+    ``/ws/events`` (see docs/design/port_actions.md, "Sidebar status annotations").
+    """
+    state = request.app[STATE_APP_KEY]
+    adapter = get_web_adapter(request)
+    adapter._require_permission(request, ("read-only", "read-write", "admin"))
+    return web.json_response(_status_payload(state))
+
+
 async def _handle_list_runs(request: web.Request) -> web.Response:
     state = request.app[STATE_APP_KEY]
     adapter = get_web_adapter(request)
@@ -738,7 +792,18 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     port_manager = getattr(console_manager, "port_manager", None)
     state = _PortActionsState(
         action_ports={k: list(v) for k, v in (section.get("action_ports") or {}).items()},
-        runner=ActionRunner(port_manager, console_manager=console_manager) if port_manager is not None else None,
+        runner=(
+            ActionRunner(
+                port_manager,
+                console_manager=console_manager,
+                # Sidebar status annotations: run frames ride the web console's
+                # global /ws/events hub (see docs/design/port_actions.md).
+                # A web console without publish_site_event (older build) -> None -> silent.
+                site_event_publisher=getattr(adapter, "publish_site_event", None),
+            )
+            if port_manager is not None
+            else None
+        ),
         actions_dir=_normalize_action_dirs(section.get("actions_dir")),
     )
     # Before the first catalog load, so a script's `import` of a sibling
@@ -766,4 +831,6 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     app.router.add_get("/ws/actions/{run_id}", _handle_ws_run_events)
     # Portless: the load errors are directory-scoped, not port-scoped (issue #43).
     app.router.add_get("/api/port-actions/health", _handle_action_health)
+    # Sidebar status annotations bootstrap (docs/design/port_actions.md).
+    app.router.add_get("/api/port-actions/status", _handle_action_status)
     return {}

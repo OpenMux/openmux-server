@@ -404,12 +404,23 @@ header.site, header.site { border-bottom: 1px solid var(--border-color); backgro
 .nav-expand { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 16px; padding: 0; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 4px; }
 .nav-expand:hover { color: var(--text-bright); background: var(--bg-hover); }
 .nav-sub { padding-left: 0; background: var(--bg-sub-nav); display: none; }
-.nav-sub-item { display: block; padding: 4px 16px 4px 42px; color: var(--text-muted); text-decoration: none; font-size: 13px; border-left: 3px solid transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-sub-item { position: relative; display: block; padding: 4px 16px 4px 42px; color: var(--text-muted); text-decoration: none; font-size: 13px; border-left: 3px solid transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nav-sub-item:hover { color: var(--text-bright); background: var(--bg-sub-nav-hover); }
 .nav-sub-item.active { color: var(--text-bright); background: var(--bg-sub-nav-active); border-left-color: var(--accent-color); }
 /* Optional dimmed port description in the sidebar list (port-labels "show
    description" preference; applied by layout.js as a child span). */
 .nav-sub-item .port-desc { opacity: 0.7; }
+/* Sidebar status annotation (port_status.js): colored dot marking the last
+   action outcome on a console port. Colors reuse the tag palette (.tag.ok /
+   .tag.warn / .tag.bad text colors); no entry means no dot at all. Pinned to
+   the indent gutter left of the label (labels start at the 42px padding), so
+   long text can never clip it. */
+.port-status-dot { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); width: 8px; height: 8px; border-radius: 50%; }
+.port-status-dot.ok { background: var(--status-ok-text); }
+.port-status-dot.bad { background: var(--status-err-text); }
+.port-status-dot.warn { background: var(--status-warn-text); }
+.port-status-dot.running { background: var(--accent-color); animation: port-status-pulse 1.2s ease-in-out infinite; }
+@keyframes port-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 .nav-sub-empty { display: block; padding: 8px 16px 8px 42px; color: var(--text-dim); font-style: italic; font-size: 12px; }
 .nav-more { background: none; border: none; color: var(--text-dim); cursor: pointer; width: 100%; text-align: left; padding: 4px 16px 4px 42px; font-size: 12px; }
 .nav-more:hover { color: var(--text-muted); }

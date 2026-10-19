@@ -46,6 +46,7 @@ from openmux.server.adapters.lifecycle import READINESS_ACTIVE, READINESS_IDLE, 
 from openmux.server.data_logger import DataLogger
 from openmux.server.locations import package_version_file, web_tls_dir
 from openmux.server.port_utils import natural_sort_key, safe_get_port
+from openmux.server.site_events import SiteEventHub
 from openmux.server.web_plugins import ADAPTER_APP_KEY
 from openmux.server.web_plugins import power_monitor as _power_monitor
 
@@ -1090,6 +1091,40 @@ async def handle_ws_status(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_ws_events(request: web.Request) -> web.WebSocketResponse:
+    """Site-wide event stream for cross-cutting UI updates (sidebar annotations).
+
+    Send-only for the client: one small JSON frame per event published through
+    the adapter's `SiteEventHub` (frame shape: ``{"type": "<topic>", ...}``).
+    Producers call `WebConsoleAdapter.publish_site_event()`; the Port Actions
+    runner emits ``action_status`` frames. Consumers treat frames as nudges
+    and re-fetch their REST endpoint on (re)connect (see
+    docs/design/port_actions.md, "Sidebar status annotations"). Registered
+    before ``/ws/{port_name}`` so the static path wins (same as ``/ws/power``).
+    """
+    adapter = _get_adapter(request)
+    if not request.get("username"):
+        raise web.HTTPUnauthorized()
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    adapter._site_events.add(ws)
+    try:
+        async for _msg in ws:
+            # Ignore client frames; iterating detects the close and ends the stream.
+            pass
+    except Exception:
+        # justification: the client is gone; cleanup below still runs
+        pass
+    finally:
+        adapter._site_events.discard(ws)
+        try:
+            await ws.close()
+        except Exception:
+            # justification: shutdown cleanup; the transport may already be closed
+            pass
+    return ws
+
+
 async def handle_api_reload(request: web.Request) -> web.Response:
     """Reload selected configuration sections online (multi-adapter).
 
@@ -2007,6 +2042,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self._status_ws_push_task = None
         self._status_ws_last_push = 0.0
         self._status_ws_min_interval = 2.0
+        # Site-wide event fan-out (/ws/events): small JSON frames (first
+        # producer: Port Actions run status for the sidebar annotations) to
+        # every open tab. Frames are nudges; pages re-fetch their REST data on
+        # (re)connect (see openmux/server/site_events.py).
+        self._site_events = SiteEventHub()
         self._meta_debounce = {}  # port_name -> last_broadcast_ts
         self._meta_min_interval = 0.3
         # Template engine will be prepared on start
@@ -2481,6 +2521,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         # Static paths win over /ws/{port_name} (registration order): a port
         # literally named "status" is shadowed here, same precedent as "power".
         app.router.add_get("/ws/status", handle_ws_status)
+        app.router.add_get("/ws/events", handle_ws_events)
         app.router.add_get("/ws/{port_name}", handle_ws)
         app.router.add_get("/ws/{server_id}/{port_name}", handle_ws_fqpn)
         # Health/Probe endpoints
@@ -2991,6 +3032,20 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             # justification: best-effort notice; the meta frame still arrives
             pass
+
+    def publish_site_event(self, event: Dict[str, Any]) -> None:
+        """Fan out one small JSON frame to every connected ``/ws/events`` tab.
+
+        Producers (e.g. the Port Actions runner) pass a dict with a ``type``
+        key naming the topic. Best-effort by design: a browser that misses a
+        frame re-fetches its data when its socket reopens, so annotations can
+        go stale for seconds but never stay wrong.
+        """
+        try:
+            self._site_events.publish(event)
+        except Exception:
+            # justification: site event fan-out is advisory; the UI re-syncs on reload
+            self.logger.debug("Site event publish failed", exc_info=True)
 
     def _find_power_adapter(self):
         """Find the active PDU adapter (adapter_type ``power``), or None."""
