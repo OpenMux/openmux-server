@@ -331,7 +331,6 @@ or inside `server:`:
 server:
   fail_fast_adapters: false
 ```
-Details: [Adapter Fail-Fast Mode](docs/configuration/adapter_fail_fast.md)
 
 
 
