@@ -122,7 +122,7 @@ async def test_api_status_returns_aggregated_payload(monkeypatch):
         "multipath": {"totals": {}},
         "web_clients": [],
     }
-    a = _frag_adapter(monkeypatch, snapshot=[{"name": "p1"}])
+    _frag_adapter(monkeypatch, snapshot=[{"name": "p1"}])
     monkeypatch.setattr(wc, "_assemble_status_payload", lambda adapter, preloaded_ports=None: payload)
     resp = await handle_api_status(_FakeRequest())
     assert resp.status == 200
