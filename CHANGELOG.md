@@ -6,7 +6,11 @@ line at 127 columns, the repository line length; do not wrap at 80. Update rule:
 one entry to the current version section. At release, rename `Unreleased` to the version number. See `AGENTS.md` for the
 workflow.
 
-## [Unreleased — 1.0.4]
+## [Unreleased — 1.0.5]
+
+Changes since v1.0.4 (2026-10-19).
+
+## [1.0.4]
 
 Changes since v1.0.3 (2026-09-17).
 
