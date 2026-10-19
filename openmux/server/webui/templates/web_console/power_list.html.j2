@@ -74,9 +74,11 @@
 {% block scripts %}
   <script>
   // Live refresh: the shared /ws/events site socket (layout.js) delivers the
-  // coalesced power_changed nudge on every outlet change. On each nudge we
-  // refetch /api/power and re-render the PDU table rows. This page holds no
-  // socket of its own; the badge follows the site socket's open/close signals.
+  // coalesced power_changed nudge on every outlet change and the pdus_changed
+  // nudge when the `power:` section is reconciled (PDU added/removed/rebuilt).
+  // On each nudge we refetch /api/power and re-render the PDU table rows. This
+  // page holds no socket of its own; the badge follows the site socket's
+  // open/close signals.
   (function () {
     var base = "{{ base_path }}" || "";
     var rowsEl = document.getElementById("pdu-rows");
@@ -116,7 +118,7 @@
     // "Signed out" stop once the login session dies).
     window.addEventListener("omx-site-event", function (ev) {
       var d = ev && ev.detail;
-      if (d && d.type === "power_changed") refresh();
+      if (d && (d.type === "power_changed" || d.type === "pdus_changed")) refresh();
     });
     window.addEventListener("omx-site-event-open", function () {
       if (window.omxSetLive) window.omxSetLive(true);

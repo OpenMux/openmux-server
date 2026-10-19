@@ -972,6 +972,13 @@ class OpenMuxServer:
             if spec:
                 await self._ras_apply_reconcile(a, spec, summary, req_id)
 
+        # Live views that cache a decision taken at request time (the console page's
+        # power badge and its Actions button) need this nudge: sections that no
+        # adapter reconciles, such as `port_actions`, and a port's in-place live
+        # fields (description, access groups, `power` feeds) change what those views
+        # would render while publishing no port event of their own.
+        self._notify_reload_applied(req_id)
+
         self.logger.info("[reload-soft:%s] Completed with summary: %s", req_id, summary)
         return summary
 
@@ -1151,9 +1158,41 @@ class OpenMuxServer:
         try:
             res = await a.reconcile_ports(effective)
             summary["adapters"].setdefault(key, res)
+            if key == "power" and isinstance(res, dict) and (res.get("added") or res.get("removed") or res.get("updated")):
+                self._notify_pdus_changed(req_id)
         except Exception as e:
             self.logger.error("[reload-soft:%s] %s reconcile error: %s", req_id, label, e, exc_info=True)
             summary["adapters"][key] = {"error": str(e)}
+
+    def _notify_pdus_changed(self, req_id: str) -> None:
+        """Tell the web console its PDU set changed, so the Power views refresh.
+
+        Only add/remove/re-create changes the Power menu list or the /power
+        table rows; a label-only in-place update keeps names and outlets.
+        """
+        self._notify_web_console("notify_pdus_changed", "PDU set changed", req_id)
+
+    def _notify_reload_applied(self, req_id: str) -> None:
+        """Tell the web console a soft reload landed, so cached views re-read.
+
+        Sent on every completed soft reload, including a no-op one: the server
+        cannot tell which section a live view depends on (`port_actions` is read
+        per request, not reconciled), and the nudge is coalesced per topic.
+        """
+        self._notify_web_console("notify_reload_applied", "config reloaded", req_id)
+
+    def _notify_web_console(self, method: str, label: str, req_id: str) -> None:
+        """Call one web-console nudge hook when that adapter exposes it."""
+        try:
+            wc = getattr(self, "web_console", None)
+            hook = getattr(wc, method, None) if wc is not None else None
+            if hook is None:
+                return
+            hook()
+            self.logger.info("[reload-soft:%s] web console notified: %s", req_id, label)
+        except Exception:
+            # justification: best-effort live refresh; pages re-fetch on their next site-socket (re)open
+            pass
 
     async def shutdown(self):
         """Gracefully shut down the server."""

@@ -582,7 +582,10 @@ Web console: the standalone `/power` page, the per-PDU pages, and the
 `web_console.plugins` entry is needed. Live outlet updates ride the shared
 `/ws/events` site socket (a coalesced `power_changed` nudge per change; the
 old dedicated `/ws/power` socket is removed). A `power:` section added or
-removed on a soft reload takes effect without a restart. Each route replies
+removed on a soft reload takes effect without a restart; PDUs added, removed,
+or re-created by that reload also publish a coalesced `pdus_changed` nudge,
+which rebuilds the sidebar Power menu and re-renders the `/power` page tables
+on every open tab. Each route replies
 404 ("Power management is not configured") while no PDU adapter is active.
 The "Power" sidebar item is emitted live per page when a PDU adapter is
 enabled, like the in-session badge, the power menu, and the live `[POWER]`

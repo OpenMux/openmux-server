@@ -719,3 +719,94 @@
     if (!first) refreshSidebar();
   });
 })();
+
+// Power menu freshness: #power-pdus is server-rendered like the console
+// list, so a PDU added or removed by a soft reload of the `power:`
+// section stayed invisible until page reload. The server publishes a
+// coalesced "pdus_changed" frame after a soft reload reconciles the PDU
+// set (main.py -> WebConsoleAdapter.notify_pdus_changed()); this view
+// rebuilds the sub-links from /api/power on that frame, and on every
+// site-socket RE-open. Limit (deliberate): if the whole `power:` section
+// appeared or disappeared, the parent nav block itself only changes on a
+// page reload — rebuilding the parent's markup here would duplicate
+// layout.html.j2 for a rare case.
+(function () {
+  function getBasePath() {
+    const meta = document.querySelector('meta[name="omx-base-path"]');
+    return meta ? meta.getAttribute('content') || '' : '';
+  }
+  let fetching = false;
+  let refetchQueued = false;
+
+  // Active highlight: a PDU detail page marks its link; recover the name from
+  // the path (/power/<name>), else from the currently active link.
+  function activePduName() {
+    try {
+      const m = decodeURIComponent(location.pathname).match(/\/power\/([^/?#]+)/);
+      if (m) return m[1];
+    } catch (e) {}
+    const act = document.querySelector('#power-pdus a.nav-sub-item.active');
+    return act ? act.getAttribute('data-pdu-name') || '' : '';
+  }
+
+  function rebuildPowerMenu(pdus) {
+    const list = document.getElementById('power-pdus');
+    if (!list) return;
+    const active = activePduName();
+    list.querySelectorAll('a.nav-sub-item, .nav-sub-empty').forEach((el) => el.remove());
+    if (!pdus.length) {
+      const empty = document.createElement('div');
+      empty.className = 'nav-sub-empty';
+      empty.textContent = 'No PDUs configured';
+      list.appendChild(empty);
+      return;
+    }
+    for (const p of pdus) {
+      const name = String((p && p.name) || '');
+      if (!name) continue;
+      const a = document.createElement('a');
+      a.className = 'nav-sub-item' + (name === active ? ' active' : '');
+      a.href = getBasePath() + '/power/' + encodeURIComponent(name);
+      a.setAttribute('data-pdu-name', name);
+      a.textContent = name;
+      list.appendChild(a);
+    }
+  }
+
+  function refreshPowerMenu() {
+    const list = document.getElementById('power-pdus');
+    if (!list) return; // page has no Power menu (power not configured at load)
+    if (fetching) {
+      refetchQueued = true; // coalesce nudges that arrive mid-fetch
+      return;
+    }
+    fetching = true;
+    fetch(getBasePath() + '/api/power', { credentials: 'same-origin' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (j && Array.isArray(j.pdus)) rebuildPowerMenu(j.pdus);
+      })
+      .catch(() => {
+        /* transient; the next nudge or reload retries */
+      })
+      .finally(() => {
+        fetching = false;
+        if (refetchQueued) {
+          refetchQueued = false;
+          refreshPowerMenu();
+        }
+      });
+  }
+
+  window.addEventListener('omx-site-event', (ev) => {
+    const d = ev && ev.detail;
+    if (d && d.type === 'pdus_changed') refreshPowerMenu();
+  });
+  // RE-open only (see the console-list block above for the rationale).
+  let socketOpenedOnce = false;
+  window.addEventListener('omx-site-event-open', () => {
+    const first = !socketOpenedOnce;
+    socketOpenedOnce = true;
+    if (!first) refreshPowerMenu();
+  });
+})();

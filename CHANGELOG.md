@@ -238,6 +238,35 @@ Changes since v1.0.3 (2026-09-17).
   refreshes the list once when its site socket reconnects. No config change
   is required.
 
+- **The console page header follows the live port and action config.** Three
+  parts of the console page kept the answer from page load: the heading (port
+  name and description), the PDU power badge, and the `Actions` button, which
+  stays hidden while a port has no action. A soft reload can change any of them
+  without touching the page, so the console page now re-reads `GET /api/ports`
+  and its own action list on these nudges: the `ports_changed` frame (a port
+  registered or unregistered) and a new coalesced `{"type": "reload_applied"}`
+  frame that a soft reload publishes. That second frame exists because two
+  changes report no event of their own: a `port_actions` grant (read per
+  request, reconciled by no adapter) and a port's in-place fields (`description`,
+  access groups, `power` feeds). Practical effect: the first action script
+  granted to a port now reveals its `Actions` button without a page reload, and
+  the heading marks a removed open port `(removed)`. Revealing the button never
+  opens the Port Actions panel; losing the port's last action closes an open
+  panel. The page never reloads itself and never closes the terminal connection,
+  so your live session is not interrupted. Limit: the Status page does not
+  re-read on a soft reload (it follows its own `status_change` nudge), and a
+  port `description` edit still does not relabel the sidebar console list,
+  which rebuilds on `ports_changed` only. No config change is required.
+
+- **The Power sidebar menu now follows PDU add and remove live.** Soft
+  reloads of the `power:` section that added, removed, or re-created a PDU
+  left the sidebar menu (and the /power pages) stale until page reload. The
+  soft reload now publishes a coalesced `{"type": "pdus_changed"}` frame on
+  `/ws/events`, and every page rebuilds the menu from `GET /api/power`; the
+  /power pages re-render their rows on the same frame. Limit: if the whole
+  `power:` section appeared or disappeared, the Power nav block itself only
+  changes on a page reload. No config change is required.
+
 - **The Status and Power pages stop reconnecting their live WebSocket when
   the login session dies.** The pages retried a fixed every 3 s forever. A
   server restart clears login sessions, so every retry was then rejected:

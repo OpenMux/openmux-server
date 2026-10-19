@@ -102,7 +102,8 @@
   <script>
   // Outlet switching: POST /api/power/outlets/<ref> with the CSRF token.
   // Live updates ride the shared /ws/events site socket (layout.js): the
-  // coalesced power_changed nudge re-renders rows from /api/power. This page
+  // coalesced power_changed (outlet change) and pdus_changed (PDU set
+  // reconciled) nudges re-render rows from /api/power. This page
   // holds no socket of its own; the shared "Live data" header badge follows
   // the site socket's open/close signals (issue #86).
   (function () {
@@ -238,7 +239,7 @@
     // sent a snapshot on connect for the same reason).
     window.addEventListener("omx-site-event", function (ev) {
       var d = ev && ev.detail;
-      if (d && d.type === "power_changed") refresh();
+      if (d && (d.type === "power_changed" || d.type === "pdus_changed")) refresh();
     });
     window.addEventListener("omx-site-event-open", function () {
       if (window.omxSetLive) window.omxSetLive(true);

@@ -51,7 +51,9 @@ def test_power_pages_drive_helper_from_site_events():
         assert '"/ws/' not in page and "'/ws/" not in page, f"{label}: no server ws path"
         for event in ('"omx-site-event"', '"omx-site-event-open"', '"omx-site-event-close"'):
             assert f"addEventListener({event}" in page, f"{label}: must listen for {event}"
-        assert "power_changed" in page, f"{label}: must react to the power_changed nudge"
+        # Outlet changes AND PDU-set reconcile changes both re-render the rows.
+        for topic in ("power_changed", "pdus_changed"):
+            assert topic in page, f"{label}: must react to the {topic} nudge"
         # Initial badge state honors the site socket's current state.
         assert "window.omxSiteLive" in page, f"{label}: must seed from omxSiteLive"
 
@@ -108,3 +110,68 @@ def test_layout_js_rebuilds_sidebar_from_ports_changed_nudge():
     assert "window.applyPortLabels" in block
     # No page-owned socket here either; it rides the layout site socket.
     assert "new WebSocket(" not in block
+
+
+def test_layout_js_rebuilds_power_menu_from_pdus_changed_nudge():
+    """Power sidebar menu rebuilds on the pdus_changed site nudge (topology).
+
+    Mirror of the console-list contract for #power-pdus (server-rendered
+    once per page load): the soft-reload reconcile publishes a coalesced
+    pdus_changed frame; this view rebuilds the links from /api/power.
+    """
+    start = LAYOUT_JS.index("Power menu freshness")
+    block = LAYOUT_JS[start:]
+    assert "addEventListener('omx-site-event'" in block
+    assert "'pdus_changed'" in block
+    assert "/api/power" in block
+    assert 'id="power-pdus"' in block or "'power-pdus'" in block
+    assert "data-pdu-name" in block
+    # The empty state must match the server template's text.
+    assert "No PDUs configured" in block
+    # One socket per tab still holds: no page-owned WebSocket here either.
+    assert "new WebSocket(" not in block
+
+
+def test_console_js_refreshes_header_without_touching_the_session():
+    """The console header, badge, and Actions button follow the live port set.
+
+    All three cache a decision from page load, so a removal, an in-place feed
+    edit, or the first action grant was invisible until reload. console.js
+    re-reads on the ports_changed / reload_applied nudges (and on site-socket
+    RE-open) and updates rendered text and visibility only: reloading the page,
+    or closing the port WebSocket, would interrupt the operator's live session.
+    """
+    start = CONSOLE_JS.index("Port-set freshness")
+    end = CONSOLE_JS.index("Info overlay helpers")
+    block = CONSOLE_JS[start:end]
+    assert "addEventListener('omx-site-event'" in block
+    assert "addEventListener('omx-site-event-open'" in block
+    assert "'ports_changed'" in block
+    # reload_applied carries what no other frame reports: a port_actions grant
+    # and a port's in-place live fields (description, groups, power feeds).
+    assert "'reload_applied'" in block
+    # Reuses the page's existing loader; opens no socket of its own.
+    assert "loadPorts()" in block
+    assert "new WebSocket(" not in block
+    # The RE-open refresh must skip the first open (page just rendered).
+    assert "siteSocketOpenedOnce" in block
+    # A failed read must keep the previous rendering instead of blanking it.
+    assert "portListReadLive = true" in block
+    # "(removed)" is gated on that live-read proof, so a first-paint unknown port
+    # still renders plain.
+    assert "' (removed)'" in CONSOLE_JS
+    assert "portListReadLive && !p" in CONSOLE_JS
+    # The power badge and the Actions button re-derive from the same reads.
+    assert "updatePowerBadge(" in block
+    assert "/actions" in block
+    # Revealing the Actions button must not run the catalog loader, which
+    # auto-joins a running action and can open the run panel.
+    assert "loadActionsCatalog(" not in block
+    # Hiding it closes an open Port Actions panel: a list of actions this port can
+    # no longer run is not worth keeping on screen. Reveal must not open it, which
+    # the assertion above already guarantees.
+    assert "if (!has) closeActionsOverlay();" in block
+    # Hard contract for the whole page script: no reload, no session teardown.
+    assert "location.reload" not in CONSOLE_JS
+    assert "location.replace" not in CONSOLE_JS
+    assert "ws.close(" not in block

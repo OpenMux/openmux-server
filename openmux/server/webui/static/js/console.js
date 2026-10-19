@@ -52,11 +52,22 @@ let wsDownTimer = null;
 // Debounce timer to delay showing Port-down (yellow) banner to avoid flicker during quick switches
 let portDownTimer = null;
 
+// Set once a port list arrives through the live refresh below. It is the proof
+// that lets the heading mark a port as removed (see updatePortDisplay).
+let portListReadLive = false;
 function updatePortDisplay() {
   if (!portDisplayName || !portDisplayDesc) return;
   const p = ports.find(x => x.name === selectedPortName);
-  portDisplayName.textContent = selectedPortName || 'No console selected';
-  portDisplayDesc.textContent = (p && p.description) ? p.description : '';
+  if (!selectedPortName) {
+    portDisplayName.textContent = 'No console selected';
+    portDisplayDesc.textContent = '';
+    return;
+  }
+  // Mark a port removed only after a live read proved it is gone. On first paint
+  // an unknown ?port= may simply not be loaded yet, so it must not read as gone.
+  const removed = portListReadLive && !p;
+  portDisplayName.textContent = selectedPortName + (removed ? ' (removed)' : '');
+  portDisplayDesc.textContent = removed ? 'Removed from the config.' : ((p && p.description) ? p.description : '');
 }
 function populatePorts(list) {
   ports = Array.isArray(list) ? list : [];
@@ -70,10 +81,82 @@ async function loadPorts() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     populatePorts(data.ports || []);
+    return true;
   } catch (e) {
     console.warn('Failed to load ports list:', e);
+    return false;
   }
 }
+
+// Port-set freshness for the header, the power badge, and the Actions button.
+// All three cache a decision taken when the page loaded: the heading shows the
+// port the page was opened with, the badge shows the feeds read then, and the
+// Actions button stays hidden when the port had no action at that moment. A soft
+// reload can change any of them without touching this page, so re-read on:
+//   - "ports_changed": a port registered or unregistered (add, remove, or a
+//     re-create from a material config change);
+//   - "reload_applied": any soft reload, because two changes publish no frame of
+//     their own - a `port_actions` grant (read per request, reconciled by no
+//     adapter) and a port's in-place live fields (description, access groups,
+//     `power` feeds).
+// Every site-socket RE-open re-reads as well, which covers what happened while
+// the socket was down.
+// Deliberate limits: this never reloads the page and never touches `ws`, because
+// either would drop the session the operator is working in. It also never runs
+// the catalog loader, which auto-joins a running action and can open the run
+// panel, so a port gaining its first action only reveals the button: the operator
+// opens the panel themselves, and opening it refetches the catalog, so the list
+// is current on first click. layout.js reads /api/ports again for the sidebar
+// list; the two reads stay independent on purpose (same choice as the Config
+// Editor's own sidebar copy).
+async function refreshPortSetViews() {
+  if (!(await loadPorts())) return; // read failed: keep what the page already shows
+  portListReadLive = true;
+  updatePortDisplay();
+  // The badge comes from the same read: /api/ports derives the feed state per
+  // request, so a feed list edited in place lands here. A port with no entry or
+  // no feeds has no badge.
+  const entry = ports.find((p) => p && p.name === currentPort()) || null;
+  updatePowerBadge((entry && entry.power) || null);
+  refreshActionsButtonVisibility();
+}
+
+// Show or hide the Actions button from what the server offers this port now. A
+// grant or a new script file needs no reload by design
+// (docs/design/port_actions.md, "Hot reload of the `port_actions` section": it
+// applies on the port's next use), so this small read is what makes the FIRST
+// action on a port reachable without reloading the page. Revealing the button
+// never opens the panel; hiding it closes the panel when it is open, because an
+// open list of actions this port can no longer run is not worth keeping up.
+let actionsProbeRunning = false;
+async function refreshActionsButtonVisibility() {
+  const port = currentPort();
+  if (!port || !actionsToggle || actionsProbeRunning) return;
+  actionsProbeRunning = true;
+  try {
+    const res = await fetch(`${getBasePath()}/api/ports/${encodeURIComponent(port)}/actions`, { credentials: 'same-origin', cache: 'no-store' });
+    if (!res.ok) return; // unreadable: leave the button as the last read left it
+    const data = await res.json();
+    const has = Array.isArray(data.actions) && data.actions.length > 0;
+    actionsToggle.style.display = has ? '' : 'none';
+    if (!has) closeActionsOverlay();
+  } catch (e) {
+    /* transient; the next nudge retries */
+  } finally {
+    actionsProbeRunning = false;
+  }
+}
+
+let siteSocketOpenedOnce = false;
+window.addEventListener('omx-site-event', (ev) => {
+  const d = ev && ev.detail;
+  if (d && (d.type === 'ports_changed' || d.type === 'reload_applied')) refreshPortSetViews();
+});
+window.addEventListener('omx-site-event-open', () => {
+  const first = !siteSocketOpenedOnce;
+  siteSocketOpenedOnce = true;
+  if (!first) refreshPortSetViews();
+});
 
 // --- Info overlay helpers ---
 const infoOverlay = document.getElementById('infoOverlay');

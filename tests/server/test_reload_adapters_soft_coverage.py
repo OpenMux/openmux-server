@@ -518,3 +518,118 @@ async def test_reconcile_power_branch_error_recorded(tmp_path, monkeypatch):
     assert res["adapters"]["power"] == {"error": "reconcile boom power"}
     # effective for an absent power section is {}
     assert s.unified_adapters[0].reconciled == [{}]
+
+
+class _NotifyRec:
+    """Records web-console notifications from the soft-reload hooks."""
+
+    def __init__(self):
+        self.pdus = 0
+        self.reloads = 0
+
+    def notify_pdus_changed(self):
+        self.pdus += 1
+
+    def notify_reload_applied(self):
+        self.reloads += 1
+
+
+async def _power_reconcile_reload(tmp_path, monkeypatch, summary):
+    s = _server(tmp_path, monkeypatch)
+    monkeypatch.setattr(s, "_reload_config_from_disk", lambda: {})
+
+    async def noop(cfg):
+        return True
+
+    monkeypatch.setattr(s.auth_manager, "update_config", noop)
+    s.web_console = _NotifyRec()
+    s.unified_adapters = [FakeAdapter("power", reconcile=summary)]
+    res = await s.reload_adapters_soft()
+    return s, res
+
+
+@pytest.mark.asyncio
+async def test_power_reconcile_added_notifies_web_console(tmp_path, monkeypatch):
+    s, res = await _power_reconcile_reload(
+        tmp_path, monkeypatch, {"added": ["p1"], "removed": [], "updated": [], "unchanged": []}
+    )
+    assert res["adapters"]["power"]["added"] == ["p1"]
+    assert s.web_console.pdus == 1
+
+
+@pytest.mark.asyncio
+async def test_power_reconcile_removed_or_rebuilt_notifies(tmp_path, monkeypatch):
+    s, _ = await _power_reconcile_reload(
+        tmp_path, monkeypatch, {"added": [], "removed": ["p1"], "updated": [], "unchanged": []}
+    )
+    assert s.web_console.pdus == 1
+    s, _ = await _power_reconcile_reload(
+        tmp_path, monkeypatch, {"added": [], "removed": [], "updated": ["p2"], "unchanged": []}
+    )
+    assert s.web_console.pdus == 1
+
+
+@pytest.mark.asyncio
+async def test_power_reconcile_unchanged_does_not_notify(tmp_path, monkeypatch):
+    s, res = await _power_reconcile_reload(
+        tmp_path, monkeypatch, {"added": [], "removed": [], "updated": [], "unchanged": ["p1"]}
+    )
+    assert res["adapters"]["power"]["unchanged"] == ["p1"]
+    assert s.web_console.pdus == 0
+
+
+@pytest.mark.asyncio
+async def test_completed_soft_reload_notifies_reload_applied(tmp_path, monkeypatch):
+    """A completed soft reload always nudges, even with nothing reconciled.
+
+    `port_actions` is read per request and reconciled by no adapter, and a port's
+    in-place live fields publish no event, so the reconcile summary cannot prove
+    that no live view changed. The nudge is coalesced per topic, so a no-op
+    reload costs one frame.
+    """
+    s = _server(tmp_path, monkeypatch)
+    monkeypatch.setattr(s, "_reload_config_from_disk", lambda: {})
+
+    async def noop(cfg):
+        return True
+
+    monkeypatch.setattr(s.auth_manager, "update_config", noop)
+    s.web_console = _NotifyRec()
+
+    res = await s.reload_adapters_soft(context={"req_id": "r1"})
+    assert res["adapters"] == {}
+    assert s.web_console.reloads == 1
+    assert s.web_console.pdus == 0
+
+
+@pytest.mark.asyncio
+async def test_config_load_failure_notifies_nothing(tmp_path, monkeypatch):
+    """The error short-circuit returns before the reload nudge."""
+    s = _server(tmp_path, monkeypatch)
+    monkeypatch.setattr(s, "_reload_config_from_disk", lambda: (_ for _ in ()).throw(RuntimeError("disk boom")))
+    s.web_console = _NotifyRec()
+
+    res = await s.reload_adapters_soft(context={"req_id": "r2"})
+    assert res == {"error": "disk boom"}
+    assert s.web_console.reloads == 0
+
+
+@pytest.mark.asyncio
+async def test_reload_without_web_console_hooks_completes(tmp_path, monkeypatch):
+    """A web console without the notify hooks (or none at all) is skipped.
+
+    The nudges only speed up live views, so a server build or a test double that
+    exposes neither method must still complete the reload.
+    """
+    s = _server(tmp_path, monkeypatch)
+    monkeypatch.setattr(s, "_reload_config_from_disk", lambda: {})
+
+    async def noop(cfg):
+        return True
+
+    monkeypatch.setattr(s.auth_manager, "update_config", noop)
+    s.web_console = object()  # no notify_* methods at all
+
+    res = await s.reload_adapters_soft(context={"req_id": "r3"})
+    assert res["adapters"] == {}
+    assert res["auth_updated"] is True

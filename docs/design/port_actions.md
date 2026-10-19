@@ -686,6 +686,16 @@ that should get it. **Implemented** (`openmux/server/web_plugins/port_actions.py
    no browser reload of the console page. The `action_ports` grants are the
    loader's scope, so a new grant in the saved config also imports the new
    script file, and a removed grant drops its action from the next catalog.
+   The console page's `Actions` button follows the same rule: a soft reload
+   publishes the `reload_applied` nudge (see `docs/GLOSSARY.md`) and the page
+   re-checks its own action list, so granting a port its first action reveals
+   the button without reloading the page. The check sets the button's
+   visibility only; it never auto-joins a run, opens the run panel, or opens the
+   Port Actions panel. When the port loses its last action, the same check hides
+   the button and closes the panel if it is open, because a list of actions this
+   port can no longer run is not worth keeping on screen. A script
+   file that appears with no reload at all stays invisible to that check until
+   the next nudge, socket reconnect, or page load.
 - **Action-centric layout**: `_allowed_actions()` computes a port's effective allow-list
   from `action_ports`, matching each entry's port list against the requested port name.
   A port-centric `port_actions: {port_name: [action_id, ...]}` layout was considered and

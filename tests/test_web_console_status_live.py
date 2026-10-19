@@ -214,8 +214,16 @@ class _KickStub:
     _kick_site_nudge = wc.WebConsoleAdapter._kick_site_nudge
     _site_nudge_later = wc.WebConsoleAdapter._site_nudge_later
     _on_port_meta_update = wc.WebConsoleAdapter._on_port_meta_update
-    # 0 debounce for a deterministic test; production uses 2 s / 1 s / 2 s.
-    _SITE_NUDGE_INTERVALS = {"status_change": 0.0, "power_changed": 0.0, "ports_changed": 0.0}
+    notify_pdus_changed = wc.WebConsoleAdapter.notify_pdus_changed
+    notify_reload_applied = wc.WebConsoleAdapter.notify_reload_applied
+    # 0 debounce for a deterministic test; production uses 2 s / 1 s / 2 s / 2 s / 2 s.
+    _SITE_NUDGE_INTERVALS = {
+        "status_change": 0.0,
+        "power_changed": 0.0,
+        "ports_changed": 0.0,
+        "pdus_changed": 0.0,
+        "reload_applied": 0.0,
+    }
 
     def __init__(self, site_listeners=1):
         self.published = []
@@ -309,6 +317,34 @@ async def test_meta_power_change_kicks_status_and_power_not_ports():
     assert set(s._site_nudges) == {"status_change", "power_changed"}
     await _drain(s)
     assert sorted(e["type"] for e in s.published) == ["power_changed", "status_change"]
+
+
+@pytest.mark.asyncio
+async def test_notify_pdus_changed_kicks_coalesced_nudge():
+    """main.py's soft-reload hook: repeated notifies collapse to one frame."""
+    s = _KickStub()
+    s.notify_pdus_changed()
+    s.notify_pdus_changed()  # coalesced into the pending push
+    await s._pending("pdus_changed")
+    assert s.published == [{"type": "pdus_changed"}]
+    assert "ports_changed" not in s._site_nudges  # power changes must not rebuild the port list
+
+
+@pytest.mark.asyncio
+async def test_notify_reload_applied_kicks_coalesced_nudge():
+    """The soft-reload completion hook nudges its own topic, coalesced.
+
+    `reload_applied` carries the changes no other frame reports (a
+    `port_actions` grant, a port's in-place live fields), so it must stay a
+    topic of its own instead of impersonating a port or PDU change.
+    """
+    s = _KickStub()
+    s.notify_reload_applied()
+    s.notify_reload_applied()  # coalesced into the pending push
+    await s._pending("reload_applied")
+    assert s.published == [{"type": "reload_applied"}]
+    assert "ports_changed" not in s._site_nudges
+    assert "pdus_changed" not in s._site_nudges
 
 
 # --- route registration order ------------------------------------------------------

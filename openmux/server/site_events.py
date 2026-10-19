@@ -10,9 +10,12 @@ Frames are nudges, not data: the page re-fetches its REST endpoint when the
 socket (re)opens, so a dropped frame can never strand the UI (see
 docs/design/port_actions.md, "Sidebar status annotations"). Producers:
 the Port Actions runner (``action_status``) and the coalesced live nudges
-``status_change`` (status page, issue #85), ``power_changed`` (Power pages)
-and ``ports_changed`` (sidebar console list), all from
-`WebConsoleAdapter._kick_site_nudge()`.
+``status_change`` (status page, issue #85), ``power_changed`` (Power pages),
+``ports_changed`` (sidebar console list), ``pdus_changed`` (Power sidebar
+menu) and ``reload_applied`` (console page header, power badge, and Actions
+button) -- the first three from `WebConsoleAdapter._kick_site_nudge()`,
+``pdus_changed`` and ``reload_applied`` from the adapter's ``notify_*`` hooks
+after a soft reload (main.py).
 """
 
 import asyncio

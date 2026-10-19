@@ -1067,8 +1067,11 @@ async def handle_ws_events(request: web.Request) -> web.WebSocketResponse:
     runner emits ``action_status`` frames, and the live nudges ride the same
     socket -- coalesced ``status_change`` (status page; the old dedicated
     ``/ws/status`` socket was migrated here), ``power_changed`` (Power pages;
-    replaced ``/ws/power``) and ``ports_changed`` (the sidebar console list
-    rebuilds from ``/api/ports`` when a port is added or removed). Consumers
+    replaced ``/ws/power``), ``ports_changed`` (the sidebar console list
+    rebuilds from ``/api/ports`` when a port is added or removed),
+    ``pdus_changed`` (the Power sidebar menu rebuilds from ``/api/power`` after
+    a soft reload re-created the PDU set) and ``reload_applied`` (the console
+    page re-reads its heading, power badge, and Actions button). Consumers
     treat frames as nudges and re-fetch their REST endpoint on (re)connect
     (see docs/design/port_actions.md, "Sidebar status annotations").
     Registered before ``/ws/{port_name}`` so the static path wins.
@@ -2009,8 +2012,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
         # and last-push timestamp per topic ("status_change" -> the status
         # page re-fetches /api/status/fragments; "power_changed" -> the Power
         # pages re-fetch /api/power; "ports_changed" -> layout.js rebuilds the
-        # sidebar console list from /api/ports). Frames carry no data (issue
-        # #85; the Power nudge replaced the dedicated /ws/power socket).
+        # sidebar console list from /api/ports; "pdus_changed" -> layout.js
+        # rebuilds the Power sidebar menu from /api/power; "reload_applied" ->
+        # the console page re-reads /api/ports and its Actions availability,
+        # which a soft reload can change without any other frame). Frames carry
+        # no data (issue #85; the Power nudge replaced the dedicated /ws/power
+        # socket).
         self._site_nudges: Dict[str, Dict[str, Any]] = {}
         # Site-wide event fan-out (/ws/events): small JSON frames (first
         # producer: Port Actions run status for the sidebar annotations) to
@@ -3095,12 +3102,41 @@ class WebConsoleAdapter(BaseGenericAdapter):
             pass
 
     # Minimum spacing per coalesced site nudge topic; unlisted topics use 2.0 s.
-    _SITE_NUDGE_INTERVALS = {"status_change": 2.0, "power_changed": 1.0, "ports_changed": 2.0}
+    _SITE_NUDGE_INTERVALS = {
+        "status_change": 2.0,
+        "power_changed": 1.0,
+        "ports_changed": 2.0,
+        "pdus_changed": 2.0,
+        "reload_applied": 2.0,
+    }
+
+    def notify_pdus_changed(self) -> None:
+        """Public hook (soft reload, main.py): the PDU set changed.
+
+        Nudges every open page to rebuild the Power sidebar menu from
+        ``/api/power`` (topic ``pdus_changed``). Deliberately thin: the
+        coalescer does the guarding, and a page that misses the frame
+        re-fetches on its next site-socket (re)open.
+        """
+        self._kick_site_nudge("pdus_changed")
+
+    def notify_reload_applied(self) -> None:
+        """Public hook (soft reload, main.py): a soft reload landed.
+
+        Nudges every open page to re-read the data it cached at render time
+        (topic ``reload_applied``). Some changes publish no other frame: a
+        ``port_actions`` grant is read per request and reconciled by no adapter,
+        and a port's in-place live fields (description, access groups, ``power``
+        feeds) set attributes without a port event. The console page re-derives
+        its heading, power badge, and Actions button visibility from it.
+        """
+        self._kick_site_nudge("reload_applied")
 
     def _kick_site_nudge(self, topic: str) -> None:
         """Schedule one coalesced ``{"type": topic}`` nudge frame on /ws/events.
 
-        Called from the port-meta listener; nudge frames carry no data, so a
+        Called from the port-meta listener and from the ``notify_*`` hooks above;
+        nudge frames carry no data, so a
         burst of events collapses into a single publish per topic (and at most
         one per ``_SITE_NUDGE_INTERVALS`` entry). Pages re-fetch their REST
         endpoint on the frame and on every socket (re)open, so a dropped nudge
