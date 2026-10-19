@@ -66,6 +66,10 @@ Simplified Technical English (ASD-STE100):
   verb works, e.g. "to reload" not "for reloading".
 - Write instructions as imperative steps ("Run `make test`."), not narrative descriptions.
 - Avoid slang, idioms, and unnecessary jargon; spell out abbreviations on first use.
+- Wrap prose in `CHANGELOG.md`, `README.md`, `CONTRIBUTING.md`, and `docs/**/*.md` at
+  127 columns, the repository line length (see `pyproject.toml`). Do not wrap at 80
+  columns. One line per sentence is wrong the other way too: fill each line. Table rows
+  and fenced code stay on one line, so they may exceed the limit.
 - After any code change, check affected docs (`docs/**/*.md`, `README.md`, `CONTRIBUTING.md`,
   docstrings, config schema comments) and update anything that no longer matches the new
   behavior. Do not consider a change done while docs describe the old behavior.
@@ -82,6 +86,8 @@ features. Update it as part of the same change:
   "Web console and observability".
 - Keep entries in the same documentation style as the rest of the docs. Name the exact
   config key and file (`security.yaml`, `server.yaml`). Do not paste commit messages.
+- Wrap `CHANGELOG.md` lines at 127 columns, the repository line length (see
+  `pyproject.toml`). Do not wrap at 80 columns; the file uses one width throughout.
 - At release, rename `Unreleased` to the version number (e.g. `1.0.3`), keep the "since
   v1.0.2" line, and start a new `Unreleased` section for the next release.
 

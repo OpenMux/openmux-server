@@ -1,15 +1,10 @@
 # MuxCon Binary Framing: Design
 
-**Status: design. Nothing in this document is implemented.** The shipped wire
-protocol is ASCII. See
-[specifications/MuxCon Protocol Specification (Implemented).md](../../specifications/MuxCon%20Protocol%20Specification%20(Implemented).md)
-for the current protocol and
-[muxcon.md](muxcon.md) for the current federation behavior (handlers are
-`MuxConProtocolHandler` in
-[openmux/server/muxcon_protocol.py](../../openmux/server/muxcon_protocol.py)
-and `UnifiedMuxConAdapter` in
-[openmux/server/adapters/muxcon.py](../../openmux/server/adapters/muxcon.py),
-whose module docstring mentions this upgrade).
+**Status: design. Nothing in this document is implemented.** The shipped wire protocol is ASCII. See [specifications/MuxCon
+Protocol Specification (Implemented).md](../../specifications/MuxCon%20Protocol%20Specification%20(Implemented).md) for the
+current protocol and [muxcon.md](muxcon.md) for the current federation behavior (handlers are `MuxConProtocolHandler` in
+[openmux/server/muxcon_protocol.py](../../openmux/server/muxcon_protocol.py) and `UnifiedMuxConAdapter` in
+[openmux/server/adapters/muxcon.py](../../openmux/server/adapters/muxcon.py), whose module docstring mentions this upgrade).
 
 ## 1. Goals
 
@@ -27,16 +22,12 @@ whose module docstring mentions this upgrade).
 
 ## 3. Frame types
 
-The design keeps the existing ASCII type characters for the active types and
-adds one. `O` (open), `E` (close), and `N` (gap report) disappear: the
-stream lifecycle and gap reports become TLVs inside `C`, `H`, and `A` frames.
+The design keeps the existing ASCII type characters for the active types and adds one. `O` (open), `E` (close), and `N` (gap
+report) disappear: the stream lifecycle and gap reports become TLVs inside `C`, `H`, and `A` frames.
 
-| Type | Meaning |
-|------|---------|
-| `D` | Data for one stream |
-| `C` | Control: stream open/close, federation commands, errors |
-| `H` | Heartbeat. Always carries a `CUM_ACK` TLV. |
-| `A` | Standalone ACK with a `CUM_ACK` TLV, plus an optional `GAP_LIST` TLV |
+| Type | Meaning | |------|---------| | `D` | Data for one stream | | `C` | Control: stream open/close, federation commands,
+errors | | `H` | Heartbeat. Always carries a `CUM_ACK` TLV. | | `A` | Standalone ACK with a `CUM_ACK` TLV, plus an optional
+`GAP_LIST` TLV |
 
 ## 4. Base header
 
@@ -59,37 +50,26 @@ Extension TLVs (section 6) follow the header. The payload follows the TLVs.
 
 ## 5. Flags (16 bits)
 
-| Bit | Name | Meaning |
-|-----|------|---------|
-| 0   | R    | Resent frame. `GlobalSeq` keeps the original value. |
-| 1   | A    | A `CUM_ACK` TLV follows. |
-| 2   | S    | A `GAP_LIST` TLV follows. |
-| 3   | P    | Frame is latency-sensitive. |
-| 4   | T    | A `TIMESTAMP` TLV follows. |
-| 5   | X    | Reserved for fragmentation. |
-| 6-15 |    | Reserved. Set to 0. |
+| Bit | Name | Meaning | |-----|------|---------| | 0 | R | Resent frame. `GlobalSeq` keeps the original value. | | 1 | A | A
+`CUM_ACK` TLV follows. | | 2 | S | A `GAP_LIST` TLV follows. | | 3 | P | Frame is latency-sensitive. | | 4 | T | A `TIMESTAMP`
+TLV follows. | | 5 | X | Reserved for fragmentation. | | 6-15 | | Reserved. Set to 0. |
 
 `ExtCount` shows the TLV count. A separate extension flag is not needed.
 
 ## 6. Extension TLVs
 
-Format: `Type (1 byte) | Len (1 byte) | Value (Len bytes)`. `Len` is 0-255,
-so a value is at most 255 bytes. That is enough for v1 port names and
-metadata.
+Format: `Type (1 byte) | Len (1 byte) | Value (Len bytes)`. `Len` is 0-255, so a value is at most 255 bytes. That is enough for
+v1 port names and metadata.
 
-| Code | Name | Value |
-|------|------|-------|
-| 0x01 | CUM_ACK | `uint64`. The highest contiguous sequence the sender has received. |
-| 0x02 | GAP_LIST | `Count (1)`, then `Count` entries of `StartSeq (8) | RunLen (2)` |
-| 0x03 | TIMESTAMP | `uint64` Unix time in ms. Use to measure RTT. |
-| 0x30 | STREAM_OPEN | `NameLen (1) | PortName | MetaLen (2) | MetadataJSON` (`MetaLen` may be 0) |
-| 0x31 | STREAM_CLOSE | `ReasonCode (1) | ReasonLen (1) | ReasonText` (both may be 0) |
-| 0x20 | CONTROL_SUBTYPE | Reserved for a structured control mapping (not used in v1) |
+| Code | Name | Value | |------|------|-------| | 0x01 | CUM_ACK | `uint64`. The highest contiguous sequence the sender has
+received. | | 0x02 | GAP_LIST | `Count (1)`, then `Count` entries of `StartSeq (8) | RunLen (2)` | | 0x03 | TIMESTAMP |
+`uint64` Unix time in ms. Use to measure RTT. | | 0x30 | STREAM_OPEN | `NameLen (1) | PortName | MetaLen (2) | MetadataJSON`
+(`MetaLen` may be 0) | | 0x31 | STREAM_CLOSE | `ReasonCode (1) | ReasonLen (1) | ReasonText` (both may be 0) | | 0x20 |
+CONTROL_SUBTYPE | Reserved for a structured control mapping (not used in v1) |
 
 TLV order does not matter, except that ACK TLVs come first.
 
-A `GAP_LIST` entry names the missing range
-`[StartSeq, StartSeq + RunLen - 1]`. Keep `Count` at 8 or fewer.
+A `GAP_LIST` entry names the missing range `[StartSeq, StartSeq + RunLen - 1]`. Keep `Count` at 8 or fewer.
 
 ## 7. Payload by type
 
@@ -137,9 +117,8 @@ Retransmission:
   Limit the number of concurrent retransmissions.
 - On a timer: resend any unacked frame older than `base_rto`.
 
-The current ASCII implementation already does retransmission with an adaptive
-timeout (`muxcon.md`, section 6). The binary design keeps that behavior and
-adds explicit gap lists.
+The current ASCII implementation already does retransmission with an adaptive timeout (`muxcon.md`, section 6). The binary
+design keeps that behavior and adds explicit gap lists.
 
 ## 10. Heartbeats
 
@@ -168,11 +147,9 @@ adds explicit gap lists.
 
 ## 12. Capability negotiation (proposed)
 
-The current capability whitelist
-(`validate_capabilities` in `muxcon_protocol.py`) is:
-`multi_hop`, `conflict_resolution`, `metadata`, `topology_discovery`,
-`port_federation`, `remote_registration`, `chain_tracking`. This design
-would add one entry, `binary1`. The current code does not define it.
+The current capability whitelist (`validate_capabilities` in `muxcon_protocol.py`) is: `multi_hop`, `conflict_resolution`,
+`metadata`, `topology_discovery`, `port_federation`, `remote_registration`, `chain_tracking`. This design would add one entry,
+`binary1`. The current code does not define it.
 
 Steps:
 
@@ -220,8 +197,7 @@ BASE_RTO_MS = 200
 HEARTBEAT_INTERVAL_MS = 5000
 ```
 
-These are starting values for tuning. The defaults in
-[DEFAULTS.md](../DEFAULTS.md) apply to every config key that this design
+These are starting values for tuning. The defaults in [DEFAULTS.md](../DEFAULTS.md) apply to every config key that this design
 reuses.
 
 ## 16. Sender loop (sketch)
@@ -233,5 +209,4 @@ reuses.
 4. On ACKs: drop every buffered frame the cumulative ACK covers, and drop
    selectively recovered sequences.
 
-The receiver runs the mirror image: keep a gap map, deliver frames once they
-become contiguous.
+The receiver runs the mirror image: keep a gap map, deliver frames once they become contiguous.

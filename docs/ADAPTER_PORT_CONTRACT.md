@@ -1,11 +1,9 @@
 # Adapter Port Contract
 
-This document defines the interface and behavioral invariants that every port
-implementation in OpenMux must satisfy. Adapters (serial, loopback, command,
-tcp\_initiator, client\_initiator, etc.) expose individual **port instances**
-that plug into the PortManager. This contract is the authoritative reference
-for what PortManager expects from a port and what a port may rely on from
-PortManager.
+This document defines the interface and behavioral invariants that every port implementation in OpenMux must satisfy. Adapters
+(serial, loopback, command, tcp\_initiator, client\_initiator, etc.) expose individual **port instances** that plug into the
+PortManager. This contract is the authoritative reference for what PortManager expects from a port and what a port may rely on
+from PortManager.
 
 ---
 
@@ -25,7 +23,8 @@ Resource → port (read loop) → data_callback(name, data)
 Client → pm.write_to_port() → port.write_data(data) → device/process/socket
 ```
 
-- **Outbound (resource → client):** the port calls `self.data_callback(name, data)`. PM sets this callback to `pm.send_data` during `register_unified_port`. PM owns the delivery queue; the port has no queue of its own.
+- **Outbound (resource → client):** the port calls `self.data_callback(name, data)`. PM sets this callback to `pm.send_data`
+during `register_unified_port`. PM owns the delivery queue; the port has no queue of its own.
 - **Inbound (client → resource):** PM calls `port.write_data(data)`. The port writes to the underlying device/process/socket.
 
 ---
@@ -34,24 +33,26 @@ Client → pm.write_to_port() → port.write_data(data) → device/process/socke
 
 Every port instance **must** expose the following attributes:
 
-| Attribute | Type | Description |
-|---|---|---|
-| `name` | `str` | Unique logical name within the adapter. |
-| `state` | `PortState` | Current lifecycle state (see [Lifecycle States](#lifecycle-states)). |
-| `is_connected` | `bool` | `True` when the underlying resource (device, socket, process) is ready for I/O. Ports without a physical resource (e.g. loopback) should be `True` while `ACTIVE`. For command ports it mirrors process liveness: a resting port (on-demand and not yet spawned, or intentionally stopped) counts as connected; the port is disconnected only while the process has exited or a spawn/respawn failed. |
-| `data_callback` | `Callable \| None` | Set by `PortManager.register_unified_port()` to `pm.send_data`. The port must call `await self.data_callback(self.name, data)` for all outbound data. Initialized to `None`; absent PM is an error (see below). |
-| `max_read_write_users` | `int` | Maximum number of simultaneous read-write clients. Used by PM for access control. |
-| `read_write_groups` | `List[str]` | Console groups granted read-write access. Empty on both this and `read_only_groups` means the port is open to all authenticated users (today's default behavior). |
-| `read_only_groups` | `List[str]` | Console groups granted read-only access. A user in this group is never promoted to read-write, even if `max_read_write_users` slots are free. |
+| Attribute | Type | Description | |---|---|---| | `name` | `str` | Unique logical name within the adapter. | | `state` |
+`PortState` | Current lifecycle state (see [Lifecycle States](#lifecycle-states)). | | `is_connected` | `bool` | `True` when
+the underlying resource (device, socket, process) is ready for I/O. Ports without a physical resource (e.g. loopback) should be
+`True` while `ACTIVE`. For command ports it mirrors process liveness: a resting port (on-demand and not yet spawned, or
+intentionally stopped) counts as connected; the port is disconnected only while the process has exited or a spawn/respawn
+failed. | | `data_callback` | `Callable \| None` | Set by `PortManager.register_unified_port()` to `pm.send_data`. The port
+must call `await self.data_callback(self.name, data)` for all outbound data. Initialized to `None`; absent PM is an error (see
+below). | | `max_read_write_users` | `int` | Maximum number of simultaneous read-write clients. Used by PM for access control.
+| | `read_write_groups` | `List[str]` | Console groups granted read-write access. Empty on both this and `read_only_groups`
+means the port is open to all authenticated users (today's default behavior). | | `read_only_groups` | `List[str]` | Console
+groups granted read-only access. A user in this group is never promoted to read-write, even if `max_read_write_users` slots are
+free. |
 
-> **Per-port settings are flat attributes.** Every local adapter stores its per-port
-> settings as direct attributes on the port object (`LoopbackPort`, `CommandPort`,
-> `TcpInitiatorPort`, `SerialPortWrapper`). `port.config` is the raw per-port config
-> *dict* the port was built from, not a second copy of those attributes. In-place
-> soft-reload updates write the flat attributes, which is the same surface the access
-> ladder reads. There is one canonical place to read and write each value.
+> **Per-port settings are flat attributes.** Every local adapter stores its per-port settings as direct attributes on the port
+> object (`LoopbackPort`, `CommandPort`, `TcpInitiatorPort`, `SerialPortWrapper`). `port.config` is the raw per-port config
+> *dict* the port was built from, not a second copy of those attributes. In-place soft-reload updates write the flat
+> attributes, which is the same surface the access ladder reads. There is one canonical place to read and write each value.
 
-> **Note:** Ports do **not** own or allocate a `data_queue`. The `UnifiedPortWrapper` created by PM owns the delivery queue. Any `data_queue` attribute on a port is a test-only staging buffer and is not part of this contract.
+> **Note:** Ports do **not** own or allocate a `data_queue`. The `UnifiedPortWrapper` created by PM owns the delivery queue.
+> Any `data_queue` attribute on a port is a test-only staging buffer and is not part of this contract.
 
 ---
 
@@ -59,21 +60,18 @@ Every port instance **must** expose the following attributes:
 
 ### `async start() -> bool`
 
-Initialize internal state, open the underlying resource (if any), and
-transition `state` to `ACTIVE`. Returns `True` on success, `False` on
-failure. Must **not** raise; log errors internally.
+Initialize internal state, open the underlying resource (if any), and transition `state` to `ACTIVE`. Returns `True` on
+success, `False` on failure. Must **not** raise; log errors internally.
 
 ### `async stop() -> None`
 
-Close the underlying resource and transition `state` to `DESTROYED`. Must
-**not** raise; log errors internally.
+Close the underlying resource and transition `state` to `DESTROYED`. Must **not** raise; log errors internally.
 
 ### `async write_data(data: bytes) -> int`
 
-Accept inbound bytes from a connected client (**client → resource** direction)
-and deliver them to the underlying resource (device, process stdin, socket).
-Returns the number of bytes accepted. Must raise `RuntimeError` if the port is
-not in `ACTIVE` state. Does **not** touch `data_callback`.
+Accept inbound bytes from a connected client (**client → resource** direction) and deliver them to the underlying resource
+(device, process stdin, socket). Returns the number of bytes accepted. Must raise `RuntimeError` if the port is not in `ACTIVE`
+state. Does **not** touch `data_callback`.
 
 ---
 
@@ -87,32 +85,25 @@ CONFIGURED → CREATING → ACTIVE → DESTROYING → DESTROYED
                            DEGRADED
 ```
 
-| State | Meaning |
-|---|---|
-| `CONFIGURED` | Port defined in config; `start()` not yet called. |
-| `CREATING` | `start()` is executing; resource acquisition in progress. |
-| `ACTIVE` | Port is fully operational; I/O is accepted. |
-| `DEGRADED` | Port exists but with reduced functionality (e.g. device disconnected, reconnecting). |
-| `DESTROYING` | `stop()` is executing; cleanup in progress. |
-| `DESTROYED` | Port is fully stopped; instance must not be reused. |
+| State | Meaning | |---|---| | `CONFIGURED` | Port defined in config; `start()` not yet called. | | `CREATING` | `start()` is
+executing; resource acquisition in progress. | | `ACTIVE` | Port is fully operational; I/O is accepted. | | `DEGRADED` | Port
+exists but with reduced functionality (e.g. device disconnected, reconnecting). | | `DESTROYING` | `stop()` is executing;
+cleanup in progress. | | `DESTROYED` | Port is fully stopped; instance must not be reused. |
 
 Readiness is a separate axis (see below).
 
 ## Readiness (derived, not stored)
 
-Readiness is the UI-facing readiness value of a port. The web console and
-status page show one of three values:
+Readiness is the UI-facing readiness value of a port. The web console and status page show one of three values:
 
-| Readiness | Meaning | Derived when |
-|---|---|---|
-| `active` | Running and serving (green "connected"). | The resource is up and no offline reason is set. |
-| `idle` | Healthy, intentionally not running (yellow "idle"). It resumes on the next client or Enter. | No offline reason is set and the resource is not up now. |
-| `offline` | Failed; needs attention (red "offline" + reason). | An offline reason (`status_message`) is set. |
+| Readiness | Meaning | Derived when | |---|---|---| | `active` | Running and serving (green "connected"). | The resource is up
+and no offline reason is set. | | `idle` | Healthy, intentionally not running (yellow "idle"). It resumes on the next client or
+Enter. | No offline reason is set and the resource is not up now. | | `offline` | Failed; needs attention (red "offline" +
+reason). | An offline reason (`status_message`) is set. |
 
-The value is derived from `(alive, status_message)` at the status-snapshot
-point by `derive_port_readiness()` in
-`openmux.server.adapters.lifecycle`. It is not stored and is not a `PortState`
-value. `PortState` is the lifecycle axis; readiness is the readiness axis.
+The value is derived from `(alive, status_message)` at the status-snapshot point by `derive_port_readiness()` in
+`openmux.server.adapters.lifecycle`. It is not stored and is not a `PortState` value. `PortState` is the lifecycle axis;
+readiness is the readiness axis.
 
 - `alive` comes from `port_is_alive(port)`. It reads `process_active`, then
   `is_connected`, then `is_running`, and returns the first boolean found.
@@ -133,8 +124,7 @@ value. `PortState` is the lifecycle axis; readiness is the readiness axis.
 
 ## Data Routing — PortManager-Only Invariant
 
-**All outbound data (resource → client) must flow exclusively through
-`data_callback`.**
+**All outbound data (resource → client) must flow exclusively through `data_callback`.**
 
 ```python
 cb = self.data_callback
@@ -144,11 +134,9 @@ else:
     self.logger.error("Port %s: data_callback not set; dropping data", self.name)
 ```
 
-`data_callback` is `pm.send_data`, which applies per-port
-policies (drop-oldest-on-full, DataLogger recording, federation hold
-refcount — issue #83) before placing data in the wrapper's internal queue
-for client delivery, and appends every chunk to the scrollback ring when
-`scrollback_size` is set.
+`data_callback` is `pm.send_data`, which applies per-port policies (drop-oldest-on-full, DataLogger recording, federation hold
+refcount — issue #83) before placing data in the wrapper's internal queue for client delivery, and appends every chunk to the
+scrollback ring when `scrollback_size` is set.
 
 ### What a port must NOT do
 
@@ -158,14 +146,12 @@ for client delivery, and appends every chunk to the scrollback ring when
 
 ### Absence of `data_callback` is an error
 
-If `data_callback` is `None` when data arrives from the resource, the port
-must log an **error** and **drop** the chunk. This surfaces misconfiguration
-rather than hiding it behind silent buffering.
+If `data_callback` is `None` when data arrives from the resource, the port must log an **error** and **drop** the chunk. This
+surfaces misconfiguration rather than hiding it behind silent buffering.
 
 ### When `data_callback` is set
 
-`data_callback` is wired **automatically** at two points — whichever comes
-first:
+`data_callback` is wired **automatically** at two points — whichever comes first:
 
 1. **At construction** (`__init__`): if `adapter.main_port_manager` is already
    set, `data_callback` is wired immediately.
@@ -198,21 +184,27 @@ await port.stop()
 
 ## Optional Attributes
 
-| Attribute | Used for |
-|---|---|
-| `description` | Human-readable label shown in the UI and status pages. |
-| `on_client_count_changed(count)` | Called by PM when the number of connected read-write clients changes. |
-| `adapter_type` | String identifying the adapter class. Surfaced in port listings. |
-| `scrollback_size` | `int` bytes of recent output to retain for client-requested scrollback replay; `0` (default) disables it. The `UnifiedPortWrapper` reads this attribute once at registration and owns the actual ring buffer (`_scrollback`) and replay (`get_scrollback()`) — a port only needs to read `scrollback_size` from its config in `__init__` and expose it; see `serial.py`, `command.py`, `loopback.py`, and `tcp_initiator.py` for the pattern. |
-| `status_message` | `str` (empty while healthy or in a resting state). Human-readable reason the port is offline. When non-empty the port includes it in its `get_status_snapshot()` return, so it surfaces in `/api/ports`, the web status page, the console info overlay, the "Port is disconnected on server" banner, and — for federated peers — the `PortMetadata.status_message` field. Set on the failure path, cleared on recovery or intentional stop (`serial.py` issue #57 duplicate-device and issue #62 disconnect / open failure, `tcp_initiator.py` / `command.py` issue #62). |
-| `get_status_snapshot()` | `Callable[[], Dict[str, Any]]` (no args, sync). Called by `UnifiedPortWrapper.get_status()` when building each port's listing. Return key/value pairs to merge into the snapshot. Use it to expose adapter-specific config and/or `status_message`. |
+| Attribute | Used for | |---|---| | `description` | Human-readable label shown in the UI and status pages. | |
+`on_client_count_changed(count)` | Called by PM when the number of connected read-write clients changes. | | `adapter_type` |
+String identifying the adapter class. Surfaced in port listings. | | `scrollback_size` | `int` bytes of recent output to retain
+for client-requested scrollback replay; `0` (default) disables it. The `UnifiedPortWrapper` reads this attribute once at
+registration and owns the actual ring buffer (`_scrollback`) and replay (`get_scrollback()`) — a port only needs to read
+`scrollback_size` from its config in `__init__` and expose it; see `serial.py`, `command.py`, `loopback.py`, and
+`tcp_initiator.py` for the pattern. | | `status_message` | `str` (empty while healthy or in a resting state). Human-readable
+reason the port is offline. When non-empty the port includes it in its `get_status_snapshot()` return, so it surfaces in
+`/api/ports`, the web status page, the console info overlay, the "Port is disconnected on server" banner, and — for federated
+peers — the `PortMetadata.status_message` field. Set on the failure path, cleared on recovery or intentional stop (`serial.py`
+issue #57 duplicate-device and issue #62 disconnect / open failure, `tcp_initiator.py` / `command.py` issue #62). | |
+`get_status_snapshot()` | `Callable[[], Dict[str, Any]]` (no args, sync). Called by `UnifiedPortWrapper.get_status()` when
+building each port's listing. Return key/value pairs to merge into the snapshot. Use it to expose adapter-specific config
+and/or `status_message`. |
 
 ---
 
 ## Test Guidance
 
-Unit tests that create port instances without a running PortManager must
-provide a stub that captures outbound data in its own queue:
+Unit tests that create port instances without a running PortManager must provide a stub that captures outbound data in its own
+queue:
 
 ```python
 class _PortManagerStub:
@@ -237,7 +229,6 @@ stub = _PortManagerStub({"port_name": port})
 adapter.main_port_manager = stub
 ```
 
-Tests read output from `stub.output_queue` (or `stub.read()`), not from any
-attribute on the port. If the stub is set on the adapter before port
-construction, `data_callback` is wired automatically via `__init__`.
+Tests read output from `stub.output_queue` (or `stub.read()`), not from any attribute on the port. If the stub is set on the
+adapter before port construction, `data_callback` is wired automatically via `__init__`.
 

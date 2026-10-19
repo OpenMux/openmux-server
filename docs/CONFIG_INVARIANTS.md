@@ -1,27 +1,28 @@
 # Configuration Invariants
 
-This document defines non-negotiable invariants for the OpenMux server configuration format so future refactors cannot silently break or coerce user configs.
+This document defines non-negotiable invariants for the OpenMux server configuration format so future refactors cannot silently
+break or coerce user configs.
 
 ## 1. Canonical Sections (Primary Format)
-Adapters are configured via top-level section keys. These keys are the *source of truth*:
-`server`, `authentication`, `logging`, `client_listener`, `serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`, `muxcon`, `web_console`, and `web_status`.
-New sections MUST be documented here before being accepted. Sidecar files (see §7) still materialize in-memory under these canonical keys.
+Adapters are configured via top-level section keys. These keys are the *source of truth*: `server`, `authentication`,
+`logging`, `client_listener`, `serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`, `muxcon`,
+`web_console`, and `web_status`. New sections MUST be documented here before being accepted. Sidecar files (see §7) still
+materialize in-memory under these canonical keys.
 
-`port_actions` is also a canonical top-level section, but it has no adapter behind
-it: it holds config for the Port Actions web plugin only (`actions_dir`,
-`action_ports`), read via `WebConsoleAdapter.server_config` (see
-[docs/design/port_actions.md](design/port_actions.md)). Like `server`/
-`authentication`/`logging`, it is exempted from the factory's missing-adapter
-fail-fast check (`core_sections` in
-[openmux/server/adapters/factory.py](../openmux/server/adapters/factory.py))
-rather than mapped to a `config_section` on a registered adapter plugin.
+`port_actions` is also a canonical top-level section, but it has no adapter behind it: it holds config for the Port Actions web
+plugin only (`actions_dir`, `action_ports`), read via `WebConsoleAdapter.server_config` (see
+[docs/design/port_actions.md](design/port_actions.md)). Like `server`/ `authentication`/`logging`, it is exempted from the
+factory's missing-adapter fail-fast check (`core_sections` in
+[openmux/server/adapters/factory.py](../openmux/server/adapters/factory.py)) rather than mapped to a `config_section` on a
+registered adapter plugin.
 
 
 ## 2. No Implicit Transformation
 The factory MUST NOT rewrite, remove, wrap, or rename user-provided sections. Loading is read-only.
 
 ## 3. Stable Mapping
-Adapter class resolution uses explicit plugin metadata (`AdapterPlugin.config_section`). No heuristic string slicing (e.g. stripping `_ports`) is allowed for deriving adapter types.
+Adapter class resolution uses explicit plugin metadata (`AdapterPlugin.config_section`). No heuristic string slicing (e.g.
+stripping `_ports`) is allowed for deriving adapter types.
 
 ## 4. Deprecation Policy
 Deprecation warnings for config keys require ALL of:
@@ -42,27 +43,43 @@ Add (and maintain) a test that:
 ## 7. Sidecar Configuration Files (authentication/security)
 The primary config (`server.yaml`) may reference two sidecar files: `authentication.yaml` and `security.yaml`.
 
-- `authentication.yaml` contains only the `authentication` mapping (users, API keys, public keys, external_auth). When externalized, `server.yaml` MUST omit inline credentials, and ConfigManager MUST keep the merged runtime view consistent for consumers.
-- `security.yaml` defines the adapter allow-list and the Config Editor allow-list under the shared `adapters.allowed`/`adapters.disabled` and `config_editor.allowed`/`config_editor.disabled` mini-schema (effective set is always `allowed - disabled`; `"*"` means "all known names"), plus authentication rate-limit overrides. Unknown keys or unknown allow/disable values are a hard error - the server refuses to start, and refuses a hot-reload that would introduce one, keeping the last-known-good policy in effect.
-- CLI flags `-a/--auth-config` and `-s/--security-config` MUST remain available so deployments can relocate sidecars. Defaults derive from the directory containing `server.yaml`.
-- Config Editor and hot-reload operations MUST honor the resolved `config_editor` writable-section set (`allowed - disabled`). An empty resolved set means the UI is fully read-only.
-- The Config Editor MUST NOT send stored secrets (user `password_hash`, `api_keys[].key`, and initiator `password`/`api_key` fields) to the browser. It returns a mask sentinel instead and restores the stored value on save unless the admin submits a new value.
+- `authentication.yaml` contains only the `authentication` mapping (users, API keys, public keys, external_auth). When
+externalized, `server.yaml` MUST omit inline credentials, and ConfigManager MUST keep the merged runtime view consistent for
+consumers.
+- `security.yaml` defines the adapter allow-list and the Config Editor allow-list under the shared
+`adapters.allowed`/`adapters.disabled` and `config_editor.allowed`/`config_editor.disabled` mini-schema (effective set is
+always `allowed - disabled`; `"*"` means "all known names"), plus authentication rate-limit overrides. Unknown keys or unknown
+allow/disable values are a hard error - the server refuses to start, and refuses a hot-reload that would introduce one, keeping
+the last-known-good policy in effect.
+- CLI flags `-a/--auth-config` and `-s/--security-config` MUST remain available so deployments can relocate sidecars. Defaults
+derive from the directory containing `server.yaml`.
+- Config Editor and hot-reload operations MUST honor the resolved `config_editor` writable-section set (`allowed - disabled`).
+An empty resolved set means the UI is fully read-only.
+- The Config Editor MUST NOT send stored secrets (user `password_hash`, `api_keys[].key`, and initiator `password`/`api_key`
+fields) to the browser. It returns a mask sentinel instead and restores the stored value on save unless the admin submits a new
+value.
 
 ## 8. Schema Authority
-Each config section has exactly one canonical format. The schemas in `openmux/config_schema/` define it; there is no legacy or compatibility form in the schema.
+Each config section has exactly one canonical format. The schemas in `openmux/config_schema/` define it; there is no legacy or
+compatibility form in the schema.
 
-- The packaged schemas are the single source of truth for shape. The code may be more permissive during a deprecation window, but MUST NOT accept a format the schema rejects without a tracking issue.
-- On every load, the server checks each config file against its schema and logs each violation as ERROR. Validation MUST stay log-only at startup; refusing to start is what `--check-config` is for.
+- The packaged schemas are the single source of truth for shape. The code may be more permissive during a deprecation window,
+but MUST NOT accept a format the schema rejects without a tracking issue.
+- On every load, the server checks each config file against its schema and logs each violation as ERROR. Validation MUST stay
+log-only at startup; refusing to start is what `--check-config` is for.
 - The Config Editor MUST reject a payload that violates the schemas (HTTP 400 with the rendered violations).
-- When a format is dropped from a schema, the removal of the old code path MUST be tracked in an issue and named in the CHANGELOG.
+- When a format is dropped from a schema, the removal of the old code path MUST be tracked in an issue and named in the
+CHANGELOG.
 
 Any future sidecar files (e.g., secrets) require expanding this section with invariants before implementation.
 
 ## 8. Backward Compatibility Window
-If a new format is introduced, the old format stays functional for a minimum of two minor versions unless a security issue mandates earlier removal. Such exceptions must be documented.
+If a new format is introduced, the old format stays functional for a minimum of two minor versions unless a security issue
+mandates earlier removal. Such exceptions must be documented.
 
 ## 9. Documentation Synchronization
-`README.md` and configuration examples under `docs/configuration/` MUST match these invariants. Pull requests altering config parsing MUST update examples in the same commit.
+`README.md` and configuration examples under `docs/configuration/` MUST match these invariants. Pull requests altering config
+parsing MUST update examples in the same commit.
 
 ## 10. Change Control Checklist
 Any PR affecting configuration parsing MUST include a checklist in its description:
@@ -74,16 +91,23 @@ Any PR affecting configuration parsing MUST include a checklist in its descripti
 - [ ] Verified no new warnings for existing sample configs
 
 ## 11. Unknown Top-Level Sections
-Any top-level key not in the canonical list (or an explicitly documented optional key) is a configuration error and MUST abort startup with a clear message listing the unknown keys. This catches typos early. No auto-ignore, no fallback.
+Any top-level key not in the canonical list (or an explicitly documented optional key) is a configuration error and MUST abort
+startup with a clear message listing the unknown keys. This catches typos early. No auto-ignore, no fallback.
 
 ## 12. Environment Variable Expansion
-Automatic `${VAR}` interpolation is NOT performed globally. Only explicitly whitelisted boolean/debug toggles MAY consult environment variables (e.g. a `DEBUG` mode) and must be documented. All other literal `${...}` strings are treated as plain text. Introducing general env expansion requires an update to this file and an opt-in toggle.
+Automatic `${VAR}` interpolation is NOT performed globally. Only explicitly whitelisted boolean/debug toggles MAY consult
+environment variables (e.g. a `DEBUG` mode) and must be documented. All other literal `${...}` strings are treated as plain
+text. Introducing general env expansion requires an update to this file and an opt-in toggle.
 
 ## 13. Ordering Guarantees
-Parsing is order-independent. Adapter instantiation order MUST be deterministic: sort by adapter type key, then by declared port/name within that section. Tests SHOULD assert determinism to prevent flaky comparisons or hash/order dependent bugs.
+Parsing is order-independent. Adapter instantiation order MUST be deterministic: sort by adapter type key, then by declared
+port/name within that section. Tests SHOULD assert determinism to prevent flaky comparisons or hash/order dependent bugs.
 
 ## 14. Duplicate Name Handling
-Local adapter/port names MUST be unique across all locally defined sections; duplicates cause a startup error with both source sections identified. Federated/muxcon obtained remote ports MAY collide in name with local ones but MUST be namespaced or otherwise disambiguated at runtime (e.g. `remote:<origin>:<name>` or an internal unique identifier) to prevent cross-talk. No silent override of a local definition by a federated one.
+Local adapter/port names MUST be unique across all locally defined sections; duplicates cause a startup error with both source
+sections identified. Federated/muxcon obtained remote ports MAY collide in name with local ones but MUST be namespaced or
+otherwise disambiguated at runtime (e.g. `remote:<origin>:<name>` or an internal unique identifier) to prevent cross-talk. No
+silent override of a local definition by a federated one.
 
 ## 15. TLS / Security Invariants
 If `tls.enabled` (or equivalent) is true for a section:
@@ -93,10 +117,13 @@ If `tls.enabled` (or equivalent) is true for a section:
 - Explicit plaintext operation only occurs when `tls.enabled` is false or omitted.
 
 ## 16. Forward Compatibility of Nested Keys
-Within a known section, unknown nested keys MAY be ignored but only emit a DEBUG-level log (never WARNING/ERROR) unless a security-related key is malformed. This allows forward extension without breaking older binaries while keeping noise low.
+Within a known section, unknown nested keys MAY be ignored but only emit a DEBUG-level log (never WARNING/ERROR) unless a
+security-related key is malformed. This allows forward extension without breaking older binaries while keeping noise low.
 
 ## 17. Include / Import Mechanisms
-Implicit multi-file include/import features are DISALLOWED. YAML anchors & aliases are permitted as inherent YAML features but MUST NOT be relied upon by core logic beyond standard parsing. Adding an explicit `include:` or similar directive requires a new invariant section, tests, and security review (path traversal, recursion limits).
+Implicit multi-file include/import features are DISALLOWED. YAML anchors & aliases are permitted as inherent YAML features but
+MUST NOT be relied upon by core logic beyond standard parsing. Adding an explicit `include:` or similar directive requires a
+new invariant section, tests, and security review (path traversal, recursion limits).
 
 ---
 *Last updated: 2025-08-24*

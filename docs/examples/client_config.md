@@ -59,9 +59,11 @@ logging:
 
 - `-s` picks a server by name or host. With `-s`, `-p` sets the port (omit it for 8023).
 - Without `-s`, the chosen server entry's own `port` is used; `-p` only applies when the entry has no `port`.
-- Server credentials resolve CLI first, then the chosen server entry (`-u`/`-w`/`-k`, `--pubkey`/`--pubkey-id`). The CLI value wins when both are set.
+- Server credentials resolve CLI first, then the chosen server entry (`-u`/`-w`/`-k`, `--pubkey`/`--pubkey-id`). The CLI value
+wins when both are set.
 - If `--encrypt/--no-encrypt` is omitted, `use_tls` decides; default is `false`.
-- Logging: the client rebuilds the logging config from its CLI flags (`-v`, `--log-file`, `--log-dir`, `--log-max-size`, `--log-backups`, `--quiet`) on top of `logging:`. Only `file_only` takes effect from the config file.
+- Logging: the client rebuilds the logging config from its CLI flags (`-v`, `--log-file`, `--log-dir`, `--log-max-size`,
+`--log-backups`, `--quiet`) on top of `logging:`. Only `file_only` takes effect from the config file.
 
 ## Quick Start
 

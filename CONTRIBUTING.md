@@ -1,6 +1,7 @@
 # Contributing to OpenMux
 
-Thank you for your interest in contributing to OpenMux! This document captures the core contribution guidelines with a focus on the recently established Exception Handling & Logging Policy to maintain observability and debuggability.
+Thank you for your interest in contributing to OpenMux! This document captures the core contribution guidelines with a focus on
+the recently established Exception Handling & Logging Policy to maintain observability and debuggability.
 
 ## Development Workflow (Short Form)
 1. Fork / feature branch naming: `feature/<short-description>` or `fix/<issue-id>`.
@@ -16,10 +17,12 @@ Thank you for your interest in contributing to OpenMux! This document captures t
 - Keep functions cohesive; extract helpers when complexity grows.
 
 ## Exception Handling & Logging Policy
-Robust error visibility is critical. Broad catch blocks (`except Exception`) may still exist but must obey one of the two allowed patterns:
+Robust error visibility is critical. Broad catch blocks (`except Exception`) may still exist but must obey one of the two
+allowed patterns:
 
 ### 1. Logged Operational Error (Preferred)
-Use this when the exception indicates a real fault, protocol anomaly, I/O failure, or anything that could affect state, correctness, or user experience.
+Use this when the exception indicates a real fault, protocol anomaly, I/O failure, or anything that could affect state,
+correctness, or user experience.
 
 ```python
 try:
@@ -35,7 +38,8 @@ Requirements:
 - Downstream state adjustment (e.g. marking disconnected) should happen inside the handler if needed.
 
 ### 2. Justified Silent / Non-Logging Block (Rare)
-Permitted only for best-effort, non-critical, *expected* failure paths where logging would create noise or duplicate prior logging.
+Permitted only for best-effort, non-critical, *expected* failure paths where logging would create noise or duplicate prior
+logging.
 
 These must include an inline justification comment beginning with the literal text `justification:`:
 
@@ -56,14 +60,13 @@ Acceptable justification categories:
 Not acceptable:
 - Swallowing protocol, transport, authentication, parsing, or persistence errors
 - Using silence to hide noisy but fixable bugs
-- Wrapping a logging call in `try/except`: the stdlib logger is exception-safe
-  (a handler that fails writes to stderr instead of raising), so such a guard
-  catches nothing. Put the log call after a successful guard instead, and
-  format message arguments lazily (``logger.info("... %s", value)``). The
-  `make test` gate rejects a new guard of this shape.
+- Wrapping a logging call in `try/except`: the stdlib logger is exception-safe (a handler that fails writes to stderr instead
+  of raising), so such a guard catches nothing. Put the log call after a successful guard instead, and format message arguments
+  lazily (``logger.info("... %s", value)``). The `make test` gate rejects a new guard of this shape.
 
 ### Narrowing Exceptions
-Where practical, prefer specific exceptions (e.g. `asyncio.TimeoutError`, `json.JSONDecodeError`, `OSError`). Broad handlers exist mainly where many error types map to a single recovery path.
+Where practical, prefer specific exceptions (e.g. `asyncio.TimeoutError`, `json.JSONDecodeError`, `OSError`). Broad handlers
+exist mainly where many error types map to a single recovery path.
 
 ### Escalation & Re-Raising
 If a handler cannot make progress and higher layers must decide, prefer re-raising after logging:
@@ -86,17 +89,26 @@ except SpecificError as e:
 
 ## Contributor License Terms (No License Yet)
 
-The project has not selected a final license yet ("No license yet"). To keep future licensing options open, all contributions must be license-flexible and free of additional restrictions.
+The project has not selected a final license yet ("No license yet"). To keep future licensing options open, all contributions
+must be license-flexible and free of additional restrictions.
 
 By submitting a contribution (code, docs, tests, or otherwise), you agree to the following:
 
-- Rights and originality: You have the necessary rights to contribute the material or have obtained permission to do so, and you identify any third-party code/data and its license in your PR.
-- Broad copyright grant: You grant the project maintainers a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to use, reproduce, modify, adapt, publicly perform, publicly display, distribute, sublicense, and relicense your contribution as part of this project.
-- Relicensing: You expressly permit the project to relicense your contribution, in whole or in part, under any OSI-approved open-source license (including permissive or copyleft licenses) chosen now or in the future.
-- Patent grant: To the extent you have patent rights that are necessarily infringed by your contribution, you grant a perpetual, worldwide, non-exclusive, royalty-free, irrevocable patent license to practice, make, use, sell, offer to sell, import, and otherwise transfer your contribution as part of this project and its derivatives.
-- No additional restrictions: You will not impose any further terms or conditions on your contribution (no special terms that would limit the project’s ability to choose a future license).
+- Rights and originality: You have the necessary rights to contribute the material or have obtained permission to do so, and
+  you identify any third-party code/data and its license in your PR.
+- Broad copyright grant: You grant the project maintainers a perpetual, worldwide, non-exclusive, royalty-free, irrevocable
+  license to use, reproduce, modify, adapt, publicly perform, publicly display, distribute, sublicense, and relicense your
+  contribution as part of this project.
+- Relicensing: You expressly permit the project to relicense your contribution, in whole or in part, under any OSI-approved
+  open-source license (including permissive or copyleft licenses) chosen now or in the future.
+- Patent grant: To the extent you have patent rights that are necessarily infringed by your contribution, you grant a
+  perpetual, worldwide, non-exclusive, royalty-free, irrevocable patent license to practice, make, use, sell, offer to sell,
+  import, and otherwise transfer your contribution as part of this project and its derivatives.
+- No additional restrictions: You will not impose any further terms or conditions on your contribution (no special terms that
+  would limit the project’s ability to choose a future license).
 
-If your contribution includes third-party material, ensure its license is compatible with broad relicensing and include required notices/attributions.
+If your contribution includes third-party material, ensure its license is compatible with broad relicensing and include
+required notices/attributions.
 
 ### Developer Certificate of Origin (DCO)
 

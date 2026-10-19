@@ -1,6 +1,8 @@
 OpenMux Configuration Defaults
 
-This document consolidates default values used across the server configuration. It combines defaults declared in the JSON Schema and implicit defaults enforced at runtime by adapters and managers. Where there is a discrepancy, the runtime behavior is authoritative, and the schema/docs should be aligned in subsequent revisions.
+This document consolidates default values used across the server configuration. It combines defaults declared in the JSON
+Schema and implicit defaults enforced at runtime by adapters and managers. Where there is a discrepancy, the runtime behavior
+is authoritative, and the schema/docs should be aligned in subsequent revisions.
 
 Config file layout
 - `config/` holds the **pristine** defaults (server.yaml, authentication.yaml,
@@ -15,19 +17,29 @@ Config file layout
 Notes
 - “Schema default” applies when validating/merging config via the schema.
 - “Runtime default” applies when code reads config and fills missing values.
-- UI hints: The Config Editor shows many of these defaults as placeholders or badges to guide input, but it does not always auto-fill values.
+- UI hints: The Config Editor shows many of these defaults as placeholders or badges to guide input, but it does not always
+auto-fill values.
 
 Top-level sections
 
 server
-- server.id: sole identity key; no default (the shared resolver falls back to the system hostname when unset). `server.name`, `server.server_id`, and `muxcon.server_id` are removed (ticket #74): the schema rejects them and the ConfigManager strips them with a warning at load.
-- server.description: no default. This is the server's human-readable display name: shown on the web console login/About pages, the telnet/SSH port menus, the CLI client port listing, and the web Basic-Auth dialog. When blank, the display name derives to "OpenMux <server.id | hostname>".
-- control socket and pidfile: `openmux.sock` / `openmux.pid` inside the run dir — no config keys; see [LOCATIONS.md](LOCATIONS.md)
+- server.id: sole identity key; no default (the shared resolver falls back to the system hostname when unset). `server.name`,
+`server.server_id`, and `muxcon.server_id` are removed (ticket #74): the schema rejects them and the ConfigManager strips them
+with a warning at load.
+- server.description: no default. This is the server's human-readable display name: shown on the web console login/About pages,
+the telnet/SSH port menus, the CLI client port listing, and the web Basic-Auth dialog. When blank, the display name derives to
+"OpenMux <server.id | hostname>".
+- control socket and pidfile: `openmux.sock` / `openmux.pid` inside the run dir — no config keys; see
+[LOCATIONS.md](LOCATIONS.md)
 
 authentication
 - At least one of users, api_keys, public_keys, or external_auth must be provided.
-- users[*].groups / api_keys[*].groups: unset (empty). Console groups for per-port `read_write_groups`/`read_only_groups` access control. External-auth (PAM) group names are reused as-is as console groups.
-- users[*].permissions: all three levels are first-class: admin, read-write, read-only (issue #58). The ladder applies this level only to ports with no group lists (see security.yaml `access_default` below); per-port `read_write_groups`/`read_only_groups` still override it. (Historically read-only was deprecated in favor of per-port lists; that was reversed.)
+- users[*].groups / api_keys[*].groups: unset (empty). Console groups for per-port `read_write_groups`/`read_only_groups`
+access control. External-auth (PAM) group names are reused as-is as console groups.
+- users[*].permissions: all three levels are first-class: admin, read-write, read-only (issue #58). The ladder applies this
+level only to ports with no group lists (see security.yaml `access_default` below); per-port
+`read_write_groups`/`read_only_groups` still override it. (Historically read-only was deprecated in favor of per-port lists;
+that was reversed.)
 - External authentication (helper binary — e.g. openmux-pam-helper):
   - authentication.external_auth.enabled: false
   - authentication.external_auth.helper: (empty — resolved from PATH or /usr/lib/openmux/openmux-pam-helper)
@@ -37,21 +49,25 @@ authentication
   - authentication.external_auth.groups.write_group: openmux_write
   - authentication.external_auth.groups.read_group: openmux_read
   - authentication.external_auth.allow_root: false
-  - authentication.external_auth.allowed_users: unset (optional allowlist; if set, only listed users can log in)
-  Note: the former `pam:` key is not supported; its presence logs a warning. Use `external_auth`.
+  - authentication.external_auth.allowed_users: unset (optional allowlist; if set, only listed users can log in) Note: the
+    former `pam:` key is not supported; its presence logs a warning. Use `external_auth`.
 
-security.yaml (runtime defaults from openmux/server/security_policy.py; the file is optional and defaults to allow-everything when absent)
-- security.yaml access_default: allow (server-wide default for console ports with no group lists; `deny` restricts those ports to admin; applies from the next connection, hot-applies on SIGHUP/soft reload)
+security.yaml (runtime defaults from openmux/server/security_policy.py; the file is optional and defaults to allow-everything
+when absent)
+- security.yaml access_default: allow (server-wide default for console ports with no group lists; `deny` restricts those ports
+to admin; applies from the next connection, hot-applies on SIGHUP/soft reload)
 
 logging (runtime defaults in _setup_basic_logging in openmux/server/main.py)
 - logging.level: WARNING at process start; overridden by -v/-vv on the CLI or by the config value, whichever comes last
 - logging.console: true (stdout handler can be turned off with false)
-- log dir: no config key. `OPENMUX_LOG_DIR` (env, then the defaults file, then the systemd `$LOGS_DIRECTORY` variable), else `logs/` cwd-relative (the base directory for all server logs, including the `ports/` subdirectory)
+- log dir: no config key. `OPENMUX_LOG_DIR` (env, then the defaults file, then the systemd `$LOGS_DIRECTORY` variable), else
+`logs/` cwd-relative (the base directory for all server logs, including the `ports/` subdirectory)
 - logging.file: none (the main aggregate log goes to `{log_dir}/openmux.log`)
 - logging.max_log_size: 10485760 (10 MB, rotation threshold per log file)
 - logging.log_backup_count: 5
 - logging paths apply on SIGHUP/soft reload or full reload; level applies the same way
-- If the log directory cannot be created, the server warns once and continues with console logging only. It does not spam a traceback on every setup call or every port log write (issue #42)
+- If the log directory cannot be created, the server warns once and continues with console logging only. It does not spam a
+traceback on every setup call or every port log write (issue #42)
 
 client_listener (TCP console) (runtime defaults from openmux/server/adapters/client_listener.py)
 - client_listener.host: 127.0.0.1
@@ -76,13 +92,15 @@ ssh_listener (per-listener entry)
 - read_only: false
 - require_auth: true (opposite default from telnet_listener; disable explicitly for anonymous access)
 - acl: empty / missing list means allow all sources
-- authentication: password (AuthManager) or Ed25519 public key (AuthManager.public_keys records with `"ssh"` in allowed_uses) unless `require_auth: false`
+- authentication: password (AuthManager) or Ed25519 public key (AuthManager.public_keys records with `"ssh"` in allowed_uses)
+unless `require_auth: false`
 - host key: auto-generated Ed25519 key shared by all entries, persisted at `~/.openmux/ssh_listener/ssh_host_key`
 - session model: interactive shell only; `exec`/subsystem requests (including SFTP) are rejected
 - control menu escape sequence: Ctrl+E then `c` (per-session; changeable at runtime with the `e` command, not persisted)
 
 serial_ports (per-port) (schema defaults, plus adapter runtime behavior)
-- Section shape: a list of port entries (array-only, like every other *_ports section). The unified adapter dict form (`{adapter_type: serial, ports: [...]}`) is rejected at load and hot reload (ticket #71).
+- Section shape: a list of port entries (array-only, like every other *_ports section). The unified adapter dict form
+(`{adapter_type: serial, ports: [...]}`) is rejected at load and hot reload (ticket #71).
 - baudrate: 9600
 - bytesize: 8
 - parity: N
@@ -92,7 +110,8 @@ serial_ports (per-port) (schema defaults, plus adapter runtime behavior)
 - dtr: true
 - rts: true
 - max_read_write_users: one
-- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users
+(default-allow, today's behavior).
 
 serial adapter (runtime defaults from openmux/server/adapters/serial.py)
 - read_coalesce: true
@@ -104,7 +123,9 @@ loopback_ports (per-port) (schema + runtime)
 - echo_delay: 0.0 (schema)
 - max_read_write_users: one
 - sanitize_control: true
-- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior). Loopback ports are enforced like any other port (no legacy "always force read-write" shortcut): under none a loopback attaches read-only for everyone.
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users
+(default-allow, today's behavior). Loopback ports are enforced like any other port (no legacy "always force read-write"
+shortcut): under none a loopback attaches read-only for everyone.
 
 command_ports (per-port) (schema defaults; issue #67 consolidated the surface)
 - shell: false
@@ -113,13 +134,11 @@ command_ports (per-port) (schema defaults; issue #67 consolidated the surface)
 - spawn_on_demand: false
 - idle_timeout_sec: 0
 - scrollback_size: 0
-- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
-Unconditional (no config key; issue #67): sanitized environment (7-var
-allow-list + TERM=xterm, probe vars stripped, env: merges on top), XTGETTCAP
-interception, newline normalization (CRLF output on a PTY, LF on pipes; pipe
-input to LF), output batching 1024 bytes / 0.002 s / 1.0 s force flush,
-write batching 1024 bytes / 0.002 s, and no automatic restart (press Enter in
-the console to respawn).
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users
+(default-allow, today's behavior). Unconditional (no config key; issue #67): sanitized environment (7-var allow-list +
+TERM=xterm, probe vars stripped, env: merges on top), XTGETTCAP interception, newline normalization (CRLF output on a PTY, LF
+on pipes; pipe input to LF), output batching 1024 bytes / 0.002 s / 1.0 s force flush, write batching 1024 bytes / 0.002 s, and
+no automatic restart (press Enter in the console to respawn).
 
 tcp_initiator_ports (per-port) (schema defaults)
 - use_tls: false
@@ -136,11 +155,15 @@ tcp_initiator_ports (per-port) (schema defaults)
 - protocol.type: plain; protocol.telnet_negotiation: none
 - max_read_write_users: one
 - scrollback_size: 0
-- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users (default-allow, today's behavior).
+- read_write_groups / read_only_groups: unset (empty). Empty on both means the port is open to all authenticated users
+(default-allow, today's behavior).
 
 muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapters/muxcon.py)
 - auth_required: true (inbound peers must pass the Ed25519 challenge; the listener logs a warning when false)
-- advertise_filters / accept_filters (and per-key public_keys[] variants): default to **deny-all** (ticket #77). With all include lists empty, a direction shares or accepts nothing. Set an include entry (e.g. `include: ["*"]`) to share or accept; exclude always wins. Filter changes take effect on a Soft Reload. The server logs a warning for each direction still in deny mode, once per deny period.
+- advertise_filters / accept_filters (and per-key public_keys[] variants): default to **deny-all** (ticket #77). With all
+include lists empty, a direction shares or accepts nothing. Set an include entry (e.g. `include: ["*"]`) to share or accept;
+exclude always wins. Filter changes take effect on a Soft Reload. The server logs a warning for each direction still in deny
+mode, once per deny period.
 - listeners[*]:
   - enabled: true
   - host: 0.0.0.0
@@ -150,10 +173,9 @@ muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapte
   - tls_autogen: true
   - interface, fwmark: unset by default
 
-  TLS material (generated certs, known peers, federated cache) stores in
-  `<OPENMUX_STATE_DIR>/muxcon/` (packaged default `/var/lib/openmux/muxcon`,
-  dev `~/.openmux/muxcon`). The `tls_dir` and `tls_known_peers_path` keys
-  are deprecated and ignored.
+  TLS material (generated certs, known peers, federated cache) stores in `<OPENMUX_STATE_DIR>/muxcon/` (packaged default
+  `/var/lib/openmux/muxcon`, dev `~/.openmux/muxcon`). The `tls_dir` and `tls_known_peers_path` keys are deprecated and
+  ignored.
   - path_pref, path_group: unset by default
 - initiators[*]:
   - host: localhost (if unspecified)
@@ -164,7 +186,8 @@ muxcon (Unified Federation Adapter) (runtime defaults from openmux/server/adapte
   - retry_backoff_max: 30.0 (seconds)
   - retry_short_session_sec: 5.0 (seconds)
   - tls_tofu: true (Trust-On-First-Use)
-  - verification mode: `ssl_verify: false` > `ssl_ca_cert` > `tls_pin_fingerprint` > `tls_tofu` > system store, first match wins (see configuration/adapters.md, "Certificate verification")
+  - verification mode: `ssl_verify: false` > `ssl_ca_cert` > `tls_pin_fingerprint` > `tls_tofu` > system store, first match
+  wins (see configuration/adapters.md, "Certificate verification")
   - server_hostname: defaults to host (sent as SNI in every TLS mode)
 - heartbeats & timing:
   - heartbeat_interval: 30.0 (seconds)
@@ -221,9 +244,13 @@ Behavioral notes
   - If ssl_port equals port, single-port mode is used (no separate redirect-only listener)
 
 Discrepancies and follow-ups
-- loopback.sanitize_control default is true and is represented in both runtime and the UI. Ensure any future schema updates retain this default for consistency.
-- muxcon advanced options (heartbeat_interval, multipath settings, retransmission timers) have runtime defaults but no schema defaults. This is acceptable; we surface them in the UI and defaults inventory. Adding descriptive defaults to the schema could improve validation UX.
-- serial_ports UI defaults present 115200 8-N-1 for convenience when creating new entries. The schema’s formal default is 9600; the UI does not auto-apply 115200 unless the user saves that value explicitly.
+- loopback.sanitize_control default is true and is represented in both runtime and the UI. Ensure any future schema updates
+retain this default for consistency.
+- muxcon advanced options (heartbeat_interval, multipath settings, retransmission timers) have runtime defaults but no schema
+defaults. This is acceptable; we surface them in the UI and defaults inventory. Adding descriptive defaults to the schema could
+improve validation UX.
+- serial_ports UI defaults present 115200 8-N-1 for convenience when creating new entries. The schema’s formal default is 9600;
+the UI does not auto-apply 115200 unless the user saves that value explicitly.
 
 Examples
 - See examples/server_config.yaml for an example that includes the config editor plugin under web_console.plugins.

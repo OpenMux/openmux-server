@@ -95,7 +95,8 @@ make test            # run tests
 
 ### Run from source without installing the package
 
-You can run OpenMux directly from the source tree without `pip install .`. Install only the third‑party dependencies, then invoke the modules with `python -m ...`.
+You can run OpenMux directly from the source tree without `pip install .`. Install only the third‑party dependencies, then
+invoke the modules with `python -m ...`.
 
 ```sh
 # Create and activate a venv
@@ -121,8 +122,10 @@ python -m openmux.client --list --server localhost --port 8023
 ```
 
 Notes:
-- Without installing the package, the console scripts (`openmux-server`, `openmux-client`, `openmuxctl`) are not created on your `PATH`. Use `python -m openmux.server`, `python -m openmux.client`, and `python -m openmux.cli.openmuxctl` instead.
-- Running from the repository root works because Python includes the current directory on `sys.path`. If running from elsewhere, set `PYTHONPATH=/path/to/checkout`.
+- Without installing the package, the console scripts (`openmux-server`, `openmux-client`, `openmuxctl`) are not created on
+your `PATH`. Use `python -m openmux.server`, `python -m openmux.client`, and `python -m openmux.cli.openmuxctl` instead.
+- Running from the repository root works because Python includes the current directory on `sys.path`. If running from
+elsewhere, set `PYTHONPATH=/path/to/checkout`.
 - Prefer not to use pip? `uv` is a fast alternative:
 
 ```sh
@@ -137,8 +140,8 @@ python -m openmux.server -c config/loopback_test.yaml
 
 ## Debian package (.deb) — no venv, no pip
 
-Builds a native Debian package using debhelper+pybuild and installs into
-system Python’s dist-packages, exposing the same console scripts.
+Builds a native Debian package using debhelper+pybuild and installs into system Python’s dist-packages, exposing the same
+console scripts.
 
 ### Build dependencies
 
@@ -159,9 +162,8 @@ sudo apt-get install -y \
   python3-yaml python3-six python3-asyncssh
 ```
 
-Note: external authentication is handled by the `openmux-pam-helper` setuid binary
-(see <https://github.com/OpenMux/openmux-pam-helper>); `python3-pam` is no longer
-required.
+Note: external authentication is handled by the `openmux-pam-helper` setuid binary (see
+<https://github.com/OpenMux/openmux-pam-helper>); `python3-pam` is no longer required.
 ```
 
 ### Build the package
@@ -176,15 +178,13 @@ make deb
 dpkg-buildpackage -us -uc -b
 ```
 
-Artifacts are placed one directory up, e.g. `../openmux_1.0.1-48_all.deb`
-(the base is the nearest `v*` tag, the number after the dash is the commit
-distance from that tag).
+Artifacts are placed one directory up, e.g. `../openmux_1.0.1-48_all.deb` (the base is the nearest `v*` tag, the number after
+the dash is the commit distance from that tag).
 
 ### Automated Debian versioning
 
-The Python version is git-derived by setuptools-scm (nearest `v*` tag, commit
-distance, short SHA). Debian versions cannot contain `+`, so the same facts
-translate as: **tag base + commit distance as the Debian revision**.
+The Python version is git-derived by setuptools-scm (nearest `v*` tag, commit distance, short SHA). Debian versions cannot
+contain `+`, so the same facts translate as: **tag base + commit distance as the Debian revision**.
 
 - Script: `scripts/update_deb_changelog.py`
   - Runs `git describe` (same flags as setuptools-scm) to find the base and the distance
@@ -199,7 +199,8 @@ Controls (via env or make variables):
 
 - `DEB_REVISION` (default `1`): revision used when the tree is exactly at a tag; otherwise the commit distance sets it
 - `DEB_DIST` (default `unstable`): distribution field in changelog
-- `DEB_SNAPSHOT` (default `off`): set to `auto` to append `~gitYYYYMMDDHHMM[.sha]` (sorts below the same commit, which is what a snapshot is)
+- `DEB_SNAPSHOT` (default `off`): set to `auto` to append `~gitYYYYMMDDHHMM[.sha]` (sorts below the same commit, which is what
+a snapshot is)
 
 Examples:
 
@@ -258,8 +259,7 @@ sudo apt-get remove -y openmux
 
 ### First run (.deb install)
 
-A fresh install generates a random admin password for the web console. The
-installer prints it on the console and stores it in
+A fresh install generates a random admin password for the web console. The installer prints it on the console and stores it in
 `/etc/openmux/.initial_credentials` (root only). To complete setup:
 
 1. Log in at the web console as `admin` with that password.
@@ -267,14 +267,12 @@ installer prints it on the console and stores it in
    (see [Generate a user password hash](#generate-a-user-password-hash)).
 3. Delete the one-time file: `sudo rm /etc/openmux/.initial_credentials`.
 
-The server also logs a warning at startup while any known default credential
-is still configured; resolve each warning the same way.
+The server also logs a warning at startup while any known default credential is still configured; resolve each warning the same
+way.
 
-The web console binds `127.0.0.1` by default, so it is reachable from the
-local host only. To open it to other hosts, set
-`web_console.host: 0.0.0.0` in `/etc/openmux/server.yaml` (or via the web
-console Config Editor > Server view), then do a full reload - see
-[QUICKSTART.md](QUICKSTART.md#1b-reach-the-web-console-from-other-machines).
+The web console binds `127.0.0.1` by default, so it is reachable from the local host only. To open it to other hosts, set
+`web_console.host: 0.0.0.0` in `/etc/openmux/server.yaml` (or via the web console Config Editor > Server view), then do a full
+reload - see [QUICKSTART.md](QUICKSTART.md#1b-reach-the-web-console-from-other-machines).
 
 ### Run (after .deb install)
 
@@ -293,24 +291,25 @@ openmuxctl reload --soft
 
 ## Web UI Assets
 
-The Web Console serves xterm.js and its CSS and JS assets from inside the
-python package (`openmux/server/webui/static/`). The files are pinned,
-committed in the source tree, and shipped in the packages, so there is no
-download at install time and no runtime CDN dependency.
+The Web Console serves xterm.js and its CSS and JS assets from inside the python package (`openmux/server/webui/static/`). The
+files are pinned, committed in the source tree, and shipped in the packages, so there is no download at install time and no
+runtime CDN dependency.
 
-`scripts/install_xtermjs.py` exists only to refresh those vendored files when
-you deliberately bump the xterm.js or `xterm-addon-fit` version.
-It exits with an error if any file fails to download, so a bad version bump is
-caught during refresh—not at runtime.
+`scripts/install_xtermjs.py` exists only to refresh those vendored files when you deliberately bump the xterm.js or
+`xterm-addon-fit` version. It exits with an error if any file fails to download, so a bad version bump is caught during
+refresh—not at runtime.
 
 ---
 
 ## Configuration locations and defaults
 
-- Use `--config-dir /path/to/config` to load `server.yaml`, `authentication.yaml`, and `security.yaml` from the same directory, or point directly at a server YAML via `-c/--config`.
+- Use `--config-dir /path/to/config` to load `server.yaml`, `authentication.yaml`, and `security.yaml` from the same directory,
+or point directly at a server YAML via `-c/--config`.
 - Override sidecar locations explicitly with `-a/--auth-config` and `-s/--security-config`.
-- In a repo checkout, your working config is `config-local/` (gitignored), seeded from the **pristine** defaults in `config/` by `make init-config`. `make run-server` adds `--config-dir config-local`. Do not edit `config/` for local changes.
-- The server has no silent fallback config: a missing config file is a hard error. Provide one via `make init-config` (dev), `--config-dir`/`-c` (explicit), or the packaged defaults in `/etc/openmux`.
+- In a repo checkout, your working config is `config-local/` (gitignored), seeded from the **pristine** defaults in `config/`
+by `make init-config`. `make run-server` adds `--config-dir config-local`. Do not edit `config/` for local changes.
+- The server has no silent fallback config: a missing config file is a hard error. Provide one via `make init-config` (dev),
+`--config-dir`/`-c` (explicit), or the packaged defaults in `/etc/openmux`.
 - The control socket and pidfile are `openmux.sock` and `openmux.pid`
   inside the run dir. The run dir resolves through one chain
   (`OPENMUX_RUN_DIR` env, then `/etc/defaults/openmux`, then the systemd
@@ -327,13 +326,17 @@ Example minimal config is provided at `config/loopback_test.yaml`.
 - TLS autogen failure complaining about cryptography:
   - Install `python3-cryptography`
 - Control socket permission denied:
-  - The socket is created with 0600; run `openmuxctl` as the same user that started the server, or change the path to a root-owned directory only if you also run the server as root.
+  - The socket is created with 0600; run `openmuxctl` as the same user that started the server, or change the path to a
+    root-owned directory only if you also run the server as root.
 - `--check-config` reports schema violations:
-  - Each line names the file, the path in the file, and the problem. Fix the config and re-run. Exit codes: 0 valid, 1 schema violations, 2 a file is missing or unparseable.
+  - Each line names the file, the path in the file, and the problem. Fix the config and re-run. Exit codes: 0 valid, 1 schema
+    violations, 2 a file is missing or unparseable.
 - Startup log shows `Config validation ... schema violation(s)`:
-  - The server loads config files against the JSON schemas on every load. A violation is logged as ERROR but does not stop the server. Fix the highlighted key.
+  - The server loads config files against the JSON schemas on every load. A violation is logged as ERROR but does not stop the
+    server. Fix the highlighted key.
 - Schema/UI in the web console not loading:
-  - The server serves the schema from the installed package. It falls back to a permissive schema and logs an ERROR if the packaged schema is missing or unreadable. The `OPENMUX_CONFIG_SCHEMA` environment variable points to a local override.
+  - The server serves the schema from the installed package. It falls back to a permissive schema and logs an ERROR if the
+    packaged schema is missing or unreadable. The `OPENMUX_CONFIG_SCHEMA` environment variable points to a local override.
 
 ---
 
@@ -362,18 +365,14 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-The `*Directory=` lines are the packaged directory defaults (see
-[LOCATIONS.md](LOCATIONS.md)): systemd creates `/run/openmux`,
-`/var/lib/openmux`, and `/var/log/openmux` owned by the service user
-before it starts, and exports `RUNTIME_DIRECTORY`, `STATE_DIRECTORY`, and
-`LOGS_DIRECTORY`. The server reads the variables at a lower tier than the
-`OPENMUX_*` env and the defaults file, so a value uncommented in
-`/etc/defaults/openmux` relocates the directory. Relocate there, not in the
-unit: a unit-only change moves the server but not `openmuxctl`.
+The `*Directory=` lines are the packaged directory defaults (see [LOCATIONS.md](LOCATIONS.md)): systemd creates `/run/openmux`,
+`/var/lib/openmux`, and `/var/log/openmux` owned by the service user before it starts, and exports `RUNTIME_DIRECTORY`,
+`STATE_DIRECTORY`, and `LOGS_DIRECTORY`. The server reads the variables at a lower tier than the `OPENMUX_*` env and the
+defaults file, so a value uncommented in `/etc/defaults/openmux` relocates the directory. Relocate there, not in the unit: a
+unit-only change moves the server but not `openmuxctl`.
 
-For a non-systemd install the `*Directory=` lines and `EnvironmentFile=` are
-optional: without them the server falls back to the dev defaults
-(`logs/`, `~/.openmux`) or to the `OPENMUX_*` variables you export.
+For a non-systemd install the `*Directory=` lines and `EnvironmentFile=` are optional: without them the server falls back to
+the dev defaults (`logs/`, `~/.openmux`) or to the `OPENMUX_*` variables you export.
 
 Then:
 
@@ -386,7 +385,8 @@ sudo systemctl enable --now openmux-server
 
 ## Optional: “Install” without pip
 
-If you don’t want to use pip to install the package and also don’t have a Debian system, you can create simple wrapper scripts that call the source tree directly. For example, on macOS or other Unix systems:
+If you don’t want to use pip to install the package and also don’t have a Debian system, you can create simple wrapper scripts
+that call the source tree directly. For example, on macOS or other Unix systems:
 
 ```sh
 # Assuming your checkout lives at /opt/openmux (adjust path accordingly)

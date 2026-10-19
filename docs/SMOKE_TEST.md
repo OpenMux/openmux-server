@@ -1,6 +1,7 @@
 Smoke Test Workflow
 
-This blueprint provides a fast end‑to‑end check that the OpenMux server and client path works across key adapters: loopback, command, and (optionally) serial.
+This blueprint provides a fast end‑to‑end check that the OpenMux server and client path works across key adapters: loopback,
+command, and (optionally) serial.
 
 Artifacts
 - Server config: `config/integration_test.yaml` (ports: `loop1`, `cat`, and optional `vserial1`)
@@ -45,7 +46,9 @@ Notes
 
 Reload verification (signals)
 
-You can trigger reloads from the CLI without using the UI. The server writes a PID file on startup at `openmux.pid` inside the run dir (dev run: `logs/openmux.pid`; packaged: `/run/openmux/openmux.pid`; override with the `OPENMUX_RUN_DIR` env or the defaults file - see [LOCATIONS.md](LOCATIONS.md)).
+You can trigger reloads from the CLI without using the UI. The server writes a PID file on startup at `openmux.pid` inside the
+run dir (dev run: `logs/openmux.pid`; packaged: `/run/openmux/openmux.pid`; override with the `OPENMUX_RUN_DIR` env or the
+defaults file - see [LOCATIONS.md](LOCATIONS.md)).
 
 - Soft reload (SIGHUP):
 
@@ -68,8 +71,10 @@ You can trigger reloads from the CLI without using the UI. The server writes a P
   - If triggered from the Web Console, restart is deferred to avoid self-stop during the HTTP request
 
 Notes:
-- On macOS and Linux, both SIGHUP and SIGUSR1 are available. If a signal isn't supported on your platform, you'll see a log line indicating that handler registration was skipped.
-- If you enable log rotation externally, you can send SIGHUP to re-apply log levels from config. Full file re-open can be added later if needed.
+- On macOS and Linux, both SIGHUP and SIGUSR1 are available. If a signal isn't supported on your platform, you'll see a log
+line indicating that handler registration was skipped.
+- If you enable log rotation externally, you can send SIGHUP to re-apply log levels from config. Full file re-open can be added
+later if needed.
 
 ---
 
@@ -77,7 +82,8 @@ Local control socket and openmuxctl
 
 Phase 2 adds a Unix domain control socket for local commands (status, soft/full reload) and a tiny CLI helper.
 
-- Default socket path: `logs/openmux.sock` (dev run) or `/run/openmux/openmux.sock` (packaged); override with `OPENMUX_RUN_DIR` or `OPENMUX_CTL_SOCK`, in the shell or via the defaults file - see [LOCATIONS.md](LOCATIONS.md)
+- Default socket path: `logs/openmux.sock` (dev run) or `/run/openmux/openmux.sock` (packaged); override with `OPENMUX_RUN_DIR`
+or `OPENMUX_CTL_SOCK`, in the shell or via the defaults file - see [LOCATIONS.md](LOCATIONS.md)
 - Permissions: the server restricts the socket file to `0600` on startup
 
 Quick usage with the helper script:

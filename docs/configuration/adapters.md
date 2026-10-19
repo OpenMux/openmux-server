@@ -2,12 +2,14 @@
 
 ## Overview
 
-OpenMux uses a modular adapter system. Adapters are configured under top-level sections in the YAML config, each providing one or more ports of a specific type. This section documents those adapter-specific sections, their options, and examples.
+OpenMux uses a modular adapter system. Adapters are configured under top-level sections in the YAML config, each providing one
+or more ports of a specific type. This section documents those adapter-specific sections, their options, and examples.
 
 Top-level adapter sections supported by the server:
 - `loopback_ports`: Loopback Adapter (testing)
 - `command_ports`: Command Adapter (external processes)
-- `tcp_initiator_ports`: TCP Initiator Adapter (outbound TCP/SSL; also connects to a remote OpenMux via `protocol: {type: openmux}`)
+- `tcp_initiator_ports`: TCP Initiator Adapter (outbound TCP/SSL; also connects to a remote OpenMux via
+  `protocol: {type: openmux}`)
 - `serial_ports`: Serial Adapter (physical serial devices)
 
 Service adapters (not port lists):
@@ -21,15 +23,38 @@ Note: Binding is configured per-adapter; the `server` section is metadata-only (
 
 Every port of every type supports the same access-control settings (issues #58 and #59):
 
-- `read_write_groups: [str]` and `read_only_groups: [str]` (per port, alongside `max_read_write_users`): users whose `groups` in `authentication.yaml` intersect a list are admitted at that level; once either list is set, the lists are a **closed boundary** — a user in neither list is denied, even with a global `read-write` permission. `admin` always bypasses the lists.
-- `max_read_write_users: none | one | multiple` (per port, write-slot capacity, issue #59): how many users may write at once. `one` (default) gives one driver: the first write-entitled user gets write, later ones attach read-only. `multiple` gives every write-entitled user write. `none` gives no driver at all: everyone attaches read-only, **including admin**. A slot is a resource, not a privilege: admin bypasses access control (groups, `access_default`), not capacity. Legacy integers still load (0 = none, 1 = one, >= 2 = multiple) with a one-time deprecation log line naming the port; any other value is a hard error.
-- `access_default: allow | deny` (server-wide, top-level key in `security.yaml`, default `allow`): decides whether a port that declares *neither* list is open at all. Under `deny`, only `admin` can connect to no-list ports (reason `denied_by_access_default`) — a fail-closed posture for mis-created ports.
+- `read_write_groups: [str]` and `read_only_groups: [str]` (per port, alongside `max_read_write_users`): users whose `groups`
+  in `authentication.yaml` intersect a list are admitted at that level; once either list is set, the lists are a **closed
+  boundary** — a user in neither list is denied, even with a global `read-write` permission. `admin` always bypasses the lists.
+- `max_read_write_users: none | one | multiple` (per port, write-slot capacity, issue #59): how many users may write at once.
+  `one` (default) gives one driver: the first write-entitled user gets write, later ones attach read-only. `multiple` gives
+  every write-entitled user write. `none` gives no driver at all: everyone attaches read-only, **including admin**. A slot is a
+  resource, not a privilege: admin bypasses access control (groups, `access_default`), not capacity. Legacy integers still load
+  (0 = none, 1 = one, >= 2 = multiple) with a one-time deprecation log line naming the port; any other value is a hard error.
+- `access_default: allow | deny` (server-wide, top-level key in `security.yaml`, default `allow`): decides whether a port that
+  declares *neither* list is open at all. Under `deny`, only `admin` can connect to no-list ports (reason
+  `denied_by_access_default`) — a fail-closed posture for mis-created ports.
 
-A full port never rejects: a write-entitled user on a full `one` port demotes to read-only; a `none` port demotes everyone to read-only. Note `none` decides who may *drive*; `access_default` decides who may be *present*. They are orthogonal.
+A full port never rejects: a write-entitled user on a full `one` port demotes to read-only; a `none` port demotes everyone to
+read-only. Note `none` decides who may *drive*; `access_default` decides who may be *present*. They are orthogonal.
 
-Takeover transfers the one write slot from a current holder to another client. Only a write-entitled client may do it — entitlement is re-checked at the moment of the take, so an attached read-only seat can never take the slot, and a `none` port gives no one a slot to take. The operation demotes exactly one holder and promotes the taker; it is audit-logged (`WRITE-SLOT TAKEOVER` and a `write_slot_takeover` data-log event) and the demoted holder is restored if the taker's promotion fails. When no client holds the slot, a no-target takeover takes the empty slot: the taker is promoted directly, nothing is demoted or announced, and the same data-log event is recorded with an empty victim. A named target that matches no holder is refused. The target of the take is the named holder, or — when none is named — the most recently attached other read-write holder. On a federated port the origin node (not the requesting node) decides, because only the origin sees every holder; the requesting client's own entitlement is still checked on its own node first. Clients surface it as "Take control" (web console viewer menu, or the no-target fallback), the `f` menu command, or the CLI `force_promote` frame. Every console can target a specific holder by `client_id` (web console passes it per-holder; the CLI and the telnet/SSH `f` command prompt for it, with Enter keeping the no-target fallback). The holder lists show the id as `[<id>] username@ip (rw)` so a user can read it off and pass it back. The demoted client sees a notice that names the taker.
+Takeover transfers the one write slot from a current holder to another client. Only a write-entitled client may do it —
+entitlement is re-checked at the moment of the take, so an attached read-only seat can never take the slot, and a `none` port
+gives no one a slot to take. The operation demotes exactly one holder and promotes the taker; it is audit-logged
+(`WRITE-SLOT TAKEOVER` and a `write_slot_takeover` data-log event) and the demoted holder is restored if the taker's promotion
+fails. When no client holds the slot, a no-target takeover takes the empty slot: the taker is promoted directly, nothing is
+demoted or announced, and the same data-log event is recorded with an empty victim. A named target that matches no holder is
+refused. The target of the take is the named holder, or — when none is named — the most recently attached other read-write
+holder. On a federated port the origin node (not the requesting node) decides, because only the origin sees every holder; the
+requesting client's own entitlement is still checked on its own node first. Clients surface it as "Take control" (web console
+viewer menu, or the no-target fallback), the `f` menu command, or the CLI `force_promote` frame. Every console can target a
+specific holder by `client_id` (web console passes it per-holder; the CLI and the telnet/SSH `f` command prompt for it, with
+Enter keeping the no-target fallback). The holder lists show the id as `[<id>] username@ip (rw)` so a user can read it off and
+pass it back. The demoted client sees a notice that names the taker.
 
-Loopback ports follow these same rules; they get no special treatment (the three modes included: a `none` loopback attaches read-only for everyone). Denial reasons surfaced to clients: `no_permissions` (unknown identity), `denied_by_group_acl`, `denied_by_access_default`. See `docs/ARCHITECTURE.md` §17 and `config/security.yaml`.
+Loopback ports follow these same rules; they get no special treatment (the three modes included: a `none` loopback attaches
+read-only for everyone). Denial reasons surfaced to clients: `no_permissions` (unknown identity), `denied_by_group_acl`,
+`denied_by_access_default`. See `docs/ARCHITECTURE.md` §17 and `config/security.yaml`.
 
 ## Loopback Adapter (`loopback_ports`)
 
@@ -63,16 +88,24 @@ Supported options per port:
 - `shell`: Run via shell (default: false)
 - `cwd`: Working directory
 - `env`: Environment variables map
-- `interactive`: Preset that enables a PTY plus `normalize_newlines` (default: false). It does not change the `command` string and never adds a shell. Set it for real terminals (shells, editors, TUIs). For scripted or byte-exact ports leave it off and set `normalize_newlines` if you need it (the process then runs on plain pipes).
+- `interactive`: Preset that enables a PTY plus `normalize_newlines` (default: false). It does not change the `command` string
+  and never adds a shell. Set it for real terminals (shells, editors, TUIs). For scripted or byte-exact ports leave it off and
+  set `normalize_newlines` if you need it (the process then runs on plain pipes).
 - `normalize_newlines`: Normalize incoming newlines (default: `interactive`)
 - `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above)
-- `scrollback_size`: Bytes of recent output to keep for replay (default: 0 = off). Local viewers replay on attach (`?scrollback=1`); a federation viewer that attaches later gets the same ring sent as the stream seed (issue #83).
-- `read_write_groups` / `read_only_groups`: Console-group access lists (see above)
-Lifecycle: on-demand spawn and idle teardown:
+- `scrollback_size`: Bytes of recent output to keep for replay (default: 0 = off). Local viewers replay on attach
+  (`?scrollback=1`); a federation viewer that attaches later gets the same ring sent as the stream seed (issue #83).
+- `read_write_groups` / `read_only_groups`: Console-group access lists (see above) Lifecycle: on-demand spawn and idle
+  teardown:
 
-The process follows the connected-client count. This mirrors the serial adapter's presence-driven `dtr`/`rts` lines, which are driven by the same client-count event (issue #63):
-- `spawn_on_demand`: When true, do not start the process at server startup; spawn only when the first client attaches. The next client after a stop respawns a fresh process. Default: false.
-- `idle_timeout_sec`: When the last client disconnects, stop the process after this many seconds. A client that reconnects inside the window cancels the stop. The process is ready to respawn when the next client attaches. **`0` disables idle shutdown** — with `spawn_on_demand` and `idle_timeout_sec: 0` the process runs until server stop; set a positive value (for example `5`) to get teardown. Default: `0`.
+The process follows the connected-client count. This mirrors the serial adapter's presence-driven `dtr`/`rts` lines, which are
+driven by the same client-count event (issue #63):
+- `spawn_on_demand`: When true, do not start the process at server startup; spawn only when the first client attaches. The next
+  client after a stop respawns a fresh process. Default: false.
+- `idle_timeout_sec`: When the last client disconnects, stop the process after this many seconds. A client that reconnects
+  inside the window cancels the stop. The process is ready to respawn when the next client attaches. **`0` disables idle
+  shutdown** — with `spawn_on_demand` and `idle_timeout_sec: 0` the process runs until server stop; set a positive value (for
+  example `5`) to get teardown. Default: `0`.
 
 ```yaml
 # Spawn on first client attach; stop 5s after the last client leaves.
@@ -85,15 +118,25 @@ command_ports:
 ```
 
 Note on shells and interactive flags:
-- The server does not modify your `command` based on the binary name. If you need an interactive shell, include the appropriate flags yourself (e.g., `bash -i`, `zsh -i`, `fish -i`). This avoids making assumptions about which shell you use and keeps behavior explicit and predictable.
+- The server does not modify your `command` based on the binary name. If you need an interactive shell, include the appropriate
+  flags yourself (e.g., `bash -i`, `zsh -i`, `fish -i`). This avoids making assumptions about which shell you use and keeps
+  behavior explicit and predictable.
 
 Behavior that is always on (issue #67 removed the config knobs):
-- Sanitized environment: the process starts from a minimal environment (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`; `TERM` set to `xterm` if missing) with variables that trigger terminal feature probes stripped (e.g. `TERM_PROGRAM`, `ITERM_SESSION_ID`, kitty/VTE vars). Merge additional values via `env:`.
-- Terminal capability queries: XTGETTCAP queries are intercepted and answered as unsupported, so editor probes do not stall the session.
-- Controlling terminal (PTY ports): the process runs in its own session, and that session adopts the pty as its controlling terminal, like `getty` and `sshd` do. Shell job control (`Ctrl+Z`, `bg`, `fg`) works, and the process group gets SIGHUP when the port stops (as with a closed SSH session). Both Linux and macOS.
-- Newline normalization: output converts LF to CRLF (on a PTY) or normalizes to LF (on pipes); pipe input normalizes to LF when `normalize_newlines` is on.
+- Sanitized environment: the process starts from a minimal environment (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`;
+  `TERM` set to `xterm` if missing) with variables that trigger terminal feature probes stripped (e.g. `TERM_PROGRAM`,
+  `ITERM_SESSION_ID`, kitty/VTE vars). Merge additional values via `env:`.
+- Terminal capability queries: XTGETTCAP queries are intercepted and answered as unsupported, so editor probes do not stall the
+  session.
+- Controlling terminal (PTY ports): the process runs in its own session, and that session adopts the pty as its controlling
+  terminal, like `getty` and `sshd` do. Shell job control (`Ctrl+Z`, `bg`, `fg`) works, and the process group gets SIGHUP when
+  the port stops (as with a closed SSH session). Both Linux and macOS.
+- Newline normalization: output converts LF to CRLF (on a PTY) or normalizes to LF (on pipes); pipe input normalizes to LF when
+  `normalize_newlines` is on.
 - I/O batching: output flushes at 1024 bytes, 2 ms idle, or a 1.0 s cap; writes flush at 1024 bytes or 2 ms.
-- No automatic restart: the process never restarts itself after it exits. The port shows the exit reason (non-zero exit) or rests (code 0); press Enter in the console to respawn. Supervised daemons belong under systemd; expose their socket on a TCP port instead.
+- No automatic restart: the process never restarts itself after it exits. The port shows the exit reason (non-zero exit) or
+  rests (code 0); press Enter in the console to respawn. Supervised daemons belong under systemd; expose their socket on a TCP
+  port instead.
 
 Example:
 ```yaml
@@ -129,10 +172,12 @@ command_ports:
 
 ### Login prompts via Command Adapter
 
-Because the command adapter allocates a real PTY in `interactive` mode, you can expose a system login prompt instead of launching a shell directly. This is useful for local access scenarios, jump boxes, or controlled service consoles.
+Because the command adapter allocates a real PTY in `interactive` mode, you can expose a system login prompt instead of
+launching a shell directly. This is useful for local access scenarios, jump boxes, or controlled service consoles.
 
 Security note:
-- Treat these like you would a console or SSH: restrict access (authz), use `max_read_write_users: one`, and prefer on-demand spawning with an idle timeout.
+- Treat these like you would a console or SSH: restrict access (authz), use `max_read_write_users: one`, and prefer on-demand
+  spawning with an idle timeout.
 
 macOS (login(1)):
 ```yaml
@@ -199,11 +244,11 @@ Supported options per port:
   - `protocol.type`: `plain` (default, raw TCP), `conserver`, or `openmux`.
   - `protocol.telnet_negotiation`: `none` (default) or `strip` (drop telnet IAC sequences), for `plain`.
   - `protocol.username` / `protocol.password`: credentials for `conserver`.
-  - `protocol.remote_port`: required by the `openmux` type. Either `protocol.api_key` or
-    `protocol.username` + `protocol.password` must be provided to authenticate.
+  - `protocol.remote_port`: required by the `openmux` type. Either `protocol.api_key` or `protocol.username` +
+    `protocol.password` must be provided to authenticate.
 
-To expose a port on a remote OpenMux server locally, use `protocol.type: openmux` (the
-former `openmux_client_ports` section was removed in ticket #72 and converted to this form):
+To expose a port on a remote OpenMux server locally, use `protocol.type: openmux` (the former `openmux_client_ports` section
+was removed in ticket #72 and converted to this form):
 
 Examples:
 ```yaml
@@ -234,14 +279,14 @@ tcp_initiator_ports:
 
 Connect to physical serial devices (RS232, USB-to-serial, etc.).
 
-The section is a list of port entries (array-only, like every other
-`*_ports` section). Any other shape is a config error at load and hot
-reload; no serial port is created for an adapter with a malformed section.
+The section is a list of port entries (array-only, like every other `*_ports` section). Any other shape is a config error at
+load and hot reload; no serial port is created for an adapter with a malformed section.
 
 Supported options per port:
 - `name` (required): Unique port name
 - `description`: Human-readable description
-- `device` (required): Device path (e.g., `/dev/ttyUSB0`). One port per device. A later duplicate entry stays listed but offline; the UI shows the reason. Give the later port another path to fix it.
+- `device` (required): Device path (e.g., `/dev/ttyUSB0`). One port per device. A later duplicate entry stays listed but
+  offline; the UI shows the reason. Give the later port another path to fix it.
 - `baudrate`: Baud rate (default: 9600)
 - `bytesize`: 5, 6, 7, 8 (default: 8)
 - `parity`: N, E, O, M, S (default: N)
@@ -250,12 +295,17 @@ Supported options per port:
 - `flow_control`: Flow control mode: `none` (default), `rtscts`, `dsrdtr`, `xonxoff`
 - `dtr`: DTR signal-line policy (default: `none`, see Signal lines below)
 - `rts`: RTS signal-line policy (default: `none`, see Signal lines below)
-- `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above); legacy `read_write_users` is still accepted with a warning
+- `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above); legacy
+  `read_write_users` is still accepted with a warning
 
 Adapter-level performance options:
-- `read_coalesce` (default: true): Enable small, time-bounded coalescing of rapid serial read bursts before forwarding to clients. This reduces visual artifacts when devices emit very small chunks quickly (e.g., repeated CR/LF while holding Enter), without adding noticeable latency.
-- `read_coalesce_max_delay_ms` (default: 4): Maximum coalescing window in milliseconds for a single flush. Incoming chunks that arrive within this tiny window may be grouped into one payload.
-- `read_coalesce_max_bytes` (default: 8192): Upper bound on accumulated bytes per coalesced flush to prevent unbounded buffering.
+- `read_coalesce` (default: true): Enable small, time-bounded coalescing of rapid serial read bursts before forwarding to
+  clients. This reduces visual artifacts when devices emit very small chunks quickly (e.g., repeated CR/LF while holding
+  Enter), without adding noticeable latency.
+- `read_coalesce_max_delay_ms` (default: 4): Maximum coalescing window in milliseconds for a single flush. Incoming chunks that
+  arrive within this tiny window may be grouped into one payload.
+- `read_coalesce_max_bytes` (default: 8192): Upper bound on accumulated bytes per coalesced flush to prevent unbounded
+  buffering.
 
 Example:
 ```yaml
@@ -277,10 +327,8 @@ serial_ports:
 ```
 #### Signal lines (`dtr` / `rts`)
 
-Each of `dtr` and `rts` takes a signal-line policy. The policy applies on
-connect and whenever the connected-client count crosses the threshold between
-zero and one or more clients. A line without a policy stays untouched:
-OpenMux never drives it.
+Each of `dtr` and `rts` takes a signal-line policy. The policy applies on connect and whenever the connected-client count
+crosses the threshold between zero and one or more clients. A line without a policy stays untouched: OpenMux never drives it.
 
 | Value          | Behavior                                                                 |
 | -------------- | ------------------------------------------------------------------------ |
@@ -290,8 +338,7 @@ OpenMux never drives it.
 | `presence-on`  | High while one or more clients are connected, low while idle.           |
 | `presence-off` | Low while one or more clients are connected, high while idle.           |
 
-Legacy boolean values are a shorthand: `dtr: true` means `on` (the old
-"set on open" behavior), `dtr: false` means `off`.
+Legacy boolean values are a shorthand: `dtr: true` means `on` (the old "set on open" behavior), `dtr: false` means `off`.
 
 ```yaml
 serial_ports:
@@ -302,20 +349,17 @@ serial_ports:
 ```
 
 Constraints:
-- `flow_control: rtscts` hands the RTS pin to the kernel handshake
-  (termios CRTSCTS). A configured `rts` value conflicts with it, and the
-  Config Manager rejects the combination at load, save, and reload. DTR is
-  not affected by any flow-control mode.
-- `dsrdtr` and `xonxoff` do not own either pin: pyserial has no kernel
-  flag for DSR/DTR flow control (DSR is polled by applications), and
-  XON/XOFF runs in-band. Either mode works with any `dtr` / `rts` policy.
-- Note: YAML 1.1 parses unquoted `on` / `off` as booleans. Quote policy
-  strings in config files to be safe; the boolean result is the same `on`
-  / `off` shorthand.
+- `flow_control: rtscts` hands the RTS pin to the kernel handshake (termios CRTSCTS). A configured `rts` value conflicts with
+  it, and the Config Manager rejects the combination at load, save, and reload. DTR is not affected by any flow-control mode.
+- `dsrdtr` and `xonxoff` do not own either pin: pyserial has no kernel flag for DSR/DTR flow control (DSR is polled by
+  applications), and XON/XOFF runs in-band. Either mode works with any `dtr` / `rts` policy.
+- Note: YAML 1.1 parses unquoted `on` / `off` as booleans. Quote policy strings in config files to be safe; the boolean result
+  is the same `on` / `off` shorthand.
 
 ## Client Listener (`client_listener`)
 
-Accepts TCP connections from OpenMux clients. Handles auth, client sessions, and forwarding to ports. This is the primary way for users/tools to connect.
+Accepts TCP connections from OpenMux clients. Handles auth, client sessions, and forwarding to ports. This is the primary way
+for users/tools to connect.
 
 Supported keys:
 - `host` (required): Bind address (e.g., `0.0.0.0` or `127.0.0.1`)
@@ -333,31 +377,39 @@ client_listener:
 ```
 
 Session behavior:
-- After authentication the session waits in its command phase (`LIST`,
-  `CONNECT:<port>`, `DISCONNECT`, `QUIT`, `POWER ...`). A blank line does
-  nothing; only `QUIT`, a closed connection, or an error ends the session.
-- The OpenMux CLI client shows a `mux> ` prompt on top of this phase. The
-  server itself never sends a prompt and never echoes; a raw client (for
-  example telnet) sees no extra bytes. See
-  [../design/cli_command_mode.md](../design/cli_command_mode.md).
-- A CLI client can leave a port without losing its session: it sends the
-  `{"type": "detach"}` control frame (the same out-of-band channel as the
-  read-write requests). The server answers with the `DISCONNECTED:<port>` line
-  plus a `detached` ack, and the session returns to its command phase.
+- After authentication the session waits in its command phase (`LIST`, `CONNECT:<port>`, `DISCONNECT`, `QUIT`, `POWER ...`). A
+  blank line does nothing; only `QUIT`, a closed connection, or an error ends the session.
+- The OpenMux CLI client shows a `mux> ` prompt on top of this phase. The server itself never sends a prompt and never echoes;
+  a raw client (for example telnet) sees no extra bytes. See [../design/cli_command_mode.md](../design/cli_command_mode.md).
+- A CLI client can leave a port without losing its session: it sends the `{"type": "detach"}` control frame (the same
+  out-of-band channel as the read-write requests). The server answers with the `DISCONNECTED:<port>` line plus a `detached`
+  ack, and the session returns to its command phase.
 
 ## MuxCon Federation (`muxcon`)
 
-Federates multiple OpenMux servers. Can both listen for peers and initiate outbound connections. TLS is supported including optional TOFU and pinning.
+Federates multiple OpenMux servers. Can both listen for peers and initiate outbound connections. TLS is supported including
+optional TOFU and pinning.
 
 Top-level keys:
 - `heartbeat_interval`: Seconds between HB pings (0 to disable; default: 30)
-- `auth_required`: Require the Ed25519 challenge/response from inbound peers (default: true). When false, each started listener logs a warning.
+- `auth_required`: Require the Ed25519 challenge/response from inbound peers (default: true). When false, each started listener
+  logs a warning.
 - `listeners`: List of listener configurations
 - `initiators`: List of outbound peers
-- `advertise_filters`: Adapter-level default filters over which local ports this node shares with peers (a `filter_set`). See below.
-- `accept_filters`: Adapter-level default filters over which peer-advertised ports this node accepts (a `filter_set`). See below. `public_keys[]` entries may also carry a per-key `advertise_filters`/`accept_filters` that override these defaults for connections authenticating with that key.
+- `advertise_filters`: Adapter-level default filters over which local ports this node shares with peers (a `filter_set`). See
+  below.
+- `accept_filters`: Adapter-level default filters over which peer-advertised ports this node accepts (a `filter_set`). See
+  below. `public_keys[]` entries may also carry a per-key `advertise_filters`/`accept_filters` that override these defaults for
+  connections authenticating with that key.
 
-A `filter_set` has six glob lists (case-sensitive, `*` wildcards): `include` / `exclude` (port name), `adapter_include` / `adapter_exclude` (adapter type), and `server_include` / `server_exclude` (origin server id; meaningfully the `accept` direction). An **empty or missing list passes anything for that dimension**, as long as at least one include list in the direction is set; exclude patterns always win over include. **A direction is deny-all (ticket #77) while all three of its include lists are empty:** then it matches no port, so nothing is shared or accepted by default. Set `include: ["*"]` to share or accept everything, or `exclude: ["*"]` to block a direction. Filter changes take effect on a Soft Reload. The server logs a warning for each direction still in deny mode, once per deny period (a warning does not repeat until the direction leaves deny mode and re-enters it).
+A `filter_set` has six glob lists (case-sensitive, `*` wildcards): `include` / `exclude` (port name), `adapter_include` /
+`adapter_exclude` (adapter type), and `server_include` / `server_exclude` (origin server id; meaningfully the `accept`
+direction). An **empty or missing list passes anything for that dimension**, as long as at least one include list in the
+direction is set; exclude patterns always win over include. **A direction is deny-all (ticket #77) while all three of its
+include lists are empty:** then it matches no port, so nothing is shared or accepted by default. Set `include: ["*"]` to share
+or accept everything, or `exclude: ["*"]` to block a direction. Filter changes take effect on a Soft Reload. The server logs a
+warning for each direction still in deny mode, once per deny period (a warning does not repeat until the direction leaves deny
+mode and re-enters it).
 
 Identity note:
 - The node identity is derived from `server.id` at the top level
@@ -372,10 +424,11 @@ Identity note:
 - `ssl_ca_cert`: CA for client cert verification (optional)
 - `require_client_cert`: Require client certificate (default: false)
 - `tls_autogen`: Autogenerate self-signed cert if missing (default: true)
-- Generated certs and the TOFU peers file store in `<state dir>/muxcon/`
-  (see [../LOCATIONS.md](../LOCATIONS.md))
- - `interface` (alias: `bind_interface`): Bind the listening socket to a specific network interface. macOS uses interface index (IPv4/IPv6); Linux uses `SO_BINDTODEVICE` (requires privileges). If not supported, ignored with a warning.
- - `fwmark` (aliases: `so_mark`, `routing_mark`): Linux-only socket mark applied to the listener. Useful with policy routing; requires CAP_NET_ADMIN/root.
+- Generated certs and the TOFU peers file store in `<state dir>/muxcon/` (see [../LOCATIONS.md](../LOCATIONS.md))
+ - `interface` (alias: `bind_interface`): Bind the listening socket to a specific network interface. macOS uses interface index
+   (IPv4/IPv6); Linux uses `SO_BINDTODEVICE` (requires privileges). If not supported, ignored with a warning.
+ - `fwmark` (aliases: `so_mark`, `routing_mark`): Linux-only socket mark applied to the listener. Useful with policy routing;
+   requires CAP_NET_ADMIN/root.
 
 Each `initiators` entry (all keys are at the same level, alongside `host`/`port`):
 - `host` (required): Peer host
@@ -387,16 +440,20 @@ Each `initiators` entry (all keys are at the same level, alongside `host`/`port`
 - `server_hostname`: SNI/hostname for verification (defaults to host)
 - `tls_pin_fingerprint`: Exact cert fingerprint to pin (format: `sha256:<hex>`)
 - `tls_tofu`: Enable TOFU if no pin (default: true)
- - `bind_host` / `bind_port`: Optional local address/port to bind the outgoing socket to. Useful to influence routing via source IP. `bind_port` defaults to 0.
- - `interface` (alias: `bind_interface`): Prefer this network interface for the outgoing connection regardless of the current DHCP-assigned IP. Platform-specific behavior; see notes below.
+ - `bind_host` / `bind_port`: Optional local address/port to bind the outgoing socket to. Useful to influence routing via
+   source IP. `bind_port` defaults to 0.
+ - `interface` (alias: `bind_interface`): Prefer this network interface for the outgoing connection regardless of the current
+   DHCP-assigned IP. Platform-specific behavior; see notes below.
  - `fwmark` (aliases: `so_mark`, `routing_mark`): Apply a routing mark on Linux to select policy routing rules. Integer value.
 
 Platform notes for routing selection:
 - Linux:
-  - `interface`: Uses `SO_BINDTODEVICE`. Requires sufficient privileges (CAP_NET_RAW/CAP_NET_ADMIN or root). If unavailable, the option is ignored with a warning.
+  - `interface`: Uses `SO_BINDTODEVICE`. Requires sufficient privileges (CAP_NET_RAW/CAP_NET_ADMIN or root). If unavailable,
+    the option is ignored with a warning.
   - `fwmark`: Uses `SO_MARK`. Requires CAP_NET_ADMIN or root. Combine with policy routing rules (`ip rule`/`ip route`).
 - macOS:
-  - `interface`: Binds by interface index using `IP_BOUND_IF` (IPv4) or `IPV6_BOUND_IF` (IPv6). Typically does not require root. If the interface name cannot be resolved, the option is ignored with a warning.
+  - `interface`: Binds by interface index using `IP_BOUND_IF` (IPv4) or `IPV6_BOUND_IF` (IPv6). Typically does not require
+    root. If the interface name cannot be resolved, the option is ignored with a warning.
 - Other BSDs:
   - `interface`: Attempts `IP_BOUND_IF`/`IPV6_BOUND_IF` if supported; otherwise ignored.
 - All platforms: `bind_host`/`bind_port` are portable and can be used when the local address is known and stable.
@@ -411,17 +468,21 @@ Each initiator resolves one verification mode per peer. The first match wins:
 4. `tls_tofu: true` (default) — "tofou": pin on first use (Trust-On-First-Use).
 5. Otherwise — "system": strict check against the system trust store. This fails for a self-signed peer by design.
 
-In the "pin", "tofou", and "off" modes the TLS-level check is relaxed (`CERT_NONE`). The post-handshake fingerprint gate protects the link. This is what lets a default initiator reach a default listener, whose autogen cert is self-signed.
+In the "pin", "tofou", and "off" modes the TLS-level check is relaxed (`CERT_NONE`). The post-handshake fingerprint gate
+protects the link. This is what lets a default initiator reach a default listener, whose autogen cert is self-signed.
 
 Behavior:
-- ToFU stores `host:port` to `sha256:<hex>` in `<state dir>/muxcon/known_peers.yaml`. The first connect is unverified and is logged at WARNING. After the first connect, a different certificate is rejected.
+- ToFU stores `host:port` to `sha256:<hex>` in `<state dir>/muxcon/known_peers.yaml`. The first connect is unverified and is
+  logged at WARNING. After the first connect, a different certificate is rejected.
 - A pin requires an exact fingerprint match (case-insensitive).
 - A peer that presents no certificate is rejected while a pin or ToFU is active.
 - `ssl_verify: false` disables only the TLS-level check. A configured pin or ToFU gate still protects the link.
-- The autogen cert has a CN of the node's `server.id` and no SAN. For a strict "ca" or "system" check, set `server_hostname` to the peer's `server.id`.
+- The autogen cert has a CN of the node's `server.id` and no SAN. For a strict "ca" or "system" check, set `server_hostname` to
+  the peer's `server.id`.
 - To graduate a ToFU peer to an explicit pin, copy the logged fingerprint into `tls_pin_fingerprint`.
 
-The server logs the effective mode once per peer at connect time. An initiator with `use_tls: true` that cannot build its TLS context fails closed: it retries after backoff instead of dialing in plaintext.
+The server logs the effective mode once per peer at connect time. An initiator with `use_tls: true` that cannot build its TLS
+context fails closed: it retries after backoff instead of dialing in plaintext.
 
 Example:
 ```yaml
@@ -476,32 +537,32 @@ web_status:
 
 ## Web Console (`web_console`)
 
-Integrated HTTP server for the xterm.js console UI and WebSocket streaming per port. Supports HTTP Basic Auth and optional HTTPS.
+Integrated HTTP server for the xterm.js console UI and WebSocket streaming per port. Supports HTTP Basic Auth and optional
+HTTPS.
 
-Reload behavior: a soft reload applies only `motd` and `logged_in_motd`. All
-other `web_console` keys require a full reload. The display name shown on the
-login page, About page, and the Basic-Auth dialog comes from the top-level
-`server.description` (deriving to "OpenMux <id>" when absent) and re-reads on
-each render, so it needs no reload at all.
+Reload behavior: a soft reload applies only `motd` and `logged_in_motd`. All other `web_console` keys require a full reload.
+The display name shown on the login page, About page, and the Basic-Auth dialog comes from the top-level `server.description`
+(deriving to "OpenMux <id>" when absent) and re-reads on each render, so it needs no reload at all.
 
 Supported keys:
 - `host`: Bind address (default: `0.0.0.0`)
 - `port`: HTTP/HTTPS port (default: 8081)
 - `enable_ui`: Serve HTML UI endpoints (default: true)
-- `motd`: Public message of the day. Shown on the login page only. Multiline; hidden when blank (default: not set). Pick up changes with a soft reload.
-- `logged_in_motd`: Message of the day for authenticated users. Shown at the top of the status page. May hold sensitive text; never shown before login. Multiline; hidden when blank (default: not set). Pick up changes with a soft reload.
+- `motd`: Public message of the day. Shown on the login page only. Multiline; hidden when blank (default: not set). Pick up
+  changes with a soft reload.
+- `logged_in_motd`: Message of the day for authenticated users. Shown at the top of the status page. May hold sensitive text;
+  never shown before login. Multiline; hidden when blank (default: not set). Pick up changes with a soft reload.
 - `base_path`: URL prefix for all routes (default: `/`)
 - `respect_forwarded_prefix`: Honor `X-Forwarded-Prefix` headers from reverse proxies
-- Static assets (xterm, css, js) and templates are inside the python
-  package (`openmux/server/webui/`); there are no directory keys
+- Static assets (xterm, css, js) and templates are inside the python package (`openmux/server/webui/`); there are no directory
+  keys
 - `session_ttl_seconds`: Browser session lifetime in seconds (default: 28800)
 - `enable_probes`: Register health endpoints `/healthz`, `/livez`, `/readyz` (default: true)
 - `probes_include_details`: Include extended JSON in probe responses (default: false)
 - `plugins`: List of Python modules to load as web console plugins
 
-Failed login lockout (per username + IP) is controlled by `rate_limits.authentication`
-in `security.yaml`, shared with all other password-based login paths (TCP, telnet,
-SSH listeners). See `config/security.yaml` for its `window_seconds`,
+Failed login lockout (per username + IP) is controlled by `rate_limits.authentication` in `security.yaml`, shared with all
+other password-based login paths (TCP, telnet, SSH listeners). See `config/security.yaml` for its `window_seconds`,
 `failure_threshold`, and `base_lock_seconds` keys.
 
 TLS/HTTPS keys:
@@ -531,16 +592,28 @@ web_console:
 
 ## PDU Power (`power`)
 
-Manages power distribution unit (PDU) outlets: on/off state plus watts, volts, and amps when the device reports them. The adapter is portless: outlets are not console ports. The console side maps a port to its feeds with the `power:` key on port entries (see below).
+Manages power distribution unit (PDU) outlets: on/off state plus watts, volts, and amps when the device reports them. The
+adapter is portless: outlets are not console ports. The console side maps a port to its feeds with the `power:` key on port
+entries (see below).
 
 Drivers implement a common interface (in `openmux/server/adapters/power_drivers/api.py`):
-- `list_outlets()` returns the device's own outlet ids. Outlet ids are free strings as reported by the device (for example `1`, or `A1`, `B1`, `C2` on a 3-phase PDU). Config only holds optional per-outlet annotations; a PDU needs no outlet config to be fully listed.
-- `read_states()` returns on/off plus watts/volts/amps per outlet. `on: null` = unknown (PDU down, not yet polled). The method may return `None` while the driver is inside its read backoff window (below); the adapter then keeps the last-known readings and performs no further action this cycle.
+- `list_outlets()` returns the device's own outlet ids. Outlet ids are free strings as reported by the device (for example `1`,
+  or `A1`, `B1`, `C2` on a 3-phase PDU). Config only holds optional per-outlet annotations; a PDU needs no outlet config to be
+  fully listed.
+- `read_states()` returns on/off plus watts/volts/amps per outlet. `on: null` = unknown (PDU down, not yet polled). The method
+  may return `None` while the driver is inside its read backoff window (below); the adapter then keeps the last-known readings
+  and performs no further action this cycle.
 - `set_state(outlet_id, on)` switches one outlet.
 
-Two drivers ship with the server: `dummy` simulates a device in memory (development and tests), and `command` runs user CLI commands against a real device (see the command driver reference below). Vendor drivers (for example Raritan, APC) register new keys in the same interface with no other changes.
+Two drivers ship with the server: `dummy` simulates a device in memory (development and tests), and `command` runs user CLI
+commands against a real device (see the command driver reference below). Vendor drivers (for example Raritan, APC) register new
+keys in the same interface with no other changes.
 
-Read backoff: every driver wraps its device-wide read path with the shared helper in `power_drivers/readbackoff.py`. The first failed read suppresses further reads for 30 s; each later failed read (one per lapsed window) doubles the window, capped at 5 min. A successful read resets the window. Explicit switches are never suppressed. This keeps a dead device from being polled at full cadence forever. Per-outlet failures (one outlet's read error) do not start the window; they surface as errors on the affected readings.
+Read backoff: every driver wraps its device-wide read path with the shared helper in `power_drivers/readbackoff.py`. The first
+failed read suppresses further reads for 30 s; each later failed read (one per lapsed window) doubles the window, capped at 5
+min. A successful read resets the window. Explicit switches are never suppressed. This keeps a dead device from being polled at
+full cadence forever. Per-outlet failures (one outlet's read error) do not start the window; they surface as errors on the
+affected readings.
 
 Supported keys:
 - `enabled`: Disable the whole feature when false (default: true)
@@ -549,47 +622,72 @@ Supported keys:
 - `pdus[].description`: Free text (default: not set)
 - `pdus[].driver`: Driver registry key: `dummy` or `command`
 - `pdus[].poll_interval`: PER-PDU refresh in seconds. `0` = no poll task (reads on demand only). Default: 10
-- `pdus[].options`: Object of pure driver settings, passed to the driver. Keys are driver-specific (see the driver references below); the driver validates them and rejects unknown keys at startup. The key `outlets` is reserved and rejected here: the per-PDU `outlets` list below is the single outlet source
-- `pdus[].outlets`: The outlet list. Each entry is `{id: "<outlet id>", ...}` (a bare string `"<outlet id>"` is shorthand for `{id: ...}`) and may carry optional keys: `description` (a label shown by the web UI; owned by the power adapter) and driver-specific fields (for the `command` driver: `index`, `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`). The power adapter reads `id` and `description`; the same list is passed to the driver (merged into the driver's `options` as `outlets`) and the driver owns the remaining keys. `id` must match the device's id exactly (a string), unique per PDU
+- `pdus[].options`: Object of pure driver settings, passed to the driver. Keys are driver-specific (see the driver references
+  below); the driver validates them and rejects unknown keys at startup. The key `outlets` is reserved and rejected here: the
+  per-PDU `outlets` list below is the single outlet source
+- `pdus[].outlets`: The outlet list. Each entry is `{id: "<outlet id>", ...}` (a bare string `"<outlet id>"` is shorthand for
+  `{id: ...}`) and may carry optional keys: `description` (a label shown by the web UI; owned by the power adapter) and
+  driver-specific fields (for the `command` driver: `index`, `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`). The power
+  adapter reads `id` and `description`; the same list is passed to the driver (merged into the driver's `options` as `outlets`)
+  and the driver owns the remaining keys. `id` must match the device's id exactly (a string), unique per PDU
 
-One list, no duplication: an outlet that needs a label AND driver fields lives once in `pdus[].outlets` with both. Ids that the device does not report raise a warning at startup
+One list, no duplication: an outlet that needs a label AND driver fields lives once in `pdus[].outlets` with both. Ids that the
+device does not report raise a warning at startup
 
-Outlet ref = `<pdu_name>.<outlet_id>` (for example `rack1.3`, `phaseA.A1`). This is the single identity used by the CLI, the web API, the Power page, and the status page.
+Outlet ref = `<pdu_name>.<outlet_id>` (for example `rack1.3`, `phaseA.A1`). This is the single identity used by the CLI, the
+web API, the Power page, and the status page.
 
-Console-side mapping: add `power: ["<ref>", ...]` to a port entry in any of the four port sections (`serial_ports`, `loopback_ports`, `command_ports`, `tcp_initiator_ports`). Multiple entries = A/B dual feed. A ref to an unknown PDU or outlet raises a warning at startup (not fatal). The web status page and the console header show a power dot (green all feeds on, yellow partial, red all off, grey unknown); the console header badge opens a per-outlet on/off menu (its switches travel as OMXCTRL power frames on the console WebSocket, the same core path as the `p` menu — not the power plugin's REST route).
+Console-side mapping: add `power: ["<ref>", ...]` to a port entry in any of the four port sections (`serial_ports`,
+`loopback_ports`, `command_ports`, `tcp_initiator_ports`). Multiple entries = A/B dual feed. A ref to an unknown PDU or outlet
+raises a warning at startup (not fatal). The web status page and the console header show a power dot (green all feeds on,
+yellow partial, red all off, grey unknown); the console header badge opens a per-outlet on/off menu (its switches travel as
+OMXCTRL power frames on the console WebSocket, the same core path as the `p` menu — not the power plugin's REST route).
 
-Any power change (web toggle, CLI, or a poll that detects out-of-band drift) sends a message to every attached session of every console the outlet feeds, and updates the web badges live. A successful manual switch also writes two records: one `POWER CONTROL` audit line in the server log (user, outlet ref, new state, consoles that lose all power), and a `power_control_notice` meta event in each affected console's port data log (the `[POWER]` notice wording, so the event stays in the log with no client attached). Polls that detect out-of-band drift update the badges but do not audit-log; only a user's switch is a control event.
+Any power change (web toggle, CLI, or a poll that detects out-of-band drift) sends a message to every attached session of every
+console the outlet feeds, and updates the web badges live. A successful manual switch also writes two records: one
+`POWER CONTROL` audit line in the server log (user, outlet ref, new state, consoles that lose all power), and a
+`power_control_notice` meta event in each affected console's port data log (the `[POWER]` notice wording, so the event stays in
+the log with no client attached). Polls that detect out-of-band drift update the badges but do not audit-log; only a user's
+switch is a control event.
 
-The `POWER` command is available on the client listener (command phase). The telnet, SSH, and OpenMux CLI clients get the escape-menu `p` command, which opens an interactive menu for the console you are attached to (see below). An outlet ref is always `<pdu-name>.<outlet-id>` (for example `rack1.3`; the PDU name is the `pdus[].name` you set, not a device number). Syntax:
+The `POWER` command is available on the client listener (command phase). The telnet, SSH, and OpenMux CLI clients get the
+escape-menu `p` command, which opens an interactive menu for the console you are attached to (see below). An outlet ref is
+always `<pdu-name>.<outlet-id>` (for example `rack1.3`; the PDU name is the `pdus[].name` you set, not a device number).
+Syntax:
 ```
 POWER                       # list every PDU + outlet
 POWER rack1                 # list one PDU's outlets
 POWER rack1.3               # report one outlet
 POWER rack1.3 off           # switch an outlet (needs read-write)
 ```
-The first token must be exactly `POWER`. Any other first token answers the
-`ERROR:POWER: usage:` line instead of a listing.
-Switching an outlet off prints `WARNING:` lines naming the consoles that would lose ALL power, and `NOTE:` lines naming the consoles that stay up on other feeds.
+The first token must be exactly `POWER`. Any other first token answers the `ERROR:POWER: usage:` line instead of a listing.
+Switching an outlet off prints `WARNING:` lines naming the consoles that would lose ALL power, and `NOTE:` lines naming the
+consoles that stay up on other feeds.
 
-Who may switch is scoped to console groups: switching needs `read-write` or `admin`, plus the entitlement to open every console the outlet feeds (the same console-access rules as attach time: `read_write_groups`/`read_only_groups` and `access_default`). A read-write user whose groups do not cover one of the outlet's consoles sees an `ERROR:POWER` line (CLI, telnet, SSH) or a 403 (web API) naming that console; switching an outlet that feeds any console outside the user's groups requires `admin`. An outlet that feeds no console stays switchable by any read-write user. The check runs on every switch path (web API, client-listener `POWER`, and the `p` power menu on the telnet, SSH, and CLI clients).
+Who may switch is scoped to console groups: switching needs `read-write` or `admin`, plus the entitlement to open every console
+the outlet feeds (the same console-access rules as attach time: `read_write_groups`/`read_only_groups` and `access_default`). A
+read-write user whose groups do not cover one of the outlet's consoles sees an `ERROR:POWER` line (CLI, telnet, SSH) or a 403
+(web API) naming that console; switching an outlet that feeds any console outside the user's groups requires `admin`. An outlet
+that feeds no console stays switchable by any read-write user. The check runs on every switch path (web API, client-listener
+`POWER`, and the `p` power menu on the telnet, SSH, and CLI clients).
 
-Reload behavior: a soft reload re-applies the `power:` section without a restart. Description edits apply in place (including `description` on a PDU or on an outlet entry). A material change (driver, `poll_interval`, `options`, or one outlet's id / driver fields) re-creates that PDU and re-discovers its outlets. Console-side `power:` mapping is read live from the ports and needs no reload work at all.
+Reload behavior: a soft reload re-applies the `power:` section without a restart. Description edits apply in place (including
+`description` on a PDU or on an outlet entry). A material change (driver, `poll_interval`, `options`, or one outlet's id /
+driver fields) re-creates that PDU and re-discovers its outlets. Console-side `power:` mapping is read live from the ports and
+needs no reload work at all.
 
-Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power") edits `power.enabled` and the PDU list (name, driver, `poll_interval`, description, `outlets` as id + description rows, and `options` as JSON). The panel keeps any driver-specific keys already present on an outlet entry when it saves; add those keys by editing the YAML directly.
+Config Editor: the "Power" submenu of the Config menu (`/config-editor?view=power`) edits `power.enabled` and the PDU list
+(name, driver, `poll_interval`, description, `outlets` as id + description rows, and `options` as JSON). The panel keeps any
+driver-specific keys already present on an outlet entry when it saves; add those keys by editing the YAML directly.
 
-Web console: the standalone `/power` page, the per-PDU pages, and the
-`/api/power` routes are core. The web console registers them always, so no
-`web_console.plugins` entry is needed. Live outlet updates ride the shared
-`/ws/events` site socket (a coalesced `power_changed` nudge per change; the
-old dedicated `/ws/power` socket is removed). A `power:` section added or
-removed on a soft reload takes effect without a restart; PDUs added, removed,
-or re-created by that reload also publish a coalesced `pdus_changed` nudge,
-which rebuilds the sidebar Power menu and re-renders the `/power` page tables
-on every open tab. Each route replies
-404 ("Power management is not configured") while no PDU adapter is active.
-The "Power" sidebar item is emitted live per page when a PDU adapter is
-enabled, like the in-session badge, the power menu, and the live `[POWER]`
-notices. No web power surface depends on a plugin.
+Web console: the standalone `/power` page, the per-PDU pages, and the `/api/power` routes are core. The web console registers
+them always, so no `web_console.plugins` entry is needed. Live outlet updates ride the shared `/ws/events` site socket (a
+coalesced `power_changed` nudge per change; the old dedicated `/ws/power` socket is removed). A `power:` section added or
+removed on a soft reload takes effect without a restart; PDUs added, removed, or re-created by that reload also publish a
+coalesced `pdus_changed` nudge, which rebuilds the sidebar Power menu and re-renders the `/power` page tables on every open
+tab. Each route replies 404 ("Power management is not configured") while no PDU adapter is active. The "Power" sidebar item is
+emitted live per page when a PDU adapter is enabled, like the in-session badge, the power menu, and the live `[POWER]` notices.
+No web power surface depends on a plugin.
 
 Example:
 ```yaml
@@ -616,11 +714,17 @@ power:
 
 ### Command driver (`driver: command`)
 
-Runs CLI commands against a real device: GPIO scripts on a Raspberry Pi, custom USB power tools, or anything the user can address from the shell. The driver validates all options and rejects the PDU entry at startup (one log line) when they are invalid.
+Runs CLI commands against a real device: GPIO scripts on a Raspberry Pi, custom USB power tools, or anything the user can
+address from the shell. The driver validates all options and rejects the PDU entry at startup (one log line) when they are
+invalid.
 
 Two command levels. A per-outlet value wins over the PDU-level value:
-- PDU level (in `options`): `on_cmd` and `off_cmd` templates. Each must contain the placeholder `{outlet_id}` or `{outlet_index}` (below). One `state_cmd` reports every outlet: by default one `<id> <state>` line per outlet, or a device-specific line format parsed by `state_pattern`.
-- Outlet level (on an entry of the per-PDU `outlets` list, which the power adapter passes into the driver): `on_cmd`, `off_cmd`, `state_cmd`, an optional `state_pattern` that matches that outlet's state output with a regex, and an optional `index` (the outlet's device-side identity, for `{outlet_index}`).
+- PDU level (in `options`): `on_cmd` and `off_cmd` templates. Each must contain the placeholder `{outlet_id}` or
+  `{outlet_index}` (below). One `state_cmd` reports every outlet: by default one `<id> <state>` line per outlet, or a
+  device-specific line format parsed by `state_pattern`.
+- Outlet level (on an entry of the per-PDU `outlets` list, which the power adapter passes into the driver): `on_cmd`,
+  `off_cmd`, `state_cmd`, an optional `state_pattern` that matches that outlet's state output with a regex, and an optional
+  `index` (the outlet's device-side identity, for `{outlet_index}`).
 
 Example, template style (one script per operation):
 ```yaml
@@ -660,7 +764,9 @@ power:
           state_pattern: \": (?P<on>connected)|(?P<off>disconnected)\"
 ```
 
-Example, an SNMP PDU (APC NetManager rack PDU) with no helper scripts: the connection fields (`host`, `username`, `password`) substitute into `{host}` / `{username}` / `{password}` (the OIDs are plain text in the command), each outlet's `index` maps the outlet ref to the device outlet index behind `{outlet_index}`, and `state_pattern` parses the `snmpwalk` lines:
+Example, an SNMP PDU (APC NetManager rack PDU) with no helper scripts: the connection fields (`host`, `username`, `password`)
+substitute into `{host}` / `{username}` / `{password}` (the OIDs are plain text in the command), each outlet's `index` maps the
+outlet ref to the device outlet index behind `{outlet_index}`, and `state_pattern` parses the `snmpwalk` lines:
 ```yaml
 power:
   pdus:
@@ -686,37 +792,80 @@ power:
 ```
 
 The per-PDU `outlets` list (not an option):
-- `outlets`: Required. List of outlet entries. Each entry: `id` (required; the ref part; no dots or whitespace; unique), `description` (optional; web UI label), `index` (optional; the device-side identity behind `{outlet_index}`; must be unique across all ids and indexes), plus the optional per-outlet `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`.
+- `outlets`: Required. List of outlet entries. Each entry: `id` (required; the ref part; no dots or whitespace; unique),
+  `description` (optional; web UI label), `index` (optional; the device-side identity behind `{outlet_index}`; must be unique
+  across all ids and indexes), plus the optional per-outlet `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`.
 
 Option keys (`driver: command`):
-- `on_cmd` / `off_cmd` (PDU level): Templates. Each must contain `{outlet_id}` or `{outlet_index}`. Required for an outlet that has no per-outlet value of the same name.
-- `host` / `username` / `password`: Connection fields, optional. Substitute into `{host}` / `{username}` / `{password}` and export as `PDU_HOST` / `PDU_USERNAME` / `PDU_PASSWORD` to the spawned commands (a user `env` key wins). `host` is non-blank when set; it is required when any command references a connection placeholder. The same fields let the credentials stay out of argv (for example `env: {SNMP_COMMUNITY: "private"}` plus `state_cmd: "snmpwalk -v2c -c $SNMP_COMMUNITY ..."`).
-- `state_cmd` (PDU level): One command that reports every outlet. Without `state_pattern`: one non-empty line per outlet, `<id> <state>`; `id` is the outlet id or its `index`. With `state_pattern`: the device's own line format. Lines that do not parse are skipped.
-- `state_pattern` (PDU level): A line regex with the named groups `id` (outlet id or index) and `value` (a state token, classified by the token table). Matched per line; the first match per outlet wins. Requires `state_cmd`.
-- `state_token_on` / `state_token_off`: Optional lists of extra state tokens (case-insensitive) added to the built-in table (`on` / `1` / `true` / `yes` and `off` / `0` / `false` / `no`). They extend the table, never replace it; a token in both lists is a config error. Example: `state_token_off: ["2"]` for the PowerNet enum.
-- Per-outlet `state_cmd`: Reports ONE outlet. The first non-empty stdout line decides: a state token sets the state; anything else keeps the last-known state and sets an error on the reading. A matching `state_pattern` overrides the token parse (below).
-- Per-outlet `state_pattern`: Regex, matched against the outlet's `state_cmd` output. A pattern with both named groups `(?P<on>...)` and `(?P<off>...)` requires exactly one group to match. A plain pattern means: match = on, no match = off. Requires a per-outlet `state_cmd`.
+- `on_cmd` / `off_cmd` (PDU level): Templates. Each must contain `{outlet_id}` or `{outlet_index}`. Required for an outlet that
+  has no per-outlet value of the same name.
+- `host` / `username` / `password`: Connection fields, optional. Substitute into `{host}` / `{username}` / `{password}` and
+  export as `PDU_HOST` / `PDU_USERNAME` / `PDU_PASSWORD` to the spawned commands (a user `env` key wins). `host` is non-blank
+  when set; it is required when any command references a connection placeholder. The same fields let the credentials stay out
+  of argv (for example `env: {SNMP_COMMUNITY: "private"}` plus `state_cmd: "snmpwalk -v2c -c $SNMP_COMMUNITY ..."`).
+- `state_cmd` (PDU level): One command that reports every outlet. Without `state_pattern`: one non-empty line per outlet,
+  `<id> <state>`; `id` is the outlet id or its `index`. With `state_pattern`: the device's own line format. Lines that do not
+  parse are skipped.
+- `state_pattern` (PDU level): A line regex with the named groups `id` (outlet id or index) and `value` (a state token,
+  classified by the token table). Matched per line; the first match per outlet wins. Requires `state_cmd`.
+- `state_token_on` / `state_token_off`: Optional lists of extra state tokens (case-insensitive) added to the built-in table
+  (`on` / `1` / `true` / `yes` and `off` / `0` / `false` / `no`). They extend the table, never replace it; a token in both
+  lists is a config error. Example: `state_token_off: ["2"]` for the PowerNet enum.
+- Per-outlet `state_cmd`: Reports ONE outlet. The first non-empty stdout line decides: a state token sets the state; anything
+  else keeps the last-known state and sets an error on the reading. A matching `state_pattern` overrides the token parse
+  (below).
+- Per-outlet `state_pattern`: Regex, matched against the outlet's `state_cmd` output. A pattern with both named groups
+  `(?P<on>...)` and `(?P<off>...)` requires exactly one group to match. A plain pattern means: match = on, no match = off.
+  Requires a per-outlet `state_cmd`.
 - `cwd`: Working directory for the commands (default: the server's cwd).
-- `timeout`: Per-command timeout in seconds (default: 5, max: 300). On timeout the driver kills the command's whole process group and reports the read/switch as failed. Size it for the slowest command the PDU runs: for SNMP commands, the net-snmp retry loop (default 5 retries at ~1 s intervals) takes ~6 s to declare a host dead, so use `timeout: 15` — the default 5 s would kill the command mid-retry, and a live-but-slow PDU would fail every poll instead of the read backoff handling it.
-- `env`: Extra environment variables, merged over a minimal allow-list (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`). Wins over the exported `PDU_*` defaults.
+- `timeout`: Per-command timeout in seconds (default: 5, max: 300). On timeout the driver kills the command's whole process
+  group and reports the read/switch as failed. Size it for the slowest command the PDU runs: for SNMP commands, the net-snmp
+  retry loop (default 5 retries at ~1 s intervals) takes ~6 s to declare a host dead, so use `timeout: 15` — the default 5 s
+  would kill the command mid-retry, and a live-but-slow PDU would fail every poll instead of the read backoff handling it.
+- `env`: Extra environment variables, merged over a minimal allow-list (`PATH`, `HOME`, `SHELL`, `USER`, `LANG`, `LC_ALL`).
+  Wins over the exported `PDU_*` defaults.
 - `max_parallel`: Max concurrent per-outlet state commands per poll (default: 4, max: 64).
 
-Commands run without a shell: the driver splits each command with shell word splitting (`shlex.split`) and spawns the result directly. Quote parts of the command when a value contains spaces. The placeholders are the only substitutions the driver performs: `{outlet_id}` (the outlet id), `{outlet_index}` (the outlet's `index`), and `{host}` / `{username}` / `{password}` (the PDU-level connection fields). A set command that uses `{outlet_index}` on an outlet without an `index` is rejected at startup, as is a PDU-level `state_cmd` that contains `{outlet_index}` (there is no per-outlet context there). Placeholders resolve at startup, so all commands are split and validated before the server starts polling.
+Commands run without a shell: the driver splits each command with shell word splitting (`shlex.split`) and spawns the result
+directly. Quote parts of the command when a value contains spaces. The placeholders are the only substitutions the driver
+performs: `{outlet_id}` (the outlet id), `{outlet_index}` (the outlet's `index`), and `{host}` / `{username}` / `{password}`
+(the PDU-level connection fields). A set command that uses `{outlet_index}` on an outlet without an `index` is rejected at
+startup, as is a PDU-level `state_cmd` that contains `{outlet_index}` (there is no per-outlet context there). Placeholders
+resolve at startup, so all commands are split and validated before the server starts polling.
 
-Read behavior: the batch `state_cmd` runs once per poll and serves every outlet that has no per-outlet `state_cmd`. A line's outlet identity (the first word, or the pattern's `id` group) matches the outlet `id` or its `index` (the mapping is checked at startup). Per-outlet `state_cmd` commands run concurrently, bounded by `max_parallel`. An outlet that receives no report in a good batch read keeps its last-known state and gets an error note ("outlet not reported by state command"). An outlet with no state command anywhere reports the last state a switch set. A device-wide read failure (the batch command failed, or every spawned state command failed) starts the read backoff (above): further polls spawn nothing until the window lapses, and `read_states()` returns `None` (the adapter keeps the last-known readings).
+Read behavior: the batch `state_cmd` runs once per poll and serves every outlet that has no per-outlet `state_cmd`. A line's
+outlet identity (the first word, or the pattern's `id` group) matches the outlet `id` or its `index` (the mapping is checked at
+startup). Per-outlet `state_cmd` commands run concurrently, bounded by `max_parallel`. An outlet that receives no report in a
+good batch read keeps its last-known state and gets an error note ("outlet not reported by state command"). An outlet with no
+state command anywhere reports the last state a switch set. A device-wide read failure (the batch command failed, or every
+spawned state command failed) starts the read backoff (above): further polls spawn nothing until the window lapses, and
+`read_states()` returns `None` (the adapter keeps the last-known readings).
 
-Switch behavior: `set_state` runs exactly one command (`on_cmd` or `off_cmd` for that outlet). It is never suppressed by the backoff. A non-zero exit or a timeout fails the switch: every switch surface (web, CLI, `p` menu) reports the error, and no audit record is written.
+Switch behavior: `set_state` runs exactly one command (`on_cmd` or `off_cmd` for that outlet). It is never suppressed by the
+backoff. A non-zero exit or a timeout fails the switch: every switch surface (web, CLI, `p` menu) reports the error, and no
+audit record is written.
 
 The driver reports no watts/volts/amps: those stay unknown for command-driven outlets.
 
 ### Writing a power driver
 
 Each driver lives in one module under `openmux/server/adapters/power_drivers/` (for example `dummy.py`, `command.py`):
-- Implement `api.PduDriver` for the class: `list_outlets`, `read_states`, `set_state`; the constructor takes the `options` dict and raises `ValueError` on invalid config (the adapter logs a line and skips the PDU entry). The power adapter merges the per-PDU `outlets` list into that dict as `options["outlets"]` before constructing, so a driver that takes an outlet list reads it from `options["outlets"]` (entries are `{id, ...}` mappings or bare id strings). The `options` section must not set its own `outlets` key.
-- Wrap the device-wide read path with `readbackoff.ReadBackoff`: while `in_backoff()` is true, do no device IO and return `None` from `read_states()`. Call `note_failure()` and also return `None` on a device-wide read failure (connection refused, timeout, whole-device error). Call `note_success()` on a device-wide successful read. Per-outlet failures ride as reading errors and do not touch the window.
-- Expose an `info()` function that returns the Config Editor metadata: `label`, `description`, `options_keys` (one entry per supported key: `key`, `type`, `default`, `help`), and `options_example`.
-- Register the module at the bottom of `openmux/server/adapters/pdu.py`: import it, then add one line to `DRIVERS` (key -> class) and one to `DRIVER_INFO` (key -> `info`). The Config Editor driver select and the per-driver options help update automatically from the registry.
-- Static discovery (discovery is `list_outlets()`'s job; the `command` driver uses the configured outlet list) and option validation are the driver's responsibilities.
+- Implement `api.PduDriver` for the class: `list_outlets`, `read_states`, `set_state`; the constructor takes the `options` dict
+  and raises `ValueError` on invalid config (the adapter logs a line and skips the PDU entry). The power adapter merges the
+  per-PDU `outlets` list into that dict as `options["outlets"]` before constructing, so a driver that takes an outlet list
+  reads it from `options["outlets"]` (entries are `{id, ...}` mappings or bare id strings). The `options` section must not set
+  its own `outlets` key.
+- Wrap the device-wide read path with `readbackoff.ReadBackoff`: while `in_backoff()` is true, do no device IO and return
+  `None` from `read_states()`. Call `note_failure()` and also return `None` on a device-wide read failure (connection refused,
+  timeout, whole-device error). Call `note_success()` on a device-wide successful read. Per-outlet failures ride as reading
+  errors and do not touch the window.
+- Expose an `info()` function that returns the Config Editor metadata: `label`, `description`, `options_keys` (one entry per
+  supported key: `key`, `type`, `default`, `help`), and `options_example`.
+- Register the module at the bottom of `openmux/server/adapters/pdu.py`: import it, then add one line to `DRIVERS` (key ->
+  class) and one to `DRIVER_INFO` (key -> `info`). The Config Editor driver select and the per-driver options help update
+  automatically from the registry.
+- Static discovery (discovery is `list_outlets()`'s job; the `command` driver uses the configured outlet list) and option
+  validation are the driver's responsibilities.
 
 Example port mapping:
 ```yaml
@@ -726,11 +875,33 @@ serial_ports:
     power: ["rack1.3", "phaseA.A1"]   # dual feed
 ```
 
-The telnet, SSH, and CLI-client escape menus have a `p` command for power. It shows an interactive menu of the feeds for the console you are attached to, numbered one per line with an on/off tag (for example ` 1  [on]   rack1.1`). Enter a number to toggle that feed. Enter `a` to toggle all feeds of the console. Press Enter to leave the menu without a change; the menu ends with an `[EXITING POWER]` marker. Switching needs the same access as the `POWER` command above. The CLI client sends the request and switch as OMXCTRL control frames, so it works over both the TCP client protocol and the WebSocket protocol; the unimplemented playback `p`/`P` placeholders it used are removed. Every attached session (CLI client, client listener, telnet, SSH, web console) also gets the live `[POWER]` / `[POWER WARNING]` notice when a feed changes under it. See [../GLOSSARY.md](../GLOSSARY.md) for the terms PDU, outlet, outlet id, outlet ref, and feed.
+The telnet, SSH, and CLI-client escape menus have a `p` command for power. It shows an interactive menu of the feeds for the
+console you are attached to, numbered one per line with an on/off tag (for example ` 1 [on] rack1.1`). Enter a number to toggle
+that feed. Enter `a` to toggle all feeds of the console. Press Enter to leave the menu without a change; the menu ends with an
+`[EXITING POWER]` marker. Switching needs the same access as the `POWER` command above. The CLI client sends the request and
+switch as OMXCTRL control frames, so it works over both the TCP client protocol and the WebSocket protocol; the unimplemented
+playback `p`/`P` placeholders it used are removed. Every attached session (CLI client, client listener, telnet, SSH, web
+console) also gets the live `[POWER]` / `[POWER WARNING]` notice when a feed changes under it. See
+[../GLOSSARY.md](../GLOSSARY.md) for the terms PDU, outlet, outlet id, outlet ref, and feed.
 
-Federation: when a port federates across MuxCon, its declared power feeds and the origin node's last-reported outlet state travel with the port (a `POWER:STATE` control frame carries live changes). A peer renders the feed badge, the `/api/ports` power block, and the `p` power menu for a federated port as it does for a local one, and the state survives a peer restart via the federated cache. The peer shows the origin's state only (no origin PDU list, telemetry, or watts). Federated feeds are named with the **global ref** form `<origin_server_id>::<pdu>.<outlet>` (the same `::` origin convention as the federation display strings), so an outlet of the same name on two nodes never collides: a bare ref always means this node's own outlet, and a federated feed is switched by its global name (for example `POWER peerO::rack1.1 off`). Switching an origin-owned outlet is possible from a peer when the user holds an open read-write console session on a fed port that the outlet feeds — the switch relays to the origin node over `POWER:SWITCH` / `POWER:RESULT` and executes there (web in-session power menu, `POWER` command, telnet/SSH/CLI `p` menu), like a local outlet. The origin refuses when the user cannot open every console the outlet feeds that it knows of, and names those consoles in the refusal. The web Power REST page (no console session to anchor on) stays read-only for such refs, replying with one typed error naming the origin node. Feed-list config edits on the origin reach peers at the next re-advertise. See [../design/muxcon.md](../design/muxcon.md) section 4.5 (state) and section 4.6 (switch relay) for the wire format and the one-hop state limit.
+Federation: when a port federates across MuxCon, its declared power feeds and the origin node's last-reported outlet state
+travel with the port (a `POWER:STATE` control frame carries live changes). A peer renders the feed badge, the `/api/ports`
+power block, and the `p` power menu for a federated port as it does for a local one, and the state survives a peer restart via
+the federated cache. The peer shows the origin's state only (no origin PDU list, telemetry, or watts). Federated feeds are
+named with the **global ref** form `<origin_server_id>::<pdu>.<outlet>` (the same `::` origin convention as the federation
+display strings), so an outlet of the same name on two nodes never collides: a bare ref always means this node's own outlet,
+and a federated feed is switched by its global name (for example `POWER peerO::rack1.1 off`). Switching an origin-owned outlet
+is possible from a peer when the user holds an open read-write console session on a fed port that the outlet feeds — the switch
+relays to the origin node over `POWER:SWITCH` / `POWER:RESULT` and executes there (web in-session power menu, `POWER` command,
+telnet/SSH/CLI `p` menu), like a local outlet. The origin refuses when the user cannot open every console the outlet feeds that
+it knows of, and names those consoles in the refusal. The web Power REST page (no console session to anchor on) stays read-only
+for such refs, replying with one typed error naming the origin node. Feed-list config edits on the origin reach peers at the
+next re-advertise. See [../design/muxcon.md](../design/muxcon.md) section 4.5 (state) and section 4.6 (switch relay) for the
+wire format and the one-hop state limit.
 
-Follow-on work beyond v1 (vendor drivers like Raritan and APC, more listener surfaces, metrics history, multi-hop live-power relay) is tracked in [../power-roadmap.md](../power-roadmap.md). The user-defined `command` driver covers devices that expose a CLI; vendor drivers cover managed PDUs with an SNMP or vendor API.
+Follow-on work beyond v1 (vendor drivers like Raritan and APC, more listener surfaces, metrics history, multi-hop live-power
+relay) is tracked in [../power-roadmap.md](../power-roadmap.md). The user-defined `command` driver covers devices that expose a
+CLI; vendor drivers cover managed PDUs with an SNMP or vendor API.
 
 ## Configuration Validation
 
@@ -742,7 +913,8 @@ At startup, each adapter validates its configuration and the server reports clea
 
 ## Migration
 
-This document describes only the current adapter configuration. Legacy formats (per-port `adapter:` entries and older field names) are not covered here and should be considered deprecated.
+This document describes only the current adapter configuration. Legacy formats (per-port `adapter:` entries and older field
+names) are not covered here and should be considered deprecated.
 
 ## Best Practices
 
@@ -753,4 +925,5 @@ This document describes only the current adapter configuration. Legacy formats (
 5. Document custom commands: include `cwd`/`env` and comments for complex setups
 
 Debugging and profiling:
-- PTY read profiling logs are emitted at debug level. Enable debug logging to diagnose latency; keep disabled in production to reduce log volume.
+- PTY read profiling logs are emitted at debug level. Enable debug logging to diagnose latency; keep disabled in production to
+  reduce log volume.
