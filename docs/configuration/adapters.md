@@ -623,8 +623,9 @@ Supported keys:
 - `pdus[].driver`: Driver registry key: `dummy` or `command`
 - `pdus[].poll_interval`: PER-PDU refresh in seconds. `0` = no poll task (reads on demand only). Default: 10
 - `pdus[].options`: Object of pure driver settings, passed to the driver. Keys are driver-specific (see the driver references
-  below); the driver validates them and rejects unknown keys at startup. The key `outlets` is reserved and rejected here: the
-  per-PDU `outlets` list below is the single outlet source
+  below); the driver validates them and rejects unknown keys at startup. The key `outlets` is reserved and rejected here by
+  the schema too, so `--check-config` and the Config Editor name it: the per-PDU `outlets` list below is the single outlet
+  source
 - `pdus[].outlets`: The outlet list. Each entry is `{id: "<outlet id>", ...}` (a bare string `"<outlet id>"` is shorthand for
   `{id: ...}`) and may carry optional keys: `description` (a label shown by the web UI; owned by the power adapter) and
   driver-specific fields (for the `command` driver: `index`, `on_cmd`, `off_cmd`, `state_cmd`, `state_pattern`). The power

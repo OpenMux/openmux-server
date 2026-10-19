@@ -10,6 +10,26 @@ workflow.
 
 Changes since v1.0.3 (2026-09-17).
 
+### Config changes to check before upgrading
+
+- **`power` PDU outlets moved out of `options` (breaking).** A PDU entry now declares one top-level `outlets` list next to
+  `driver:`, with one entry per outlet (`{id: ..., description: ...}`, plus that outlet's driver fields). A PDU that keeps
+  `outlets` inside `options` does not build: the boot log shows `Invalid configuration for PDU Power` and
+  `Failed to create adapter for plugin PDU Power`, and the server keeps serving every other port while the Power page answers
+  `Power management is not configured`. Boot does not abort, so check before you upgrade: find `outlets` under a PDU `options:`
+  block in `server.yaml` and move that list up one level.
+
+- **`--check-config` and the Config Editor reject the old key too.** In 1.0.3 the schema accepted an `outlets` key inside a PDU
+  `options`, so only the boot log reported it and `--check-config` called an old file valid. That key now fails schema
+  validation (`power.pdus[N].options` is named, exit code 1) and the Config Editor refuses the save.
+- **`power` is a top-level section, and it gates control.** `power.enabled: false` stops polling and hides the Power menu, and
+  a `power_switch` from a client or the Status page is then refused (`power management is not configured`). The OpenMux you
+  connect to owns that decision, not the target OpenMux, so enable power on the managing side.
+
+- **New optional keys, no action needed.** `power_switch_timeout_sec` on a `muxcon:` port sets how long one outlet may take to
+  confirm a switch (default 5.0). On a `driver: command` PDU, `host`, `username` and `password` send the commands over SSH, and
+  `state_cmd` with `state_pattern` or `state_token_on` / `state_token_off` reads an outlet state back from the command output.
+
 ### New
 
 - **Action scripts can control the port's power feeds.** The action script's `session` object gains `list_power()`,
@@ -300,6 +320,31 @@ Changes since v1.0.3 (2026-09-17).
   catalog read and next run launch. The plugin re-reads the `port_actions` section from the running config on every use, so a
   soft reload or a Config Editor save is enough - a full reload is no longer required. Removing a grant or a directory also
   takes effect on the next use. No config change is required.
+
+### Suggested upgrade checklist
+
+1. Read "Config changes to check before upgrading" above. One `power:` key move is breaking.
+
+2. In `server.yaml`, move every PDU `outlets` list out of `options:` to the PDU top level, with one entry per outlet.
+
+3. Run `openmux-server --check-config` on the three files. An old `options.outlets` entry is named there, so a clean run means
+   the `power:` section needs no edit.
+4. After the first start, search the log for `Failed to create adapter for plugin PDU Power`. Then open the Power page and
+   confirm every PDU and outlet is listed.
+
+5. Set `power.enabled: true` on the OpenMux that clients connect to. That server, not the target server, decides whether a
+   switch is allowed.
+
+6. Tell anyone who scripts a raw TCP or telnet session: a blank line no longer ends the command phase, and the CLI client now
+   opens with a `mux> ` prompt.
+
+7. Check monitoring that reads adapter status: a disabled `client_listener` or `power:` adapter now reports `disabled`, not
+   `stopped`.
+
+8. Optional: raise `power_switch_timeout_sec` on a `muxcon:` port whose PDU is slow to confirm a switch. The default is 5.0
+   seconds.
+
+9. No data migration is required. Every other config section loads unchanged.
 
 ## [1.0.3]
 

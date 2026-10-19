@@ -317,3 +317,31 @@ def test_muxcon_public_keys_nested_filters_rejected():
     }
     errors = list(Draft202012Validator(_config_schema()).iter_errors(cfg))
     assert errors, "removed nested per-key muxcon form must be rejected"
+
+
+def test_power_pdu_options_outlets_rejected():
+    # A PDU declares its outlets once, in the top-level `outlets` list. The
+    # pre-1.0.4 form (outlets inside the PDU `options`) is rejected here as
+    # well as by the adapter, so --check-config and the Config Editor name it
+    # instead of reporting the file as valid.
+    old = {"power": {"pdus": [{"name": "r1", "driver": "dummy", "options": {"outlets": ["1", "2"]}}]}}
+    errors = list(Draft202012Validator(_config_schema()).iter_errors(old))
+    assert errors, "options.outlets must be rejected by the schema"
+    assert any("outlets" in e.message for e in errors), [e.message for e in errors]
+
+    # The current form still validates, and the other driver keys stay free-form.
+    _validate({"power": {"pdus": [{"name": "r1", "driver": "dummy", "options": {"baudrate": 9600}, "outlets": ["1", "2"]}]}})
+    _validate(
+        {
+            "power": {
+                "pdus": [
+                    {
+                        "name": "r1",
+                        "driver": "command",
+                        "options": {"host": "10.0.0.5", "password": "secret", "state_token_off": ["2"]},
+                        "outlets": [{"id": "1", "index": 3}],
+                    }
+                ]
+            }
+        }
+    )

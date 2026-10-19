@@ -485,10 +485,16 @@ properties:
             # Deliberate: 0 is a real value (on-demand reads), not "unset".
             # Default 10 (see pdu.py DEFAULT_POLL_INTERVAL).
             poll_interval: { type: number, minimum: 0 }
-            # Free-form, driver-specific settings. The adapter requires it
-            # to be a mapping and rejects an `outlets` key here (the
-            # per-PDU `outlets` list below is the only outlet source).
-            options: { type: object }
+            # Free-form, driver-specific settings, except `outlets`: one PDU
+            # declares its outlets only in the `outlets` list below, so an
+            # `outlets` key here is the pre-1.0.4 form and is rejected (the
+            # adapter rejects it too, see PduAdapter._driver_options).
+            # `propertyNames` is used instead of `not: {required: [outlets]}`
+            # so the violation names the key without echoing the whole
+            # mapping: a `driver: command` PDU keeps its `password` in here.
+            options:
+              type: object
+              propertyNames: { not: { const: outlets } }
             # THE outlet list: ids, optional labels, and driver-specific
             # per-outlet fields. A bare string entry is shorthand for
             # {id: <string>}. The item stays open (no
