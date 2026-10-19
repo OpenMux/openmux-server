@@ -9,9 +9,10 @@ browser tab receives them.
 Frames are nudges, not data: the page re-fetches its REST endpoint when the
 socket (re)opens, so a dropped frame can never strand the UI (see
 docs/design/port_actions.md, "Sidebar status annotations"). Producers:
-the Port Actions runner (``action_status``) and the coalesced live-status
-nudge (``status_change``, issue #85, migrated from the removed dedicated
-``/ws/status`` socket).
+the Port Actions runner (``action_status``) and the coalesced live nudges
+``status_change`` (status page, issue #85), ``power_changed`` (Power pages)
+and ``ports_changed`` (sidebar console list), all from
+`WebConsoleAdapter._kick_site_nudge()`.
 """
 
 import asyncio

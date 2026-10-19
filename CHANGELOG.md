@@ -227,6 +227,17 @@ Changes since v1.0.3 (2026-09-17).
   unchanged. A custom page that connected to `/ws/power` must switch to
   `/ws/events`. No config change is required.
 
+- **The sidebar console list now follows port add and remove live.** A port
+  added after the page load (for example by a hot config reload or by
+  federation) stayed invisible until reload; a removed port stayed listed and
+  clickable. The web console now publishes a coalesced `{"type":
+  "ports_changed"}` frame on `/ws/events` (at most one per 2 s) whenever a
+  port registers or unregisters, and every page rebuilds the list from
+  `GET /api/ports`. The rebuild keeps the expand/collapse state, the label
+  options, the action dots, and the current-port highlight. A tab also
+  refreshes the list once when its site socket reconnects. No config change
+  is required.
+
 - **The Status and Power pages stop reconnecting their live WebSocket when
   the login session dies.** The pages retried a fixed every 3 s forever. A
   server restart clears login sessions, so every retry was then rejected:

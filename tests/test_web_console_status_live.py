@@ -3,10 +3,12 @@
 Covers the three new moving parts:
 - `_extract_status_fragments()` — marker-based split of the rendered markup.
 - `handle_api_status_fragments()` — auth gate + fragment JSON with sort honored.
-- `WebConsoleAdapter._kick_site_nudge()` — coalesced `status_change` site
-  events for the status page (issue #85, migrated from the removed
-  /ws/status socket onto the shared /ws/events hub; hub fan-out itself is
-  covered by tests/server/test_site_events.py).
+- `WebConsoleAdapter._kick_site_nudge()` — coalesced site nudges on the
+  shared /ws/events hub (issue #85, migrated from the removed /ws/status
+  socket; hub fan-out itself is covered by tests/server/test_site_events.py).
+- `WebConsoleAdapter._on_port_meta_update()` — which meta event kicks which
+  nudge topic (`status_change` always; `power_changed` for outlet changes;
+  `ports_changed` for port register/unregister).
 
 Style follows test_web_console_handle_ws_coverage.py: module-level `_get_adapter`
 /`web.WebSocketResponse` are monkeypatched and handlers run against scripted
@@ -211,13 +213,15 @@ class _KickStub:
 
     _kick_site_nudge = wc.WebConsoleAdapter._kick_site_nudge
     _site_nudge_later = wc.WebConsoleAdapter._site_nudge_later
-    # 0 debounce for a deterministic test; production uses 2 s / 1 s.
-    _SITE_NUDGE_INTERVALS = {"status_change": 0.0, "power_changed": 0.0}
+    _on_port_meta_update = wc.WebConsoleAdapter._on_port_meta_update
+    # 0 debounce for a deterministic test; production uses 2 s / 1 s / 2 s.
+    _SITE_NUDGE_INTERVALS = {"status_change": 0.0, "power_changed": 0.0, "ports_changed": 0.0}
 
     def __init__(self, site_listeners=1):
         self.published = []
         self._site_events = SimpleNamespace(client_count=lambda: site_listeners)
         self._site_nudges = {}
+        self._meta_subscribers = {}  # no console subscribers: meta broadcast short-circuits
         self.logger = logging.getLogger("kittest")
 
     def publish_site_event(self, event):
@@ -264,6 +268,46 @@ async def test_kick_topics_coalesce_independently():
     s._kick_site_nudge("status_change")  # coalesced into the pending status push
     await s._pending("status_change")
     await s._pending("power_changed")
+    assert sorted(e["type"] for e in s.published) == ["power_changed", "status_change"]
+
+
+# --- _on_port_meta_update nudge routing (which topic each event kicks) -----------
+
+
+async def _drain(stub):
+    for state in list(stub._site_nudges.values()):
+        if state.get("task") is not None:
+            await state["task"]
+
+
+@pytest.mark.asyncio
+async def test_meta_any_change_kicks_status_change():
+    s = _KickStub()
+    s._on_port_meta_update("p1", {"connected": True})
+    # Only the generic status nudge; no power or ports topic is scheduled.
+    assert set(s._site_nudges) == {"status_change"}
+    await _drain(s)
+    assert s.published == [{"type": "status_change"}]
+
+
+@pytest.mark.asyncio
+async def test_meta_port_registered_kicks_status_and_ports():
+    for event in ("port_registered", "port_unregistered", "federated_port_registered", "federated_port_unregistered"):
+        s = _KickStub()
+        s._on_port_meta_update("p1", {"event": event})
+        # A sidebar-list change always carries the generic status nudge too.
+        assert set(s._site_nudges) == {"status_change", "ports_changed"}, event
+        await _drain(s)
+        assert sorted(e["type"] for e in s.published) == ["ports_changed", "status_change"]
+
+
+@pytest.mark.asyncio
+async def test_meta_power_change_kicks_status_and_power_not_ports():
+    s = _KickStub()
+    s._on_port_meta_update("p1", {"event": "power_outlet_changed", "on": False})
+    # Power nudges the Power pages, not the sidebar; no ports_changed fired.
+    assert set(s._site_nudges) == {"status_change", "power_changed"}
+    await _drain(s)
     assert sorted(e["type"] for e in s.published) == ["power_changed", "status_change"]
 
 

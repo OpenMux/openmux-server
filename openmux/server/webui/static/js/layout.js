@@ -614,3 +614,108 @@
   }
   connect();
 })();
+
+// Sidebar console-list freshness: #console-ports is server-rendered once per
+// page load, so an added or removed port stays invisible until reload. The
+// server publishes a coalesced "ports_changed" frame whenever a port
+// registers or unregisters (local hot-reload or federation); this view
+// rebuilds the list from /api/ports on that frame, and on every site-socket
+// (re)open, which also covers events missed while the socket was down. The
+// Config Editor keeps its own copy of this rebuild (refreshSidebarPorts in
+// config_editor.js) for the post-save reload; this one serves every page.
+(function () {
+  function getBasePath() {
+    const meta = document.querySelector('meta[name="omx-base-path"]');
+    return meta ? meta.getAttribute('content') || '' : '';
+  }
+  let fetching = false;
+  let refetchQueued = false;
+
+  // The rebuilt links carry no server-side state, so the active highlight is
+  // recomputed: ?port= on a console page, else the item that was active.
+  function currentPortName() {
+    try {
+      const qp = new URLSearchParams(window.location.search).get('port');
+      if (qp) return qp;
+    } catch (e) {}
+    const act = document.querySelector('#console-ports a.nav-sub-item.active');
+    if (act) {
+      try {
+        return new URL(act.getAttribute('href') || '', window.location.origin).searchParams.get('port') || '';
+      } catch (e) {}
+    }
+    return '';
+  }
+
+  function rebuildSidebarPorts(ports) {
+    const list = document.getElementById('console-ports');
+    if (!list) return;
+    const active = currentPortName();
+    // Keep the container itself (its expand/collapse display style survives);
+    // replace only the links. Carry the label data the template emits
+    // (data-origin / data-desc) so applyPortLabels() keeps working.
+    list.querySelectorAll('a.nav-sub-item, .nav-sub-empty').forEach((el) => el.remove());
+    if (!ports.length) {
+      const empty = document.createElement('div');
+      empty.className = 'nav-sub-empty';
+      empty.textContent = 'No ports';
+      list.appendChild(empty);
+    } else {
+      for (const p of ports) {
+        const name = String((p && p.name) || '');
+        if (!name) continue;
+        const a = document.createElement('a');
+        a.className = 'nav-sub-item' + (name === active ? ' active' : '');
+        a.href = getBasePath() + '/console?port=' + encodeURIComponent(name);
+        a.setAttribute('data-origin', (p && p.origin_server_id) || 'local');
+        a.setAttribute('data-desc', (p && p.description) || '');
+        a.textContent = name;
+        list.appendChild(a);
+      }
+    }
+    // Re-capture the natural order (the old link elements are detached) and
+    // re-apply label prefs and the Port Actions dots to the fresh links.
+    if (typeof window.setPortOrder === 'function') window.setPortOrder();
+    if (typeof window.applyPortLabels === 'function') window.applyPortLabels();
+  }
+
+  function refreshSidebar() {
+    const list = document.getElementById('console-ports');
+    if (!list) return; // page has no sidebar list
+    if (fetching) {
+      refetchQueued = true; // coalesce nudges that arrive mid-fetch
+      return;
+    }
+    fetching = true;
+    fetch(getBasePath() + '/api/ports', { credentials: 'same-origin' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (j && Array.isArray(j.ports)) rebuildSidebarPorts(j.ports);
+      })
+      .catch(() => {
+        /* transient; the next nudge or reload retries */
+      })
+      .finally(() => {
+        fetching = false;
+        if (refetchQueued) {
+          refetchQueued = false;
+          refreshSidebar();
+        }
+      });
+  }
+
+  window.addEventListener('omx-site-event', (ev) => {
+    const d = ev && ev.detail;
+    if (d && d.type === 'ports_changed') refreshSidebar();
+  });
+  // RE-open (not the first open) doubles as a freshness refresh: it covers
+  // ports that came and went while the socket was down. The first open needs
+  // no refresh — the page was just rendered with the current list, and
+  // /api/ports is a full snapshot we should not fetch needlessly per page view.
+  let socketOpenedOnce = false;
+  window.addEventListener('omx-site-event-open', () => {
+    const first = !socketOpenedOnce;
+    socketOpenedOnce = true;
+    if (!first) refreshSidebar();
+  });
+})();

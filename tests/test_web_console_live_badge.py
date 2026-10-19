@@ -84,3 +84,27 @@ def test_terminal_pages_never_call_the_helper():
     for name in ("console.html.j2",):
         text = (TPL / name).read_text(encoding="utf-8")
         assert "omxSetLive" not in text
+
+
+def test_layout_js_rebuilds_sidebar_from_ports_changed_nudge():
+    """Sidebar console list rebuilds on the ports_changed site nudge.
+
+    A port added/removed after load is otherwise invisible until reload; the
+    shared /ws/events socket (owned by layout.js) makes #console-ports follow
+    the live set. This pins the static contract of that rebuild block.
+    """
+    # Pull just the sidebar-refresh IIFE (from its comment to the file end).
+    start = LAYOUT_JS.index("Sidebar console-list freshness")
+    block = LAYOUT_JS[start:]
+    # It consumes exactly the ports_changed frame and reuses /api/ports.
+    assert "'ports_changed'" in block
+    assert "/api/ports" in block
+    assert "addEventListener('omx-site-event'" in block
+    # The rebuild carries the label data applyPortLabels()/sorting need, and
+    # re-captures the natural order so prefs and dots survive.
+    assert "data-origin" in block
+    assert "data-desc" in block
+    assert "window.setPortOrder" in block
+    assert "window.applyPortLabels" in block
+    # No page-owned socket here either; it rides the layout site socket.
+    assert "new WebSocket(" not in block

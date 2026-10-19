@@ -1063,13 +1063,15 @@ async def handle_ws_events(request: web.Request) -> web.WebSocketResponse:
 
     Send-only for the client: one small JSON frame per event published through
     the adapter's `SiteEventHub` (frame shape: ``{"type": "<topic>", ...}``).
-    Producers call `WebConsoleAdapter.publish_site_event()`; the Port Actions
-    runner emits ``action_status`` frames and the live status page receives
-    coalesced ``status_change`` nudges (the old dedicated ``/ws/status``
-    socket was migrated here). Consumers treat frames as nudges and re-fetch
-    their REST endpoint on (re)connect (see docs/design/port_actions.md,
-    "Sidebar status annotations"). Registered before ``/ws/{port_name}`` so
-    the static path wins (same as ``/ws/power``).
+    Producers call `WebConsoleAdapter.publish_site_event()`: the Port Actions
+    runner emits ``action_status`` frames, and the live nudges ride the same
+    socket -- coalesced ``status_change`` (status page; the old dedicated
+    ``/ws/status`` socket was migrated here), ``power_changed`` (Power pages;
+    replaced ``/ws/power``) and ``ports_changed`` (the sidebar console list
+    rebuilds from ``/api/ports`` when a port is added or removed). Consumers
+    treat frames as nudges and re-fetch their REST endpoint on (re)connect
+    (see docs/design/port_actions.md, "Sidebar status annotations").
+    Registered before ``/ws/{port_name}`` so the static path wins.
     """
     adapter = _get_adapter(request)
     if not request.get("username"):
@@ -2006,8 +2008,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
         # Live page nudges on the shared /ws/events hub: one coalescing task
         # and last-push timestamp per topic ("status_change" -> the status
         # page re-fetches /api/status/fragments; "power_changed" -> the Power
-        # pages re-fetch /api/power). Frames carry no data (issue #85; the
-        # Power nudge replaced the dedicated /ws/power socket).
+        # pages re-fetch /api/power; "ports_changed" -> layout.js rebuilds the
+        # sidebar console list from /api/ports). Frames carry no data (issue
+        # #85; the Power nudge replaced the dedicated /ws/power socket).
         self._site_nudges: Dict[str, Dict[str, Any]] = {}
         # Site-wide event fan-out (/ws/events): small JSON frames (first
         # producer: Port Actions run status for the sidebar annotations) to
@@ -3055,6 +3058,16 @@ class WebConsoleAdapter(BaseGenericAdapter):
             # changes nudge the Power pages to re-fetch /api/power.
             if isinstance(changes, dict) and changes.get("event") == "power_outlet_changed":
                 self._kick_site_nudge("power_changed")
+            # Sidebar console list: a port appearing or disappearing (local
+            # hot-reload or federation) nudges every page to rebuild
+            # #console-ports from /api/ports (layout.js).
+            if isinstance(changes, dict) and changes.get("event") in (
+                "port_registered",
+                "port_unregistered",
+                "federated_port_registered",
+                "federated_port_unregistered",
+            ):
+                self._kick_site_nudge("ports_changed")
             if not subs:
                 return
             # Check if we should bypass debounce for connection state changes
@@ -3082,7 +3095,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
             pass
 
     # Minimum spacing per coalesced site nudge topic; unlisted topics use 2.0 s.
-    _SITE_NUDGE_INTERVALS = {"status_change": 2.0, "power_changed": 1.0}
+    _SITE_NUDGE_INTERVALS = {"status_change": 2.0, "power_changed": 1.0, "ports_changed": 2.0}
 
     def _kick_site_nudge(self, topic: str) -> None:
         """Schedule one coalesced ``{"type": topic}`` nudge frame on /ws/events.
