@@ -41,7 +41,7 @@ who know the protocol.
 | `connect <port>` | `c <port>` | Send `CONNECT:<port>`. On `CONNECTED:<port>:<mode>`, print `[Connected to <port> (<mode>)]` and switch to stream mode. On `ERROR:...`, print the server line and stay in command mode. | server |
 | `connect` (no argument) | | Print `[Usage: connect <port>]` and `[Run "list" to see ports]`. | client |
 | `disconnect` | | Not attached: print `[Not attached. Type "connect <port>", or "quit" to end the session]`. Never sent on the wire. | client |
-| `power` | | Send the line verbatim. Forms: `power`, `power <pdu>`, `power <pdu>.<outlet>`, `power <pdu>.<outlet> on|off`. Server answers (see `docs/configuration/adapters.md`). | server |
+| `power` | | Send the line verbatim. Forms: `power`, `power <pdu>`, `power <pdu>.<outlet>`, `power <pdu>.<outlet> on\|off`. Server answers (see `docs/configuration/adapters.md`). | server |
 | `quit` | `exit`, `q` | End the session (same as the control menu `.`). | client + `QUIT` |
 | Empty line (Enter) | | Re-prompt. Sends zero bytes. | client |
 | Unknown line | | Print `[Unknown command: "<line>" — type "help"]`. Never sent on the wire. | client |
