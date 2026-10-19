@@ -987,7 +987,8 @@ async def handle_api_ports(request: web.Request) -> web.Response:
 
 # Live status page (issue #85): the markers in status_content.html.j2 delimit
 # the regions the Auto Refresh toggle swaps in place; the fragments endpoint
-# renders them and the /ws/status socket pokes viewers to re-fetch.
+# renders them and a `status_change` frame on the shared /ws/events socket
+# nudges viewers to re-fetch (see openmux/server/site_events.py).
 _STATUS_FRAGMENT_RE = re.compile(r"<!--OMX-STATUS-FRAGMENT:BEGIN:(\w+)-->(.*?)<!--OMX-STATUS-FRAGMENT:END:\1-->", re.S)
 STATUS_FRAGMENT_NAMES = ("summary", "ports", "federation", "clients")
 
@@ -1057,50 +1058,18 @@ async def handle_api_status_fragments(request: web.Request) -> web.Response:
         return web.json_response({"error": True, "message": "Failed to render status fragments"}, status=500)
 
 
-async def handle_ws_status(request: web.Request) -> web.WebSocketResponse:
-    """Live-update poke stream for the status page (issue #85).
-
-    Send-only for the client: one ``{"event": "status_change"}`` frame on
-    connect (freshness after a reload or reconnect) and one per coalesced
-    port-meta change. The viewer re-fetches /api/status/fragments on each
-    frame, like the Power pages re-fetch /api/power. Registered before
-    ``/ws/{port_name}`` so the static path wins (same as ``/ws/power``).
-    """
-    adapter = _get_adapter(request)
-    if not request.get("username"):
-        raise web.HTTPUnauthorized()
-    ws = web.WebSocketResponse(heartbeat=30)
-    await ws.prepare(request)
-    cid = f"statusws:{id(ws)}"
-    adapter._status_ws_clients[cid] = ws
-    try:
-        await ws.send_str(json.dumps({"event": "status_change"}, separators=(",", ":")))
-        async for _msg in ws:
-            # Ignore client frames; iterating detects the close and ends the stream.
-            pass
-    except Exception:
-        # justification: the client is gone; cleanup below still runs
-        pass
-    finally:
-        adapter._status_ws_clients.pop(cid, None)
-        try:
-            await ws.close()
-        except Exception:
-            # justification: shutdown cleanup; the transport may already be closed
-            pass
-    return ws
-
-
 async def handle_ws_events(request: web.Request) -> web.WebSocketResponse:
     """Site-wide event stream for cross-cutting UI updates (sidebar annotations).
 
     Send-only for the client: one small JSON frame per event published through
     the adapter's `SiteEventHub` (frame shape: ``{"type": "<topic>", ...}``).
     Producers call `WebConsoleAdapter.publish_site_event()`; the Port Actions
-    runner emits ``action_status`` frames. Consumers treat frames as nudges
-    and re-fetch their REST endpoint on (re)connect (see
-    docs/design/port_actions.md, "Sidebar status annotations"). Registered
-    before ``/ws/{port_name}`` so the static path wins (same as ``/ws/power``).
+    runner emits ``action_status`` frames and the live status page receives
+    coalesced ``status_change`` nudges (the old dedicated ``/ws/status``
+    socket was migrated here). Consumers treat frames as nudges and re-fetch
+    their REST endpoint on (re)connect (see docs/design/port_actions.md,
+    "Sidebar status annotations"). Registered before ``/ws/{port_name}`` so
+    the static path wins (same as ``/ws/power``).
     """
     adapter = _get_adapter(request)
     if not request.get("username"):
@@ -2034,14 +2003,13 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self._client_meta = {}  # client_id -> {ip, username}
         # Event-driven meta push support
         self._meta_subscribers = {}  # port_name -> set(client_id)
-        # Live status page (issue #85): client_id -> /ws/status WebSocketResponse,
-        # a single coalescing push task, and the last push timestamp for the
-        # debounce window. Pokes carry no data; the client re-fetches
-        # /api/status/fragments on each one.
-        self._status_ws_clients: Dict[str, Any] = {}
-        self._status_ws_push_task = None
-        self._status_ws_last_push = 0.0
-        self._status_ws_min_interval = 2.0
+        # Live status page (issue #85): a single coalescing push task and the
+        # last push timestamp for the debounce window. The nudge is a
+        # `status_change` frame on the shared /ws/events hub; it carries no
+        # data, and the status page re-fetches /api/status/fragments on it.
+        self._status_change_push_task = None
+        self._status_change_last_push = 0.0
+        self._status_change_min_interval = 2.0
         # Site-wide event fan-out (/ws/events): small JSON frames (first
         # producer: Port Actions run status for the sidebar annotations) to
         # every open tab. Frames are nudges; pages re-fetch their REST data on
@@ -2519,8 +2487,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
         app.router.add_get("/ws/power", _power_monitor._handle_ws_power)
         app.router.add_get("/api/csrf", self._handle_api_csrf)
         # Static paths win over /ws/{port_name} (registration order): a port
-        # literally named "status" is shadowed here, same precedent as "power".
-        app.router.add_get("/ws/status", handle_ws_status)
+        # literally named "events" is shadowed here, same precedent as "power".
         app.router.add_get("/ws/events", handle_ws_events)
         app.router.add_get("/ws/{port_name}", handle_ws)
         app.router.add_get("/ws/{server_id}/{port_name}", handle_ws_fqpn)
@@ -2532,11 +2499,11 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
     async def stop(self) -> None:
         self._set_running(False)
-        # Pending live-status poke (issue #85): the viewers go away with the
+        # Pending live-status nudge (issue #85): the viewers go away with the
         # console, so a scheduled push has nobody to serve.
-        if self._status_ws_push_task is not None:
-            self._status_ws_push_task.cancel()
-            self._status_ws_push_task = None
+        if self._status_change_push_task is not None:
+            self._status_change_push_task.cancel()
+            self._status_change_push_task = None
         try:
             # Close HTTP server
             # New dual-server cleanup first
@@ -3081,9 +3048,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
             # state from the `power` block the meta frame carries below.
             if isinstance(changes, dict) and changes.get("event") == "power_outlet_changed" and subs:
                 self._push_power_notice(port_name, changes)
-            # Live status page (issue #85): poke every /ws/status viewer on any
-            # port meta change, independent of the per-port console subscribers.
-            self._kick_status_ws()
+            # Live status page (issue #85): publish a coalesced status_change
+            # site event on any port meta change, independent of the per-port
+            # console subscribers.
+            self._kick_status_change()
             if not subs:
                 return
             # Check if we should bypass debounce for connection state changes
@@ -3110,48 +3078,41 @@ class WebConsoleAdapter(BaseGenericAdapter):
             # justification: best-effort meta push; the next event retries
             pass
 
-    def _kick_status_ws(self) -> None:
-        """Schedule one coalesced live-update poke for the status page (issue #85).
+    def _kick_status_change(self) -> None:
+        """Schedule one coalesced ``status_change`` site event for the status page (issue #85).
 
-        Called from the port-meta listener; frames carry no data, so a burst of
-        port events collapses into a single ``status_change`` push per client
-        (and at most one per ``_status_ws_min_interval``). A viewer re-fetches
-        /api/status/fragments on the poke, like the Power pages' pattern.
+        Called from the port-meta listener; the frame carries no data, so a
+        burst of port events collapses into a single push (and at most one per
+        ``_status_change_min_interval``). The status page re-fetches
+        /api/status/fragments on the frame; the frame fans out to every
+        /ws/events tab through `SiteEventHub` (the old dedicated /ws/status
+        socket was migrated here, so dead-peer pruning is the hub's job).
         """
-        if not self._status_ws_clients:
+        if not self._site_events.client_count():
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        task = self._status_ws_push_task
+        task = self._status_change_push_task
         if task is not None and not task.done():
-            return  # a poke is already scheduled; this event is coalesced into it
-        last = float(self._status_ws_last_push or 0.0)
-        delay = max(0.0, float(self._status_ws_min_interval) - (time.time() - last)) if last > 0 else 0.0
-        self._status_ws_push_task = loop.create_task(self._status_ws_push_later(delay))
+            return  # a nudge is already scheduled; this event is coalesced into it
+        last = float(self._status_change_last_push or 0.0)
+        delay = max(0.0, float(self._status_change_min_interval) - (time.time() - last)) if last > 0 else 0.0
+        self._status_change_push_task = loop.create_task(self._status_change_push_later(delay))
 
-    async def _status_ws_push_later(self, delay: float) -> None:
-        """Sleep out the debounce window, then poke every /ws/status viewer once."""
+    async def _status_change_push_later(self, delay: float) -> None:
+        """Sleep out the debounce window, then publish one ``status_change`` frame."""
         try:
             if delay > 0:
                 await asyncio.sleep(delay)
-            self._status_ws_last_push = time.time()
-            frame = json.dumps({"event": "status_change"}, separators=(",", ":"))
-            for cid in list(self._status_ws_clients.keys()):
-                ws = self._status_ws_clients.get(cid)
-                if ws is None:
-                    continue
-                try:
-                    await ws.send_str(frame)
-                except Exception:
-                    # Dead viewer: drop it so later pokes skip it (cleanup is best-effort).
-                    self._status_ws_clients.pop(cid, None)
+            self._status_change_last_push = time.time()
+            self.publish_site_event({"type": "status_change"})
         except asyncio.CancelledError:
             raise
         except Exception:
             # justification: best-effort live push; the next meta event retries
-            self.logger.debug("status ws poke failed", exc_info=True)
+            self.logger.debug("status_change site event failed", exc_info=True)
 
     def _schedule_meta_broadcast(self, port_name: str, changes: Optional[Dict[str, Any]], immediate: bool) -> None:
         """Broadcast a meta update now, or schedule a debounced one.

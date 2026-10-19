@@ -560,12 +560,15 @@
 // Global site-event socket (/ws/events): one connection per page for
 // cross-cutting updates, so features do not each open their own socket.
 // Every frame arrives as an "omx-site-event" CustomEvent (detail = parsed
-// JSON frame); each (re)connect also fires "omx-site-event-open" so
-// consumers re-fetch their bootstrap endpoint and fill frames missed while
-// disconnected. Server side: openmux/server/site_events.py; first producer:
-// Port Actions "action_status" frames feeding the sidebar dots (port_status.js).
+// JSON frame); each (re)connect also fires "omx-site-event-open" and every
+// drop "omx-site-event-close", so consumers can re-fetch their bootstrap
+// endpoint and show connection state without owning a socket. Server side:
+// openmux/server/site_events.py; producers: Port Actions "action_status"
+// frames (sidebar dots, port_status.js) and the status page's coalesced
+// "status_change" nudges (status.js, migrated off the old /ws/status socket).
 (function () {
   const policy = window.omxMakeReconnectPolicy();
+  window.omxSiteLive = false; // current socket state, readable by late subscribers
   function getBasePath() {
     const meta = document.querySelector('meta[name="omx-base-path"]');
     return meta ? meta.getAttribute('content') || '' : '';
@@ -586,6 +589,7 @@
     }
     ws.onopen = function () {
       policy.reset();
+      window.omxSiteLive = true;
       dispatch('omx-site-event-open', null);
     };
     ws.onmessage = function (ev) {
@@ -598,6 +602,8 @@
       if (data && typeof data === 'object') dispatch('omx-site-event', data);
     };
     ws.onclose = function () {
+      window.omxSiteLive = false;
+      dispatch('omx-site-event-close', null);
       policy.reconnect(connect);
     };
     ws.onerror = function () {

@@ -1,23 +1,24 @@
 (function () {
   // Status page live updates (issue #85; always-on per issue #86 follow-up):
-  // the page opens /ws/status on load - like the Power pages, no toggle -
-  // and swaps the OMX-STATUS-FRAGMENT regions in place on each server poke
+  // the page swaps the OMX-STATUS-FRAGMENT regions in place on each
+  // "status_change" nudge from the shared /ws/events site socket
   // (re-fetching /api/status/fragments, like the Power pages re-fetch
-  // /api/power). Scroll position and expanded per-port Details survive an
-  // update because nothing reloads. The old Auto Refresh button predates the
-  // WebSocket (it triggered a window.location.reload() every 5 s); with
-  // in-place updates its cost/benefit disappeared, so it is gone. Pre-#86
-  // browsers may still hold its per-browser pref key; delete the stale key.
+  // /api/power). The nudge used to arrive on a dedicated status WebSocket;
+  // it now rides the site socket layout.js owns (site_events.py hub), so the
+  // page holds one connection for all live updates. Scroll position and
+  // expanded per-port Details survive an update because nothing reloads. The
+  // old Auto Refresh button predates the WebSocket (it triggered a
+  // window.location.reload() every 5 s); with in-place updates its
+  // cost/benefit disappeared, so it is gone. Pre-#86 browsers may still hold
+  // its per-browser pref key; delete the stale key.
   try {
     localStorage.removeItem('omx_status_autorefresh');
   } catch (e) {}
-  // Reconnect timing lives in the shared layout.js policy (omxReconnect):
-  // capped backoff, and a stop with a "Signed out" badge once the server no
-  // longer accepts our session (e.g. after a server restart). An earlier
-  // fixed 3 s retry spammed the server forever in that case.
+  // Reconnect timing and the "Signed out" badge live in the layout.js site
+  // socket policy (omxMakeReconnectPolicy): capped backoff, and a stop once
+  // the server no longer accepts our session (e.g. after a server restart).
   // Regions the fragment endpoint returns, mapped to their container ids.
   const REGION_IDS = { summary: 'statusSummary', ports: 'portsTbody', federation: 'federationArea', clients: 'clientsTbody' };
-  let ws = null;
   let fetching = false;
   let refetchQueued = false;
 
@@ -90,39 +91,29 @@
       });
   }
 
-  function connect() {
-    if (ws) return;
-    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(scheme + '://' + location.host + getBasePath() + '/ws/status');
-    ws.onopen = () => {
-      setLive(true);
-      if (window.omxReconnectReset) window.omxReconnectReset();
-    };
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        if (msg && msg.event === 'status_change') refresh();
-      } catch (e) {
-        /* ignore malformed frame */
-      }
-    };
-    ws.onclose = () => {
-      ws = null;
-      setLive(false);
-      // Shared policy: backoff + stop when the login session died (layout.js).
-      if (window.omxReconnect) window.omxReconnect(connect);
-    };
-    ws.onerror = () => {
-      try {
-        if (ws) ws.close();
-      } catch (e) {}
-    };
-  }
+  // Live updates ride the site socket layout.js owns: "omx-site-event" carries
+  // each frame (detail = frame JSON); "-open"/"-close" report its state. The
+  // open refresh replaces the old per-connect freshness poke (it also covers
+  // the gap of a reconnect, which the old socket could not see mid-page).
+  window.addEventListener('omx-site-event', (ev) => {
+    const d = ev && ev.detail;
+    if (d && d.type === 'status_change') refresh();
+  });
+  window.addEventListener('omx-site-event-open', () => {
+    setLive(true);
+    refresh();
+  });
+  window.addEventListener('omx-site-event-close', () => setLive(false));
 
-  // Opt in before the first connect: a socket that never opens turns the
-  // badge red after the helper's debounce (issue #86).
-  setLive(false);
-  connect();
+  // Initial badge state: the site socket usually opens after this script ran
+  // (the open event above then refreshes); if it is already up, refresh now.
+  // A socket that never opens turns the badge red after the debounce (issue #86).
+  if (window.omxSiteLive) {
+    setLive(true);
+    refresh();
+  } else {
+    setLive(false);
+  }
 
   // Details (±) toggles. Delegated on the document so buttons arriving with a
   // fragment swap keep working without re-wiring.

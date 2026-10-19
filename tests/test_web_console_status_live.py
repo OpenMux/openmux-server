@@ -3,8 +3,10 @@
 Covers the three new moving parts:
 - `_extract_status_fragments()` — marker-based split of the rendered markup.
 - `handle_api_status_fragments()` — auth gate + fragment JSON with sort honored.
-- `handle_ws_status()` + `WebConsoleAdapter._kick_status_ws()` — viewer
-  registration, connect poke, and coalesced change pokes.
+- `WebConsoleAdapter._kick_status_change()` — coalesced `status_change` site
+  events for the status page (issue #85, migrated from the removed
+  /ws/status socket onto the shared /ws/events hub; hub fan-out itself is
+  covered by tests/server/test_site_events.py).
 
 Style follows test_web_console_handle_ws_coverage.py: module-level `_get_adapter`
 /`web.WebSocketResponse` are monkeypatched and handlers run against scripted
@@ -24,7 +26,6 @@ from openmux.server.web_console import (
     _extract_status_fragments,
     handle_api_status,
     handle_api_status_fragments,
-    handle_ws_status,
 )
 
 
@@ -202,129 +203,61 @@ async def test_fragments_endpoint_error_is_500_json(monkeypatch):
     assert json.loads(resp.body)["error"] is True
 
 
-# --- handle_ws_status -------------------------------------------------------------
-
-
-class _StatusFakeWS:
-    def __init__(self, *args, **kwargs):
-        _StatusFakeWS.instances.append(self)
-        self.incoming = []
-        self.sent = []
-        self.closed = 0
-
-    instances = []
-
-    async def prepare(self, request):
-        return None
-
-    async def send_str(self, text):
-        self.sent.append(text)
-
-    async def close(self):
-        self.closed += 1
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if self.incoming:
-            return self.incoming.pop(0)
-        raise StopAsyncIteration
-
-
-def _ws_adapter():
-    a = MagicMock(name="adapter")
-    a._status_ws_clients = {}
-    a.logger = Log()
-    return a
-
-
-@pytest.mark.asyncio
-async def test_ws_status_requires_username(monkeypatch):
-    a = _ws_adapter()
-    monkeypatch.setattr(wc, "_get_adapter", lambda request: a)
-    monkeypatch.setattr(wc.web, "WebSocketResponse", _StatusFakeWS)
-    with pytest.raises(web.HTTPUnauthorized):
-        await handle_ws_status(_FakeRequest(username=None))
-
-
-@pytest.mark.asyncio
-async def test_ws_status_pokes_on_connect_and_unregisters_on_close(monkeypatch):
-    a = _ws_adapter()
-    monkeypatch.setattr(wc, "_get_adapter", lambda request: a)
-    monkeypatch.setattr(wc.web, "WebSocketResponse", _StatusFakeWS)
-    ws = await handle_ws_status(_FakeRequest())
-    # One freshness poke on connect, then the socket ended (no incoming frames).
-    assert [json.loads(m) for m in ws.sent] == [{"event": "status_change"}]
-    assert a._status_ws_clients == {}, "viewer must be unregistered on socket close"
-    assert ws.closed == 1
-
-
-# --- _kick_status_ws coalescing (bound to a stub holder) --------------------------
+# --- _kick_status_change coalescing (bound to a stub holder) -----------------------
 
 
 class _KickStub:
-    """Exercises the real kick/push methods against stub state."""
+    """Exercises the real kick/push methods against stub state (hub-based)."""
 
-    _kick_status_ws = wc.WebConsoleAdapter._kick_status_ws
-    _status_ws_push_later = wc.WebConsoleAdapter._status_ws_push_later
+    _kick_status_change = wc.WebConsoleAdapter._kick_status_change
+    _status_change_push_later = wc.WebConsoleAdapter._status_change_push_later
 
-    def __init__(self):
-        self._status_ws_clients = {}
-        self._status_ws_push_task = None
-        self._status_ws_last_push = 0.0
+    def __init__(self, site_listeners=1):
+        self.published = []
+        self._site_events = SimpleNamespace(client_count=lambda: site_listeners)
+        self._status_change_push_task = None
+        self._status_change_last_push = 0.0
         # 0 debounce for a deterministic test; production default is 2s.
-        self._status_ws_min_interval = 0.0
+        self._status_change_min_interval = 0.0
         self.logger = logging.getLogger("kittest")
 
-
-class _Viewer:
-    def __init__(self, fail=False):
-        self.frames = []
-        self.fail = fail
-
-    async def send_str(self, frame):
-        if self.fail:
-            raise RuntimeError("gone")
-        self.frames.append(frame)
+    def publish_site_event(self, event):
+        self.published.append(event)
 
 
 @pytest.mark.asyncio
-async def test_kick_without_viewers_is_noop():
-    s = _KickStub()
-    s._kick_status_ws()
-    assert s._status_ws_push_task is None
+async def test_kick_without_site_listeners_is_noop():
+    s = _KickStub(site_listeners=0)
+    s._kick_status_change()
+    assert s._status_change_push_task is None
+    assert s.published == []
 
 
 @pytest.mark.asyncio
-async def test_kick_coalesces_burst_into_one_poke():
+async def test_kick_coalesces_burst_into_one_event():
     s = _KickStub()
-    v1, v2 = _Viewer(), _Viewer()
-    s._status_ws_clients = {"a": v1, "b": v2}
     # A burst of meta events: the pending-task guard admits exactly one push.
     for _ in range(5):
-        s._kick_status_ws()
-    await s._status_ws_push_task
-    assert [json.loads(f) for f in v1.frames] == [{"event": "status_change"}]
-    assert len(v2.frames) == 1
+        s._kick_status_change()
+    await s._status_change_push_task
+    assert s.published == [{"type": "status_change"}]
 
 
 @pytest.mark.asyncio
-async def test_kick_drops_dead_viewer_keeps_live_one():
+async def test_kick_after_a_completed_push_publishes_again():
     s = _KickStub()
-    dead, alive = _Viewer(fail=True), _Viewer()
-    s._status_ws_clients = {"dead": dead, "alive": alive}
-    s._kick_status_ws()
-    await s._status_ws_push_task
-    assert "dead" not in s._status_ws_clients
-    assert len(alive.frames) == 1
+    s._kick_status_change()
+    await s._status_change_push_task
+    s._kick_status_change()
+    await s._status_change_push_task
+    assert s.published == [{"type": "status_change"}, {"type": "status_change"}]
 
 
 # --- route registration order ------------------------------------------------------
 
 
 def test_routes_registered_with_expected_paths_and_ws_precedence(tmp_path):
-    """GET /api/status/fragments and /ws/status exist; /ws/status precedes /ws/{port_name}."""
+    """Fragments endpoint exists; the dedicated /ws/status socket is gone; /ws/events precedes /ws/{port_name}."""
 
     async def _csrf(request):
         return web.json_response({})
@@ -341,4 +274,5 @@ def test_routes_registered_with_expected_paths_and_ws_precedence(tmp_path):
     paths = [route.resource.canonical for route in app.router.routes()]
     assert "/api/status" in paths
     assert "/api/status/fragments" in paths
-    assert paths.index("/ws/status") < paths.index("/ws/{port_name}")
+    assert "/ws/status" not in paths, "the migrated socket must not come back"
+    assert paths.index("/ws/events") < paths.index("/ws/{port_name}")

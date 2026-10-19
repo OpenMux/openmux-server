@@ -55,18 +55,22 @@ def test_status_page_uses_shared_helper_and_has_no_toggle():
     assert "statusLiveState" not in STATUS_JS
     assert "statusLiveState" not in STATUS_TPL, "the #85 page-local badge must be gone"
     # The page is always live (issue #86 follow-up): no Auto Refresh button,
-    # no per-browser pref, opt-in + connect run unconditionally on load.
+    # no per-browser pref.
     assert "autoRefreshToggle" not in STATUS_JS
     assert "autoRefreshToggle" not in STATUS_TPL
     assert "localStorage.setItem" not in STATUS_JS, "the Auto Refresh pref must be gone"
-    opt_in = STATUS_JS.index("setLive(false);")
-    top_level_connect = re.search(r"\n  connect\(\);", STATUS_JS)
-    assert top_level_connect, "status.js must connect on load"
-    assert opt_in < top_level_connect.start(), "must opt in before the first connect"
-    opt_in = STATUS_JS.index("setLive(false)")
-    top_level_connect = re.search(r"\n  connect\(\);", STATUS_JS)
-    assert top_level_connect, "status.js must connect on load"
-    assert opt_in < top_level_connect.start(), "must opt in before the first connect"
+    # Migrated off the dedicated status socket: the page owns NO socket.
+    # The shared /ws/events socket in layout.js drives it via site events.
+    assert "new WebSocket(" not in STATUS_JS
+    assert "'/ws/" not in STATUS_JS, "status.js must not open a server socket"
+    for event in ("'omx-site-event'", "'omx-site-event-open'", "'omx-site-event-close'"):
+        assert f"addEventListener({event}" in STATUS_JS, f"must listen for {event}"
+    assert "status_change" in STATUS_JS, "must react to the status_change nudge frame"
+    # Badge contract: red opt-in unless the site socket is already open at
+    # script init (a socket that never opens turns the badge red after the debounce).
+    assert "window.omxSiteLive" in STATUS_JS
+    assert "setLive(true)" in STATUS_JS
+    assert "setLive(false)" in STATUS_JS
 
 
 def test_terminal_pages_never_call_the_helper():

@@ -210,6 +210,14 @@ Changes since v1.0.3 (2026-09-17).
   config change is required. See `docs/design/port_actions.md` ("Sidebar status
   annotations").
 
+- **The status page now receives its live nudges on the shared site socket.**
+  The page used its own `/ws/status` WebSocket for the `status_change` poke
+  that triggers a fragments re-fetch. That socket is removed; the poke now
+  arrives as a `{"type": "status_change"}` frame on `/ws/events`, which every
+  page already holds. Same 2 s coalescing, same in-place updates; pages now
+  keep one live socket instead of two. A custom page that connected to
+  `/ws/status` must switch to `/ws/events`. No config change is required.
+
 - **The Status and Power pages stop reconnecting their live WebSocket when
   the login session dies.** The pages retried a fixed every 3 s forever. A
   server restart clears login sessions, so every retry was then rejected:

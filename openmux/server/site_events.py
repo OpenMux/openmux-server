@@ -7,9 +7,11 @@ publish small JSON frames through `SiteEventHub.publish()` and every connected
 browser tab receives them.
 
 Frames are nudges, not data: the page re-fetches its REST endpoint when the
-socket (re)opens, so a dropped frame can never strand the UI. That is the same
-reliability model as ``/ws/status`` (see docs/design/port_actions.md,
-"Sidebar status annotations").
+socket (re)opens, so a dropped frame can never strand the UI (see
+docs/design/port_actions.md, "Sidebar status annotations"). Producers:
+the Port Actions runner (``action_status``) and the coalesced live-status
+nudge (``status_change``, issue #85, migrated from the removed dedicated
+``/ws/status`` socket).
 """
 
 import asyncio
