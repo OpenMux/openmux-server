@@ -10,6 +10,15 @@ workflow.
 
 Changes since v1.0.4 (2026-10-19).
 
+### Web console and observability
+
+- **An action script's operator prompt now closes for every viewer of the run.** Answering a `session.prompt()` (`confirm()`,
+  `choose()`, `select()`, `radio()`, `wait_for_input()`) in one browser tab hid the prompt box only in that tab: the answer
+  produced no event, so another viewer of the same run kept a live-looking prompt box, the waiting badge, and the "waiting for
+  input" notice until the run finished. The run now publishes `operator_prompt_closed` with `reason: answered` or `expired`,
+  and reports the answer as an ordinary run log line (`operator_answered: <answer>`), so both reach every viewer and the
+  replayed history for anyone who joins later. A prompt whose `timeout=` the script catches now closes too. No config change.
+
 ## [1.0.4]
 
 Changes since v1.0.3 (2026-09-17).

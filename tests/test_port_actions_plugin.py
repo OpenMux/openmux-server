@@ -406,6 +406,110 @@ async def test_operator_input_ws_rejects_wrong_client_id():
 
 
 @pytest.mark.asyncio
+async def test_operator_answer_reaches_a_second_viewer_of_the_run():
+    """A viewer who is not the operator must see a prompt close without touching anything.
+
+    The reported bug: the operator answered in their own tab and a second viewer of the same run
+    kept the prompt box on screen until the run finished, because answering published no event
+    and only the answering tab hid its own box. A second WS on the same run now receives
+    `operator_prompt_closed` plus the answer line.
+    """
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"confirm_probe": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/confirm_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}, "client_id": "launcher1"},
+            ) as resp:
+                run_id = (await resp.json())["run_id"]
+
+            viewer_events: List[dict] = []
+
+            async def _drive_viewer():
+                async with session.ws_connect(
+                    f"http://127.0.0.1:{bound_port}/ws/actions/{run_id}?client_id=viewer1", headers=AUTH_HEADER
+                ) as ws:
+                    async for msg in ws:
+                        event = json.loads(msg.data)
+                        viewer_events.append(event)
+                        if event.get("event") == "action_finished":
+                            break
+
+            viewer_task = asyncio.create_task(_drive_viewer())
+
+            # The operator answers from their own connection and never touches the viewer's.
+            async with session.ws_connect(
+                f"http://127.0.0.1:{bound_port}/ws/actions/{run_id}?client_id=launcher1", headers=AUTH_HEADER
+            ) as ws:
+                async for msg in ws:
+                    event = json.loads(msg.data)
+                    if event.get("event") == "waiting_for_operator":
+                        await ws.send_str(json.dumps({"type": "operator_input", "text": "yes"}))
+                    if event.get("event") == "action_finished":
+                        break
+            await asyncio.wait_for(viewer_task, timeout=5)
+
+            names = [e.get("event") for e in viewer_events]
+            prompt = next(e for e in viewer_events if e.get("event") == "waiting_for_operator")
+            closed = next(e for e in viewer_events if e.get("event") == "operator_prompt_closed")
+            assert closed["prompt_id"] == prompt["prompt_id"]
+            assert closed["reason"] == "answered"
+            # The close has to arrive while the box is still meaningful, i.e. before the run ends.
+            assert names.index("operator_prompt_closed") < names.index("action_finished")
+            assert "operator_answered: 'yes'" in names
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_late_joiner_replay_pairs_a_prompt_with_its_close():
+    """History replay must not hand a joiner a prompt box for an answered prompt.
+
+    `waiting_for_operator` is kept in the run's event history, so a joiner (a reconnect, or a pane
+    closed and reopened) used to render a permanently stale box. The replay now carries the close
+    right after the prompt it retires.
+    """
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"confirm_probe": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/confirm_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}, "client_id": "launcher1"},
+            ) as resp:
+                run_id = (await resp.json())["run_id"]
+
+            async with session.ws_connect(
+                f"http://127.0.0.1:{bound_port}/ws/actions/{run_id}?client_id=launcher1", headers=AUTH_HEADER
+            ) as ws:
+                async for msg in ws:
+                    event = json.loads(msg.data)
+                    if event.get("event") == "waiting_for_operator":
+                        await ws.send_str(json.dumps({"type": "operator_input", "text": "yes"}))
+                    if event.get("event") == "action_finished":
+                        break
+
+            # Join only now: everything on screen comes from the replayed history.
+            replayed: List[dict] = []
+            async with session.ws_connect(
+                f"http://127.0.0.1:{bound_port}/ws/actions/{run_id}?client_id=late1", headers=AUTH_HEADER
+            ) as ws:
+                async for msg in ws:
+                    replayed.append(json.loads(msg.data))
+
+            names = [e.get("event") for e in replayed]
+            opened = names.index("waiting_for_operator")
+            assert names[opened + 1] == "operator_prompt_closed"
+            assert replayed[opened]["prompt_id"] == replayed[opened + 1]["prompt_id"]
+            assert names[opened + 2] == "operator_answered: 'yes'"
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
 async def test_operator_take_over_ws_round_trip():
     """A second viewer can take over as the run's operator mid-run (mirrors the port's
     own "Force take read-write"); the previous operator is notified via `operator_changed`

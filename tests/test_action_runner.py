@@ -1,4 +1,5 @@
 import asyncio
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -369,6 +370,147 @@ async def test_submit_operator_input_unknown_run_returns_false(dummy_logger):
     runner = ActionRunner(pm)
 
     assert runner.submit_operator_input("no-such-run", "yes") is False
+    await adapter.stop()
+
+
+async def _drain_until(queue, event_name: str, timeout: float = 2.0) -> Dict[str, Any]:
+    """Read `queue` until the named structured event arrives, and return it."""
+    while True:
+        event = await asyncio.wait_for(queue.get(), timeout=timeout)
+        if event.get("event") == event_name:
+            return event
+
+
+@pytest.mark.asyncio
+async def test_answering_a_prompt_publishes_a_close_for_every_viewer(dummy_logger):
+    """Answering must show up on the run's event stream, not only in the answering tab.
+
+    `submit_operator_input()` used to write a debug-only `operator_answered` transcript line, so
+    no subscriber ever learned the prompt was resolved and every other viewer kept a prompt
+    box for a prompt the operator had already answered. The close event plus the answer line are
+    what fix that (docs/design/port_actions.md "Operator input").
+    """
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(CONFIRM_PROBE_PATH)
+    runner = ActionRunner(pm)
+
+    run = runner.launch_run(action, "p1", {"text": "hello"}, username="tester", requesting_client_id="human1")
+    queue = runner.subscribe(run.run_id)
+
+    prompt = await _drain_until(queue, "waiting_for_operator")
+    prompt_id = prompt["prompt_id"]
+    assert prompt_id
+
+    assert runner.submit_operator_input(run.run_id, "yes", requesting_client_id="human1") is True
+
+    closed = await _drain_until(queue, "operator_prompt_closed")
+    assert closed["prompt_id"] == prompt_id
+    assert closed["reason"] == "answered"
+    # The answer itself travels as an ordinary run log line, so it reads like any other milestone.
+    assert (await queue.get())["event"] == "operator_answered: 'yes'"
+
+    task = runner._tasks.get(run.run_id)
+    if task is not None:
+        await task
+
+    # Recorded, not just streamed: the history replay has to pair the two events too.
+    names = [e.get("event") for e in run.events]
+    assert names.index("waiting_for_operator") + 1 == names.index("operator_prompt_closed")
+    assert "operator_answered: 'yes'" in names
+    # And persisted, worded the same as the live view (see `_format_event_for_log`).
+    transcript = [e["event"] for e in dummy_logger.meta_events if e["port"] == run.log_port_name]
+    assert "operator_prompt_closed (answered)" in transcript
+    assert "operator_answered: 'yes'" in transcript
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_answer_announces_nothing(dummy_logger):
+    """A caller who isn't the operator must not make the prompt look answered anywhere.
+
+    Refusing silently is the documented model; announcing before the script actually read the text
+    would resolve the prompt for every viewer while the run is still blocked.
+    """
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(CONFIRM_PROBE_PATH)
+    runner = ActionRunner(pm)
+
+    run = runner.launch_run(action, "p1", {"text": "hello"}, username="tester", requesting_client_id="human1")
+    queue = runner.subscribe(run.run_id)
+    await _drain_until(queue, "waiting_for_operator")
+
+    assert runner.submit_operator_input(run.run_id, "yes", requesting_client_id="someone_else") is False
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(queue.get(), timeout=0.2)
+    assert run.status == "running"
+    assert "operator_prompt_closed" not in [e.get("event") for e in run.events]
+
+    # The real operator can still answer the same, still-pending prompt.
+    assert runner.submit_operator_input(run.run_id, "yes", requesting_client_id="human1") is True
+    assert (await _drain_until(queue, "operator_prompt_closed"))["reason"] == "answered"
+    task = runner._tasks.get(run.run_id)
+    if task is not None:
+        await task
+    assert run.status == "success"
+    await adapter.stop()
+
+
+def _write_prompt_timeout_action(tmp_path) -> str:
+    """Write a script whose prompt expires unanswered and which carries on regardless."""
+    path = tmp_path / "prompt_timeout_probe.py"
+    path.write_text(
+        textwrap.dedent(
+            """
+            from openmux.server.actions.errors import ActionTimeoutError
+
+            ACTION = {
+                "id": "prompt_timeout_probe",
+                "name": "Prompt that expires",
+                "description": "Waits for an answer nobody gives, then carries on.",
+                "timeout": 10.0,
+                "params": [],
+            }
+
+
+            async def run(session):
+                try:
+                    await session.confirm("Send it?", timeout=0.05)
+                except ActionTimeoutError:
+                    session.log("prompt_expired")
+            """
+        )
+    )
+    return str(path)
+
+
+@pytest.mark.asyncio
+async def test_an_expired_prompt_closes_the_prompt_box(dummy_logger, tmp_path):
+    """A script that catches its own `prompt(timeout=)` expiry must still retire the box.
+
+    That case has no `action_finished` after it - the run carries on - so before the expiry was
+    reported every viewer kept a prompt box the script had already given up on.
+    """
+    pm, adapter = await _make_pm()
+    action = load_action_from_file(_write_prompt_timeout_action(tmp_path))
+    runner = ActionRunner(pm)
+
+    run = runner.launch_run(action, "p1", {}, username="tester", requesting_client_id="human1")
+    queue = runner.subscribe(run.run_id)
+
+    prompt = await _drain_until(queue, "waiting_for_operator")
+    closed = await _drain_until(queue, "operator_prompt_closed")
+    assert closed["prompt_id"] == prompt["prompt_id"]
+    assert closed["reason"] == "expired"
+    assert "operator_input_timeout" in (await queue.get())["event"]
+
+    task = runner._tasks.get(run.run_id)
+    if task is not None:
+        await task
+
+    # The script swallowed the timeout, so the run succeeds - and the prompt is still closed.
+    assert run.status == "success"
+    transcript = [e["event"] for e in dummy_logger.meta_events if e["port"] == run.log_port_name]
+    assert "operator_prompt_closed (expired)" in transcript
     await adapter.stop()
 
 

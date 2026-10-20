@@ -61,6 +61,7 @@ class ActionSession:
         on_input_wait: Optional[
             Callable[[Optional[str], str, Optional[List[Dict[str, str]]], Optional[str], str], None]
         ] = None,
+        on_input_end: Optional[Callable[[str], None]] = None,
         on_progress: Optional[Callable[[str, Optional[int]], None]] = None,
         on_debug: Optional[Callable[[str], None]] = None,
         on_log: Optional[Callable[[str], None]] = None,
@@ -83,6 +84,10 @@ class ActionSession:
         # (last set via progress(), if any) and the prompt's accent color, so the
         # event is self-contained.
         self._on_input_wait = on_input_wait
+        # Called (sync) when a prompt stops waiting, with "answered" or "expired". Without it a
+        # `waiting_for_operator` event is never superseded, so every viewer - and every history
+        # replay - keeps a prompt box for a prompt nobody can answer any more.
+        self._on_input_end = on_input_end
         # Called (sync) from progress(), so the caller can surface a "progress"
         # structured event. Separate from on_input_wait: progress is the script's own
         # step/percent reporting, waiting-for-operator is an orthogonal paused state
@@ -105,6 +110,27 @@ class ActionSession:
             except Exception:
                 # justification: best-effort UI callback; the action flow continues
                 pass
+
+    def _end_input_wait(self, reason: str) -> None:
+        """Report that the pending prompt is over: `reason` is "answered" or "expired"."""
+        if self._on_input_end is None:
+            return
+        try:
+            self._on_input_end(reason)
+        except Exception:
+            # justification: best-effort UI callback; the action flow continues
+            pass
+
+    def _finish_prompt(self, answer: str) -> str:
+        """Close an answered prompt and hand `answer` back to the script.
+
+        The waiting state ends first, then the answer is reported with `log()` - an ordinary
+        run line, so it reaches the live view and the persisted transcript like any other
+        milestone. Order matters: the answer must be the line a viewer sees last.
+        """
+        self._end_input_wait("answered")
+        self.log(f"operator_answered: {answer!r}")
+        return answer
 
     def _client_queue(self) -> Optional[asyncio.Queue]:
         port = self.port_manager.ports.get(self.port_name)
@@ -297,10 +323,14 @@ class ActionSession:
             except Exception:
                 logger.error("action _on_input_wait callback failed; the user will not see prompt %r", text, exc_info=True)
         if timeout is None:
-            return await self._operator_input.get()
+            return self._finish_prompt(await self._operator_input.get())
         try:
-            return await asyncio.wait_for(self._operator_input.get(), timeout=timeout)
+            return self._finish_prompt(await asyncio.wait_for(self._operator_input.get(), timeout=timeout))
         except asyncio.TimeoutError:
+            # The script may catch this timeout and carry on, so the open prompt has to be
+            # closed here: nothing else ever tells a viewer the prompt is gone.
+            self._end_input_wait("expired")
+            self.log(f"operator_input_timeout: {(text or 'no prompt')!r}")
             raise ActionTimeoutError(f"Timed out waiting for operator input ({text or 'no prompt'})")
 
     async def wait_for_input(self, prompt: Optional[str] = None, color: str = "none", timeout: Optional[float] = None) -> str:
@@ -331,7 +361,11 @@ class ActionSession:
         return await self.prompt(prompt, kind="radio", choices=choices, color=color, timeout=timeout)
 
     def submit_operator_input(self, text: str) -> None:
-        """Feed operator-supplied text to a pending `wait_for_input`/`confirm` call."""
+        """Feed operator-supplied text to a pending `wait_for_input`/`confirm` call.
+
+        Only delivers the text; `prompt()` reports the answer (and closes the waiting state)
+        once the resumed script reads it, so a queued-but-never-read answer never looks answered.
+        """
         self._operator_input.put_nowait(text)
 
     # --- power control (issue #93; docs/design/port_actions.md "Power control") ---------

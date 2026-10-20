@@ -99,6 +99,8 @@ def _format_event_for_log(event: Dict[str, Any]) -> str:
         step = event.get("step")
         prompt = event.get("prompt") or ""
         return f"waiting_for_operator {f'{step}: ' if step else ''}{prompt}"
+    if name == "operator_prompt_closed":
+        return f"operator_prompt_closed ({event.get('reason') or ''})"
     if name == "action_finished":
         status = event.get("status") or ""
         error = event.get("error")
@@ -140,6 +142,11 @@ class ActionRunner:
         self._tasks: Dict[str, "asyncio.Task[None]"] = {}
         self._subscribers: Dict[str, list] = {}
         self._sessions: Dict[str, ActionSession] = {}
+        # The prompt id each run is currently blocked on (see `_next_prompt_id()`). A viewer needs
+        # it to tell that an `operator_prompt_closed` frame retires the prompt box it shows,
+        # rather than an older one from the replayed history.
+        self._pending_prompt_id: Dict[str, str] = {}
+        self._prompt_seq = 0
 
     def get_active_run(self, port_name: str) -> Optional[ActionRun]:
         """Return the in-progress `ActionRun` for `port_name`, if any."""
@@ -264,6 +271,10 @@ class ActionRunner:
         docs/design/port_actions.md "Operator input") may do this once `operator_client_id`
         is set; other callers are silently ignored. Returns False if the run/session is
         unknown or the caller isn't authorized, True once the text has been delivered.
+
+        Nothing is announced here: the resumed script reports the answer and closes the waiting
+        state itself (see `ActionSession._finish_prompt()`), so a rejected or unread answer never
+        looks answered to any viewer.
         """
         run = self.runs.get(run_id)
         session = self._sessions.get(run_id)
@@ -272,7 +283,6 @@ class ActionRunner:
         if run.operator_client_id is not None and requesting_client_id != run.operator_client_id:
             return False
         session.submit_operator_input(text)
-        self._log_debug(run, f"operator_answered: {_truncate(text)!r}")
         return True
 
     def cancel_run(self, run_id: str, *, requesting_client_id: Optional[str] = None) -> bool:
@@ -408,6 +418,37 @@ class ActionRunner:
         )
         return True
 
+    def _next_prompt_id(self, run_id: str) -> str:
+        """Return a fresh id for the prompt `run_id` is about to block on.
+
+        Ids are unique within a run only, which is all the client needs: it compares an
+        `operator_prompt_closed` id against the box it currently shows.
+        """
+        self._prompt_seq += 1
+        prompt_id = f"{run_id}-{self._prompt_seq}"
+        self._pending_prompt_id[run_id] = prompt_id
+        return prompt_id
+
+    def _close_prompt(self, run_id: str, reason: str) -> None:
+        """Publish the close of the prompt `run_id` was blocked on (`reason`: answered | expired).
+
+        This frame is a pure state change and carries no answer text: the answer itself travels as
+        an ordinary `session.log()` line (see `ActionSession._finish_prompt()`), so every viewer
+        reads it like any other milestone. `_publish()` appends to `run.events`, so a late
+        joiner's replay pairs each `waiting_for_operator` with its close instead of showing a
+        prompt box nobody can answer.
+        """
+        self._publish(
+            run_id,
+            {
+                "event": "operator_prompt_closed",
+                "run_id": run_id,
+                "prompt_id": self._pending_prompt_id.pop(run_id, None),
+                "reason": reason,
+                "ts": time.time(),
+            },
+        )
+
     def _publish(self, run_id: str, event: Dict[str, Any]) -> None:
         run = self.runs.get(run_id)
         if run is not None:
@@ -500,9 +541,11 @@ class ActionRunner:
                         "choices": choices,
                         "step": step,
                         "color": color,
+                        "prompt_id": self._next_prompt_id(run.run_id),
                         "ts": time.time(),
                     },
                 ),
+                on_input_end=lambda reason: self._close_prompt(run.run_id, reason),
                 on_progress=lambda step, percent: self._publish(
                     run.run_id,
                     {
@@ -560,6 +603,7 @@ class ActionRunner:
             self._active_by_port.pop(port_name, None)
             self._open_finished_by_port[port_name] = run.run_id
             self._sessions.pop(run.run_id, None)
+            self._pending_prompt_id.pop(run.run_id, None)
             self._notify(port_name, "action_finished", run)
             self._publish(
                 run.run_id,

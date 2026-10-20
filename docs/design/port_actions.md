@@ -167,10 +167,11 @@ vertically (left/right, not top/bottom):
 - A new `#actionTermPane` (containing `#actionTerm`), created lazily on first use so `FitAddon.fit()` never runs against a
   `display:none` container, with its own `Terminal`/`FitAddon` pair (same pattern as the main console) fed by a dedicated
   WebSocket (`/ws/actions/<run_id>`) carrying the action's transcript plus structured events (`step_started`, `step_matched`,
-  `action_finished`, `waiting_for_operator`, `progress`, ...) rendered as one text line per event (timestamp, event/message
-  text) — not squeezed into the same grid as raw port bytes. `progress` (from `session.progress(step, percent=None)`, see
-  action_session.md) drives an optional progress bar shown in the run panel, in the same slot the finished-run outcome banner
-  uses — hidden entirely for scripts that never call it. `waiting_for_operator` carries the script's last-reported step too, so
+  `action_finished`, `waiting_for_operator`, `operator_prompt_closed`, `progress`, ...) rendered as one text line per event
+  (timestamp, event/message text) — not squeezed into the same grid as raw port bytes. `progress` (from
+  `session.progress(step, percent=None)`, see action_session.md) drives an optional progress bar shown in the run panel, in the
+  same slot the finished-run outcome banner uses — hidden entirely for scripts that never call it. `waiting_for_operator`
+  carries the script's last-reported step too, so
   the console page can show which step a pending prompt belongs to, but is otherwise a separate, paused overlay state, not a
   step of the progress bar's own sequence.
 
@@ -213,6 +214,10 @@ second run:
     history, if the run already finished) — this also replaced the old "send one synthetic final-status event" fallback for
     connecting to an already-finished run, since replaying the real recorded event history now covers that case too.
   - Both are replayed once on connect, then the connection switches to live streaming.
+- **Implemented**: a replay cannot leave a joiner with a prompt box for a prompt somebody already answered, because
+  `operator_prompt_closed` is a recorded event like the prompt it retires (see "Operator input"). A joiner whose replay ends
+  with an open `waiting_for_operator` is looking at a prompt that is genuinely still unanswered — the replay states the run's
+  real condition.
 - **Implemented**: a console that hasn't opened the Actions overlay at all (so never fetched the catalog / `active_run`, and
   isn't connected to `/ws/actions/<run_id>`) still learns "live", with no refresh needed, that a run just started or finished
   on the port it's viewing. `ConsoleManager.broadcast_control_frame_to_port(port_name, payload)` fans a control frame out to
@@ -267,6 +272,27 @@ covered above.
   carrying `prompt`, `kind`, `color`, and (for `buttons`/`select`/`radio`) the normalized `choices` list, published the same
   way as any other action event (history-replayed for late joiners, per phase 4), so it's obvious the run is paused and needs a
   human, not just idle.
+- **Implemented**: a prompt closes as an event too, so answering in one tab closes the box in every tab. `ActionSession`
+  takes an `on_input_end` callback beside `on_input_wait`, and `prompt()` calls it when its own wait finishes: `"answered"`
+  once the resumed script reads the text, `"expired"` when the script's own `prompt(timeout=)` fires.
+  `ActionRunner._close_prompt()` publishes that as an `operator_prompt_closed` structured event carrying `reason` and
+  `prompt_id` — the id `ActionRunner._next_prompt_id()` minted for the matching `waiting_for_operator` event. `prompt()` then
+  reports the outcome with `session.log()`: `operator_answered: 'yes'`, or `operator_input_timeout: '<prompt>'` on expiry. The
+  split is deliberate: the answer text is an ordinary run line every viewer reads like any other milestone, and the close frame
+  stays a pure state change that carries no answer text.
+- Nothing else retires a prompt. `ActionRunner.submit_operator_input()` announces nothing (see the permission note above: a
+  refused answer must not look answered anywhere), and `ActionSession.submit_operator_input()` only queues the text — the
+  resumed `prompt()` reports it. So the box closes exactly when the script really read the answer, in every viewer, including a
+  script that catches its own prompt timeout and carries on. `console.js` ignores a close whose `prompt_id` is not the box it
+  shows.
+- **Implemented**: `console.js` closes a prompt box only on `operator_prompt_closed` (or the run ending) — never as a local
+  side effect of sending an answer. The old optimistic hide made the answering tab look right while every other viewer kept a
+  stale box, and it also hid the box when the server had refused the answer. To keep a send feeling immediate and stop a second
+  Enter from queueing a duplicate answer for the script's *next* prompt, `sendOperatorInput()` sets `operatorInputPending`,
+  which `applyOperatorInputDisabledState()` folds into the controls' disabled state until the close arrives. An answer the
+  server refuses produces no event at all, so `OPERATOR_INPUT_ACK_MS` re-enables the controls rather than leaving a box that
+  does nothing. The `#actionsOperatorReadonlyNote` stays keyed to `isCurrentOperator()` alone, so that short wait never claims
+  the viewer lost the operator role.
 
 **Implemented**: "Taking over as operator" — `ActionRunner.take_over_operator(run_id, new_client_id)` reassigns
 `ActionRun.operator_client_id` mid-run (mirroring the port's own "Take control") and publishes an `operator_changed` structured
@@ -359,10 +385,11 @@ by whatever `port_name` string is passed to `record()`. Route action traffic thr
 (`{log_dir}/ports/{port_name}_action_{action_id}_{started_YYYYMMDDHHMMSS}_{run_id}.log`), independent of the port's own log.
 
 `ActionRunner._publish()` is the single place every event (the script's own `session.log()` messages *and* the runner's own
-`action_started`/`progress`/ `waiting_for_operator`/`action_finished`/`operator_changed` events) passes through, so it's also
-the single place that writes to this transcript via `DataLogger.record_meta()` — the on-disk file ends up with the same lines
-the live terminal view shows, not just the script's own `session.log()` calls. `_format_event_for_log()` renders each
-structured event as one line, mirroring `console.js`'s terminal "detail" text; keep both in sync if either changes.
+`action_started`/`progress`/ `waiting_for_operator`/`operator_prompt_closed`/`action_finished`/`operator_changed` events)
+passes through, so it's also the single place that writes to this transcript via `DataLogger.record_meta()` — the on-disk file
+ends up with the same lines the live terminal view shows, not just the script's own `session.log()` calls.
+`_format_event_for_log()` renders each structured event as one line, mirroring `console.js`'s terminal "detail" text; keep both
+in sync if either changes.
 
 While a run is active, `ActionRunner._execute()` also calls `DataLogger.set_mirror(port_name, run.log_port_name)` (issue #94).
 The logger then duplicates every record it takes for the port — the device data lines and the lifecycle meta
@@ -375,13 +402,14 @@ already installed its own mirror.
 
 `ActionRunner._log_debug()` writes extra debug-only lines straight to the same transcript file via `DataLogger.record_meta()`,
 bypassing `_publish()` entirely - these never touch `run.events` or WS subscribers, so they never reach the live console, only
-the on-disk file. Covers: the operator's answer to a `prompt()` (`operator_answered`), `session.send()`/`sendline()` text —
-logged before the write is issued, so it lands before an instant echo of that text in the transcript; a rejected write still
-leaves the line, recording what was attempted (`send`) —, `session.expect()`'s matched text or the buffered-but-unmatched text
-at timeout (`expect_matched`/`expect_timeout`), the script's own `session.debug(message)` calls (untruncated, the script's own
-debug channel), and, on an unhandled script exception, the port's remaining read buffer and the full Python traceback
-(`buffer_at_crash`/`traceback`) - the session-generated lines are truncated (`_truncate()`) since port output/tracebacks can be
-arbitrarily large.
+the on-disk file. Covers: `session.send()`/`sendline()` text — logged before the write is issued, so it lands before an instant
+echo of that text in the transcript; a rejected write still leaves the line, recording what was attempted (`send`) —,
+`session.expect()`'s matched text or the buffered-but-unmatched text at timeout (`expect_matched`/`expect_timeout`), the
+script's own `session.debug(message)` calls (untruncated, the script's own debug channel), and, on an unhandled script
+exception, the port's remaining read buffer and the full Python traceback (`buffer_at_crash`/`traceback`) - the
+session-generated lines are truncated (`_truncate()`) since port output/tracebacks can be arbitrarily large. The operator's
+answer is deliberately not in this list: it is a live `session.log()` line (see "Operator input"), because every viewer of the
+run needs to see what was answered, not only the transcript file.
 
 ## Run registry
 Keep a lightweight in-memory `ActionRun` record per run: run_id, port_name, action_id, user, redacted params, start/end

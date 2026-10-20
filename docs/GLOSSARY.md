@@ -103,6 +103,8 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Site event hub | The fan-out point (`SiteEventHub`) behind `/ws/events`: one global socket per browser tab. Producers publish small JSON frames with a `type` key; each page re-fetches its REST data on (re)connect, so frames are nudges. | global socket, event bus |
 | Status dot | The sidebar annotation on a console item: it marks the Port Actions result awaiting acknowledgement, from the run's finish until the run is closed (see `docs/design/port_actions.md`, "Sidebar status annotations"). | status badge (for this), run indicator |
 | Close (a run) | The operator's acknowledgement that settles a finished Port Action run for every viewer (issue #90). Run states: running, finished (open), closed. Distinct from hiding the pane (✕), which only dismisses the view for one browser tab. | ack (as a verb in UI text), dismiss (for the global action), delete |
+| Operator prompt | A Port Action script's pending `session.prompt()` call, and the `#actionsOperatorPrompt` box that shows it to every viewer of the run. Only the run's operator may answer it (see `docs/design/port_actions.md`, "Operator input"). | question, question box, dialog |
+| Prompt close | The `operator_prompt_closed` event that retires an operator prompt for every viewer: `answered` once the script reads the answer, or `expired` when the script's own `prompt(timeout=)` fired. The answer text travels as a run log line, not in this event. | prompt resolved, question closed |
 
 ## Authentication and Security
 

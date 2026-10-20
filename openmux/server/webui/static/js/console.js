@@ -664,6 +664,11 @@ let portOpenFinishedRun = null;
 // Whether the run currently shown in the pane has been closed/acked - its buttons
 // stay hidden and its transcript just stays readable (issue #90 slice 2).
 let currentRunClosed = false;
+// Id of the operator prompt this tab currently shows a box for, from the
+// `waiting_for_operator` event. The matching `operator_prompt_closed` event carries the same
+// id, so a viewer closes the box for the prompt that was actually answered - and ignores a
+// close belonging to an earlier prompt in the replayed history.
+let currentPromptId = null;
 
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -860,14 +865,34 @@ function isCurrentOperator() {
 // Non-operator viewers can see a running action's operator-input prompt (it's part of
 // the shared live view) but must not be able to answer it - disable every control here
 // so only the assigned operator's clicks/keystrokes actually do anything.
+//
+// `operatorInputPending` covers the gap between sending an answer and the server's
+// `operator_prompt_closed` event coming back (the only thing that now closes the box, so every
+// viewer sees the same thing). Until then the controls stay disabled: a second Enter would
+// otherwise queue a duplicate answer for the script's *next* prompt. An answer the server
+// refuses produces no event at all, so the timer re-enables the controls instead of leaving a
+// live-looking box that does nothing.
+let operatorInputPending = false;
+let operatorInputPendingTimer = null;
+const OPERATOR_INPUT_ACK_MS = 4000;
+function clearOperatorInputPending() {
+  operatorInputPending = false;
+  if (operatorInputPendingTimer !== null) {
+    clearTimeout(operatorInputPendingTimer);
+    operatorInputPendingTimer = null;
+  }
+}
 function applyOperatorInputDisabledState() {
-  const enabled = isCurrentOperator();
+  const isOperator = isCurrentOperator();
+  const enabled = isOperator && !operatorInputPending;
   if (actionsOperatorInput) actionsOperatorInput.disabled = !enabled;
   if (actionsOperatorSend) actionsOperatorSend.disabled = !enabled;
   if (actionsOperatorButtons) actionsOperatorButtons.querySelectorAll('button').forEach((b) => { b.disabled = !enabled; });
   if (actionsOperatorSelectEl) actionsOperatorSelectEl.disabled = !enabled;
   if (actionsOperatorRadioEl) actionsOperatorRadioEl.querySelectorAll('input').forEach((r) => { r.disabled = !enabled; });
-  if (actionsOperatorReadonlyNote) actionsOperatorReadonlyNote.style.display = enabled ? 'none' : '';
+  // The note explains the operator rule only - a brief ack wait must not claim the viewer
+  // isn't the operator.
+  if (actionsOperatorReadonlyNote) actionsOperatorReadonlyNote.style.display = isOperator ? 'none' : '';
 }
 function markRunClosed(runId, hidePaneForCloser) {
   // Stamp a closed (acked) run (issue #90 slice 2): pending cues disappear, open
@@ -1342,6 +1367,8 @@ function streamActionRun(runId) {
       detail = ` ${msg.step || ''}${msg.percent != null ? ` (${msg.percent}%)` : ''}`;
     } else if (msg.event === 'waiting_for_operator') {
       detail = ` ${msg.step ? `${msg.step}: ` : ''}${msg.prompt || ''}`;
+    } else if (msg.event === 'operator_prompt_closed') {
+      detail = ` (${msg.reason || ''})`;
     } else if (msg.event === 'action_finished') {
       detail = ` ${msg.status || ''}${msg.error ? `: ${msg.error}` : ''}`;
     } else if (msg.event === 'operator_changed') {
@@ -1404,9 +1431,23 @@ function streamActionRun(runId) {
       showActionStrip(`Action running: ${label} — ${msg.step || ''}`);
     } else if (msg.event === 'waiting_for_operator') {
       setActionTag('Waiting for input…', 'warn');
-      showOperatorPrompt(msg.prompt, msg.kind, msg.choices, msg.color);
+      showOperatorPrompt(msg.prompt, msg.kind, msg.choices, msg.color, msg.prompt_id);
       setActionWaitingBadge(true); // overlay only - never touches the step/percent already shown
       showActionStrip(`${label}: waiting for input — click to answer`);
+    } else if (msg.event === 'operator_prompt_closed') {
+      // The prompt this run was blocked on is settled - the operator answered it (in another
+      // tab or on another machine, which is the whole point of the event) or the script's own
+      // prompt(timeout=) expired. Nothing else ever retires a box a viewer did not fill in
+      // itself, so this is the only path that clears the box, the flash, the waiting badge and
+      // the "waiting for input" strip for a non-operator. The id check keeps a replay of a
+      // multi-prompt script honest: a close for an already-replaced prompt is dropped.
+      if (!msg.prompt_id || msg.prompt_id === currentPromptId) {
+        hideOperatorPrompt();
+        if (!currentRunFinished && !currentRunClosed) {
+          setActionTag('Running', 'warn');
+          showActionStrip(`Action running: ${label}`);
+        }
+      }
     } else if (msg.event === 'operator_changed') {
       const wasOperator = currentRunOperatorClientId === myClientId;
       currentRunOperatorClientId = msg.operator_client_id;
@@ -1435,8 +1476,12 @@ function streamActionRun(runId) {
 //   "buttons"         - one button per choice; clicking answers immediately, no Send row.
 //   "select"          - a <select> (options supplied by the script).
 //   "radio"           - one radio button per choice.
-function showOperatorPrompt(prompt, kind, choices, color) {
+// `promptId` is the server's id for this prompt; keep it so the matching
+// `operator_prompt_closed` event can be matched to the box on screen.
+function showOperatorPrompt(prompt, kind, choices, color, promptId) {
   if (!actionsOperatorPrompt) return;
+  currentPromptId = promptId || null;
+  clearOperatorInputPending(); // a fresh prompt is always answerable by the current operator
   actionsOperatorPromptText.textContent = prompt || 'Script is waiting for input';
   actionsOperatorPrompt.style.display = '';
   actionsOperatorPrompt.classList.add('action-needs-attention');
@@ -1497,6 +1542,8 @@ function showOperatorPrompt(prompt, kind, choices, color) {
   applyOperatorInputDisabledState();
 }
 function hideOperatorPrompt() {
+  currentPromptId = null;
+  clearOperatorInputPending();
   if (actionsOperatorPrompt) {
     actionsOperatorPrompt.style.display = 'none';
     actionsOperatorPrompt.classList.remove('action-needs-attention');
@@ -1530,7 +1577,17 @@ function sendOperatorInput(value) {
     }
   }
   try { currentActionsWs.send(JSON.stringify({ type: 'operator_input', text })); } catch (_) {}
-  hideOperatorPrompt();
+  // No optimistic hide: the box closes on the server's `operator_prompt_closed` event, which
+  // reaches this tab and every other viewer of the run the same way. Hiding it here instead is
+  // what left a second viewer staring at a prompt the operator had already answered.
+  operatorInputPending = true;
+  applyOperatorInputDisabledState();
+  if (operatorInputPendingTimer !== null) clearTimeout(operatorInputPendingTimer);
+  operatorInputPendingTimer = setTimeout(() => {
+    operatorInputPendingTimer = null;
+    operatorInputPending = false;
+    applyOperatorInputDisabledState();
+  }, OPERATOR_INPUT_ACK_MS);
 }
 if (actionsOperatorSend) actionsOperatorSend.addEventListener('click', () => sendOperatorInput());
 if (actionsOperatorInput) actionsOperatorInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendOperatorInput(); });

@@ -112,6 +112,10 @@ arguments.
   structured event carrying the script's last-reported step (see
   `progress()` above, and port_actions.md, "Operator input"). Callback
   exceptions are swallowed; they never abort the run.
+- Invokes the session's `on_input_end` callback (if set) the same way when the wait finishes, with `"answered"` once the
+  resumed script reads the text or `"expired"` when `timeout` fired, then reports the outcome with `log()`: `operator_answered:
+  <answer>` or `operator_input_timeout: <prompt>`. `prompt()` is the only place that reports an answer, so a queued-but-refused
+  answer never looks answered to anyone watching the run (see port_actions.md, "Operator input").
 
 | Wrapper | `kind` | Returns |
 |---|---|---|
@@ -126,7 +130,9 @@ Feeds operator-supplied text to whichever `prompt()`/wrapper call is
 currently awaiting one. Routing a submission to the right run/session, and
 rejecting one from the wrong client, is `ActionRunner`'s job, not
 `ActionSession`'s — the session itself has exactly one pending-input queue
-and does not check identity.
+and does not check identity. This call only queues the text: the resumed
+`prompt()` reports the answer and closes the waiting state, so a text that
+no script ever reads is never announced as an answer.
 
 ### Power control
 
