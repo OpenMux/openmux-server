@@ -20,6 +20,21 @@ Changes since v1.0.4 (2026-10-19).
   section with your grants — Config Editor > Actions edits it. A fresh packaged install gets the example scripts in
   `/etc/openmux/actions`; a script you edited is never overwritten.
 
+### Behavior changes (no config change required)
+
+- **A `port_actions` section the loader cannot read no longer removes the endpoints.** One value of the wrong type
+  (for example `port_actions: true`, or `action_ports` written as a list) made the route registration fail at start, so
+  `/api/ports/<port>/actions` and `/api/port-actions/health` answered 404 for the life of the process: the routes register once
+  per start, so only a restart could bring them back. The loader now drops what it cannot read and logs the key by name, and the
+  endpoints answer the same empty result as they do with no section. Fix the value in the config, and the next request uses
+  it: no restart is needed.
+- **A grant that names one port now grants that port.** `action_ports: {echo_probe: loopback}` — one port name without the
+  list brackets — granted the action to the ports `l`, `o`, `p`, `b`, `a`, `c` and `k`, and not to `loopback`. Nothing was
+  logged and Script health stayed clean, because the action id resolved and its script loaded. A single port name now means
+  the port you wrote, the way one path in `actions_dir` means one directory. A grant you wrote with brackets, such as
+  `["loopback"]`, means exactly what it meant before. Config Editor > Actions loads the single-name form into its row, so
+  saving that page keeps the port instead of emptying the list.
+
 ### Web console and observability
 
 - **The Port Actions endpoints are core.** The web console now registers the action routes itself, like the Power routes:

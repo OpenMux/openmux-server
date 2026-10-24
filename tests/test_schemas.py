@@ -345,3 +345,21 @@ def test_power_pdu_options_outlets_rejected():
             }
         }
     )
+
+
+def test_port_actions_grant_accepts_one_port_name_or_a_list():
+    # A grant names one port or several. One port name written without the list
+    # brackets is the common form, and `actions_dir` already accepts one path
+    # without them, so the schema accepts both (issue #97).
+    _validate({"port_actions": {"actions_dir": "actions", "action_ports": {"reboot": "console1"}}})
+    _validate({"port_actions": {"action_ports": {"reboot": ["console1", "console2"]}}})
+    _validate({"port_actions": {"action_ports": {}}})
+    # A grant that is neither form stays a violation, so --check-config names it
+    # even though the loader also tolerates it by dropping the grant.
+    for cfg in (
+        {"port_actions": {"action_ports": {"reboot": 3}}},
+        {"port_actions": {"action_ports": True}},
+        {"port_actions": True},
+    ):
+        errors = list(Draft202012Validator(_config_schema()).iter_errors(cfg))
+        assert errors, f"malformed port_actions config must be rejected: {cfg}"

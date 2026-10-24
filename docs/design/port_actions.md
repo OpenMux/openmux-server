@@ -472,20 +472,23 @@ The feature's own settings (`actions_dir`, `action_ports`) live in a dedicated t
 sibling of `web_console`, `loopback_ports`, etc., not nested inside `web_console` - because they configure the action engine,
 not the web console. The web console registers the action routes on every start, so no `web_console.plugins` entry is needed:
 the `port_actions` section is the only switch. With no section, no `actions_dir`, or no grant, the endpoints stay available and
-answer empty, and the module imports no script and runs nothing.
+answer empty, and the module imports no script and runs nothing. A value of the wrong shape reads the same way, after one log
+line names it. `_parse_section()` is the only reader of the section, at start and on every later read, and it never raises: a
+raise at start would cost the routes until the next restart, because route registration runs once per start (issue #97).
 The allow-list config key itself is action-centric: `action_ports: {action_id: [port_name, ...]}` (see the default
 `config/server.yaml`, the `config/loopback_test.yaml` example, or the module docstring in
 [port_actions.py](../../openmux/server/web_plugins/port_actions.py)) — for when it's more natural to think "which ports get
 this action" than "which actions does this port get", and to avoid repeating the same action id under every port that should
 get it. **Implemented** (`openmux/server/web_plugins/port_actions.py`):
-- **Top-level `port_actions` section**: `register_routes()` reads `actions_dir`/ `action_ports` from
-  `adapter.server_config["port_actions"]` (the full raw server config, wired onto the `WebConsoleAdapter` by `main.py` right
-  after adapter creation - see `WebConsoleAdapter.server_config` in `openmux/server/web_console.py`), not from a
-  `web_console.plugins` entry. After start, `_live_section()` re-reads the section from the running ConfigManager on each use,
-  so a saved or soft-reloaded config applies without a server reload (issue #92, "Hot reload of the `port_actions` section"
-  below). `openmux/server/adapters/factory.py`'s fail-fast startup check treats `port_actions` as a recognized non-adapter
-  top-level section (alongside `server`/`authentication`/`logging`), so a bare `port_actions:` section with no matching adapter
-  plugin doesn't abort startup.
+- **Top-level `port_actions` section**: `_live_section()` resolves the section for every read — at start in `register_routes()`
+  and on each request after it. It prefers the running ConfigManager, where a Config Editor save or a soft reload
+  already landed, and falls back to `adapter.server_config["port_actions"]` (the full raw server config, wired onto the
+  `WebConsoleAdapter` by `main.py` right after adapter creation - see `WebConsoleAdapter.server_config` in
+  `openmux/server/web_console.py`). Neither path reads a `web_console.plugins` entry, and both then hand the value to
+  `_parse_section()`, so a saved or soft-reloaded config applies without a server reload (issue #92, "Hot reload of the
+  `port_actions` section" below). `openmux/server/adapters/factory.py`'s fail-fast startup check treats `port_actions` as a
+  recognized non-adapter top-level section (alongside `server`/`authentication`/`logging`), so a bare `port_actions:` section
+  with no matching adapter plugin doesn't abort startup.
 - **Enabled in the default config**: `config/server.yaml` grants the read-only example scripts in
   `openmux/server/actions/examples` to the demo `loopback` port, so a fresh dev run shows the Actions menu without any
   hand-editing. The routes need no config entry of their own. `scripts/make_deb_server_config.py` builds the packaged
@@ -546,11 +549,18 @@ get it. **Implemented** (`openmux/server/web_plugins/port_actions.py`):
   `_allowed_actions()`, without listing each one by name. Since the allow-list is computed per-request rather than precomputed
   once at startup, a port added later is covered immediately without a config reload — the wildcard is still an explicit,
   visible administrative choice per action, not a default, matching the "Security / permissions" model above.
+- **One port name needs no list brackets**: `action_ports: {factory_reset: console1}` grants the one port `console1`, the way
+  `actions_dir` accepts one path. `_normalize_grant_ports()` reads a string as one name and never as its characters, because
+  `list("console1")` grants the action to the ports `c`, `o`, `n`, and so on, with no error anywhere: the id still resolved and
+  the file still loaded, so Script health stayed clean (issue #97). A port entry that is not a string, or a value that is
+  neither a name nor a list, is dropped with a warning naming the action id. The schema accepts both forms, so `--check-config`
+  stays quiet about the single-name form and names only what the reader also drops.
 - **Config Editor web-UI support**: **implemented** — `port_actions` is a recognized `config_editor.allowed` section name in
   `config/security.yaml`, and there is a dedicated "Actions" sub-view (mirroring the existing `ports`/`listeners`/`muxcon`/
   `auth` sub-pages in `openmux/server/webui/templates/web_console/config_editor.html.j2`, `?view=actions`) for editing
   `actions_dir` and the `action_ports` allow-list table without hand-editing YAML. Each `action_ports` entry is edited as one
-  row (action id + comma-separated port list, `*` for all ports) in `openmux/server/webui/static/js/config_editor.js`.
+  row (action id + comma-separated port list, `*` for all ports) in `openmux/server/webui/static/js/config_editor.js`. A grant
+  stored as one port name fills that row with its one port, so saving the page keeps the port and stores it as a list.
 
 ## Sidebar status annotations
 

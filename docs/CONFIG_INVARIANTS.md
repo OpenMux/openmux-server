@@ -10,9 +10,13 @@ Adapters are configured via top-level section keys. These keys are the *source o
 materialize in-memory under these canonical keys.
 
 `port_actions` is also a canonical top-level section, but it has no adapter behind it: it holds config for the Port Actions
-feature only (`actions_dir`, `action_ports`), read via `WebConsoleAdapter.server_config`. The web console registers the Port
-Actions routes on every start, so this section gates what the feature does, not whether its endpoints exist (see
-[docs/design/port_actions.md](design/port_actions.md)). Like `server`/ `authentication`/`logging`, it is exempted from the
+feature only (`actions_dir`, `action_ports`), read through `_live_section()` and `_parse_section()` in
+[openmux/server/web_plugins/port_actions.py](../openmux/server/web_plugins/port_actions.py): the running ConfigManager first,
+`WebConsoleAdapter.server_config` as the fallback. The web console registers the Port Actions routes on every start, so this
+section gates what the feature does, not whether its endpoints exist (see
+[docs/design/port_actions.md](design/port_actions.md)). The loader MUST NOT raise on a value it cannot read: it drops the value
+with one log line that names the key, because route registration runs once per start and a raise would remove the endpoints
+until the next restart (issue #97). Like `server`/ `authentication`/`logging`, it is exempted from the
 factory's missing-adapter fail-fast check (`core_sections` in
 [openmux/server/adapters/factory.py](../openmux/server/adapters/factory.py)) rather than mapped to a `config_section` on a
 registered adapter plugin.

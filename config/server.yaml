@@ -163,10 +163,11 @@ port_actions:
   # changes, without a server reload.
   actions_dir: openmux/server/actions/examples
   # Allow-list: action id -> the ports that may run it. The entry "*" grants
-  # every port, including a port added later. An id must equal its script
-  # file name (without ".py"), and only granted scripts are imported.
-  # A grant with no matching script is listed in Config Editor > Actions >
-  # Script health.
+  # every port, including a port added later. One port name needs no list
+  # brackets (`echo_probe: loopback`); several names need them.
+  # An id must equal its script file name (without ".py"), and only granted
+  # scripts are imported. A grant with no matching script is listed in Config
+  # Editor > Actions > Script health.
   action_ports:
     # The bundled read-only examples, granted to the loopback demo port:
     # echo_probe sends a line and waits for its echo; status_probe fails when

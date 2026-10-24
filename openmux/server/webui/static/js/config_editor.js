@@ -1386,8 +1386,12 @@ function buildTable(rootId, columns, options){ options = options||{}; const root
         try {
           const actionPorts = deepGet(current, 'port_actions.action_ports') || {};
           const rows = Object.keys(actionPorts).map(function(actionId){
+            // A grant may name one port without the list brackets (issue #97).
+            // The table edits an array, so the row gains the brackets and a save
+            // keeps the port instead of writing an empty list.
             const ports = actionPorts[actionId];
-            return {action_id: actionId, ports: Array.isArray(ports)? ports: []};
+            const portList = Array.isArray(ports)? ports : (typeof ports === 'string' && ports.trim()? [ports.trim()] : []);
+            return {action_id: actionId, ports: portList};
           });
           if (tables['port_actions.action_ports']) tables['port_actions.action_ports']._set(rows);
         } catch(_e){}

@@ -19,6 +19,10 @@ from openmux.server.web_console import WebConsoleAdapter
 
 ACTIONS_DIR = str(Path(__file__).resolve().parents[1] / "openmux" / "server" / "actions" / "examples")
 
+# Sentinel for "the caller did not pass a section", so a test may pass a falsy one
+# such as `False` or `0` and still have it written to the config.
+_UNSET = object()
+
 USERS = [{"username": "u", "password_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"}]
 AUTH_HEADER = {"Authorization": "Basic " + base64.b64encode(b"u:password").decode()}
 
@@ -33,14 +37,17 @@ async def _start_console(
     users=None,
     plugin_entry: bool = True,
     section: bool = True,
+    raw_section: Any = _UNSET,
 ):
     """Start a web console over one loopback port named `p1`.
 
     `plugin_entry` decides whether the config keeps a `web_console.plugins`
     entry for this module, which is what an older config still has. `section`
-    decides whether the top-level `port_actions` section exists at all. Neither
-    switch changes whether the endpoints answer: the web console registers the
-    routes itself, so the switches only change what the catalog holds.
+    decides whether the top-level `port_actions` section exists at all, and
+    `raw_section` writes that section verbatim, which is how a value of the
+    wrong shape reaches the loader. None of the switches change whether the
+    endpoints answer: the web console registers the routes itself, so the
+    switches only change what the catalog holds.
     """
     pm = PortManager([])
     loop_adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "p1", "max_read_write_users": max_read_write_users}]})
@@ -52,7 +59,9 @@ async def _start_console(
     cm = ConsoleManager(pm, auth)
 
     config: Dict[str, Any] = {}
-    if section:
+    if raw_section is not _UNSET:
+        config["port_actions"] = raw_section
+    elif section:
         config["port_actions"] = {
             "actions_dir": actions_dir if actions_dir is not None else ACTIONS_DIR,
             "action_ports": action_ports,
@@ -207,6 +216,170 @@ async def test_routes_answer_empty_without_a_port_actions_section():
                 json={"params": {"text": "hi"}},
             ) as resp:
                 assert resp.status == 404
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.parametrize("bad_section", [True, "port_actions", ["echo_probe"], 42], ids=["bool", "string", "list", "int"])
+@pytest.mark.asyncio
+async def test_malformed_section_costs_the_grants_not_the_routes(bad_section, caplog):
+    """One ERROR naming the section, then the empty answers (issue #97).
+
+    A section of the wrong shape used to raise inside the route registration, which
+    the web console logged and skipped: the endpoints then answered 404 until the next
+    restart, a state no document describes. They now answer what no section answers.
+    """
+    with caplog.at_level(logging.WARNING, logger="openmux.server.web_plugins.port_actions"):
+        web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {}, raw_section=bad_section)
+    base = f"http://127.0.0.1:{bound_port}"
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(f"{base}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert await resp.json() == {
+                    "actions": [],
+                    "active_run": None,
+                    "open_finished_run": None,
+                    "action_load_errors": [],
+                }
+
+            async with session.get(f"{base}/api/port-actions/health", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["action_load_errors"] == []
+
+            async with session.get(f"{base}/api/port-actions/status", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["ports"] == {}
+
+            async with session.post(
+                f"{base}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}},
+            ) as resp:
+                assert resp.status == 404
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+    errors = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
+    assert [text for text in errors if "port_actions section must be a mapping" in text], errors
+
+
+@pytest.mark.asyncio
+async def test_string_grant_value_names_one_port_not_its_letters():
+    """`action_ports: {echo_probe: p1}` grants port `p1`, not the ports `p` and `1`.
+
+    A single port name usually loses its YAML list brackets, and reading the string
+    as a sequence granted the action to every port named by one of its letters - with
+    no error anywhere, because the id resolved and the script loaded (issue #97).
+    """
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": "p1"}, plugin_entry=False)
+    base = f"http://127.0.0.1:{bound_port}"
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(f"{base}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert [a["id"] for a in (await resp.json())["actions"]] == ["echo_probe"]
+
+            for letter_port in ("p", "1", "o"):
+                async with session.get(f"{base}/api/ports/{letter_port}/actions", headers=AUTH_HEADER) as resp:
+                    assert resp.status == 200
+                    assert (await resp.json())["actions"] == []
+
+            # The grant also reached the loader's scope, so the script runs.
+            async with session.post(
+                f"{base}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}},
+            ) as resp:
+                assert resp.status == 200
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_unusable_grant_entries_are_dropped_with_a_warning(tmp_path, caplog):
+    """An entry that is not a port name is dropped and named; the grant next to it stays.
+
+    Script health also stays readable: its unresolved-grant line joins port names, so
+    a grant that kept a non-string entry would raise inside the handler (issue #97).
+    """
+    dir_custom = tmp_path / "dropped_grant_actions"
+    dir_custom.mkdir()
+    _write_action(dir_custom, "keep_me")
+    with caplog.at_level(logging.WARNING, logger="openmux.server.web_plugins.port_actions"):
+        web_adapter, pm, loop_adapter, bound_port = await _start_console(
+            0,
+            {
+                "keep_me": ["p1", 42],  # the number is dropped, the port is kept
+                "no_script": "p1",  # one name, no brackets; no script loads with this id
+                "broken_shape": {"port": "p1"},  # neither a name nor a list
+                7: ["p1"],  # not an action id
+            },
+            actions_dir=[str(dir_custom)],
+            plugin_entry=False,
+        )
+    base = f"http://127.0.0.1:{bound_port}"
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(f"{base}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                data = await resp.json()
+            assert [a["id"] for a in data["actions"]] == ["keep_me"]
+            unresolved = [e for e in data["action_load_errors"] if e["file"] == "no_script"]
+            assert len(unresolved) == 1, data["action_load_errors"]
+            assert "assigned to p1" in unresolved[0]["error"]
+            assert not [e for e in data["action_load_errors"] if e["file"] in ("broken_shape", "7")]
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert [text for text in warnings if "non-string port name" in text and "keep_me" in text]
+    assert [text for text in warnings if "broken_shape" in text]
+    assert [text for text in warnings if "non-string action id" in text]
+
+
+@pytest.mark.asyncio
+async def test_a_fixed_section_recovers_without_a_restart(tmp_path):
+    """The empty answer is not sticky: a saved fix applies on the next request (issue #97).
+
+    Route registration runs once per start, so the old failure could only be undone by
+    restarting the server. The live read is now the one reader of the section, so the
+    same request path that answered empty parses the section the operator just saved -
+    here in its single-port-name form, which the reload path must read identically.
+    """
+    dir_custom = tmp_path / "recovered_grant_actions"
+    dir_custom.mkdir()
+    _write_action(dir_custom, "recovered")
+
+    (tmp_path / "server.yaml").write_text("server:\n  id: test\n", encoding="utf-8")
+    (tmp_path / "authentication.yaml").write_text("users: []\n", encoding="utf-8")
+    cm = ConfigManager(str(tmp_path / "server.yaml"))
+    cm.load_config()
+    cm.config = None
+
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {}, raw_section=True, live_config_manager=cm)
+    base = f"http://127.0.0.1:{bound_port}"
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(f"{base}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["actions"] == []
+
+            payload = {
+                "server": {"id": "test"},
+                "port_actions": {"actions_dir": str(dir_custom), "action_ports": {"recovered": "p1"}},
+                "authentication": {"users": USERS},
+            }
+            assert cm.save_config(payload) is True
+            cm.load_config()
+
+            async with session.get(f"{base}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert [a["id"] for a in (await resp.json())["actions"]] == ["recovered"]
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()
@@ -783,6 +956,66 @@ def test_normalize_action_dirs_accepts_string_or_list() -> None:
     assert _normalize_action_dirs(["a", "b", "a", "  "]) == ["a", "b"]
     assert _normalize_action_dirs(("a", 5, "b")) == ["a", "b"]
     assert _normalize_action_dirs({"x": 1}) == []
+
+
+def test_normalize_action_grants_accepts_one_port_or_a_list() -> None:
+    from openmux.server.web_plugins.port_actions import _normalize_action_grants
+
+    assert _normalize_action_grants(None) == {}
+    assert _normalize_action_grants({}) == {}
+    # A bare port name names one port, never the characters of it (issue #97).
+    assert _normalize_action_grants({"echo_probe": "p1"}) == {"echo_probe": ["p1"]}
+    assert _normalize_action_grants({"echo_probe": "*"}) == {"echo_probe": ["*"]}
+    assert _normalize_action_grants({"echo_probe": ["p1", "p2", "p1", "  "]}) == {"echo_probe": ["p1", "p2"]}
+    assert _normalize_action_grants({"echo_probe": ("p1", 5, "p2")}) == {"echo_probe": ["p1", "p2"]}
+    assert _normalize_action_grants({"echo_probe": None}) == {"echo_probe": []}
+    assert _normalize_action_grants({"echo_probe": []}) == {"echo_probe": []}
+    # An entry that is not a port name or a list of them is dropped, not guessed.
+    assert _normalize_action_grants({"echo_probe": 42}) == {}
+    assert _normalize_action_grants({"echo_probe": {"port": "p1"}}) == {}
+    assert _normalize_action_grants({7: ["p1"]}) == {}
+    assert _normalize_action_grants({"  ": ["p1"]}) == {}
+    assert _normalize_action_grants(["echo_probe"]) == {}
+    assert _normalize_action_grants(True) == {}
+
+
+def test_parse_section_reads_every_shape_the_same_way(caplog) -> None:
+    """One reader judges the section for both paths, and never raises (issue #97)."""
+    from openmux.server.web_plugins.port_actions import _parse_section
+
+    assert _parse_section({"actions_dir": ACTIONS_DIR, "action_ports": {"echo_probe": "p1"}}) == (
+        {"echo_probe": ["p1"]},
+        [ACTIONS_DIR],
+    )
+    assert _parse_section(None) == ({}, [])
+    assert _parse_section({}) == ({}, [])
+    for bad in (True, False, 0, "port_actions", ["echo_probe"], 42):
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="openmux.server.web_plugins.port_actions"):
+            assert _parse_section(bad) == ({}, [])
+        assert [record.levelno for record in caplog.records] == [logging.ERROR], bad
+        assert "must be a mapping of config keys" in caplog.text
+
+
+def test_live_section_fallback_survives_a_broken_snapshot() -> None:
+    """The `server_config` fallback is the branch a harness reaches, or a console started
+    without a reachable ConfigManager; it handed the raw value straight to `.get()`, so a
+    wrong shape raised inside a request handler instead of answering (issue #97)."""
+    from openmux.server.web_plugins.port_actions import _live_section, _parse_section
+
+    class _SnapshotOnlyAdapter:
+        def __init__(self, server_config):
+            self.server_config = server_config
+
+    for server_config in ({"port_actions": True}, {"port_actions": 42}, {"port_actions": "x"}, None, ["not", "a", "map"], 7):
+        assert _parse_section(_live_section(_SnapshotOnlyAdapter(server_config))) == ({}, []), server_config
+
+    # A usable snapshot still reads through the same branch.
+    adapter = _SnapshotOnlyAdapter({"port_actions": {"action_ports": {"echo_probe": "p1"}}})
+    assert _parse_section(_live_section(adapter)) == ({"echo_probe": ["p1"]}, [])
+    # An absent section reads as {} and never None: _refresh_catalog() skips its config
+    # check on None, and a removed section must still clear the grants (issue #92).
+    assert _live_section(_SnapshotOnlyAdapter({"server": {}})) == {}
 
 
 def test_load_catalog_only_probes_granted_scripts(tmp_path: Path) -> None:

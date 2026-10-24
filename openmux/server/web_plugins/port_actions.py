@@ -19,12 +19,20 @@ not nested under it):
       action_ports:
         echo_probe: [loopback1]
         health_check: ["*"]
+        # One port name needs no list brackets: `reboot_probe: loopback1`.
 
 With no `port_actions` section, no `actions_dir`, or no `action_ports` grant,
 the routes stay registered and answer empty: no script file is imported, the
 catalog stays empty, and every port reports `actions: []`. That is what lets a
 `port_actions` section added or edited on a soft reload - or saved from the
 Config Editor - take effect without a restart (issue #92).
+
+`_parse_section()` is the only reader of this section, for the start-time
+registration and for every later read. It never raises: a value of the wrong
+shape is dropped in favour of an empty grant, with one log line naming the key.
+A raise during registration would cost the routes for the whole life of the
+process, because registration runs once per start and a soft reload does not
+repeat it (issue #97).
 
 Actions are opt-in per port via `action_ports: {action_id: [port_name, ...]}`
 (action-centric: which ports an action gets, see docs/design/port_actions.md
@@ -109,6 +117,90 @@ def _normalize_action_dirs(value: Any) -> List[str]:
         if item and item not in dirs:
             dirs.append(item)
     return dirs
+
+
+def _normalize_grant_ports(action_id: str, raw: Any) -> Optional[List[str]]:
+    """Normalize one `action_ports` value to a port-name list; None when unusable.
+
+    One port name may be written as a plain string, like `actions_dir` accepts
+    one path (issue #97). Iterating a string yields characters, which would
+    grant the action to every port named by one of those letters, so a string
+    names exactly one port here. A value that is neither a string nor a list
+    returns None, so the caller names the action id in its warning.
+    """
+    if isinstance(raw, str):
+        items: List[Any] = [raw]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    elif raw is None:
+        items = []
+    else:
+        return None
+    ports: List[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            logger.warning("Ignoring non-string port name in the action_ports grant for %s: %r", action_id, item)
+            continue
+        name = item.strip()
+        if name and name not in ports:
+            ports.append(name)
+    return ports
+
+
+def _normalize_action_grants(value: Any) -> Dict[str, List[str]]:
+    """Normalize the `action_ports` config value to `{action_id: [port_name, ...]}`.
+
+    Every entry that survives holds port names, so the two consumers can compare
+    and join it without checking types: `_allowed_actions()` matches a port name,
+    and `_load_errors_payload()` lists the ports of a broken grant. An entry of the
+    wrong shape is dropped with a log line naming it, which is safer than guessing
+    a port from it.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        logger.error(
+            "port_actions action_ports must be a mapping of action id to port name(s); ignoring the %s value",
+            type(value).__name__,
+        )
+        return {}
+    grants: Dict[str, List[str]] = {}
+    for raw_id, raw_ports in value.items():
+        action_id = raw_id.strip() if isinstance(raw_id, str) else ""
+        if not action_id:
+            logger.warning("Ignoring an action_ports entry with a non-string action id: %r", raw_id)
+            continue
+        ports = _normalize_grant_ports(action_id, raw_ports)
+        if ports is None:
+            logger.warning(
+                "Ignoring the action_ports grant for %s: port names must be one name or a list of names, not %s",
+                action_id,
+                type(raw_ports).__name__,
+            )
+            continue
+        grants[action_id] = ports
+    return grants
+
+
+def _parse_section(section: Any) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Read a `port_actions` section into (grants, action-script directories).
+
+    The single reader for the section shape, used by `register_routes()` at start
+    and by `_apply_section()` on every later read, so one value cannot be tolerated
+    by one reader and fatal for the other (issue #97). A section that is not a
+    mapping returns no grants and no directories after one ERROR names its type:
+    the routes stay registered and answer empty, as they do with no section at all.
+    """
+    if section is None:
+        return {}, []
+    if not isinstance(section, dict):
+        logger.error(
+            "The port_actions section must be a mapping of config keys; ignoring the %s value. "
+            "No action script is available until the config is fixed.",
+            type(section).__name__,
+        )
+        return {}, []
+    return _normalize_action_grants(section.get("action_ports")), _normalize_action_dirs(section.get("actions_dir"))
 
 
 def _missing_action_note(path: Path) -> str:
@@ -204,19 +296,26 @@ def _running_config(adapter) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _live_section(adapter) -> Dict[str, Any]:
+def _live_section(adapter) -> Any:
     """Resolve the current `port_actions` section (issue #92).
 
     Prefers the running config, where a save or a soft reload already landed;
     falls back to the snapshot captured at `register_routes()` time when the
     running ConfigManager is not reachable (e.g. a test harness that sets
     `server_config` directly).
+
+    Returns the section as configured rather than as a mapping: `_parse_section()`
+    judges the shape and reports what it drops, so one reader cannot hide a typo
+    from the other. An absent section is `{}` and not None, because
+    `_refresh_catalog()` skips its config check on None and a removal must still
+    clear the grants (issue #92).
     """
     cfg = _running_config(adapter)
-    if cfg is not None:
-        section = cfg.get("port_actions")
-        return section if isinstance(section, dict) else {}
-    return (getattr(adapter, "server_config", None) or {}).get("port_actions") or {}
+    source = cfg if cfg is not None else (getattr(adapter, "server_config", None) or {})
+    if not isinstance(source, dict):
+        return {}
+    section = source.get("port_actions", None)
+    return {} if section is None else section
 
 
 def _evict_stale_siblings(state: _PortActionsState) -> None:
@@ -349,18 +448,17 @@ def _rebuild_catalog(
     return catalog, mtimes, errors
 
 
-def _apply_section(state: _PortActionsState, section: Dict[str, Any]) -> bool:
+def _apply_section(state: _PortActionsState, section: Any) -> bool:
     """Apply the live `port_actions` section to `state`; report a change.
 
     A grant or directory added or removed in the config (saved from the
     Config Editor or picked up by a soft reload) changes the import scope
     (`action_ports` is the loader's scope), so the catalog must rebuild when
     this reports a change - on the very next use, without a server reload
-    (issue #92).
+    (issue #92). Shapes are judged by `_parse_section()`, the same reader
+    `register_routes()` uses, so a value never reads differently on the two paths.
     """
-    raw_ports = section.get("action_ports") or {}
-    new_ports = {k: list(v) for k, v in raw_ports.items()} if isinstance(raw_ports, dict) else {}
-    new_dirs = _normalize_action_dirs(section.get("actions_dir"))
+    new_ports, new_dirs = _parse_section(section)
     changed = (new_ports != state.action_ports) or (new_dirs != (state.actions_dir or []))
     if changed:
         state.action_ports = new_ports
@@ -369,7 +467,7 @@ def _apply_section(state: _PortActionsState, section: Dict[str, Any]) -> bool:
     return changed
 
 
-def _refresh_catalog(state: _PortActionsState, section: Optional[Dict[str, Any]] = None) -> None:
+def _refresh_catalog(state: _PortActionsState, section: Any = None) -> None:
     """Re-import action scripts that changed on disk, including sibling helper modules.
 
     Cheap when nothing changed: this only `stat()`s each `.py` file in the
@@ -793,10 +891,12 @@ def register_routes(app: web.Application, adapter) -> Dict[str, Any]:
     The web console calls this on every start, like the power routes, so the
     endpoints exist whether or not the feature is configured: with no
     `actions_dir` or no `action_ports` grant, the catalog stays empty, no script
-    file is imported, and every port reports no actions.
+    file is imported, and every port reports no actions. A section of the wrong
+    shape reads as no section, with one ERROR naming it (issue #97).
 
     The action settings are read from the top-level `port_actions` config
-    section, not from a `web_console.plugins` entry: via the adapter's
+    section, not from a `web_console.plugins` entry: through `_live_section()`,
+    which prefers the running config and falls back to the adapter's
     `server_config` (the full raw server config, wired by main.py after adapter
     creation).
     """
@@ -807,12 +907,15 @@ def register_routes(app: web.Application, adapter) -> Dict[str, Any]:
         # would raise a duplicate-route error.
         logger.debug("Port Actions routes are already registered; ignoring the extra registration")
         return {}
-    server_config = getattr(adapter, "server_config", None) or {}
-    section = server_config.get("port_actions") or {}
+    section = _live_section(adapter)
     console_manager = getattr(adapter, "console_manager", None)
     port_manager = getattr(console_manager, "port_manager", None)
+    # `_parse_section()` reports a bad shape instead of raising: a raise here
+    # would leave the routes unregistered for the whole life of the process,
+    # because registration runs once per start (issue #97).
+    grants, action_dirs = _parse_section(section)
     state = _PortActionsState(
-        action_ports={k: list(v) for k, v in (section.get("action_ports") or {}).items()},
+        action_ports=grants,
         runner=(
             ActionRunner(
                 port_manager,
@@ -825,7 +928,7 @@ def register_routes(app: web.Application, adapter) -> Dict[str, Any]:
             if port_manager is not None
             else None
         ),
-        actions_dir=_normalize_action_dirs(section.get("actions_dir")),
+        actions_dir=action_dirs,
     )
     # Before the first catalog load, so a script's `import` of a sibling
     # helper module resolves (see `_sync_action_paths()`); and so a stale

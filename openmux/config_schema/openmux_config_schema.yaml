@@ -454,9 +454,13 @@ properties:
           - { type: array, items: { type: string } }
       action_ports:
         type: object
+        # A grant names one port or several. One port name needs no list
+        # brackets, like `actions_dir` accepts one path; the loader reads both
+        # forms the same way and reports what it cannot read (issue #97).
         additionalProperties:
-          type: array
-          items: { type: string }
+          oneOf:
+            - { type: string }
+            - { type: array, items: { type: string } }
   # PDU power management. The per-PDU `outlets` list is the single source
   # for the outlet ids and their driver fields; the adapter merges it into
   # the driver's options (as options.outlets) and reads id + description
