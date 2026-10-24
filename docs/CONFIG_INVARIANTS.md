@@ -9,8 +9,9 @@ Adapters are configured via top-level section keys. These keys are the *source o
 `web_console`, and `web_status`. New sections MUST be documented here before being accepted. Sidecar files (see §7) still
 materialize in-memory under these canonical keys.
 
-`port_actions` is also a canonical top-level section, but it has no adapter behind it: it holds config for the Port Actions web
-plugin only (`actions_dir`, `action_ports`), read via `WebConsoleAdapter.server_config` (see
+`port_actions` is also a canonical top-level section, but it has no adapter behind it: it holds config for the Port Actions
+feature only (`actions_dir`, `action_ports`), read via `WebConsoleAdapter.server_config`. The web console registers the Port
+Actions routes on every start, so this section gates what the feature does, not whether its endpoints exist (see
 [docs/design/port_actions.md](design/port_actions.md)). Like `server`/ `authentication`/`logging`, it is exempted from the
 factory's missing-adapter fail-fast check (`core_sections` in
 [openmux/server/adapters/factory.py](../openmux/server/adapters/factory.py)) rather than mapped to a `config_section` on a

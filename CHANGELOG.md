@@ -10,7 +10,24 @@ workflow.
 
 Changes since v1.0.4 (2026-10-19).
 
+### Config changes to check before upgrading
+
+- **The default `server.yaml` grants the example action scripts.** The pristine default (`config/server.yaml`, and the packaged
+  `/etc/openmux/server.yaml` on a fresh install) carries a `port_actions:` section: `actions_dir`
+  (`openmux/server/actions/examples`, or `/etc/openmux/actions` when packaged) plus `action_ports` grants for the read-only
+  example scripts on the demo `loopback` port. A config you already have is untouched: the package never rewrites
+  `/etc/openmux/server.yaml`, and `make init-config` copies only a missing file. To run actions on your own ports, add that
+  section with your grants — Config Editor > Actions edits it. A fresh packaged install gets the example scripts in
+  `/etc/openmux/actions`; a script you edited is never overwritten.
+
 ### Web console and observability
+
+- **The Port Actions endpoints are core.** The web console now registers the action routes itself, like the Power routes:
+  `/api/ports/<port>/actions` (catalog, run, history, close, takeover), `/ws/actions/<run>`, `/api/port-actions/health` and
+  `/api/port-actions/status` answer on every start. You need no `web_console.plugins` entry for
+  `openmux.server.web_plugins.port_actions`; an entry you already have still loads and changes nothing, and you may delete it.
+  Without a `port_actions` section, or with no grant, the endpoints stay available and report nothing: the catalog is empty, no
+  action script file is imported, and no Actions button appears.
 
 - **An action script's operator prompt now closes for every viewer of the run.** Answering a `session.prompt()` (`confirm()`,
   `choose()`, `select()`, `radio()`, `wait_for_input()`) in one browser tab hid the prompt box only in that tab: the answer

@@ -13,6 +13,11 @@ debian/package-config/client.yaml usr/share/openmux/default-config/
 debian/package-config/openmux.defaults /etc/defaults/
 scripts/generate_deb_auth_config.py usr/share/openmux/
 debian/openmux-server.service lib/systemd/system/
+# Bundled example Port Action scripts. The default server.yaml grants these ids
+# to the loopback demo port, and openmux.postinst seeds /etc/openmux/actions
+# from this directory on a fresh install. The server imports scripts only from
+# actions_dir, so shipping them under /usr/share keeps them inert until seeded.
+openmux/server/actions/examples/*.py usr/share/openmux/action-examples/
 # The web UI templates and static assets ship with the python package
 # (openmux/server/webui, installed to dist-packages via pyproject
 # package-data); the server resolves them from there. The former

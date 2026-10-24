@@ -68,8 +68,6 @@ web_console:
   - openmux.server.web_plugins.config_editor
   #- openmux.server.web_plugins.os_customizer
   #- openmux.server.web_plugins.federated_proxy
-  - module: openmux.server.web_plugins.port_actions
-    enabled: true
   port: 80
   probes_include_details: true
   respect_forwarded_prefix: false

@@ -1,9 +1,12 @@
-"""Port Actions web plugin (see docs/design/port_actions.md, rollout phase 2).
+"""Port Actions catalog and web routes (see docs/design/port_actions.md, rollout phase 2).
 
 Exposes a per-port action catalog plus run/list/live-status HTTP+WS routes on
-top of the `openmux.server.actions` package. Enable the plugin's routes under
-`web_console.plugins`, and configure it via its own top-level `port_actions`
-config section (a sibling of `web_console`, not nested under it):
+top of the `openmux.server.actions` package. The routes are CORE, like the
+power routes: the web console registers them on every start
+(`WebConsoleAdapter._register_routes()` calls `register_routes()`), so no
+`web_console.plugins` entry is needed. The feature is gated by its own
+top-level `port_actions` config section instead (a sibling of `web_console`,
+not nested under it):
 
     port_actions:
       # One directory, or a list of directories, holding action scripts
@@ -17,10 +20,11 @@ config section (a sibling of `web_console`, not nested under it):
         echo_probe: [loopback1]
         health_check: ["*"]
 
-    web_console:
-      plugins:
-        - module: openmux.server.web_plugins.port_actions
-          enabled: true
+With no `port_actions` section, no `actions_dir`, or no `action_ports` grant,
+the routes stay registered and answer empty: no script file is imported, the
+catalog stays empty, and every port reports `actions: []`. That is what lets a
+`port_actions` section added or edited on a soft reload - or saved from the
+Config Editor - take effect without a restart (issue #92).
 
 Actions are opt-in per port via `action_ports: {action_id: [port_name, ...]}`
 (action-centric: which ports an action gets, see docs/design/port_actions.md
@@ -142,9 +146,9 @@ def _record_load_failure(path: Path, exc: ActionValidationError, errors: Dict[st
     return False
 
 
-# Action-script directories this plugin inserted into `sys.path` (see
-# `_sync_action_paths()`). Kept module-level so a `register_plugin()` re-run on
-# a full config reload removes directories the plugin itself added earlier.
+# Action-script directories this module inserted into `sys.path` (see
+# `_sync_action_paths()`). Kept module-level so a `register_routes()` re-run on
+# a full config reload removes directories the module itself added earlier.
 _ADDED_SYS_PATH_DIRS: Set[str] = set()
 
 
@@ -156,7 +160,7 @@ def _sync_action_paths(actions_dirs: Optional[List[str]]) -> None:
     shared client for an internal system, next to several action scripts).
     Entries are added idempotently and are removed again once a directory is
     no longer configured. A directory already on `sys.path` by other means is
-    used as-is and never removed by this plugin.
+    used as-is and never removed by this module.
     """
     wanted: Set[str] = set()
     for directory in actions_dirs or []:
@@ -204,8 +208,9 @@ def _live_section(adapter) -> Dict[str, Any]:
     """Resolve the current `port_actions` section (issue #92).
 
     Prefers the running config, where a save or a soft reload already landed;
-    falls back to the snapshot captured at `register_plugin()` time when the
-    running ConfigManager is not reachable (e.g. a bare plugin test).
+    falls back to the snapshot captured at `register_routes()` time when the
+    running ConfigManager is not reachable (e.g. a test harness that sets
+    `server_config` directly).
     """
     cfg = _running_config(adapter)
     if cfg is not None:
@@ -782,10 +787,26 @@ async def _stream_run_events(ws: web.WebSocketResponse, history: list, queue: Op
                 break
 
 
-def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    # `options` is only the web_console.plugins entry (module/enabled) - the plugin's own
-    # settings live in the top-level `port_actions` config section, read via the adapter's
-    # `server_config` (the full raw server config, wired by main.py after adapter creation).
+def register_routes(app: web.Application, adapter) -> Dict[str, Any]:
+    """Register the core Port Actions routes on the web console app; idempotent.
+
+    The web console calls this on every start, like the power routes, so the
+    endpoints exist whether or not the feature is configured: with no
+    `actions_dir` or no `action_ports` grant, the catalog stays empty, no script
+    file is imported, and every port reports no actions.
+
+    The action settings are read from the top-level `port_actions` config
+    section, not from a `web_console.plugins` entry: via the adapter's
+    `server_config` (the full raw server config, wired by main.py after adapter
+    creation).
+    """
+    if app.get(STATE_APP_KEY) is not None:
+        # Already registered by the core path above. A config that still lists
+        # this module under `web_console.plugins` lands here through the plugin
+        # loader (`register_plugin()`), and a second `add_get` on the same path
+        # would raise a duplicate-route error.
+        logger.debug("Port Actions routes are already registered; ignoring the extra registration")
+        return {}
     server_config = getattr(adapter, "server_config", None) or {}
     section = server_config.get("port_actions") or {}
     console_manager = getattr(adapter, "console_manager", None)
@@ -817,7 +838,7 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     # Baseline for `_refresh_catalog()` (tracks every file, not just scoped ones).
     state.script_mtimes = _catalog_file_mtimes(state.actions_dir)
     if state.runner is None:
-        logger.warning("port_actions plugin registered without a PortManager; actions will not be runnable")
+        logger.warning("Port Actions registered without a PortManager; actions will not be runnable")
     app[STATE_APP_KEY] = state
 
     base = "/api/ports/{port_name}/actions"
@@ -834,3 +855,15 @@ def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, A
     # Sidebar status annotations bootstrap (docs/design/port_actions.md).
     app.router.add_get("/api/port-actions/status", _handle_action_status)
     return {}
+
+
+def register_plugin(app: web.Application, adapter, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Backward-compat entry point for a `web_console.plugins` list entry.
+
+    The routes are core since the web console registers them itself, so a normal
+    config needs no entry here. A deployment that still lists
+    `openmux.server.web_plugins.port_actions` arrives through the plugin loader
+    and gets the same registration, which `register_routes()` folds into a
+    no-op because the core call already ran.
+    """
+    return register_routes(app, adapter)

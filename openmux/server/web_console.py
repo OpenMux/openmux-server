@@ -48,6 +48,7 @@ from openmux.server.locations import package_version_file, web_tls_dir
 from openmux.server.port_utils import natural_sort_key, safe_get_port
 from openmux.server.site_events import SiteEventHub
 from openmux.server.web_plugins import ADAPTER_APP_KEY
+from openmux.server.web_plugins import port_actions as _port_actions
 from openmux.server.web_plugins import power_monitor as _power_monitor
 
 try:  # Prefer importlib.metadata (std lib)
@@ -2454,10 +2455,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
         """Register all HTTP routes on the console app.
 
         Static assets, the UI pages (when ``enable_ui``), login/API and
-        websocket routes, the power (PDU) routes, and the health probes.
-        The power routes are always registered so a soft reload of the
-        ``power:`` section needs no restart (handlers reply 404 when no PDU
-        adapter is active).
+        websocket routes, the power (PDU) routes, the Port Actions routes, and
+        the health probes. The power routes are always registered so a soft
+        reload of the ``power:`` section needs no restart (handlers reply 404
+        when no PDU adapter is active). The Port Actions routes are always
+        registered too, so ``port_actions`` needs no ``web_console.plugins``
+        entry (the catalog stays empty when that section grants nothing).
         """
         # Static files at /static/
         try:
@@ -2494,6 +2497,16 @@ class WebConsoleAdapter(BaseGenericAdapter):
         # /ws/events site socket ("power_changed" nudges).
         app.router.add_get("/api/power", _power_monitor._handle_api_power)
         app.router.add_post(r"/api/power/outlets/{outlet_ref:.+}", _power_monitor._handle_set_outlet)
+        # Port Actions routes are core for the same reason as Power: the per-port
+        # Actions button and the Config Editor script-health panel call them on
+        # every console, so a config needs no `web_console.plugins` entry. The
+        # module reads its own top-level `port_actions` section and stays inert
+        # when that section is absent or grants nothing: the catalog is empty, no
+        # action script file is imported, and every port reports no actions.
+        try:
+            _port_actions.register_routes(app, self)
+        except Exception as e:
+            self.logger.error("Failed to register Port Actions routes: %s", e, exc_info=True)
         app.router.add_get("/api/csrf", self._handle_api_csrf)
         # Static paths win over /ws/{port_name} (registration order): a port
         # literally named "events" is shadowed here.
@@ -4293,11 +4306,13 @@ class WebConsoleAdapter(BaseGenericAdapter):
         return None
 
     # --- Plugin loader ---
-    # Real optional web plugins (e.g. config_editor, os_customizer, port_actions)
-    # are loaded from web_console.plugins. The Power feature is NOT a plugin:
-    # its routes are core (registered in start()) and its sidebar item is
-    # emitted live per page in _get_allowed_plugin_nav, so neither depends on a
-    # plugins entry.
+    # Real optional web plugins (e.g. config_editor, os_customizer) are loaded
+    # from web_console.plugins. The Power feature and the Port Actions routes are
+    # NOT plugins: their routes are core, registered in _register_routes().
+    # Power also emits its sidebar item live per page in _get_allowed_plugin_nav,
+    # so neither depends on a plugins entry. Port Actions adds no nav item, and a
+    # plugins entry left over from an older config still loads: register_routes()
+    # is idempotent, so the extra entry is a no-op.
     def _power_adapter_present(self) -> bool:
         """True when an enabled power adapter is registered (live nav gate)."""
         pdu = self._find_power_adapter()

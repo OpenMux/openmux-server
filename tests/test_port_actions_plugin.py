@@ -1,10 +1,11 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import time
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 import pytest
 from aiohttp import ClientSession, TCPConnector
@@ -30,7 +31,17 @@ async def _start_console(
     actions_dir=None,
     live_config_manager=None,
     users=None,
+    plugin_entry: bool = True,
+    section: bool = True,
 ):
+    """Start a web console over one loopback port named `p1`.
+
+    `plugin_entry` decides whether the config keeps a `web_console.plugins`
+    entry for this module, which is what an older config still has. `section`
+    decides whether the top-level `port_actions` section exists at all. Neither
+    switch changes whether the endpoints answer: the web console registers the
+    routes itself, so the switches only change what the catalog holds.
+    """
     pm = PortManager([])
     loop_adapter = LoopbackAdapter("loop", {"loopback_ports": [{"name": "p1", "max_read_write_users": max_read_write_users}]})
     loop_adapter.main_port_manager = pm
@@ -40,24 +51,26 @@ async def _start_console(
     auth = AuthManager({"users": users if users is not None else USERS})
     cm = ConsoleManager(pm, auth)
 
-    config = {
-        "port_actions": {
+    config: Dict[str, Any] = {}
+    if section:
+        config["port_actions"] = {
             "actions_dir": actions_dir if actions_dir is not None else ACTIONS_DIR,
             "action_ports": action_ports,
-        },
-        "web_console": {
-            "host": "127.0.0.1",
-            "port": http_port,
-            "enable_ui": enable_ui,
-            "enable_probes": False,
-            "plugins": [
-                {
-                    "module": "openmux.server.web_plugins.port_actions",
-                    "enabled": True,
-                }
-            ],
-        },
+        }
+    web_console_config: Dict[str, Any] = {
+        "host": "127.0.0.1",
+        "port": http_port,
+        "enable_ui": enable_ui,
+        "enable_probes": False,
     }
+    if plugin_entry:
+        web_console_config["plugins"] = [
+            {
+                "module": "openmux.server.web_plugins.port_actions",
+                "enabled": True,
+            }
+        ]
+    config["web_console"] = web_console_config
     web_adapter = WebConsoleAdapter("wc", config)
     # Mirrors main.py's post-creation wiring: the adapter's own `web_console` config
     # section (passed to the constructor) doesn't include sibling top-level sections.
@@ -95,8 +108,10 @@ async def test_list_actions_only_shows_allowed_actions():
 
 
 @pytest.mark.asyncio
-async def test_console_page_renders_actions_button_when_plugin_active():
-    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]}, enable_ui=True)
+async def test_console_page_renders_actions_button_without_a_plugins_entry():
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(
+        0, {"echo_probe": ["p1"]}, enable_ui=True, plugin_entry=False
+    )
     try:
         async with ClientSession(connector=TCPConnector(ssl=False)) as session:
             async with session.get(f"http://127.0.0.1:{bound_port}/console?port=p1", headers=AUTH_HEADER) as resp:
@@ -104,6 +119,94 @@ async def test_console_page_renders_actions_button_when_plugin_active():
                 body = await resp.text()
                 assert 'id="actionsToggle"' in body
                 assert 'id="actionsOverlay"' in body
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_core_routes_answer_without_a_plugins_entry():
+    """No `web_console.plugins` entry: the routes, the runner and the run WS all work."""
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]}, plugin_entry=False)
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(f"http://127.0.0.1:{bound_port}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert [a["id"] for a in (await resp.json())["actions"]] == ["echo_probe"]
+
+            async with session.get(f"http://127.0.0.1:{bound_port}/api/port-actions/health", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["action_load_errors"] == []
+
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}},
+            ) as resp:
+                assert resp.status == 200
+                run_id = (await resp.json())["run_id"]
+
+            async with session.ws_connect(f"http://127.0.0.1:{bound_port}/ws/actions/{run_id}", headers=AUTH_HEADER) as ws:
+                async for msg in ws:
+                    if json.loads(msg.data).get("event") == "action_finished":
+                        break
+
+            async with session.get(f"http://127.0.0.1:{bound_port}/api/port-actions/status", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["ports"]["p1"]["action_id"] == "echo_probe"
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_stale_plugins_entry_does_not_double_register_the_routes(caplog):
+    """A config that still lists the module loads quietly and registers once."""
+    with caplog.at_level(logging.DEBUG, logger="openmux.server.web_plugins.port_actions"):
+        web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {"echo_probe": ["p1"]})
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(f"http://127.0.0.1:{bound_port}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert [a["id"] for a in (await resp.json())["actions"]] == ["echo_probe"]
+        texts = [record.getMessage() for record in caplog.records]
+        assert not [text for text in texts if "Error loading plugin" in text or "Failed to register Port Actions" in text]
+        # The core call already registered the routes, so the loader's call folds away.
+        assert any("already registered" in text for text in texts)
+    finally:
+        await web_adapter.stop()
+        await loop_adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_routes_answer_empty_without_a_port_actions_section():
+    """No section at all: every endpoint answers, and nothing is runnable or imported."""
+    web_adapter, pm, loop_adapter, bound_port = await _start_console(0, {}, plugin_entry=False, section=False)
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False)) as session:
+            async with session.get(f"http://127.0.0.1:{bound_port}/api/ports/p1/actions", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert await resp.json() == {
+                    "actions": [],
+                    "active_run": None,
+                    "open_finished_run": None,
+                    "action_load_errors": [],
+                }
+
+            async with session.get(f"http://127.0.0.1:{bound_port}/api/port-actions/health", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["action_load_errors"] == []
+
+            async with session.get(f"http://127.0.0.1:{bound_port}/api/port-actions/status", headers=AUTH_HEADER) as resp:
+                assert resp.status == 200
+                assert (await resp.json())["ports"] == {}
+
+            async with session.post(
+                f"http://127.0.0.1:{bound_port}/api/ports/p1/actions/echo_probe/run",
+                headers=AUTH_HEADER,
+                json={"params": {"text": "hi"}},
+            ) as resp:
+                assert resp.status == 404
     finally:
         await web_adapter.stop()
         await loop_adapter.stop()

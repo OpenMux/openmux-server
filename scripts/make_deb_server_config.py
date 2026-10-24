@@ -6,8 +6,9 @@ single source of truth) at package-build time, applying only the FHS
 overrides that differ in a packaged install:
 
   * ``logging.file`` -> ``/var/log/openmux/openmux_server.log``
-  * append ``port_actions.actions_dir: /etc/openmux/actions`` (the writable,
-    user-managed home for port-action scripts, created by the package)
+  * ``port_actions.actions_dir`` -> ``/etc/openmux/actions`` (the writable,
+    user-managed home for port-action scripts, created by the package and
+    seeded with the bundled examples by ``openmux.postinst``)
 
 Any other difference between the pristine and packaged server config should
 be fixed in ``config/server.yaml`` itself, so the two stop drifting. This
@@ -22,12 +23,8 @@ import sys
 LOG_LINE = '  file: "logs/openmux_server.log"'
 LOG_LINE_PKG = '  file: "/var/log/openmux/openmux_server.log"'
 
-ACTIONS_BLOCK = """
-port_actions:
-  # Writable, user-managed home for port-action scripts (created by the
-  # package; the Config Editor creates action directories here).
-  actions_dir: /etc/openmux/actions
-"""
+ACTIONS_DIR_LINE = "  actions_dir: openmux/server/actions/examples"
+ACTIONS_DIR_LINE_PKG = "  actions_dir: /etc/openmux/actions"
 
 
 def main() -> None:
@@ -37,16 +34,16 @@ def main() -> None:
     with open(src, encoding="utf-8") as fh:
         text = fh.read()
 
-    if LOG_LINE not in text:
-        sys.exit(f"error: {src} has no {LOG_LINE!r} line; update {sys.argv[0]}")
-    if "port_actions:" in text:
-        sys.exit(f"error: {src} already has a port_actions section; remove it from the pristine config or this script")
+    for expected in (LOG_LINE, ACTIONS_DIR_LINE):
+        if expected not in text:
+            sys.exit(f"error: {src} has no {expected!r} line; update {sys.argv[0]}")
 
     text = text.replace(LOG_LINE, LOG_LINE_PKG, 1)
+    text = text.replace(ACTIONS_DIR_LINE, ACTIONS_DIR_LINE_PKG, 1)
     if not text.endswith("\n"):
         text += "\n"
     with open(dst, "w", encoding="utf-8") as fh:
-        fh.write(text + ACTIONS_BLOCK)
+        fh.write(text)
     print(f"generated {dst} from {src} (FHS overrides applied)")
 
 

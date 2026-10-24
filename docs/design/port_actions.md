@@ -28,13 +28,13 @@ params are never read from the URL, and autorun is skipped (falls back to a pre-
 isn't already valid, e.g. a required sensitive param that couldn't be pre-filled. Phase 7's action-centric assignment config is
 implemented: the sole allow-list config key is `action_ports: {action_id: [port_name, ...]}`, plus a `"*"` wildcard entry
 granting an action to every port — Config Editor web-UI support for managing these assignments without hand-editing YAML is NOT
-implemented (see "Action-to-port assignment config" below). The plugin's config (`actions_dir`/`action_ports`) lives in its own
-top-level `port_actions` section (a sibling of `web_console`, not nested inside it) — `web_console.plugins` only enables its
-routes.**
+implemented (see "Action-to-port assignment config" below). The feature's config (`actions_dir`/`action_ports`) lives in its
+own top-level `port_actions` section (a sibling of `web_console`, not nested inside it) — the web console registers the
+action routes itself, as core routes like the power ones, so no `web_console.plugins` entry is needed to turn them on.**
 
 Implementation: `openmux/server/actions/` (`session.py`, `registry.py`, `runner.py`), example scripts in
 `openmux/server/actions/examples/` (`echo_probe.py`, `slow_noop.py`, `confirm_probe.py`, `select_probe.py`, `setup_wizard.py`,
-`power_probe.py`), CLI entry point in `scripts/run_action.py`, web plugin in `openmux/server/web_plugins/port_actions.py`,
+`power_probe.py`), CLI entry point in `scripts/run_action.py`, web routes in `openmux/server/web_plugins/port_actions.py`,
 console-page UI in `openmux/server/webui/templates/web_console/console.html.j2` (Actions button/overlay) and
 `openmux/server/webui/static/js/console.js` (catalog fetch, run form, live WS event log, run history), tests in
 `tests/test_action_*.py` and `tests/test_port_actions_plugin.py`.
@@ -430,10 +430,11 @@ general traffic log.
   has not yet joined, or re-showing the pane of a run this tab already streams (a finished run's transcript re-opens the same
   way). It never opens the run panel.
 - **API**: `POST /api/ports/<name>/actions/<id>/run` starts a run; `GET /api/ports/<name>/actions/<id>/runs` lists history.
-- **Web plugin**: implemented as its own `openmux.server.web_plugins.port_actions` module
-  (`register_plugin(app, adapter, options=None)`, same pattern as
-  [config_editor.py](../../openmux/server/web_plugins/config_editor.py#L639)) adding its own routes rather than modifying
-  `web_console.py` core.
+- **Web routes**: implemented as its own `openmux.server.web_plugins.port_actions` module, which exports
+  `register_routes(app, adapter)` plus a `register_plugin(app, adapter, options=None)` alias
+  ([config_editor.py](../../openmux/server/web_plugins/config_editor.py#L639) has the same signature) for a config that still
+  lists the module under `web_console.plugins`. The web console calls `register_routes()` itself from
+  `WebConsoleAdapter._register_routes()`, as a core route set like the power routes, so no plugins entry is needed.
 
 ## Deep-linking an action
 Another system (a ticketing tool, an inventory system, a runbook link) should be able to open a console straight into a
@@ -467,22 +468,30 @@ specific action with its parameters pre-filled, instead of an operator navigatin
   sensitive (e.g. passwords) before it's stored in the run registry or logs.
 
 ## Action-to-port assignment config
-The plugin's own settings (`actions_dir`, `action_ports`) live in a dedicated top-level `port_actions` config section - a
-sibling of `web_console`, `loopback_ports`, etc., not nested inside `web_console.plugins` - since it's the plugin's own
-configuration, not a web-console-specific detail. `web_console.plugins` only carries `module`/`enabled` to turn its routes on.
-The allow-list config key itself is action-centric: `action_ports: {action_id: [port_name, ...]}` (see the
-`config/loopback_test.yaml` example, or the module docstring in
+The feature's own settings (`actions_dir`, `action_ports`) live in a dedicated top-level `port_actions` config section - a
+sibling of `web_console`, `loopback_ports`, etc., not nested inside `web_console` - because they configure the action engine,
+not the web console. The web console registers the action routes on every start, so no `web_console.plugins` entry is needed:
+the `port_actions` section is the only switch. With no section, no `actions_dir`, or no grant, the endpoints stay available and
+answer empty, and the module imports no script and runs nothing.
+The allow-list config key itself is action-centric: `action_ports: {action_id: [port_name, ...]}` (see the default
+`config/server.yaml`, the `config/loopback_test.yaml` example, or the module docstring in
 [port_actions.py](../../openmux/server/web_plugins/port_actions.py)) — for when it's more natural to think "which ports get
 this action" than "which actions does this port get", and to avoid repeating the same action id under every port that should
 get it. **Implemented** (`openmux/server/web_plugins/port_actions.py`):
-- **Top-level `port_actions` section**: `register_plugin()` reads `actions_dir`/ `action_ports` from
+- **Top-level `port_actions` section**: `register_routes()` reads `actions_dir`/ `action_ports` from
   `adapter.server_config["port_actions"]` (the full raw server config, wired onto the `WebConsoleAdapter` by `main.py` right
-  after adapter creation - see `WebConsoleAdapter.server_config` in `openmux/server/web_console.py`), not from its own
+  after adapter creation - see `WebConsoleAdapter.server_config` in `openmux/server/web_console.py`), not from a
   `web_console.plugins` entry. After start, `_live_section()` re-reads the section from the running ConfigManager on each use,
   so a saved or soft-reloaded config applies without a server reload (issue #92, "Hot reload of the `port_actions` section"
   below). `openmux/server/adapters/factory.py`'s fail-fast startup check treats `port_actions` as a recognized non-adapter
   top-level section (alongside `server`/`authentication`/`logging`), so a bare `port_actions:` section with no matching adapter
   plugin doesn't abort startup.
+- **Enabled in the default config**: `config/server.yaml` grants the read-only example scripts in
+  `openmux/server/actions/examples` to the demo `loopback` port, so a fresh dev run shows the Actions menu without any
+  hand-editing. The routes need no config entry of their own. `scripts/make_deb_server_config.py` builds the packaged
+  default from the same file and points `actions_dir` at `/etc/openmux/actions`, and `debian/openmux.postinst` copies the
+  examples there on a fresh install, never overwriting a file an admin edited. The endpoints still answer on such an install;
+  a config with no `port_actions` section, or with no grant for a port, lists no action and shows no Actions button.
 - **`actions_dir` is a path or a list of paths**: a single string keeps working; a list loads action scripts from each
   directory, in list order. The same action id in two directories does not override the earlier entry (first directory wins).
   The Config Editor "Actions" sub-view edits this as a textarea, one directory per line (a single line stores the plain string

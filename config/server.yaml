@@ -149,7 +149,39 @@ power:
     #     - id: "storage-1"
     #       index: "4"
 
-# Web console with Config Editor plugin enabled
+# Port Actions: server-side automation attached to a console port (see
+# docs/design/port_actions.md). The web console registers the action routes on
+# every start, so this section is the only switch: it chooses the action scripts
+# and the ports that may run them. With no `port_actions` section, or with no
+# grant here, the endpoints answer empty and no script runs.
+# The section is re-read on every use, so a grant saved in the Config Editor
+# applies without a server reload.
+port_actions:
+  # One directory, or a list of directories, holding action scripts. Each
+  # existing directory is also put on sys.path, so a script can import a
+  # helper module sitting next to it. Scripts re-import when their file
+  # changes, without a server reload.
+  actions_dir: openmux/server/actions/examples
+  # Allow-list: action id -> the ports that may run it. The entry "*" grants
+  # every port, including a port added later. An id must equal its script
+  # file name (without ".py"), and only granted scripts are imported.
+  # A grant with no matching script is listed in Config Editor > Actions >
+  # Script health.
+  action_ports:
+    # The bundled read-only examples, granted to the loopback demo port:
+    # echo_probe sends a line and waits for its echo; status_probe fails when
+    # an expected reply is missing; slow_noop sleeps and holds the port lock;
+    # confirm_probe and select_probe ask the operator first; power_probe
+    # reports the port's power feeds. For the full operator-input demo, add:
+    #   setup_wizard: [loopback]
+    confirm_probe: ["loopback"]
+    echo_probe: ["loopback"]
+    power_probe: ["loopback"]
+    select_probe: ["loopback"]
+    slow_noop: ["loopback"]
+    status_probe: ["loopback"]
+
+# Web console with the Config Editor plugin enabled
 web_console:
   enable_probes: true
   enable_ui: true

@@ -73,6 +73,9 @@ variables nor systemd's. Its control-socket resolution:
   (host keys), `web_console/` (web TLS).
 - Port-action scripts: `port_actions.actions_dir` in config (packaged
   default `/etc/openmux/actions`, created by the package at 0750).
+- Bundled example action scripts: inside the python package
+  (`openmux/server/actions/examples/`). The .deb ships a copy in
+  `/usr/share/openmux/action-examples/` for the seeding below.
 - Web UI assets: inside the python package
   (`openmux/server/webui/`); never copied at install or boot.
 
@@ -87,4 +90,8 @@ variables nor systemd's. Its control-socket resolution:
 - `EnvironmentFile=-/etc/defaults/openmux` applies the admin overrides;
   the `-` keeps the service startable if the file is removed.
 - The postinst script creates `/etc/openmux/actions` (0750
-  `openmux:openmux`) for port-action scripts.
+  `openmux:openmux`) for port-action scripts. It then copies the
+  bundled examples from `/usr/share/openmux/action-examples/` into
+  that directory, so the action grants in the default config resolve.
+  It never overwrites an existing file, so an admin edit survives a
+  reinstall or upgrade.
