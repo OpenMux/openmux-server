@@ -54,6 +54,14 @@ from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .power_drivers.api import OutletId, OutletReading, PduDriver  # noqa: F401  (re-exports for existing imports)
 from .power_drivers.dummy import DummyDriver  # noqa: F401  (re-export for existing imports)
 
+# Config-time logger for the power section. ``validate_config`` and
+# ``_validate_pdu_entry`` are class/static methods and run before any adapter
+# instance exists, so the rejection reasons (issue #96) have no per-instance
+# logger to go to. The name is the parent of the per-adapter loggers created in
+# ``PduAdapter.__init__`` (``openmux.adapter.power.<name>``).
+logger = logging.getLogger("openmux.adapter.power")
+
+
 # Default poll cadence (seconds) when a PDU entry omits `poll_interval`.
 DEFAULT_POLL_INTERVAL = 10.0
 
@@ -307,6 +315,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         """
         section = cls._effective_section(config) if isinstance(config, dict) else {}
         if not isinstance(section, dict):
+            logger.error("power section must be a mapping, got %s", type(section).__name__)
             return False
         if section.get("enabled", True) is False:
             return True
@@ -314,6 +323,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         if pdus is None:
             return True
         if not isinstance(pdus, list):
+            logger.error("power 'pdus' must be a list of PDU entries, got %s", type(pdus).__name__)
             return False
         seen_names = set()
         for pdu in pdus:
@@ -321,6 +331,7 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
                 return False
             # Duplicate names are a conflict regardless of the rest of the entry.
             if pdu.get("name") in seen_names:
+                logger.error("power PDU %r is declared twice: every PDU needs a unique 'name'", pdu.get("name"))
                 return False
             seen_names.add(pdu.get("name"))
         return True
@@ -333,20 +344,33 @@ class PduAdapter(BaseGenericAdapter):  # noqa: Vulture
         unparsable drivers, bad poll intervals, or malformed
         driver-options/annotations. Name duplication is checked by the
         caller (``validate_config``).
+
+        Every rejection logs its reason (issue #96). The adapter factory only
+        reports that the ``power`` section was rejected, so without a line here
+        the operator gets no clue about which entry or which key is wrong.
         """
         if not isinstance(pdu, dict):
+            logger.error("power PDU entry must be a mapping, got %s", type(pdu).__name__)
             return False
         pname = pdu.get("name")
         if not isinstance(pname, str) or not _valid_ref_token(pname):
+            logger.error("power PDU name %r must be non-empty without dots or whitespace", pname)
             return False
         driver = pdu.get("driver")
         if not isinstance(driver, str) or driver not in DRIVERS:
+            logger.error(
+                "PDU %r driver %r is not a known driver (known: %s)",
+                pname,
+                driver,
+                ", ".join(sorted(DRIVERS)) or "none",
+            )
             return False
         try:
             _as_poll_interval(pdu.get("poll_interval"))
             _driver_options(pdu)
             _parse_annotations(pdu.get("outlets"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            logger.error("PDU %r rejected: %s", pname, exc)
             return False
         return True
 

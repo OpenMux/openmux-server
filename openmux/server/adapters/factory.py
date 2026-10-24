@@ -455,7 +455,9 @@ class GenericAdapterFactory:
             # Pass the full config section dict for validation
             config_to_validate = {plugin.config_section: plugin_config}
             if not validate_fn(config_to_validate):
-                logger.error("Invalid configuration for %s", plugin.name)
+                # The adapter logs the reason when it has one (issue #96); the
+                # caller logs this failure, so no line here (it printed the same
+                # text twice per rejected section).
                 raise ValueError(f"Invalid configuration for {plugin.name}")
 
         # Security policy enforcement (legacy sections)

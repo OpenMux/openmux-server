@@ -34,6 +34,10 @@ Changes since v1.0.4 (2026-10-19).
   the port you wrote, the way one path in `actions_dir` means one directory. A grant you wrote with brackets, such as
   `["loopback"]`, means exactly what it meant before. Config Editor > Actions loads the single-name form into its row, so
   saving that page keeps the port instead of emptying the list.
+- **A rejected power entry now says why at boot.** A bad `power.pdus[]` entry used to log only `Invalid configuration for PDU
+  Power`, and the power adapter stayed down with no clue why. The startup log now names the entry and the reason, for example
+  `PDU 'rack1' rejected: poll_interval must be >= 0, got -1.0`, and the adapter factory reports the failure once instead of
+  twice. No key changed: fix the value the log names in `server.yaml`.
 
 ### Web console and observability
 

@@ -68,3 +68,25 @@ def test_factory_blocks_adapter_when_policy_denies_type(dummy_registry):
     adapters = factory.create_adapters_from_config(config)
 
     assert adapters == []
+
+
+class _RejectingAdapter(DummyAdapter):
+    """Adapter whose section validation always fails."""
+
+    adapter_type = "rejecting"
+
+    @classmethod
+    def validate_config(cls, config):
+        return False
+
+
+def test_factory_logs_one_failure_line_for_a_rejected_section(dummy_registry, caplog):
+    """Issue #96: a rejected section reports once, so the adapter's reason line stands out."""
+    registry = PluginRegistry()
+    registry.register_plugin(AdapterPlugin("Rejecting", "rejecting_section", _RejectingAdapter))
+    factory = GenericAdapterFactory(registry)
+    with caplog.at_level("INFO", logger="openmux.server.adapters.factory"):
+        caplog.clear()
+        assert factory.create_adapters_from_config({"server": {}, "rejecting_section": []}) == []
+    lines = [r.getMessage() for r in caplog.records if r.name == "openmux.server.adapters.factory"]
+    assert sum(1 for line in lines if "Invalid configuration for Rejecting" in line) == 1

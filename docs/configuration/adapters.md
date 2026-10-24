@@ -635,6 +635,10 @@ Supported keys:
 One list, no duplication: an outlet that needs a label AND driver fields lives once in `pdus[].outlets` with both. Ids that the
 device does not report raise a warning at startup
 
+A rejected entry names itself and the reason in the startup log (`openmux.adapter.power`), for example
+`PDU 'rack1' rejected: poll_interval must be >= 0, got -1.0`. The power adapter then stays down, and the other ports keep
+running. The adapter checks these rules; the schema also checks the ones it can express (`--check-config` names the key).
+
 Outlet ref = `<pdu_name>.<outlet_id>` (for example `rack1.3`, `phaseA.A1`). This is the single identity used by the CLI, the
 web API, the Power page, and the status page.
 

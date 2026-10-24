@@ -146,6 +146,59 @@ def test_validate_config_rejects_bad_names_and_ids():
     assert PduAdapter.validate_config({"power": {"pdus": {"name": "x"}}}) is False
 
 
+# Issue #96: every rejection must say why, because the factory only reports that
+# the power section was rejected ("Invalid configuration for PDU Power").
+_REJECTED = [
+    ({"power": {"pdus": [{"name": "rack1", "driver": "dummy", "poll_interval": -1}]}}, "poll_interval must be >= 0"),
+    ({"power": {"pdus": [{"name": "rack1", "driver": "dummy", "poll_interval": "fast"}]}}, "poll_interval must be a number"),
+    ({"power": {"pdus": [{"name": "rack1", "driver": "dummy", "options": {"outlets": ["1"]}}]}}, "must not set 'outlets'"),
+    ({"power": {"pdus": [{"name": "rack1", "driver": "dummy", "options": "host"}]}}, "'options' must be a mapping"),
+    ({"power": {"pdus": [{"name": "rack1", "driver": "dummy", "outlets": {"id": "1"}}]}}, "'outlets' must be a list"),
+    ({"power": {"pdus": [{"name": "rack1", "driver": "dummy", "outlets": ["1", "2"]}]}}, "must be mappings"),
+    ({"power": {"pdus": [{"name": "rack1", "driver": "dummy", "outlets": [{"id": " "}]}]}}, "non-empty 'id'"),
+    ({"power": {"pdus": [{"name": "rack1", "driver": "dummy", "outlets": [{"id": "a.b"}]}]}}, "must not contain dots"),
+    ({"power": {"pdus": [{"name": "rack1", "driver": "nope"}]}}, "not a known driver"),
+    ({"power": {"pdus": [{"name": "ra ck", "driver": "dummy"}]}}, "must be non-empty without dots"),
+    ({"power": {"pdus": ["rack1"]}}, "must be a mapping"),
+    ({"power": {"pdus": {"name": "x"}}}, "must be a list"),
+    (
+        {"power": {"pdus": [{"name": "rack1", "driver": "dummy"}, {"name": "rack1", "driver": "dummy"}]}},
+        "declared twice",
+    ),
+]
+
+
+@pytest.mark.parametrize("config,reason", _REJECTED)
+def test_validate_config_logs_the_reject_reason(config, reason, caplog):
+    """Each rejected power config logs one line naming the reason."""
+    with caplog.at_level("WARNING", logger="openmux.adapter.power"):
+        caplog.clear()
+        assert PduAdapter.validate_config(config) is False
+    lines = [r.getMessage() for r in caplog.records if r.name == "openmux.adapter.power"]
+    assert any(reason in line for line in lines), f"{reason!r} missing from {lines!r}"
+
+
+def test_validate_config_reason_names_the_pdu(caplog):
+    """The reason line names the PDU, so the operator finds the entry."""
+    cfg = {
+        "power": {"pdus": [{"name": "rack1", "driver": "dummy"}, {"name": "rack2", "driver": "dummy", "poll_interval": -1}]}
+    }
+    with caplog.at_level("WARNING", logger="openmux.adapter.power"):
+        caplog.clear()
+        assert PduAdapter.validate_config(cfg) is False
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "PDU 'rack2' rejected: poll_interval must be >= 0" in text
+    assert [r.getMessage() for r in caplog.records]  # one line, not a stack of them
+
+
+def test_valid_power_config_logs_nothing(caplog):
+    """A good section stays quiet: the reason lines are errors, not chatter."""
+    with caplog.at_level("WARNING", logger="openmux.adapter.power"):
+        caplog.clear()
+        assert PduAdapter.validate_config(POWER_SECTION) is True
+    assert [r for r in caplog.records if r.name.startswith("openmux.adapter.power")] == []
+
+
 # --- dummy driver ------------------------------------------------------------
 
 
