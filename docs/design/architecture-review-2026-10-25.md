@@ -40,7 +40,7 @@ No `docs/adr/` exists at the time of writing, so no candidate contradicts a reco
 | # | Candidate | Seam | Strength | Depends on |
 |---|---|---|---|---|
 | 1 | One Client-listener session module, two transport adapters | in-process | Strong | Candidate 2 |
-| 2 | Give Takeover a result instead of `(bool, str)` | in-process | Strong | none |
+| 2 | One access-decision module behind the Write slot and attach interface | in-process | Strong | none |
 | 3 | One deep Port-set reconcile module | in-process | Strong | none |
 | 4 | One module for the Outlet switch decision | local-substitutable | Worth exploring | a decision on MuxCon |
 | 5 | One login gate behind the Auth Manager's interface | mock | Worth exploring | none |
@@ -77,35 +77,77 @@ Test note. The two suites are mirror images today: `test_force_rw_prompts_and_pa
 the power menu tests are duplicated. Several names say "escape menu", which `docs/GLOSSARY.md` forbids; the
 approved term is **Control menu**. Retire that naming while the files move.
 
-## 2. Give Takeover a result instead of `(bool, str)` — Strong
+## 2. One access-decision module behind the Write slot and attach interface — Strong
 
-Files: `openmux/server/console_manager.py:1140` (`take_write_slot`) mints the reason string at line 1266;
-`adapters/ssh_listener.py:768`, `adapters/telnet_listener.py:558`, `adapters/client_listener.py:864`, and
-`web_console.py:1645` parse it; `adapters/listener_common.py:427-500` and
-`openmux/client/adapters/rw_control.py:22-60` decode the denial vocabulary branch by branch.
+Files: `openmux/server/console_manager.py` (`take_write_slot:1140`, `connect_client_to_port:386`,
+`promote_client_to_read_write:556`, `demote_client_to_read_only:593`, `_taker_entitled:266`,
+`_resolve_access_mode:336`); the four surfaces `adapters/client_listener.py`, `adapters/ssh_listener.py`,
+`adapters/telnet_listener.py`, and `web_console.py`; three decoders `adapters/listener_common.py:427-451`,
+`openmux/client/adapters/rw_control.py:14-36`, and `webui/static/js/console.js:2021-2048`.
 
-Problem. The Write slot interface returns a bare `(bool, str)`. The string is an undocumented protocol of eight
-values plus one embedded payload, `"takeover from <user> [<id>]"`. Four callers test the prefix, for example
-`if ok and reason.startswith("takeover from "): payload["takeover"] = reason.removeprefix("takeover from ")`, and
-two more decode it branch by branch. The reason values are `already_rw`, `promote_failed`, `invalid_target`,
-`federation_denied`, and `victim_not_current`, plus the takeover payload. Test fakes hold the formatted string, for
-example `_FakeSshCm((True, "takeover from alice [f4]"))`.
+Problem. These decisions return a bare flag plus a string. `take_write_slot` mints the reason string at `:1266`
+from 13 documented values, one of them an embedded payload, `"takeover from <user> [<id>]"`. All four surfaces
+re-extract that payload with the same `startswith("takeover from ")`. `promote_client_to_read_write:556` collapses
+three causes into one `bool`, and `take_write_slot` calls it at `:1018`, `:1126`, and `:1242`, then re-mints the code
+it just dropped. `_taker_entitled:266` hides a tri-state inside a boolean: `False, ""` means "demote me to
+read-only" and `False, <code>` means "deny", and only `:376-381` decodes the difference. The `reason` key is one
+namespace with three writers: `console_manager`, `muxcon.py:1805,1872`, and `actions/runner.py:728,809,815`.
 
-Deepening. Return a structured result: outcome, victim label, holders, and Write slot capacity. Each surface keeps
-its own rendering: one CRLF line on Telnet and SSH, one control frame on the web console, one refusal line on the
-CLI. Decoding exists nowhere.
+Evidence that the drift is live. The server owns no wording, so every surface keeps its own table for one outcome.
+`console.js:2031,2034` prints lower case with an en dash; `rw_control.py:36` and `listener_common.py:450` print
+upper case with a hyphen; the web console never prints "granted" at all. `no_holder` wording exists only in
+`rw_control.py:27`. The promote reply carries no code on any surface, which makes `listener_common.py:446` and
+`rw_control.py:35` dead code. Two surfaces report a wrong outcome: the release path hard-codes `ok: True` and drops
+the result (`client_listener.py:896`, `web_console.py:1617`), and a handler exception answers with a mode-shaped
+refusal that carries no code (`client_listener.py:966`). Attach denial carries no code anywhere, and the CLI over
+WebSocket throws away the close code and message (`websocket_adapter.py:175-189`), so that path reports nothing.
+
+Deepening. One stdlib-only leaf module owns the decision: the outcome-code namespace, one code-to-wording table, one
+holder label builder, the `client_mode` notice payload builder, and the structured result returned by the six
+members above. Holders, Write slot capacity, and the victim label become fields, which deletes the three holder
+label builders (`client_listener.py:986`, `web_console.py:1353`, `console_manager.py:1318`) and the two duplicated
+capacity helpers. Each surface keeps only its transport: NUL-prefixed `OMXCTRL ` on TCP, bare `OMXCTRL ` on the
+WebSocket, line bytes on Telnet and SSH. Decoding exists nowhere, server-side or client-side.
+
+The standard. Every access decision reaches a Client as the one frame type `client_mode`, carrying `ok`, `mode`, one
+outcome code, the server-owned human line, and the holder and capacity fields. The keys `reason`, `takeover`, and
+`taken_by` are deleted. No new frame types appear, because the web console writes an unrecognised control frame into
+the device (`web_console.py:1738` then `_hws_read_loop:1740-1744`). A refusal frame goes out before the hang-up: the
+web console sends it then closes 4003, Telnet and SSH print the line then exit, and TCP adds the code to the tail of
+`ERROR:CONNECT:`, which the CLI logs but never parses. `CONNECTED:<port>:<MODE>` keeps its shape, because
+`tcp_adapter.py:850-859` splits on `:` and compares the last token exactly, so one extra token silently demotes a
+real user to read-only.
+
+Outside the seam. Transport framing stays per surface. The decision to push a victim, federation, or Port Action
+notice stays with `console_manager`, `muxcon.py:1805,1872`, and `actions/runner.py`; those three call the builder.
+Not in scope, each recorded as a follow-up: the `detached` ack, the legacy `connect_client:152`, the delivery
+booleans at `:917`, notice ownership which belongs to candidate 6, the HTTP status payloads, the `FEDRWACK`
+vocabulary, and the `CONNECTED:` token format.
+
+Two bug fixes travel with the change: the release path must report the real result, and the exception path must
+carry the internal-failure code. Both are user visible, so `CHANGELOG.md` records them together with the new frame
+keys. This PR also fixes the CLI-over-WebSocket refusal, which is about ten lines and one integration test.
+
+Verification. Tuple unpacking stops compiling, which finds every caller. About 73 asserts across 13 test files pin
+the frame keys, 16 tests in 4 files pin the wording, six files hold the formatted tuple, and nothing pins any
+`ERROR:CONNECT:` line today. Telnet and SSH keep calling the one mapping from symmetrical bodies, which preserves
+the diff proof candidate 1 depends on. ADR-0001 records the protocol change and the compatibility window, because
+`docs/CONFIG_INVARIANTS.md` covers config formats only and the repo has no written wire policy.
 
 Wins:
 
 - The interface stops leaking a format.
 - Four parse sites and two duplicated holder helpers (`_rw_holders_for_port`, `_max_rw_users_for_port`, which exist
   in both `client_listener.py` and `web_console.py`) join this interface for free.
-- Denial wording lives in one place, and lockout wording stops drifting.
+- Denial wording lives in one place, in one tense, on all four surfaces.
 - Magic strings leave the fakes.
-- The MuxCon relay matches the local shape.
+- `_taker_entitled` stops smuggling three states through one boolean.
+- Attach denial becomes machine-readable, and the CLI over WebSocket reports a reason for the first time.
 
-Sequence. Do this candidate before candidate 1, in its own pull request. It is contained, and it removes the prefix
-parsing that a moved `_cmd_force_rw` would otherwise inherit already wrong.
+Sequence. Do this candidate before candidate 1, in its own pull request. It removes the prefix parsing that a moved
+`_cmd_force_rw` would otherwise inherit already wrong. Ship it as one pull request, because `denied_by_group_acl`
+and `denied_by_access_default` are shared by the Write slot path and the attach path: splitting them lands the shared
+vocabulary while its users still match on strings.
 
 ## 3. One deep Port-set reconcile module — Strong
 
@@ -254,8 +296,10 @@ spawn bug proves the need.
 - Candidate 1 adds the term for the new module (**Listener session module**) and the term for each side of the seam
   (**transport adapter**). Add both to `docs/GLOSSARY.md` with the seam contract, and fix the "escape menu" test
   names to **Control menu** in the same move.
-- Candidate 2 changes the Takeover result contract. Update the **Takeover** entry to name the result instead of the
-  reason string, and record the trade-off as the first ADR under `docs/adr/`.
+- Candidate 2 adds **Access decision** and **Outcome code**, widens the **Takeover** entry to name the result
+  instead of the reason string, and records that `client_mode` now reports the outcome of any access decision
+  instead of only a mode change. Record the protocol change and its compatibility window as the first ADR under
+  `docs/adr/`.
 - Candidate 4 needs one term for the shared decision (**Outlet switch decision**) and a decision recorded as an ADR
   about the MuxCon relay gate.
 - Add any new term to `docs/GLOSSARY.md` in the same pull request as the code that introduces it.
