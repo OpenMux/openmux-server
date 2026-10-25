@@ -107,6 +107,7 @@ debian/openmux.postrm.debhelper
 debian/openmux.prerm.debhelper
 debian/.debhelper/
 debian/openmux/
+deb-out/
 *.deb
 *.buildinfo
 *.changes
