@@ -58,9 +58,11 @@ Changes since v1.0.4 (2026-10-19).
   twice. No key changed: fix the value the log names in `server.yaml`.
 
 ### Web console and observability
-- **Web console pages ask for their scripts by version.** Each page now requests its scripts as
-  `/static/js/<name>.js?v=<version>`. A browser keeps a script until its URL changes, so an upgrade used to leave an open
-  or reloadable page running the previous release's script. Nothing to clear by hand after this upgrade.
+- **Web console pages ask for their assets by version.** Each page now requests its scripts and stylesheets as
+  `/static/<path>?v=<version>`, for example `/static/js/console.js?v=1.0.5`. A browser keeps an asset until its URL
+  changes, so an upgrade used to leave an open or reloadable page running the previous release's script. Nothing to clear
+  by hand after this upgrade. The logo image keeps its plain URL: an operator owns that file, and a release stamp would
+  hide a logo replaced inside one release.
 - **The viewer list has its own frame.** The viewer count and list now arrive in a `presence` frame instead of reusing
   `client_mode`, because a viewer badge is not a mode change. A page that read viewers from `client_mode` must read
   `presence`. The web console page already does.

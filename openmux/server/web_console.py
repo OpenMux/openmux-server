@@ -2152,7 +2152,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
     def _get_logo_url(self) -> Optional[str]:
         """Return a /static/ URL to a logo image if found in static_dir.
 
-        Looks for: logo.svg, logo.png, logo.webp, logo.jpg, logo.jpeg
+        Looks for: logo.svg, logo.png, logo.webp, logo.jpg, logo.jpeg. The URL is not passed
+        through ``asset_url`` on purpose: the operator owns that file, and a release stamp
+        would keep a replaced logo hidden in the browser cache until the next release.
         """
         try:
             base = Path(self.static_dir) if self.static_dir else None
