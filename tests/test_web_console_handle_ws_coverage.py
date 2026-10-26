@@ -7,13 +7,13 @@ until the socket closes (or it is cancelled), then tears down.
 The handler does NOT type-check the websocket, so a scripted fake driven by
 `async for` works once the module's `web.WebSocketResponse` is patched. The
 adapter is a lightweight stub (owning the tracking dicts, logger, and the
-optional _get_client_ip/_broadcast_meta hooks) plus a stub console manager;
-only `_get_adapter` and `safe_get_port` are monkeypatched, so the module-level
-holder/capacity readers run for real against a port object the stub
-port_manager exposes.
+optional _get_client_ip/_broadcast_meta hooks) plus a stub console manager that
+answers with real `AccessDecision` values (issue #98); only `_get_adapter` and
+`safe_get_port` are monkeypatched, so the holders and capacity a reply carries
+come from a port object the stub port_manager exposes.
 
-These tests pin the PRE-refactor behavior; they must be green before and after
-the refactor, at 100% of the `handle_ws` span.
+Every OMXCTRL JSON object is answered by a handler: none of them fall through to
+the serial device, which the assertions on `cm.pm.writes` pin.
 """
 
 import asyncio
@@ -25,7 +25,10 @@ from aiohttp import WSMessage, WSMsgType
 from aiohttp.web import HTTPBadRequest
 
 import openmux.server.web_console as wc
+from openmux.server.access_control import WIRE_MULTIPLE
+from openmux.server.access_decision import Code, Holder, Mode, decide
 from openmux.server.web_console import handle_ws
+from tests.support.decisions import holders_frame_of, with_port_state
 
 
 def _boom():
@@ -103,6 +106,7 @@ class FakeWS:
         self.close_calls += 1
         self.closed = True
         self.close_code = code
+        self.close_message = message
 
 
 class _CondWS(FakeWS):
@@ -182,18 +186,25 @@ class _PM:
 
 
 class CM:
+    """Console manager stand-in that answers each request with a real ``AccessDecision``.
+
+    The web console replies with a decision's frame, so a fake returning the old
+    ``(ok, mode, reason)`` tuple would exercise a shape nothing produces (issue #98).
+    """
+
     def __init__(self):
-        self.result = (True, "read-only", None)
+        self.result = decide(Code.READ_ONLY_STANDING, mode=Mode.READ_ONLY)
         self.connect_boom = False
         self.register_boom = False
         self.unregister_boom = False
         self.disconnect_boom = False
         self.viewers = []
         self.viewers_boom = False
-        self.promote = True
+        self.promote = None
+        self.demote = None
         self.promote_boom = False
         self.demote_boom = False
-        self.take = (False, "not_attached")
+        self.take = None
         self.take_boom = False
         self.write_boom = False
         self.pm_boom = False
@@ -212,7 +223,7 @@ class CM:
         if self.connect_boom:
             _boom()
         self.connect_calls.append((client_id, port_name, username))
-        return self.result
+        return with_port_state(self.result, self._port(port_name), client_id)
 
     def register_client_channel(self, client_id, client_manager):
         if self.register_boom:
@@ -238,18 +249,28 @@ class CM:
         if self.promote_boom:
             _boom()
         self.promoted.append((client_id, port_name))
-        return self.promote
+        granted = self.promote or decide(Code.GRANTED, mode=Mode.READ_WRITE)
+        return with_port_state(granted, self._port(port_name), client_id)
 
     async def demote_client_to_read_only(self, client_id, port_name, notify_origin=True):
         if self.demote_boom:
             _boom()
         self.demoted.append((client_id, port_name))
+        released = self.demote or decide(Code.RELEASED, mode=Mode.READ_ONLY)
+        return with_port_state(released, self._port(port_name), client_id)
 
     async def take_write_slot(self, client_id, port_name, target=None):
         if self.take_boom:
             _boom()
         self.taken.append((client_id, port_name, target))
-        return self.take
+        took = self.take or decide(Code.NOT_ATTACHED, mode=Mode.READ_ONLY)
+        return with_port_state(took, self._port(port_name), client_id)
+
+    def _port(self, port_name):
+        return self.pm.ports.get(port_name)
+
+    def rw_holders_frame(self, port_name):
+        return holders_frame_of(self.pm.ports.get(port_name))
 
     def _track_pop(self, key):
         self.pop_calls.append(key)
@@ -398,7 +419,7 @@ def _req(port_name="console1", username="u", meta="1", rel_query=None):
 async def _run(
     monkeypatch,
     incoming=None,
-    result=(True, "read-only", None),
+    result=None,
     *,
     no_connect=False,
     cm_attrs=None,
@@ -419,7 +440,8 @@ async def _run(
         ad._meta_subscribers = meta_subs
     cm = _NoConnect() if no_connect else CM()
     if not no_connect:
-        cm.result = result
+        if result is not None:
+            cm.result = result
         if cm_attrs:
             for key, val in cm_attrs.items():
                 setattr(cm, key, val)
@@ -550,7 +572,9 @@ async def test_meta_query_nonstr(monkeypatch):
 @pytest.mark.asyncio
 async def test_fallback_metaonly(monkeypatch):
     port = _PortObj(fed=True, up=False)
-    ws, res, ad, cm = await _run(monkeypatch, incoming=[], port=port, result=(False, "read-only", "port_full"))
+    ws, res, ad, cm = await _run(
+        monkeypatch, incoming=[], port=port, result=decide(Code.PORT_UNAVAILABLE, mode=Mode.READ_ONLY)
+    )
     assert res is ws
     assert not ws.closed
     assert any("meta-only" in m for m in ad.logger.has("info"))
@@ -560,42 +584,55 @@ async def test_fallback_metaonly(monkeypatch):
 @pytest.mark.asyncio
 async def test_fallback_port_up(monkeypatch):
     port = _PortObj(fed=True, up=True)
-    ws, res, ad, cm = await _run(monkeypatch, incoming=[], port=port, result=(False, "read-only", "port_full"))
+    ws, res, ad, cm = await _run(
+        monkeypatch, incoming=[], port=port, result=decide(Code.PORT_UNAVAILABLE, mode=Mode.READ_ONLY)
+    )
     assert ws.close_code == 4003
     assert ad._clients == {}
 
 
 @pytest.mark.asyncio
 async def test_fallback_not_fed(monkeypatch):
-    ws, res, ad, cm = await _run(monkeypatch, incoming=[], result=(False, "read-only", "port_full"))
+    ws, res, ad, cm = await _run(monkeypatch, incoming=[], result=decide(Code.PORT_UNAVAILABLE, mode=Mode.READ_ONLY))
     assert ws.close_code == 4003
     assert ad._clients == {}
 
 
 @pytest.mark.asyncio
 async def test_fallback_safe_boom(monkeypatch):
-    ws, res, ad, cm = await _run(monkeypatch, incoming=[], safe_boom=True, result=(False, "read-only", "port_full"))
+    ws, res, ad, cm = await _run(
+        monkeypatch, incoming=[], safe_boom=True, result=decide(Code.PORT_UNAVAILABLE, mode=Mode.READ_ONLY)
+    )
     assert ws.close_code == 4003
     assert ad._clients == {}
 
 
 @pytest.mark.asyncio
 async def test_fallback_isconnected_boom(monkeypatch):
-    ws, res, ad, cm = await _run(monkeypatch, incoming=[], port=_BoomIsPort(), result=(False, "read-only", "port_full"))
+    ws, res, ad, cm = await _run(
+        monkeypatch, incoming=[], port=_BoomIsPort(), result=decide(Code.PORT_UNAVAILABLE, mode=Mode.READ_ONLY)
+    )
     assert ws.close_code == 4003
     assert ad._clients == {}
 
 
 @pytest.mark.asyncio
 async def test_denied_group_acl(monkeypatch):
-    ws, res, ad, cm = await _run(monkeypatch, incoming=[], result=(False, None, "denied_by_group_acl"))
+    ws, res, ad, cm = await _run(monkeypatch, incoming=[], result=decide(Code.DENIED_BY_GROUP_ACL, mode=Mode.READ_ONLY))
+    # The page gets the refusal in words before the socket closes, so it can say why
+    # the console did not open (issue #98).
+    refusal = _one(ws, "client_mode")
+    assert refusal["ok"] is False
+    assert refusal["code"] == "denied_by_group_acl"
+    assert "Access denied to this port" == refusal["message"]
+    assert ws.close_message.decode() == refusal["message"]
     assert ws.close_code == 4003
     assert ad._clients == {}
 
 
 @pytest.mark.asyncio
 async def test_no_permissions(monkeypatch):
-    ws, res, ad, cm = await _run(monkeypatch, incoming=[], result=(False, None, "no_permissions"))
+    ws, res, ad, cm = await _run(monkeypatch, incoming=[], result=decide(Code.NO_PERMISSIONS, mode=Mode.READ_ONLY))
     assert ws.close_code == 4003
     assert ad._clients == {}
 
@@ -612,7 +649,7 @@ async def test_no_console_manager(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_connect_readwrite_mode(monkeypatch):
-    ws, res, ad, cm = await _run(monkeypatch, incoming=[_close()], result=(True, "read-write", None))
+    ws, res, ad, cm = await _run(monkeypatch, incoming=[_close()], result=decide(Code.ATTACHED, mode=Mode.READ_WRITE))
     mode = _one(ws, "client_mode")
     assert mode["mode"] == "read-write"
     assert mode["client_id"].startswith("ws:")
@@ -676,7 +713,7 @@ async def test_connect_register_boom(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_connect_mode_none(monkeypatch):
-    ws, res, ad, cm = await _run(monkeypatch, incoming=[_close()], result=(True, None, None))
+    ws, res, ad, cm = await _run(monkeypatch, incoming=[_close()], result=decide(Code.READ_ONLY_STANDING, mode=Mode.READ_ONLY))
     assert _one(ws, "client_mode")["mode"] == "read-only"
 
 
@@ -733,7 +770,7 @@ async def test_write_binary(monkeypatch):
 async def test_write_meta_only_dropped(monkeypatch):
     port = _PortObj(fed=True, up=False)
     ws, res, ad, cm = await _run(
-        monkeypatch, incoming=[_text("drop"), _close()], port=port, result=(False, "read-only", "port_full")
+        monkeypatch, incoming=[_text("drop"), _close()], port=port, result=decide(Code.PORT_UNAVAILABLE, mode=Mode.READ_ONLY)
     )
     assert cm.pm.writes == []
 
@@ -803,10 +840,14 @@ async def test_omxctrl_outer_nonlist(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_omxctrl_unknown_type(monkeypatch):
+async def test_omxctrl_unknown_type_is_answered_not_forwarded(monkeypatch):
+    # An OMXCTRL object this server cannot answer gets a typed refusal. It used to be
+    # forwarded, which typed JSON into the serial device (issue #98).
     ws, res, ad, cm = await _run(monkeypatch, incoming=[_ctrl_frame({"type": "zzz"}), _close()], req_kw=dict(meta=None))
-    assert [c["type"] for c in _ctrl(ws)] == ["client_mode", "presence"]
-    assert len(cm.pm.writes) == 1  # forwarded (not matched as a command)
+    resp = _after_cmd(ws, "client_mode")
+    assert resp["ok"] is False
+    assert resp["code"] == "unsupported_request"
+    assert cm.pm.writes == []
 
 
 @pytest.mark.asyncio
@@ -823,29 +864,36 @@ async def test_request_rw_ok(monkeypatch):
     ws, res, ad, cm = await _run(
         monkeypatch,
         incoming=[_ctrl_frame({"type": "request_rw"}), _close()],
-        cm_attrs=dict(promote=True),
         req_kw=dict(meta=None),
     )
     resp = _after_cmd(ws, "client_mode")
     assert resp["ok"] is True and resp["mode"] == "read-write"
+    assert resp["code"] == "ok"
+    assert resp["lines"] == ["[Read-write access granted]"]
     assert "rw_holders" not in resp and "max_rw_users" not in resp
     assert cm.taken == []
 
 
 @pytest.mark.asyncio
 async def test_request_rw_denied_holders(monkeypatch):
-    port = _PortObj(connected_clients=[{"mode": "read-write", "username": "h", "client_id": "hc"}], maxrw=2)
+    port = _PortObj(
+        connected_clients=[{"mode": "read-write", "username": "h", "client_id": "hc"}],
+        maxrw=1,
+    )
     ws, res, ad, cm = await _run(
         monkeypatch,
         incoming=[_ctrl_frame({"type": "promote"}), _close()],
         port=port,
-        cm_attrs=dict(promote=False),
+        cm_attrs=dict(promote=decide(Code.PROMOTE_FAILED, mode=Mode.READ_ONLY)),
         req_kw=dict(meta=None),
     )
     resp = _after_cmd(ws, "client_mode")
     assert resp["ok"] is False and resp["mode"] == "read-only"
-    assert len(resp["rw_holders"]) == 1
-    assert "max_rw_users" in resp
+    assert resp["code"] == "promote_failed"
+    assert resp["rw_holders"] == ["[hc] h@unknown (rw)"]
+    assert resp["max_rw_users"] == 1
+    # The refusal arrives in the server's sentence, not as a code the browser decodes.
+    assert "failed to grant read-write access" in resp["message"]
 
 
 @pytest.mark.asyncio
@@ -866,7 +914,6 @@ async def test_request_rw_send_boom(monkeypatch):
     ws, res, ad, cm = await _run(
         monkeypatch,
         incoming=[_ctrl_frame({"type": "request_rw"}), _close()],
-        cm_attrs=dict(promote=True),
         ws_factory=lambda i: _CondWS(i, n=2, when="client_mode"),
     )
     assert cm.pm.writes == []
@@ -892,7 +939,11 @@ async def test_release_rw_demote_boom(monkeypatch):
         req_kw=dict(meta=None),
     )
     resp = _after_cmd(ws, "client_mode")
-    assert resp["ok"] is True
+    # A release that raised is reported as a failure that kept the mode (issue #98):
+    # the old reply said ok=True whatever happened.
+    assert resp["ok"] is False
+    assert resp["code"] == "error"
+    assert resp["mode"] == "read-only"
 
 
 @pytest.mark.asyncio
@@ -914,12 +965,14 @@ async def test_force_promote_takeover_ok(monkeypatch):
     ws, res, ad, cm = await _run(
         monkeypatch,
         incoming=[_ctrl_frame({"type": "force_promote", "client_id": "victim"}), _close()],
-        cm_attrs=dict(take=(True, "takeover from VICT")),
+        cm_attrs=dict(take=decide(Code.GRANTED, mode=Mode.READ_WRITE, victim=Holder(client_id="victim", username="vict"))),
         req_kw=dict(meta=None),
     )
     resp = _after_cmd(ws, "client_mode")
     assert resp["ok"] is True and resp["mode"] == "read-write"
-    assert resp["takeover"] == "VICT"
+    # The displaced holder rides along as the server's own line (issue #61, #98).
+    assert resp["lines"] == ["[Read-write access granted]", "[Taken from: [victim] vict@unknown (rw)]"]
+    assert "takeover" not in resp and "taken_by" not in resp and "reason" not in resp
     assert cm.taken and cm.taken[0][2] == "victim"
 
 
@@ -928,11 +981,12 @@ async def test_force_promote_already_rw(monkeypatch):
     ws, res, ad, cm = await _run(
         monkeypatch,
         incoming=[_ctrl_frame({"type": "force_promote"}), _close()],
-        cm_attrs=dict(take=(True, "already_rw")),
+        cm_attrs=dict(take=decide(Code.ALREADY_RW, mode=Mode.READ_WRITE)),
         req_kw=dict(meta=None),
     )
     resp = _after_cmd(ws, "client_mode")
     assert resp["ok"] is True
+    assert resp["code"] == "already_rw"
     assert "reason" not in resp
     assert cm.taken and cm.taken[0][2] is None
 
@@ -942,7 +996,7 @@ async def test_force_promote_target_self(monkeypatch):
     ws, res, ad, cm = await _run(
         monkeypatch,
         incoming_factory=lambda ws: [_ctrl_frame({"type": "force_promote", "client_id": _cid_of(ws)}), _close()],
-        cm_attrs=dict(take=(True, "already_rw")),
+        cm_attrs=dict(take=decide(Code.ALREADY_RW, mode=Mode.READ_WRITE)),
         req_kw=dict(meta=None),
     )
     assert cm.taken and cm.taken[0][2] is None
@@ -957,8 +1011,10 @@ async def test_force_promote_take_boom(monkeypatch):
         req_kw=dict(meta=None),
     )
     resp = _after_cmd(ws, "client_mode")
+    # A takeover that raised answers with a code and the mode still held (issue #98).
     assert resp["ok"] is False
-    assert resp["reason"] == "error"
+    assert resp["code"] == "error"
+    assert resp["mode"] == "read-only"
     assert "max_rw_users" not in resp
 
 
@@ -969,10 +1025,11 @@ async def test_force_promote_maxrw(monkeypatch):
         monkeypatch,
         incoming=[_ctrl_frame({"type": "force_promote"}), _close()],
         port=port,
-        cm_attrs=dict(take=(False, "full")),
+        cm_attrs=dict(take=decide(Code.PROMOTE_FAILED, mode=Mode.READ_ONLY)),
         req_kw=dict(meta=None),
     )
     assert "max_rw_users" in _after_cmd(ws, "client_mode")
+    assert _after_cmd(ws, "client_mode")["max_rw_users"] == WIRE_MULTIPLE
 
 
 @pytest.mark.asyncio
@@ -980,7 +1037,7 @@ async def test_force_promote_maxrw_none(monkeypatch):
     ws, res, ad, cm = await _run(
         monkeypatch,
         incoming=[_ctrl_frame({"type": "force_promote"}), _close()],
-        cm_attrs=dict(take=(False, "full")),
+        cm_attrs=dict(take=decide(Code.PROMOTE_FAILED, mode=Mode.READ_ONLY)),
         req_kw=dict(meta=None),
     )
     assert "max_rw_users" not in _after_cmd(ws, "client_mode")
@@ -1059,9 +1116,14 @@ async def test_power_pdu_ok(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_power_pdu_none_default(monkeypatch):
+    # A power adapter that answers nothing falls back to the unconfigured reply, typed
+    # for the request that asked.
     pdu = Pdu(None)
     ws, res, ad, cm = await _run(
-        monkeypatch, incoming=[_ctrl_frame({"type": "power_query"}), _close()], ad_attrs=dict(pdu=pdu), req_kw=dict(meta=None)
+        monkeypatch,
+        incoming=[_ctrl_frame({"type": "power_switch", "ref": "r"}), _close()],
+        ad_attrs=dict(pdu=pdu),
+        req_kw=dict(meta=None),
     )
     resp = _one(ws, "power_switch")
     assert resp["ok"] is False
@@ -1077,9 +1139,12 @@ async def test_power_pdu_boom(monkeypatch):
         ad_attrs=dict(pdu=pdu),
         req_kw=dict(meta=None),
     )
-    # handle_power_frame raised -> the power handler's outer except -> forwarded
-    assert [c["type"] for c in _ctrl(ws)] == ["client_mode", "presence"]
-    assert len(cm.pm.writes) == 1
+    # A power request that raised is answered as a failure instead of being forwarded
+    # into the port, which is what the old outer except did (issue #98).
+    resp = _after_cmd(ws, "power_switch")
+    assert resp["ok"] is False
+    assert resp["error"] == "power control failed"
+    assert cm.pm.writes == []
 
 
 @pytest.mark.asyncio
@@ -1091,7 +1156,8 @@ async def test_power_find_boom(monkeypatch):
     ws2 = FakeWS([_ctrl_frame({"type": "power_query"})])
     monkeypatch.setattr(wc.web, "WebSocketResponse", lambda **k: ws2)
     await handle_ws(_req(meta=None))
-    assert "power_feeds" not in [c["type"] for c in _ctrl(ws2)]
+    # A power lookup that raised is answered, and the request stays off the port.
+    assert _one(ws2, "power_feeds")["error"] == "power control failed"
 
 
 @pytest.mark.asyncio

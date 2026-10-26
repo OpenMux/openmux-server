@@ -36,12 +36,20 @@ import urllib.parse
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from aiohttp import web
 
 from openmux.common.identity import basic_authenticate_header, get_server_id, get_server_label
-from openmux.server.access_control import capacity_display_label, capacity_to_wire, holder_id_short
+from openmux.server.access_control import capacity_display_label
+from openmux.server.access_decision import (
+    CLOSE_ATTACH_DENIED,
+    FRAME_HOLDERS,
+    Code,
+    decide,
+    mode_or_read_only,
+    presence_frame,
+)
 from openmux.server.adapters.lifecycle import READINESS_ACTIVE, READINESS_IDLE, READINESS_OFFLINE
 from openmux.server.data_logger import DataLogger
 from openmux.server.locations import package_version_file, web_tls_dir
@@ -89,6 +97,60 @@ def _read_package_version() -> str:
     except (OSError, ValueError):
         # justification: the stamp is optional; the About page renders without it
         return ""
+
+
+def _format_template_ts(value: Any) -> str:
+    """Format an epoch timestamp as local time, accepting seconds or milliseconds.
+
+    Returns "" for None or empty, and the value unchanged when it is not a number.
+    """
+    try:
+        if value is None or value == "":
+            return ""
+        seconds = float(value)
+        if seconds > 1_000_000_000_000:
+            seconds = seconds / 1000.0
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds))
+    except Exception:
+        return str(value)
+
+
+def stamp_asset_url(path: str, stamp: str) -> str:
+    """Append ``v=<stamp>`` to one static asset path.
+
+    A browser keeps a cached script until its URL changes, so a version in the URL is
+    what makes an upgrade reload the script. ``path`` is returned unchanged with no
+    stamp, rather than carrying an empty one.
+    """
+    if not stamp:
+        return path
+    joiner = "&" if "?" in path else "?"
+    return f"{path}{joiner}v={stamp}"
+
+
+def register_template_helpers(env: Any, asset_stamp: Optional[Callable[[], str]] = None) -> None:
+    """Register the filters and globals the shipped page templates call.
+
+    ``fmt_ts`` formats a timestamp and ``asset_url`` stamps a static asset path with the
+    running version. ``asset_stamp`` is a callable so the version is read on first use,
+    after the adapter knows it. Each registration stands alone and a page still renders
+    with an unstamped link, so a template helper can never take the console down. A test
+    that builds its own Jinja environment calls this too, so it renders the real
+    templates.
+    """
+
+    def _asset_url(path: str) -> str:
+        return stamp_asset_url(path, asset_stamp() if asset_stamp is not None else "")
+
+    for register in (
+        lambda: env.filters.__setitem__("fmt_ts", _format_template_ts),
+        lambda: env.globals.__setitem__("asset_url", _asset_url),
+    ):
+        try:
+            register()
+        except Exception:
+            # justification: optional template helper; the page renders without it
+            pass
 
 
 def _format_uptime(seconds: Optional[float]) -> str:
@@ -1351,53 +1413,29 @@ async def handle_readyz(request: web.Request) -> web.Response:
 
 
 def _rw_holders_for_port(adapter: Any, port_name: str) -> list:
-    """Return holder labels for all read-write clients on a port.
+    """Deprecated shim kept for out-of-tree callers until the next release.
 
-    Format: ``[<id>] username@ip (rw)`` (issue #61), identical to the
-    telnet/SSH `w` command and the CLI client's holder lines. The `client_id`
-    in brackets is the value the per-holder "Take control" button and a
-    targeted takeover's `client_id` field match on.
+    The Write slot holders of a Port, and the frame that answers for them, belong to
+    ``ConsoleManager.rw_holders_frame`` (issue #98). New code must call that: it is the
+    only place that labels a holder, resolves its IP, and reads the port capacity.
     """
-    holders: list = []
     try:
-        pm = getattr(getattr(adapter, "console_manager", None), "port_manager", None)
-        port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
-        if port_obj is not None:
-            for c in getattr(port_obj, "connected_clients", []):
-                if c.get("mode") == "read-write":
-                    cid = c.get("client_id", "")
-                    username = c.get("username", "unknown")
-                    ip = "unknown"
-                    try:
-                        resolver = getattr(adapter, "_resolve_client_meta", None)
-                        meta = resolver(cid) if callable(resolver) else {}
-                        ip = meta.get("ip") or "unknown"
-                    except Exception:
-                        # justification: optional metadata; the holder list tolerates a missing ip
-                        pass
-                    holders.append(f"[{holder_id_short(cid)}] {username}@{ip} (rw)")
+        frame = adapter.console_manager.rw_holders_frame(port_name)
     except Exception:
-        # justification: optional metadata; the holder list stays usable
-        pass
-    return holders
+        # justification: deprecated shim; an unreachable port has no holders to list
+        return []
+    return list(frame.get("holders") or [])
 
 
 def _max_rw_users_for_port(adapter: Any, port_name: str) -> Optional[int]:
-    """Return the UI wire capacity for a port (0/1/WIRE_MULTIPLE), or None if not determinable.
-
-    The port stores the tri-value mode (issue #59); the browser only needs the
-    int shape it has always rendered (0 shows the "read-write is disabled"
-    notice; anything else shows holder info).
-    """
+    """Deprecated shim: read the capacity from ``rw_holders_frame`` instead (issue #98)."""
     try:
-        pm = getattr(getattr(adapter, "console_manager", None), "port_manager", None)
-        port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
-        if port_obj is not None:
-            return capacity_to_wire(getattr(port_obj, "max_read_write_users", 1))
+        frame = adapter.console_manager.rw_holders_frame(port_name)
     except Exception:
-        # justification: optional metadata; None is the safe answer
-        pass
-    return None
+        # justification: deprecated shim; an unreachable port reports no capacity
+        return None
+    value = frame.get("max_rw_users")
+    return None if value is None else int(value)
 
 
 @dataclass
@@ -1413,6 +1451,7 @@ class _Hw:
     attached: bool = False
     want_meta: bool = False
     mode: Optional[str] = None
+    attach_decision: Any = None
 
 
 async def _hws_prepare(adapter, request):
@@ -1471,21 +1510,21 @@ async def _hws_attach(adapter, h):
         await h.ws.close(code=1011, message=b"Console manager not available")
         _hws_cleanup(adapter, h)
         return False
-    ok, mode, reason = await adapter.console_manager.connect_client_to_port(h.client_id, h.port_name, h.username)
-    h.mode = mode
-    if ok:
+    attached = await adapter.console_manager.connect_client_to_port(h.client_id, h.port_name, h.username)
+    h.attach_decision = attached
+    h.mode = attached.mode.value
+    if attached.ok:
         h.attached = True
         return True
-    if reason == "denied_by_group_acl":
-        await h.ws.close(code=4003, message=b"Access denied to this port")
-        _hws_cleanup(adapter, h)
-        return False
-    if reason == "no_permissions":
-        await h.ws.close(code=4003, message=b"No permissions assigned to this account")
-        _hws_cleanup(adapter, h)
-        return False
-    # Fallback: allow meta-only websocket when federated port is currently down
-    return await _hws_fallback_metaonly(adapter, h)
+    if attached.code is Code.PORT_UNAVAILABLE:
+        # Fallback: allow meta-only websocket when federated port is currently down
+        return await _hws_fallback_metaonly(adapter, h)
+    # Answer in the browser's vocabulary before the socket goes away. A close reason
+    # alone leaves the page with nothing to show (issue #98).
+    await _hws_send_ctrl(adapter, h, attached.frame())
+    await h.ws.close(code=CLOSE_ATTACH_DENIED, message=attached.message.encode())
+    _hws_cleanup(adapter, h)
+    return False
 
 
 async def _hws_connect_phase(adapter, h):
@@ -1512,6 +1551,7 @@ async def _hws_connect_phase(adapter, h):
 async def _hws_fallback_metaonly(adapter, h):
     """Meta-only attach for a down federated port. Returns False when the socket
     was closed and the driver should return."""
+    reason = h.attach_decision.message.encode() if h.attach_decision is not None else b"Port attach failed"
     try:
         pm = getattr(adapter.console_manager, "port_manager", None)
         port_obj = safe_get_port(pm, h.port_name)
@@ -1520,37 +1560,36 @@ async def _hws_fallback_metaonly(adapter, h):
         if is_fed and not is_up:
             h.meta_only = True
             return True
-        await h.ws.close(code=4003, message=b"Port attach failed")
+        await h.ws.close(code=CLOSE_ATTACH_DENIED, message=reason)
         _hws_cleanup(adapter, h)
         return False
     except Exception:
-        await h.ws.close(code=4003, message=b"Port attach failed")
+        await h.ws.close(code=CLOSE_ATTACH_DENIED, message=reason)
         _hws_cleanup(adapter, h)
         return False
 
 
-async def _hws_send_client_mode(adapter, h):
+async def _hws_send_ctrl(adapter, h, frame: Dict[str, Any]) -> None:
+    """Send one OMXCTRL control frame. A Client that cannot take it is not an error."""
     try:
-        granted_mode = "read-write" if h.mode == "read-write" else "read-only"
-        payload = {
-            "type": "client_mode",
-            "ok": True,
-            "mode": granted_mode,
-            # Lets the browser pass its own client_id back on actions it triggers
-            # (e.g. Port Actions self-demote/auto-restore, see docs/design/port_actions.md).
-            "client_id": h.client_id,
-        }
-        if granted_mode == "read-only":
-            holders = _rw_holders_for_port(adapter, h.port_name)
-            if holders:
-                payload["rw_holders"] = holders
-            max_rw = _max_rw_users_for_port(adapter, h.port_name)
-            if max_rw is not None:
-                payload["max_rw_users"] = max_rw
-        await h.ws.send_str("OMXCTRL " + json.dumps(payload, separators=(",", ":")))
+        await h.ws.send_str("OMXCTRL " + json.dumps(frame, separators=(",", ":")))
     except Exception:
         # justification: best-effort control message; the UI tolerates a miss
         pass
+
+
+async def _hws_send_client_mode(adapter, h) -> None:
+    """Tell the browser the mode the attach granted, in the attach decision's own frame.
+
+    The frame carries the outcome code, the Write slot holders, and the capacity, so the
+    page needs no table that maps a reason string to a sentence (issue #98). `client_id`
+    lets the browser pass its own id back on actions it triggers, such as a Port Action
+    self-demote (see docs/design/port_actions.md).
+    """
+    decision = h.attach_decision
+    if decision is None:
+        return
+    await _hws_send_ctrl(adapter, h, decision.frame())
 
 
 async def _hws_send_presence(adapter, h):
@@ -1559,8 +1598,7 @@ async def _hws_send_presence(adapter, h):
         # other already-attached viewers already got this via ConsoleManager's
         # attach-time broadcast_presence() call.
         viewers = adapter.console_manager.get_viewers_display(h.port_name)
-        presence = {"type": "presence", "viewers": viewers}
-        await h.ws.send_str("OMXCTRL " + json.dumps(presence, separators=(",", ":")))
+        await h.ws.send_str("OMXCTRL " + json.dumps(presence_frame(viewers), separators=(",", ":")))
     except Exception:
         # justification: best-effort control message; the UI tolerates a miss
         pass
@@ -1585,91 +1623,78 @@ async def _hws_subscribe_meta(adapter, h):
 # --- per-control handlers; each returns True (handled) on the path it takes ---
 
 
-async def _hws_ctrl_rw_request(adapter, h, req):
-    ok = False
+async def _hws_answer(adapter, h, request, *, current_mode: Optional[str]) -> bool:
+    """Run one access request and answer it with that decision's frame (issue #98).
+
+    ``request`` is the console-manager call to await. A request that raised answers as an
+    internal failure carrying the mode the Client still holds, so the page never shows a
+    mode this server did not grant.
+    """
     try:
-        ok = await adapter.console_manager.promote_client_to_read_write(h.client_id, h.port_name)
+        decision = await request()
     except Exception:
-        ok = False
-    # Reply with a client_mode control frame so UI can update
-    resp = {"type": "client_mode", "ok": bool(ok), "mode": ("read-write" if ok else "read-only")}
-    if not ok:
-        holders = _rw_holders_for_port(adapter, h.port_name)
-        if holders:
-            resp["rw_holders"] = holders
-        max_rw = _max_rw_users_for_port(adapter, h.port_name)
-        if max_rw is not None:
-            resp["max_rw_users"] = max_rw
-    try:
-        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
-    except Exception:
-        # justification: best-effort control message; the UI tolerates a miss
-        pass
+        adapter.logger.warning("Web console access request failed for %s", h.client_id, exc_info=True)
+        decision = decide(
+            Code.INTERNAL,
+            mode=mode_or_read_only(current_mode),
+            client_id=h.client_id,
+            port_name=h.port_name,
+        )
+    h.mode = decision.mode.value
+    await _hws_send_ctrl(adapter, h, decision.frame())
     return True
+
+
+async def _hws_ctrl_rw_request(adapter, h, req):
+    """request_rw: ask for the write seat on this port."""
+    return await _hws_answer(
+        adapter,
+        h,
+        lambda: adapter.console_manager.promote_client_to_read_write(h.client_id, h.port_name),
+        current_mode=h.mode,
+    )
 
 
 async def _hws_ctrl_release_rw(adapter, h, req):
-    try:
-        await adapter.console_manager.demote_client_to_read_only(h.client_id, h.port_name)
-    except Exception:
-        # justification: best-effort mode change; the client keeps its mode
-        pass
-    resp = {"type": "client_mode", "ok": True, "mode": "read-only"}
-    try:
-        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
-    except Exception:
-        # justification: best-effort control message; the UI tolerates a miss
-        pass
-    return True
+    """release_rw: give the write seat back.
+
+    A refused release keeps the Client read-write, and its reply says so instead of
+    confirming a release that did not happen (issue #98).
+    """
+    return await _hws_answer(
+        adapter,
+        h,
+        lambda: adapter.console_manager.demote_client_to_read_only(h.client_id, h.port_name),
+        current_mode=h.mode,
+    )
 
 
 async def _hws_ctrl_force_promote(adapter, h, req):
-    # Single write-slot takeover (issue #59 Part 2).
-    # `client_id` names the victim; absent = most
-    # recently attached holder. The victim's own
-    # demotion notice is pushed by the console manager.
+    """force_promote: take the single write slot, optionally from a named holder.
+
+    ``client_id`` names the victim; absent means the most recently attached holder, and
+    the victim's own demotion notice is pushed by the console manager. The reply names
+    the displaced holder in the server's own wording, so the taker's console shows its
+    "taken from" line without decoding a reason string (issues #59 Part 2, #61, #98).
+    """
     target = req.get("client_id") if isinstance(req.get("client_id"), str) and req.get("client_id") != h.client_id else None
-    ok, reason = False, "not_attached"
-    try:
-        ok, reason = await adapter.console_manager.take_write_slot(h.client_id, h.port_name, target)
-    except Exception:
-        ok, reason = False, "error"
-    resp = {
-        "type": "client_mode",
-        "ok": bool(ok),
-        "mode": ("read-write" if ok else "read-only"),
-        "reason": reason,
-    }
-    if ok and reason == "already_rw":
-        resp.pop("reason")
-    if ok and reason.startswith("takeover from "):
-        # Targeted takeover (issue #61): the victim's
-        # holder label rides along so the taker's
-        # console can show "taken from <holder>".
-        resp["takeover"] = reason.removeprefix("takeover from ")
-    if not ok:
-        max_rw = _max_rw_users_for_port(adapter, h.port_name)
-        if max_rw is not None:
-            resp["max_rw_users"] = max_rw
-    try:
-        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
-    except Exception:
-        # justification: best-effort control message; the UI tolerates a miss
-        pass
-    return True
+    return await _hws_answer(
+        adapter,
+        h,
+        lambda: adapter.console_manager.take_write_slot(h.client_id, h.port_name, target),
+        current_mode=h.mode,
+    )
 
 
 async def _hws_ctrl_query_holders(adapter, h, req):
+    """query_rw_holders: the ConsoleManager's one holders answer for this port."""
     try:
-        holders = _rw_holders_for_port(adapter, h.port_name)
-        resp = {"type": "rw_holders", "holders": holders}
-        max_rw = _max_rw_users_for_port(adapter, h.port_name)
-        if max_rw is not None:
-            resp["max_rw_users"] = max_rw
-        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+        frame = adapter.console_manager.rw_holders_frame(h.port_name)
     except Exception:
-        # justification: best-effort control message; the UI tolerates a miss
-        pass
+        # justification: a holders query that failed answers empty; the console still works
+        adapter.logger.debug("rw_holders_frame failed for port %s", h.port_name, exc_info=True)
+        frame = {"type": FRAME_HOLDERS, "holders": []}
+    await _hws_send_ctrl(adapter, h, frame)
     return True
 
 
@@ -1678,23 +1703,27 @@ async def _hws_ctrl_power(adapter, h, req):
     # `p` menu): feed list for the attached port or one
     # switch. `username` is the Basic-Auth identity; the
     # live [POWER] notice rides the meta fan-out.
-    pdu = adapter._find_power_adapter()
-    if pdu is None:
-        if req.get("type") == "power_query":
-            resp = {"type": "power_feeds", "ok": False, "error": "power management is not configured", "feeds": []}
-        else:
-            resp = {"type": "power_switch", "ok": False, "error": "power management is not configured"}
-    else:
-        resp = await pdu.handle_power_frame(h.port_name, req, h.username, client_id=h.client_id) or {
-            "type": "power_switch",
-            "ok": False,
-            "error": "power management is not configured",
-        }
+    req_type = req.get("type")
+    reply_type = "power_feeds" if req_type == "power_query" else "power_switch"
+    pdu = None
+    failed = False
     try:
-        await h.ws.send_str("OMXCTRL " + json.dumps(resp, separators=(",", ":")))
+        pdu = adapter._find_power_adapter()
+        resp = await pdu.handle_power_frame(h.port_name, req, h.username, client_id=h.client_id) if pdu else None
     except Exception:
-        # justification: best-effort control message; the UI tolerates a miss
-        pass
+        # justification: a failed power request is answered below; the socket stays open
+        adapter.logger.warning("Power control request failed for port %s", h.port_name, exc_info=True)
+        failed = True
+        resp = None
+    if not resp:
+        resp = {
+            "type": reply_type,
+            "ok": False,
+            "error": "power control failed" if failed else "power management is not configured",
+        }
+        if reply_type == "power_feeds":
+            resp["feeds"] = []
+    await _hws_send_ctrl(adapter, h, resp)
     return True
 
 
@@ -1712,29 +1741,44 @@ async def _hws_ctrl_scrollback(adapter, h, req):
 
 async def _hws_omxctrl(adapter, h, msg):
     """Handle one inbound TEXT frame that may be an OMXCTRL control frame.
-    Returns True when the frame was a handled control (skip the port write)."""
+    Returns True when the frame was a handled control (skip the port write).
+
+    A JSON object this server cannot answer gets a typed refusal instead of falling
+    through, so an unknown control frame never reaches the serial device (issue #98).
+    """
+    if not (isinstance(msg.data, str) and msg.data.startswith("OMXCTRL ")):
+        return False
     try:
-        if isinstance(msg.data, str) and msg.data.startswith("OMXCTRL "):
-            payload = msg.data[len("OMXCTRL ") :]
-            req = json.loads(payload)
-            if isinstance(req, dict):
-                t = req.get("type")
-                if t in ("request_rw", "promote"):
-                    return await _hws_ctrl_rw_request(adapter, h, req)
-                if t == "release_rw":
-                    return await _hws_ctrl_release_rw(adapter, h, req)
-                if t == "force_promote":
-                    return await _hws_ctrl_force_promote(adapter, h, req)
-                if t == "query_rw_holders":
-                    return await _hws_ctrl_query_holders(adapter, h, req)
-                if t in ("power_query", "power_switch"):
-                    return await _hws_ctrl_power(adapter, h, req)
-                if t == "request_scrollback":
-                    return await _hws_ctrl_scrollback(adapter, h, req)
+        req = json.loads(msg.data[len("OMXCTRL ") :])
     except Exception:
-        # justification: best-effort control message; the UI tolerates a miss
-        pass
-    return False
+        # justification: text that is not JSON is keystrokes; the browser builds its own frames
+        return False
+    if not isinstance(req, dict):
+        return False
+    t = req.get("type")
+    if t in ("request_rw", "promote"):
+        return await _hws_ctrl_rw_request(adapter, h, req)
+    if t == "release_rw":
+        return await _hws_ctrl_release_rw(adapter, h, req)
+    if t == "force_promote":
+        return await _hws_ctrl_force_promote(adapter, h, req)
+    if t == "query_rw_holders":
+        return await _hws_ctrl_query_holders(adapter, h, req)
+    if t in ("power_query", "power_switch"):
+        return await _hws_ctrl_power(adapter, h, req)
+    if t == "request_scrollback":
+        return await _hws_ctrl_scrollback(adapter, h, req)
+    await _hws_send_ctrl(
+        adapter,
+        h,
+        decide(
+            Code.UNSUPPORTED_REQUEST,
+            mode=mode_or_read_only(h.mode),
+            client_id=h.client_id,
+            port_name=h.port_name,
+        ).frame(),
+    )
+    return True
 
 
 async def _hws_read_loop(adapter, h):
@@ -2108,7 +2152,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
     def _get_logo_url(self) -> Optional[str]:
         """Return a /static/ URL to a logo image if found in static_dir.
 
-        Looks for: logo.svg, logo.png, logo.webp, logo.jpg, logo.jpeg
+        Looks for: logo.svg, logo.png, logo.webp, logo.jpg, logo.jpeg. The URL is not passed
+        through ``asset_url`` on purpose: the operator owns that file, and a release stamp
+        would keep a replaced logo hidden in the browser cache until the next release.
         """
         try:
             base = Path(self.static_dir) if self.static_dir else None
@@ -2597,6 +2643,23 @@ class WebConsoleAdapter(BaseGenericAdapter):
         return redirect_app
 
     # --- Template and HTML rendering helpers ---
+    def _asset_stamp(self) -> str:
+        """The version string stamped onto static asset URLs, or "" when unknown.
+
+        One stamp per server run, so every page in a release asks for the same URLs.
+        """
+        stamp = getattr(self, "_asset_stamp_cache", None)
+        if stamp is None:
+            try:
+                stamp = _read_package_version() or _get_dist_version() or ""
+            except Exception:
+                # justification: a cache-busting stamp is optional; assets serve without it
+                stamp = ""
+            if stamp in ("unknown", None):
+                stamp = ""
+            self._asset_stamp_cache = str(stamp)
+        return str(self._asset_stamp_cache)
+
     def _prepare_templates(self) -> None:
         """Initialize the Jinja2 template environment and ensure default directories.
 
@@ -2628,9 +2691,9 @@ class WebConsoleAdapter(BaseGenericAdapter):
     def _setup_jinja_env(self) -> None:
         """Build the Jinja2 environment for the configured template dir.
 
-        Sets ``self._jinja_env`` (with the ``fmt_ts`` filter registered) on
-        success; when the template dir is missing or jinja2 is unavailable
-        the env stays None and an error is logged at startup.
+        Sets ``self._jinja_env`` (with the template helpers of ``_register_template_helpers``)
+        on success; when the template dir is missing or jinja2 is unavailable the env stays
+        None and an error is logged at startup.
         """
         try:
             from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
@@ -2645,30 +2708,22 @@ class WebConsoleAdapter(BaseGenericAdapter):
                 autoescape=select_autoescape(["html", "xml"]),
                 enable_async=False,
             )
-
-            # Register handy filters
-            def _fmt_ts(value):
-                try:
-                    if value is None or value == "":
-                        return ""
-                    v = float(value)
-                    # Accept values in ms as well
-                    if v > 1_000_000_000_000:
-                        v = v / 1000.0
-                    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v))
-                except Exception:
-                    return str(value)
-
-            try:
-                self._jinja_env.filters["fmt_ts"] = _fmt_ts
-            except Exception:
-                # justification: optional template filter; the default formatting applies
-                pass
+            self._register_template_helpers()
             self.logger.info("WebConsole templates enabled: %s", tdir)
         except Exception:
             # jinja2 not installed or couldn't initialize
             self._jinja_env = None
             self.logger.error("WebConsole templates unavailable: jinja2 is not installed")
+
+    def _register_template_helpers(self) -> None:
+        """Register the page helpers on ``self._jinja_env`` (see `register_template_helpers`)."""
+        if self._jinja_env is None:
+            return
+        register_template_helpers(self._jinja_env, self._asset_stamp)
+
+    def asset_url(self, path: str) -> str:
+        """Return one static asset path stamped with this version (see `stamp_asset_url`)."""
+        return stamp_asset_url(path, self._asset_stamp())
 
     def _render_console(
         self,

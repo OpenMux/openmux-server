@@ -108,6 +108,7 @@ from cryptography.x509.oid import NameOID
 
 from openmux.common.identity import get_server_id, get_server_label
 from openmux.server.access_control import capacity_from_wire, capacity_to_wire, wire_to_mode
+from openmux.server.access_decision import Code, notice
 from openmux.server.locations import muxcon_known_peers_path, muxcon_tls_dir
 from openmux.server.port_utils import safe_get_port
 
@@ -1802,7 +1803,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             if console_manager is not None:
                 await console_manager.send_control_frame_to_client(
                     victim_id,
-                    {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"},
+                    notice(Code.DEMOTED, client_id=victim_id, port_name=port_name).frame(),
                 )
         except Exception:
             self.logger.debug("[%s] FEDRW TAKE: victim notice to %s failed", conn_id, victim_id, exc_info=True)
@@ -1869,7 +1870,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             await console_manager.demote_client_to_read_only(local_client_id, proxy.name, notify_origin=False)
             await console_manager.send_control_frame_to_client(
                 local_client_id,
-                {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"},
+                notice(Code.DEMOTED, client_id=local_client_id, port_name=proxy.name).frame(),
             )
         except Exception:
             self.logger.debug(

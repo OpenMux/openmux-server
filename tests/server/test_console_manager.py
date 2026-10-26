@@ -8,7 +8,9 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from openmux.server.access_control import holder_id_short
+from openmux.server.access_decision import Code, Mode
 from openmux.server.console_manager import ConsoleManager
+from tests.support.decisions import attach_result, ladder_result, take_result
 
 
 class FakePort:
@@ -130,7 +132,7 @@ async def test_take_demotes_other_holder_and_promotes_target(cm, port_manager):
     _attach(cm, port, "p1", "A", "alice", "read-write")
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (True, "ok")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
@@ -147,16 +149,24 @@ async def test_take_cross_notifies_via_client_to_manager(cm, port_manager):
     other_adapter = FakeAdapterChannel(accept=True)
     cm.client_to_manager["A"] = other_adapter
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (True, "ok")
     # Presence broadcasts (issue #48) also land on this channel now; filter down to
-    # the demotion notice this test actually cares about. The victim gets a
-    # single client_mode frame: reason "demoted" (rendered as "read-write was
-    # taken") plus "taken_by" naming the taker.
-    demotion_frames = [p for p in other_adapter.received if p.get("type") == "client_mode" and p.get("reason")]
+    # the demotion notice this test actually cares about. The victim gets a single
+    # client_mode frame, and the server supplies its wording: the frame carries the
+    # rendered line, not a code for the client to translate (issue #98).
+    demotion_frames = [p for p in other_adapter.received if p.get("code") == "demoted"]
     assert demotion_frames == [
-        {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted", "taken_by": "bob"}
+        {
+            "type": "client_mode",
+            "ok": False,
+            "mode": "read-only",
+            "code": "demoted",
+            "client_id": "A",
+            "lines": ["[Your read-write access was taken by bob]"],
+            "message": "Your read-write access was taken by bob",
+        }
     ]
 
 
@@ -182,15 +192,23 @@ async def test_take_demotes_and_notifies_a_federated_holder(cm, port_manager):
     cm.register_client_channel("fed:peerA:7", muxcon_adapter)
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (True, "ok")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
     assert modes["fed:peerA:7"] == "read-only"
     assert modes["B"] == "read-write"
-    demotion_frames = [p for p in muxcon_adapter.received if p.get("type") == "client_mode" and p.get("reason")]
+    demotion_frames = [p for p in muxcon_adapter.received if p.get("code") == "demoted"]
     assert demotion_frames == [
-        {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted", "taken_by": "bob"}
+        {
+            "type": "client_mode",
+            "ok": False,
+            "mode": "read-only",
+            "code": "demoted",
+            "client_id": "fed:peerA:7",
+            "lines": ["[Your read-write access was taken by bob]"],
+            "message": "Your read-write access was taken by bob",
+        }
     ]
 
     cm.unregister_client_port("fed:peerA:7")
@@ -210,7 +228,7 @@ async def test_take_empty_slot_grants(cm, port_manager):
     port_manager.ports["p1"] = port
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (True, "ok")
     assert port.connected_clients[0]["mode"] == "read-write"
@@ -224,7 +242,7 @@ async def test_take_empty_slot_already_rw_when_sole_holder(cm, port_manager):
     port_manager.ports["p1"] = port
     _attach(cm, port, "p1", "A", "alice", "read-write")
 
-    ok, reason = await cm.take_write_slot("A", "p1")
+    ok, reason = take_result(await cm.take_write_slot("A", "p1"))
 
     assert (ok, reason) == (True, "already_rw")
     assert port.connected_clients[0]["mode"] == "read-write"
@@ -239,7 +257,7 @@ async def test_take_empty_slot_named_target_refuses(cm, port_manager):
     port_manager.ports["p1"] = port
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, reason = await cm.take_write_slot("B", "p1", target="ghost")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1", target="ghost"))
 
     assert (ok, reason) == (False, "no_holder")
     assert port.connected_clients[0]["mode"] == "read-only"
@@ -274,7 +292,7 @@ async def test_take_empty_slot_audits(cm, port_manager, monkeypatch):
 
     monkeypatch.setattr(dl_mod.DataLogger, "get", classmethod(lambda cls: _RecLogger()))
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
     cm.logger.removeHandler(handler)
     cm.logger.setLevel(old_level)
 
@@ -292,7 +310,7 @@ async def test_take_not_attached_refuses(cm, port_manager):
     port_manager.ports["p1"] = port
     _attach(cm, port, "p1", "A", "alice", "read-write")
 
-    ok, reason = await cm.take_write_slot("ghost", "p1")
+    ok, reason = take_result(await cm.take_write_slot("ghost", "p1"))
 
     assert (ok, reason) == (False, "not_attached")
     assert port.connected_clients[0]["mode"] == "read-write"
@@ -323,7 +341,7 @@ async def test_take_read_only_global_user_denied():
     _attach(cm, port, "p1", "A", "alice", "read-write")
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (False, "not_entitled")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
@@ -341,7 +359,7 @@ async def test_take_ro_group_user_denied_even_over_entitled_holder():
     _attach(cm, port, "p1", "B", "bob", "read-only")
     cm.auth_manager.groups["bob"] = {"viewers"}
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (False, "not_entitled")
     assert {c["client_id"]: c["mode"] for c in port.connected_clients}["A"] == "read-write"
@@ -357,7 +375,7 @@ async def test_take_unlisted_user_denied_by_group_acl():
     _attach(cm, port, "p1", "A", "alice", "read-write")
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (False, "denied_by_group_acl")
 
@@ -377,7 +395,7 @@ async def test_take_denied_by_server_access_default_deny():
 
     cm.security_policy = _DenyPolicy()
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (False, "denied_by_access_default")
 
@@ -392,7 +410,7 @@ async def test_take_admin_allowed_to_take():
     _attach(cm, port, "p1", "A", "alice", "read-write")
     _attach(cm, port, "p1", "R", "root", "read-only")
 
-    ok, reason = await cm.take_write_slot("R", "p1")
+    ok, reason = take_result(await cm.take_write_slot("R", "p1"))
 
     assert (ok, reason) == (True, "ok")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
@@ -416,17 +434,26 @@ def _mode_cm(mode: str):
 async def test_take_multiple_mode_already_rw_when_holding():
     pm, cm, port = _mode_cm("multiple")
     _attach(cm, port, "p1", "B", "bob", "read-write")
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
     assert (ok, reason) == (True, "already_rw")
 
 
 @pytest.mark.asyncio
-async def test_take_none_mode_no_holder_to_take():
+async def test_take_none_mode_no_seat_to_take():
+    """A ``none`` port has no writer to take from, and says so by capacity.
+
+    The refusal names the Port's setting rather than "no holder", which was true
+    but left a reader looking for a holder that never existed (issue #98).
+    """
     pm, cm, port = _mode_cm("none")
     _attach(cm, port, "p1", "A", "alice", "read-only")
     _attach(cm, port, "p1", "B", "bob", "read-only")
-    ok, reason = await cm.take_write_slot("B", "p1")
-    assert (ok, reason) == (False, "no_holder")
+    taken = await cm.take_write_slot("B", "p1")
+
+    assert taken.ok is False
+    assert taken.code is Code.NO_WRITE_SLOT
+    assert taken.capacity == "none"
+    assert "no write slot" in taken.message
     assert all(c["mode"] == "read-only" for c in port.connected_clients)
 
 
@@ -442,29 +469,39 @@ def _three_holder(cm, pm: FakePortManager, port: FakePort):
 
 @pytest.mark.asyncio
 async def test_take_target_specific_holder(cm, port_manager):
-    # Targeted take (issue #61): the success reason names the demoted
-    # holder so the taker's console can show "taken from <holder>".
+    # Targeted take (issue #61, issue #98): the decision carries the demoted
+    # holder, so the taker's console renders its own "taken from" line.
     port = FakePort()
     port_manager.ports["p1"] = port
     _three_holder(cm, port_manager, port)
 
-    ok, reason = await cm.take_write_slot("B", "p1", target="A")
+    taken = await cm.take_write_slot("B", "p1", target="A")
 
-    assert (ok, reason) == (True, "takeover from alice [A]")
+    assert (taken.ok, taken.code) == (True, Code.GRANTED)
+    assert taken.mode is Mode.READ_WRITE
+    assert taken.victim is not None and taken.victim.client_id == "A"
+    assert taken.victim.label == "[A] alice@unknown (rw)"
+    assert taken.lines == ("[Read-write access granted]", "[Taken from: [A] alice@unknown (rw)]")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
     assert modes == {"A": "read-only", "M": "read-write", "B": "read-write"}
 
 
 @pytest.mark.asyncio
-async def test_take_target_reason_shortens_long_holder_id(cm, port_manager):
+async def test_take_target_names_a_long_holder_id_by_its_short_form(cm, port_manager):
+    """A long client_id is shown short, and the full id stays on the Holder."""
     port = FakePort()
     port_manager.ports["p1"] = port
     _attach(cm, port, "p1", "holder-abcdefgh-123456", "carol", "read-write")
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
-    ok, reason = await cm.take_write_slot("B", "p1", target="holder-abcdefgh-123456")
+    taken = await cm.take_write_slot("B", "p1", target="holder-abcdefgh-123456")
 
-    assert (ok, reason) == (True, f"takeover from carol [{holder_id_short('holder-abcdefgh-123456')}]")
+    assert taken.victim is not None
+    assert taken.victim.short_id == holder_id_short("holder-abcdefgh-123456")
+    assert taken.victim.client_id == "holder-abcdefgh-123456"
+    # The short label reaches the taker's rendered lines; the full id stays on
+    # the Holder for a targeted follow-up.
+    assert taken.victim.short_id in taken.lines[-1]
 
 
 @pytest.mark.asyncio
@@ -473,10 +510,10 @@ async def test_take_target_invalid_refuses(cm, port_manager):
     port_manager.ports["p1"] = port
     _three_holder(cm, port_manager, port)
 
-    ok, reason = await cm.take_write_slot("B", "p1", target="B")  # cannot take own seat
+    ok, reason = take_result(await cm.take_write_slot("B", "p1", target="B"))  # cannot take own seat
 
     assert (ok, reason) == (False, "invalid_target")
-    ok, reason = await cm.take_write_slot("B", "p1", target="ghost")  # never a holder
+    ok, reason = take_result(await cm.take_write_slot("B", "p1", target="ghost"))  # never a holder
     assert (ok, reason) == (False, "invalid_target")
 
 
@@ -487,7 +524,7 @@ async def test_take_without_target_picks_most_recent_holder(cm, port_manager):
     port_manager.ports["p1"] = port
     _three_holder(cm, port_manager, port)
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (True, "ok")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
@@ -525,7 +562,7 @@ async def test_take_restores_victim_when_taker_promote_fails():
         return await real_promote(port_name, client_id)
 
     pm.promote_client = flaky_promote
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (False, "promote_failed")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
@@ -543,7 +580,7 @@ async def test_take_keeps_slot_count_invariant():
     _attach(cm, port, "p1", "B", "bob", "read-only")
 
     assert sum(1 for c in port.connected_clients if c["mode"] == "read-write") == 1
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (True, "ok")
     assert sum(1 for c in port.connected_clients if c["mode"] == "read-write") == 1
@@ -585,7 +622,7 @@ async def test_take_writes_audit_line_and_data_logger_event(cm, port_manager, mo
 
     monkeypatch.setattr(dl_mod.DataLogger, "get", classmethod(lambda cls: _RecLogger()))
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
     cm.logger.removeHandler(handler)
     cm.logger.setLevel(old_level)
 
@@ -640,11 +677,11 @@ async def test_two_takers_race_empty_slot_leaves_exactly_one_writer(cm, port_man
     # that later lost the slot to the other take is accepted preemption
     # semantics (the loser sees a "demoted" notice); a capacity-refused
     # interleaving reports ``promote_failed``.
-    for ok, reason in results:
-        assert (ok, reason) in [(True, "ok"), (True, "already_rw"), (False, "promote_failed")]
+    for taken in results:
+        assert (taken.ok, taken.code.value) in [(True, "ok"), (True, "already_rw"), (False, "promote_failed")]
     # At most one demotion notice is sent (two takers; one may lose its seat
     # to the other's take).
-    demotions = [p for p in other_receiver.received if p.get("type") == "client_mode" and p.get("reason") == "demoted"]
+    demotions = [p for p in other_receiver.received if p.get("code") == "demoted"]
     assert len(demotions) <= 1
     if demotions:
         assert demotions[0]["mode"] == "read-only"
@@ -695,7 +732,7 @@ async def test_take_federated_origin_grants(cm, port_manager):
     port_manager.ports["p1"] = port
     cm.client_port_map["B"] = "p1"
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (True, "ok")
     modes = {c["client_id"]: c["mode"] for c in port.connected_clients}
@@ -710,7 +747,7 @@ async def test_take_federated_origin_denies(cm, port_manager):
     port_manager.ports["p1"] = port
     cm.client_port_map["B"] = "p1"
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     assert (ok, reason) == (False, "federation_denied")
     assert all(c["mode"] == "read-only" for c in port.connected_clients if c["client_id"] == "B")
@@ -727,7 +764,7 @@ async def test_take_federated_origin_grant_missing_local_seat_refuses(cm, port_m
     cm.client_port_map["B"] = "p1"  # attached, but absent from the port's local record list
     cm.client_to_manager["B"] = FakeAdapterChannel()
 
-    ok, reason = await cm.take_write_slot("B", "p1")
+    ok, reason = take_result(await cm.take_write_slot("B", "p1"))
 
     # A grant the local write gate cannot honor is refused (promote_failed)
     # rather than reported as success.
@@ -747,7 +784,7 @@ async def test_take_taker_without_username_is_not_entitled(cm, port_manager):
     _attach(cm, port, "p1", "A", "alice", "read-write")
     _attach(cm, port, "p1", "ghost", "", "read-only")
 
-    ok, reason = await cm.take_write_slot("ghost", "p1")
+    ok, reason = take_result(await cm.take_write_slot("ghost", "p1"))
 
     assert (ok, reason) == (False, "not_entitled")
 
@@ -923,7 +960,7 @@ class TestConnectClientToPortGroupAcl:
             {"name": "p1", "max_read_write_users": 1},
             {"users": [{"username": "alice", "password_hash": "x"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
         assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
@@ -933,7 +970,7 @@ class TestConnectClientToPortGroupAcl:
             {"name": "p1", "max_read_write_users": 2, "read_write_groups": ["ops"]},
             {"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
         assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
@@ -948,7 +985,7 @@ class TestConnectClientToPortGroupAcl:
             },
             {"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "bob")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "bob"))
         assert (ok, mode, reason) == (True, "read-only", None)
 
     @pytest.mark.asyncio
@@ -963,7 +1000,7 @@ class TestConnectClientToPortGroupAcl:
             },
             {"users": [{"username": "eve", "password_hash": "x"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "eve")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "eve"))
         assert (ok, mode, reason) == (False, None, "denied_by_group_acl")
 
     @pytest.mark.asyncio
@@ -973,7 +1010,7 @@ class TestConnectClientToPortGroupAcl:
             {"name": "p1", "max_read_write_users": 5, "read_write_groups": ["ops"]},
             {"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "root")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "root"))
         assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
@@ -1005,7 +1042,7 @@ class TestConnectClientToPortGroupAcl:
         wrapper_id = id(cm.port_manager.ports["p1"])
 
         # Baseline: with no group lists, an unprivileged user gets read-write.
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "eve")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "eve"))
         assert (ok, mode, reason) == (True, "read-write", None)
         await cm.disconnect_client_from_port("c1", "p1")
 
@@ -1038,11 +1075,11 @@ class TestConnectClientToPortGroupAcl:
         # Post-reload: the closed boundary kicks in. eve is neither in ops nor admin, so
         # her next attach must be denied. This only works if the access ladder re-reads
         # the group list live from the (same) port object the reconcile call mutated.
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "eve")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "eve"))
         assert (ok, mode, reason) == (False, None, "denied_by_group_acl")
 
         # Sanity: an admin still bypasses the boundary.
-        ok, mode, reason = await cm.connect_client_to_port("c2", "p1", "root")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c2", "p1", "root"))
         assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
@@ -1054,7 +1091,7 @@ class TestConnectClientToPortGroupAcl:
             {"name": "loopback1", "max_read_write_users": 1},
             {"users": [{"username": "alice", "password_hash": "x"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "loopback1", "alice")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "loopback1", "alice"))
         assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
@@ -1069,7 +1106,7 @@ class TestConnectClientToPortGroupAcl:
             },
             {"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "loopback1", "bob")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "loopback1", "bob"))
         assert (ok, mode, reason) == (True, "read-only", None)
 
     # ------------------------------------------------------------------
@@ -1090,7 +1127,7 @@ class TestConnectClientToPortGroupAcl:
             {"name": "p1", "max_read_write_users": 1},
             {"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "auditor")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "auditor"))
         assert (ok, mode, reason) == (True, "read-only", None)
 
     @pytest.mark.asyncio
@@ -1101,9 +1138,9 @@ class TestConnectClientToPortGroupAcl:
             {"name": "p1", "max_read_write_users": 1},
             {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
         )
-        ok1, mode1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok1, mode1, _ = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
         assert (ok1, mode1) == (True, "read-write")
-        ok2, mode2, reason2 = await cm.connect_client_to_port("c2", "p1", "bob")
+        ok2, mode2, reason2 = attach_result(await cm.connect_client_to_port("c2", "p1", "bob"))
         assert (ok2, mode2, reason2) == (True, "read-only", None)
 
     @pytest.mark.asyncio
@@ -1119,9 +1156,9 @@ class TestConnectClientToPortGroupAcl:
                 ]
             },
         )
-        ok1, mode1, _ = await cm.connect_client_to_port("c1", "p1", "a")
+        ok1, mode1, _ = attach_result(await cm.connect_client_to_port("c1", "p1", "a"))
         assert (ok1, mode1) == (True, "read-write")
-        ok2, mode2, reason2 = await cm.connect_client_to_port("c2", "p1", "b")
+        ok2, mode2, reason2 = attach_result(await cm.connect_client_to_port("c2", "p1", "b"))
         assert (ok2, mode2, reason2) == (True, "read-only", None)
 
     @pytest.mark.asyncio
@@ -1132,7 +1169,7 @@ class TestConnectClientToPortGroupAcl:
             {"name": "p1", "max_read_write_users": 1, "read_write_groups": ["ops"]},
             {"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only", "groups": ["ops"]}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "auditor")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "auditor"))
         assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
@@ -1142,7 +1179,7 @@ class TestConnectClientToPortGroupAcl:
             {"name": "p1", "max_read_write_users": 5, "read_only_groups": ["viewers"]},
             {"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "bob")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "bob"))
         assert (ok, mode, reason) == (True, "read-only", None)
 
     @pytest.mark.asyncio
@@ -1154,9 +1191,9 @@ class TestConnectClientToPortGroupAcl:
             {"name": "loopback1", "max_read_write_users": 1},
             {"users": [{"username": "a", "password_hash": "x"}, {"username": "b", "password_hash": "x"}]},
         )
-        ok1, mode1, _ = await cm.connect_client_to_port("c1", "loopback1", "a")
+        ok1, mode1, _ = attach_result(await cm.connect_client_to_port("c1", "loopback1", "a"))
         assert (ok1, mode1) == (True, "read-write")
-        ok2, mode2, reason2 = await cm.connect_client_to_port("c2", "loopback1", "b")
+        ok2, mode2, reason2 = attach_result(await cm.connect_client_to_port("c2", "loopback1", "b"))
         assert (ok2, mode2, reason2) == (True, "read-only", None)
 
     @pytest.mark.asyncio
@@ -1167,7 +1204,7 @@ class TestConnectClientToPortGroupAcl:
             {"name": "p1", "max_read_write_users": 5, "read_write_groups": ["ops"]},
             {"users": [{"username": "stranger", "password_hash": "x", "permissions": "read-write"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "stranger")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "stranger"))
         assert (ok, mode, reason) == (False, None, "denied_by_group_acl")
 
     # ---------------- access_default integration (issue #58, part 2) ----------------
@@ -1180,7 +1217,7 @@ class TestConnectClientToPortGroupAcl:
             {"users": [{"username": "alice", "password_hash": "x"}]},
         )
         cm.security_policy = _StubPolicy("deny")
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
         assert (ok, mode, reason) == (False, None, "denied_by_access_default")
 
     @pytest.mark.asyncio
@@ -1191,7 +1228,7 @@ class TestConnectClientToPortGroupAcl:
             {"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]},
         )
         cm.security_policy = _StubPolicy("deny")
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "root")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "root"))
         assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
@@ -1202,7 +1239,7 @@ class TestConnectClientToPortGroupAcl:
             {"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]},
         )
         cm.security_policy = _StubPolicy("deny")
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
         assert (ok, mode, reason) == (True, "read-write", None)
 
     @pytest.mark.asyncio
@@ -1213,11 +1250,11 @@ class TestConnectClientToPortGroupAcl:
             {"name": "p1", "max_read_write_users": 1},
             {"users": [{"username": "alice", "password_hash": "x"}]},
         )
-        ok0, mode0, _ = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok0, mode0, _ = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
         assert (ok0, mode0) == (True, "read-write")
         cm.security_policy = _StubPolicy("allow")  # explicit stub: same expectation
         await cm.disconnect_client_from_port("c1", "p1")
-        ok1, mode1, _ = await cm.connect_client_to_port("c2", "p1", "alice")
+        ok1, mode1, _ = attach_result(await cm.connect_client_to_port("c2", "p1", "alice"))
         assert (ok1, mode1) == (True, "read-write")
 
 
@@ -1278,26 +1315,33 @@ class TestResolveAccessModeLadder:
         # read-only.
         cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
         # "one" with a free slot: admin gets read-write.
-        assert cm._resolve_access_mode(_LadderPort(max_rw="one"), "p1", "admin", "root") == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(_LadderPort(max_rw="one"), "p1", "admin", "root")) == ("read-write", None)
         # "one" full (legacy int 1 accepted): admin demotes, even with group grants.
-        assert cm._resolve_access_mode(_LadderPort(max_rw=1, rw_clients=1, rw_groups=("ops",)), "p1", "admin", "root") == (
+        assert ladder_result(
+            cm._resolve_access_mode(_LadderPort(max_rw=1, rw_clients=1, rw_groups=("ops",)), "p1", "admin", "root")
+        ) == (
             "read-only",
             None,
         )
         # "none" has no slots at all: admin is always read-only.
-        assert cm._resolve_access_mode(_LadderPort(max_rw="none", rw_groups=("ops",)), "p1", "admin", "root") == (
+        assert ladder_result(
+            cm._resolve_access_mode(_LadderPort(max_rw="none", rw_groups=("ops",)), "p1", "admin", "root")
+        ) == (
             "read-only",
             None,
         )
         # "multiple" never demotes, no matter how busy.
-        assert cm._resolve_access_mode(
-            _LadderPort(max_rw="multiple", rw_clients=7, rw_groups=("ops",)), "p1", "admin", "root"
+        assert ladder_result(
+            cm._resolve_access_mode(_LadderPort(max_rw="multiple", rw_clients=7, rw_groups=("ops",)), "p1", "admin", "root")
         ) == ("read-write", None)
 
     def test_global_read_write_demotes_on_full_port(self):
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
-        assert cm._resolve_access_mode(_LadderPort(max_rw=1), "p1", "read-write", "alice") == ("read-write", None)
-        assert cm._resolve_access_mode(_LadderPort(max_rw=1, rw_clients=1), "p1", "read-write", "alice") == (
+        assert ladder_result(cm._resolve_access_mode(_LadderPort(max_rw=1), "p1", "read-write", "alice")) == (
+            "read-write",
+            None,
+        )
+        assert ladder_result(cm._resolve_access_mode(_LadderPort(max_rw=1, rw_clients=1), "p1", "read-write", "alice")) == (
             "read-only",
             None,
         )
@@ -1305,8 +1349,11 @@ class TestResolveAccessModeLadder:
     def test_global_read_only_never_promoted(self):
         """Bug 1 fix: the slot branch consults the global permission."""
         cm = self._cm({"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only"}]})
-        assert cm._resolve_access_mode(_LadderPort(max_rw=1), "p1", "read-only", "auditor") == ("read-only", None)
-        assert cm._resolve_access_mode(_LadderPort(max_rw=1, rw_clients=1), "p1", "read-only", "auditor") == (
+        assert ladder_result(cm._resolve_access_mode(_LadderPort(max_rw=1), "p1", "read-only", "auditor")) == (
+            "read-only",
+            None,
+        )
+        assert ladder_result(cm._resolve_access_mode(_LadderPort(max_rw=1, rw_clients=1), "p1", "read-only", "auditor")) == (
             "read-only",
             None,
         )
@@ -1314,13 +1361,13 @@ class TestResolveAccessModeLadder:
     def test_rw_group_member_gets_read_write_on_free_slot(self):
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]})
         port = _LadderPort(max_rw=1, rw_groups=("ops",))
-        assert cm._resolve_access_mode(port, "p1", "read-write", "alice") == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-write", "alice")) == ("read-write", None)
 
     def test_rw_group_member_demotes_when_port_full(self):
         """Bug 2 fix: group grants respect the slot cap at resolution time."""
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]})
         port = _LadderPort(max_rw=1, rw_clients=1, rw_groups=("ops",))
-        assert cm._resolve_access_mode(port, "p1", "read-write", "alice") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-write", "alice")) == ("read-only", None)
 
     def test_rw_group_grant_beats_read_only_global(self):
         """Explicit grants beat the global permission, both directions."""
@@ -1328,17 +1375,17 @@ class TestResolveAccessModeLadder:
             {"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only", "groups": ["ops"]}]}
         )
         port = _LadderPort(max_rw=1, rw_groups=("ops",))
-        assert cm._resolve_access_mode(port, "p1", "read-only", "auditor") == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-only", "auditor")) == ("read-write", None)
 
     def test_ro_group_grant_beats_read_write_global(self):
         cm = self._cm({"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]})
         port = _LadderPort(max_rw=5, ro_groups=("viewers",))
-        assert cm._resolve_access_mode(port, "p1", "read-write", "bob") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-write", "bob")) == ("read-only", None)
 
     def test_group_acl_is_closed_boundary_even_with_read_write_global(self):
         cm = self._cm({"users": [{"username": "stranger", "password_hash": "x", "permissions": "read-write"}]})
         port = _LadderPort(max_rw=1, rw_groups=("ops",), ro_groups=("viewers",))
-        assert cm._resolve_access_mode(port, "p1", "read-write", "stranger") == (None, "denied_by_group_acl")
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-write", "stranger")) == (None, "denied_by_group_acl")
 
     def test_loopback_ports_get_no_special_treatment(self):
         """The old loopback auto-promotion is gone (#58): no-list loopback
@@ -1346,10 +1393,10 @@ class TestResolveAccessModeLadder:
         cm = self._cm({"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only"}]})
         # Free slot does not promote a global read-only user anymore.
         port = _LadderPort(max_rw=1, loopback=True, adapter_type="loopback")
-        assert cm._resolve_access_mode(port, "p1", "read-only", "auditor") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-only", "auditor")) == ("read-only", None)
         # A full port demotes a global read-write user, loopback or not.
         port_full = _LadderPort(max_rw=1, rw_clients=1, loopback=True, adapter_type="loopback")
-        assert cm._resolve_access_mode(port_full, "p1", "read-write", "alice") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(port_full, "p1", "read-write", "alice")) == ("read-only", None)
 
     # ---------------- access_default (issue #58, part 2) ----------------
 
@@ -1357,35 +1404,38 @@ class TestResolveAccessModeLadder:
         """Unwired console manager (no policy) keeps today's allow behavior."""
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
         assert cm.security_policy is None
-        assert cm._resolve_access_mode(_LadderPort(), "p1", "read-write", "alice") == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(_LadderPort(), "p1", "read-write", "alice")) == ("read-write", None)
 
     def test_access_default_deny_denies_no_list_port(self):
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
         cm.security_policy = _StubPolicy("deny")
-        assert cm._resolve_access_mode(_LadderPort(), "p1", "read-write", "alice") == (None, "denied_by_access_default")
+        assert ladder_result(cm._resolve_access_mode(_LadderPort(), "p1", "read-write", "alice")) == (
+            None,
+            "denied_by_access_default",
+        )
 
     def test_access_default_deny_still_allows_admin(self):
         cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
         cm.security_policy = _StubPolicy("deny")
-        assert cm._resolve_access_mode(_LadderPort(), "p1", "admin", "root") == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(_LadderPort(), "p1", "admin", "root")) == ("read-write", None)
 
     def test_access_default_deny_group_grant_unaffected(self):
         """deny only acts on no-list ports: list-bearing ports keep their grants."""
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]})
         cm.security_policy = _StubPolicy("deny")
         port = _LadderPort(max_rw=1, rw_groups=("ops",))
-        assert cm._resolve_access_mode(port, "p1", "read-write", "alice") == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-write", "alice")) == ("read-write", None)
 
     def test_access_default_deny_unlisted_on_acl_port_keeps_group_acl_reason(self):
         cm = self._cm({"users": [{"username": "stranger", "password_hash": "x", "permissions": "read-write"}]})
         cm.security_policy = _StubPolicy("deny")
         port = _LadderPort(rw_groups=("ops",))
-        assert cm._resolve_access_mode(port, "p1", "read-write", "stranger") == (None, "denied_by_group_acl")
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-write", "stranger")) == (None, "denied_by_group_acl")
 
     def test_loopback_with_groups_is_not_auto_promoted(self):
         cm = self._cm({"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]})
         port = _LadderPort(loopback=True, adapter_type="loopback", ro_groups=("viewers",))
-        assert cm._resolve_access_mode(port, "p1", "read-write", "bob") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-write", "bob")) == ("read-only", None)
 
 
 class _AdapterTypeStub:

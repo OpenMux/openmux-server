@@ -8,12 +8,35 @@ clients via the registered client manager.
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 # Import the helper module to set the console manager reference
-from openmux.server.access_control import holder_id_short, wire_to_mode, write_capacity
+from openmux.server.access_control import wire_to_mode, write_capacity
+from openmux.server.access_decision import (
+    AccessDecision,
+    Code,
+    Entitlement,
+    Holder,
+    Mode,
+    decide,
+    holders_frame,
+    holders_of,
+    notice,
+    presence_frame,
+)
 from openmux.server.console_manager_helper import set_console_manager
 from openmux.server.data_logger import DataLogger
+
+
+def _port_capacity(port: Optional[Any]) -> Optional[Any]:
+    """The port's own write-capacity setting, passed through un-normalised.
+
+    Every Access decision about a Port carries it, so a console can show the
+    limit next to the refusal without asking the Port again. ``None`` when the
+    Port could not be resolved, which leaves the key off the frame.
+    """
+    return getattr(port, "max_read_write_users", None) if port is not None else None
 
 
 class ConsoleManager:
@@ -242,17 +265,28 @@ class ConsoleManager:
         current_rw_users = sum(1 for client in getattr(port, "connected_clients", []) if client.get("mode") == "read-write")
         return current_rw_users < capacity
 
-    def _rw_mode_or_demote(self, port: Optional[Any], port_name: str, username: str, context: str) -> str:
-        """Return "read-write" if a slot is free, else "read-only" (demote, never reject).
+    def _holders_for(self, port: Optional[Any]) -> Tuple[Holder, ...]:
+        """The Write slot holders of one port, labelled the one way (issue #98).
+
+        ``_resolve_client_ip`` resolves through the owning adapter, so a telnet
+        client sees a web console holder with the same label the web shows.
+        """
+        return holders_of(getattr(port, "connected_clients", None) or [], ip_of=self._resolve_client_ip)
+
+    def _rw_mode_or_demote(self, port: Optional[Any], port_name: str, username: str, context: str) -> Tuple[Mode, Code]:
+        """Return the mode a write-entitled user gets on this port, with its code.
 
         A full port demotes; a ``none`` port (0 writers, issue #59) always
         demotes — that includes admin, because a slot is a resource, not a
-        privilege.
+        privilege. Both demotions are still grants: the Client attaches and
+        watches, so the codes say which seat it got rather than reporting a
+        failure.
         """
         if self._has_write_slots(port):
             self.logger.info("Granting read-write access to user %s for port %s (%s)", username, port_name, context)
-            return "read-write"
-        if write_capacity(getattr(port, "max_read_write_users", 1)) == 0.0:
+            return Mode.READ_WRITE, Code.ATTACHED
+        no_slots = write_capacity(getattr(port, "max_read_write_users", 1)) == 0.0
+        if no_slots:
             self.logger.info(
                 f"Port {port_name} has no write slots (max_read_write_users=none); "
                 f"granting read-only access to user {username} ({context})"
@@ -261,11 +295,9 @@ class ConsoleManager:
             self.logger.info(
                 "Read-write slots full; granting read-only access to user %s for port %s (%s)", username, port_name, context
             )
-        return "read-only"
+        return Mode.READ_ONLY, Code.CAPACITY_NONE if no_slots else Code.CAPACITY_FULL
 
-    def _taker_entitled(
-        self, port: Optional[Any], port_name: str, permissions: Optional[str], username: str
-    ) -> Tuple[bool, str]:
+    def _taker_entitled(self, port: Optional[Any], port_name: str, permissions: Optional[str], username: str) -> Entitlement:
         """Decide whether this identity may drive this port (issue #59 Part 2).
 
         This is the #58 access ladder with the slot-occupancy question removed.
@@ -274,23 +306,22 @@ class ConsoleManager:
         it is attached.
 
         Returns:
-            Tuple[bool, str]: (entitled, reason). ``reason`` is the attach
-            deny_reason (``denied_by_group_acl`` / ``denied_by_access_default``)
-            when the identity is denied outright, else an empty string.
+            Entitlement: drive, watch, or denied. A denial carries the code of
+            the rule that refused it, which is also the code the attach reports.
         """
         if permissions == "admin":
-            return True, ""
+            return Entitlement.write()
         rw_groups = set(getattr(port, "read_write_groups", None) or [])
         ro_groups = set(getattr(port, "read_only_groups", None) or [])
         if rw_groups or ro_groups:
             user_groups = self.auth_manager.get_user_groups(username)
             if user_groups & rw_groups:
-                return True, ""
+                return Entitlement.write()
             if user_groups & ro_groups:
-                return False, ""
+                return Entitlement.read_only()
             # Group lists are a closed boundary: anyone not listed is denied,
             # regardless of the global permission or the server-wide default.
-            return False, "denied_by_group_acl"
+            return Entitlement.denied(Code.DENIED_BY_GROUP_ACL)
 
         # No group lists: the server-wide access_default decides whether the
         # port is drivable at all (security.yaml, issue #58).
@@ -301,10 +332,10 @@ class ConsoleManager:
             except Exception:
                 access_default = "allow"  # justification: policy lookup must not break attach; stay fail-open on this path
         if access_default == "deny":
-            return False, "denied_by_access_default"
+            return Entitlement.denied(Code.DENIED_BY_ACCESS_DEFAULT)
 
         # access_default allow: the global permission decides.
-        return permissions == "read-write", ""
+        return Entitlement.write() if permissions == "read-write" else Entitlement.read_only()
 
     def blocked_ports_for_user(self, port_names: List[str], username: str) -> List[str]:
         """Return the subset of ``port_names`` this user may not drive.
@@ -328,14 +359,13 @@ class ConsoleManager:
                 port = self.port_manager.get_port(name)
             except Exception:
                 port = None
-            entitled, _reason = self._taker_entitled(port, name, permissions, username)
-            if not entitled:
+            if not self._taker_entitled(port, name, permissions, username).may_drive:
                 blocked.append(name)
         return blocked
 
     def _resolve_access_mode(
         self, port: Optional[Any], port_name: str, permissions: Optional[str], username: str
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> AccessDecision:
         """Resolve the console access mode for a connecting user (issue #58 ladder).
 
         Single ladder, first match wins ("a slot is free" reads the port's
@@ -368,25 +398,24 @@ class ConsoleManager:
         ``permissions is None`` first.
 
         Returns:
-            Tuple[Optional[str], Optional[str]]: (mode, deny_reason). ``mode``
-            is "read-write"/"read-only" when access is granted (deny_reason is
-            then None); ``mode`` is None with a deny_reason when denied.
+            AccessDecision: ``mode`` is the mode the ladder gives (read-only for
+            a refusal, which grants nothing) and ``code`` is why: ``attached``
+            with the seat it got, or the rule that refused it.
         """
-        entitled, deny_reason = self._taker_entitled(port, port_name, permissions, username)
-        if not entitled:
-            if deny_reason:
-                self.logger.info("Denying user %s for port %s: %s", username, port_name, deny_reason)
-                return None, deny_reason
+        entitlement = self._taker_entitled(port, port_name, permissions, username)
+        if not entitlement.may_drive:
+            if entitlement.code is not None:
+                self.logger.info("Denying user %s for port %s: %s", username, port_name, entitlement.code.value)
+                return decide(entitlement.code, mode=Mode.READ_ONLY, port_name=port_name, capacity=_port_capacity(port))
             self.logger.info("Granting read-only access to user %s for port %s", username, port_name)
-            return "read-only", None
+            return decide(Code.READ_ONLY_STANDING, mode=Mode.READ_ONLY, port_name=port_name, capacity=_port_capacity(port))
         # Admin bypasses access control but not capacity (issue #59): under a
         # ``none`` (0-writer) port admin gets read-only like everyone else.
-        return self._rw_mode_or_demote(port, port_name, username, "write entitlement"), None
+        mode, code = self._rw_mode_or_demote(port, port_name, username, "write entitlement")
+        return decide(code, mode=mode, port_name=port_name, capacity=_port_capacity(port))
 
-    async def connect_client_to_port(
-        self, client_id: str, port_name: str, username: str
-    ) -> Tuple[bool, Optional[str], Optional[str]]:
-        """Connect a client id to a port and determine access mode.
+    async def connect_client_to_port(self, client_id: str, port_name: str, username: str) -> AccessDecision:
+        """Connect a client id to a port and determine its access mode.
 
         Args:
             client_id: Unique identifier of the client.
@@ -394,10 +423,10 @@ class ConsoleManager:
             username: Authenticated username for permission lookup.
 
         Returns:
-            Tuple[bool, Optional[str], Optional[str]]: (success flag, access
-            mode "read-only"|"read-write" or None, deny reason code
-            ("no_permissions"|"denied_by_group_acl"|"port_full") when access
-            was not granted, else None.
+            AccessDecision: ``ok`` is True for every attach that left the Client
+            on the Port, including a read-only one; ``mode`` is the mode it holds.
+            A refusal carries ``no_permissions``, a group/policy refusal, or
+            ``port_unavailable`` when even the read-only seat could not be taken.
         """
         # Check if client is already connected to a port
         if client_id in self.client_port_map:
@@ -409,7 +438,7 @@ class ConsoleManager:
         permissions = self.auth_manager.get_user_permissions(username)
         if permissions is None:
             self.logger.warning("Denying connection for '%s' to port %s: no permissions assigned", username, port_name)
-            return False, None, "no_permissions"
+            return self._attach_refusal(Code.NO_PERMISSIONS, client_id, port_name, None)
 
         port = None
         try:
@@ -417,10 +446,10 @@ class ConsoleManager:
         except Exception:
             port = None
 
-        mode, reason = self._resolve_access_mode(port, port_name, permissions, username)
-        if mode is None:
-            self.logger.warning("Denying connection for '%s' to port %s: %s", username, port_name, reason)
-            return False, None, reason
+        ladder = self._resolve_access_mode(port, port_name, permissions, username)
+        if not ladder.ok:
+            self.logger.warning("Denying connection for '%s' to port %s: %s", username, port_name, ladder.code.value)
+            return replace(ladder, client_id=client_id)
 
         # A federated (remote_muxcon) port's origin server is the sole authority on
         # its shared read-write slot (issue #52) - this proxy's own connected_clients
@@ -428,15 +457,16 @@ class ConsoleManager:
         # Always attach read-only first; "read-write" here only means this user is
         # entitled to try for the slot, not that one is actually free right now.
         is_federated = hasattr(port, "remote_port_name")
-        entitled_mode = mode
-        if is_federated and mode == "read-write":
-            mode = "read-only"
+        entitled_mode = ladder.mode
+        mode = Mode.READ_ONLY if (is_federated and entitled_mode is Mode.READ_WRITE) else entitled_mode
 
-        mode = await self._attach_client_to_port(port, port_name, client_id, username, mode, is_federated, entitled_mode)
-        if mode is None:
-            return False, None, "port_full"
+        attached, code = await self._attach_client_to_port(
+            port, port_name, client_id, username, mode, is_federated, entitled_mode, ladder.code
+        )
+        if attached is None:
+            return self._attach_refusal(Code.PORT_UNAVAILABLE, client_id, port_name, port)
 
-        self.logger.info("Client %s (%s) connected to port %s in %s mode", username, client_id, port_name, mode)
+        self.logger.info("Client %s (%s) attached to port %s in %s mode", username, client_id, port_name, attached.value)
 
         # Update every already-attached viewer's presence badge; the new client's own
         # channel isn't registered yet, so the caller sends it an initial snapshot itself
@@ -446,7 +476,25 @@ class ConsoleManager:
         except Exception:
             self.logger.debug("broadcast_presence failed after connect for %s", port_name, exc_info=True)
 
-        return True, mode, None
+        return decide(
+            code,
+            mode=attached,
+            client_id=client_id,
+            port_name=port_name,
+            holders=self._holders_for(port),
+            capacity=_port_capacity(port),
+        )
+
+    def _attach_refusal(self, code: Code, client_id: str, port_name: str, port: Optional[Any]) -> AccessDecision:
+        """Refuse an attach: the Client holds nothing, so the mode is read-only."""
+        return decide(
+            code,
+            mode=Mode.READ_ONLY,
+            client_id=client_id,
+            port_name=port_name,
+            holders=self._holders_for(port),
+            capacity=_port_capacity(port),
+        )
 
     async def _attach_client_to_port(
         self,
@@ -454,10 +502,11 @@ class ConsoleManager:
         port_name: str,
         client_id: str,
         username: str,
-        mode: str,
+        mode: Mode,
         is_federated: bool,
-        entitled_mode: str,
-    ) -> Optional[str]:
+        entitled_mode: Mode,
+        code: Code = Code.ATTACHED,
+    ) -> Tuple[Optional[Mode], Code]:
         """Attach a client to a port, falling back from read-write to read-only.
 
         A denied read-write attach (slot full) retries once as read-only.
@@ -470,21 +519,25 @@ class ConsoleManager:
             port_name: Target port name.
             client_id: Client id to attach.
             username: Authenticated username recorded with the attachment.
-            mode: Mode to attach in ("read-only" or "read-write").
+            mode: Mode to attach in.
             is_federated: True when the port is a federated (remote_muxcon) proxy.
             entitled_mode: Mode this user is entitled to (before demotion).
+            code: The code matching ``mode``, from ``_resolve_access_mode``.
 
         Returns:
-            Optional[str]: The mode attached in, or None when the port is full.
+            Tuple[Optional[Mode], Code]: (mode attached in, the code matching
+            it), or (None, ``port_unavailable``) when the port is full.
         """
-        success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
-        if not success and mode == "read-write":
-            mode = "read-only"
+        # The Port keeps its plain mode strings; a Mode is this module's vocabulary.
+        success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode.value)
+        if not success and mode is Mode.READ_WRITE:
+            mode = Mode.READ_ONLY
+            code = Code.CAPACITY_FULL
             self.logger.info("Read-write slot full for %s on port %s; falling back to read-only", username, port_name)
-            success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode)
+            success = await self.port_manager.add_client_to_port(port_name, client_id, username, mode.value)
 
         if not success:
-            return None
+            return None, Code.PORT_UNAVAILABLE
 
         # Map client to port
         self.client_port_map[client_id] = port_name
@@ -496,11 +549,15 @@ class ConsoleManager:
         # arbitrate promotion to the slot this user is entitled to. Best-effort -
         # falls back to read-only on any failure/timeout/older-origin, never
         # optimistically grants read-write across a federation link.
-        if is_federated and entitled_mode == "read-write":
+        if is_federated and entitled_mode is Mode.READ_WRITE:
             if await self._request_federated_promotion(port, port_name, client_id):
-                mode = "read-write"
+                mode, code = Mode.READ_WRITE, Code.ATTACHED
+            else:
+                # The origin holds the one shared slot; the reason this Client
+                # watches instead of drives is capacity, not access control.
+                code = Code.CAPACITY_FULL
 
-        return mode
+        return mode, code
 
     async def disconnect_client_from_port(self, client_id: str, port_name: str) -> bool:
         """Disconnect a client from a specific port.
@@ -553,7 +610,7 @@ class ConsoleManager:
             return False
         return await self.port_manager.promote_client(port_name, client_id)
 
-    async def promote_client_to_read_write(self, client_id: str, port_name: str) -> bool:
+    async def promote_client_to_read_write(self, client_id: str, port_name: str) -> AccessDecision:
         """Promote a client's access to read-write on a port.
 
         Args:
@@ -561,36 +618,58 @@ class ConsoleManager:
             port_name: Port on which to promote the client.
 
         Returns:
-            bool: True if promotion succeeded.
+            AccessDecision: ``granted`` when the Client now drives; otherwise
+            ``not_attached``, ``federation_denied``, or ``promote_failed`` with
+            the holders that took the seat and the Port's capacity. ``mode`` is
+            the mode the Client holds afterwards, so a refusal still reads
+            read-only here and the Client keeps its read-only seat.
         """
         # Check if client is connected to this port
         if client_id not in self.client_port_map or self.client_port_map[client_id] != port_name:
-            return False
+            return decide(Code.NOT_ATTACHED, mode=Mode.READ_ONLY, client_id=client_id, port_name=port_name)
 
-        # A federated (remote_muxcon) port's origin server is the sole authority on
-        # its shared read-write slot (issue #52) - ask it before granting locally.
         try:
             port = self.port_manager.get_port(port_name)
         except Exception:
             port = None
+
+        # A federated (remote_muxcon) port's origin server is the sole authority on
+        # its shared read-write slot (issue #52) - ask it before granting locally.
         if port is not None and hasattr(port, "request_read_write_for_client"):
             if not await self._request_federated_promotion(port, port_name, client_id):
                 self.logger.info("Origin denied read-write promotion for %s on federated port %s", client_id, port_name)
-                return False
+                return decide(
+                    Code.FEDERATION_DENIED,
+                    mode=Mode.READ_ONLY,
+                    client_id=client_id,
+                    port_name=port_name,
+                    holders=self._holders_for(port),
+                    capacity=_port_capacity(port),
+                )
 
         # Promote client
         success = await self.port_manager.promote_client(port_name, client_id)
 
-        if success:
-            self.logger.info("Client %s promoted to read-write on port %s", client_id, port_name)
-            try:
-                await self.broadcast_presence(port_name)
-            except Exception:
-                self.logger.debug("broadcast_presence failed after promote for %s", port_name, exc_info=True)
+        if not success:
+            # Snapshot the holders after the attempt: whoever holds the seat now is
+            # who the console names in the refusal.
+            return self._seat_refusal(port, port_name, client_id)
 
-        return success
+        self.logger.info("Client %s promoted to read-write on port %s", client_id, port_name)
+        try:
+            await self.broadcast_presence(port_name)
+        except Exception:
+            self.logger.debug("broadcast_presence failed after promote for %s", port_name, exc_info=True)
 
-    async def demote_client_to_read_only(self, client_id: str, port_name: str, notify_origin: bool = True) -> bool:
+        return decide(
+            Code.GRANTED,
+            mode=Mode.READ_WRITE,
+            client_id=client_id,
+            port_name=port_name,
+            capacity=_port_capacity(port),
+        )
+
+    async def demote_client_to_read_only(self, client_id: str, port_name: str, notify_origin: bool = True) -> AccessDecision:
         """Demote a client's access to read-only on a port.
 
         Args:
@@ -606,34 +685,51 @@ class ConsoleManager:
                 the full request timeout before this method can return.
 
         Returns:
-            bool: True if demotion succeeded.
+            AccessDecision: ``released`` when the Client gave the slot up. A
+            failure keeps ``mode`` at read-write, because that is what the
+            Client still holds: its console would otherwise drop to read-only
+            and stop forwarding keystrokes while the Port still lists it as the
+            writer (issue #98).
         """
         if client_id not in self.client_port_map or self.client_port_map[client_id] != port_name:
-            return False
+            return decide(Code.NOT_ATTACHED, mode=Mode.READ_WRITE, client_id=client_id, port_name=port_name)
 
         success = await self.port_manager.demote_client(port_name, client_id)
+        try:
+            port = self.port_manager.get_port(port_name)
+        except Exception:
+            port = None
+        if not success:
+            return decide(
+                Code.DEMOTE_FAILED,
+                mode=Mode.READ_WRITE,
+                client_id=client_id,
+                port_name=port_name,
+                holders=self._holders_for(port),
+                capacity=_port_capacity(port),
+            )
 
-        if success:
-            # Release the shared slot on the origin too (issue #52), so another
-            # local or federated writer can be promoted. Best-effort: the local
-            # demotion above already applies regardless of this call's outcome.
-            if notify_origin:
-                try:
-                    port = self.port_manager.get_port(port_name)
-                except Exception:
-                    port = None
-                if port is not None and hasattr(port, "release_read_write_for_client"):
-                    try:
-                        await port.release_read_write_for_client(client_id)
-                    except Exception:
-                        self.logger.debug("FEDRW release failed for %s on %s", client_id, port_name, exc_info=True)
-            self.logger.info("Client %s demoted to read-only on port %s", client_id, port_name)
+        # Release the shared slot on the origin too (issue #52), so another
+        # local or federated writer can be promoted. Best-effort: the local
+        # demotion above already applies regardless of this call's outcome.
+        if notify_origin and port is not None and hasattr(port, "release_read_write_for_client"):
             try:
-                await self.broadcast_presence(port_name)
+                await port.release_read_write_for_client(client_id)
             except Exception:
-                self.logger.debug("broadcast_presence failed after demote for %s", port_name, exc_info=True)
+                self.logger.debug("FEDRW release failed for %s on %s", client_id, port_name, exc_info=True)
+        self.logger.info("Client %s demoted to read-only on port %s", client_id, port_name)
+        try:
+            await self.broadcast_presence(port_name)
+        except Exception:
+            self.logger.debug("broadcast_presence failed after demote for %s", port_name, exc_info=True)
 
-        return success
+        return decide(
+            Code.RELEASED,
+            mode=Mode.READ_ONLY,
+            client_id=client_id,
+            port_name=port_name,
+            capacity=_port_capacity(port),
+        )
 
     # Note: legacy connect_port/disconnect_port removed (unified adapters own lifecycle)
 
@@ -914,20 +1010,50 @@ class ConsoleManager:
         """Remove a mapping registered via `register_client_port`."""
         self.client_port_map.pop(client_id, None)
 
-    async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
+    def _taker_display(self, taker_id: str, taker_username: str) -> str:
+        """The name a demoted Client sees in "taken by ...": the taker's Holder Display Name.
+
+        The same ``username@ip`` a holders list shows, because two people can share one
+        account name and this notice is the victim's only clue about who displaced it.
+        Without a source IP, the name alone is better than a made-up ``@unknown``.
+        """
+        name = taker_username or "unknown"
+        if not taker_id:
+            return name
+        meta = self._client_meta_for(taker_id)
+        ip = str(meta.get("ip") or "")
+        return f"{name}@{ip}" if ip and ip != "unknown" else name
+
+    def _client_meta_for(self, client_id: str) -> Dict[str, Any]:
+        """The owning adapter's metadata for one Client, or an empty dict."""
+        mgr = self.client_to_manager.get(client_id)
+        resolver = getattr(mgr, "_resolve_client_meta", None)
+        if callable(resolver):
+            try:
+                return dict(resolver(client_id) or {})
+            except Exception:
+                # justification: optional metadata; the notice falls back to the username
+                pass
+        return {}
+
+    async def send_control_frame_to_client(self, client_id: str, payload: Any) -> bool:
         """Deliver an access-mode control frame to a client via its owning adapter.
 
         Routes through the adapter registered for `client_id` (TCP, telnet, or
         web console), regardless of which adapter originated the request, so
         e.g. a CLI force-take can notify a web console client and vice versa.
+        Each adapter renders the frame its own surface uses.
 
         Args:
             client_id: Target client identifier.
-            payload: JSON-serializable control message (e.g. a demotion notice).
+            payload: an ``AccessDecision`` (rendered with ``frame()``), or a
+                JSON-serializable control message from a plugin.
 
         Returns:
             bool: True if the owning adapter accepted and sent the frame.
         """
+        if isinstance(payload, AccessDecision):
+            payload = payload.frame()
         mgr = self.client_to_manager.get(client_id)
         if mgr is None or not hasattr(mgr, "send_control_frame_to_client"):
             return False
@@ -963,7 +1089,7 @@ class ConsoleManager:
 
     def _resolve_take_target(
         self, port: Any, port_name: str, taker_id: str, target: Optional[str] = None
-    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Code]]:
         """Pick the holder a write-slot takeover demotes (issue #59 Part 2).
 
         With an explicit ``target`` that record must be a current read-write
@@ -977,28 +1103,27 @@ class ConsoleManager:
         peer via the normal channel routing.
 
         Returns:
-            Tuple[Optional[dict], Optional[str]]: (the chosen record, None)
-            on success, else (None, reason) with ``invalid_target`` or
-            ``no_holder``.
+            Tuple[Optional[dict], Optional[Code]]: (the chosen record, None)
+            on success, else (None, ``no_holder`` or ``invalid_target``).
         """
         holders = [
             c
             for c in getattr(port, "connected_clients", [])
-            if c.get("mode") == "read-write" and c.get("client_id") != taker_id
+            if c.get("mode") == Mode.READ_WRITE.value and c.get("client_id") != taker_id
         ]
         if not holders:
-            return None, "no_holder"
+            return None, Code.NO_HOLDER
         if target is not None:
             for c in holders:
                 if c.get("client_id") == target:
                     return c, None
-            return None, "invalid_target"
+            return None, Code.INVALID_TARGET
         chosen = max(holders, key=lambda c: (c.get("connected_at") or 0.0))
         return chosen, None
 
     async def _take_slot_local(
         self, port: Any, port_name: str, taker_id: str, taker_username: str, victim: Dict[str, Any]
-    ) -> Tuple[bool, str]:
+    ) -> AccessDecision:
         """Perform a take on a LOCAL port: demote the victim, promote the taker.
 
         The slot count is invariant: a takeover transfers the one writer; it
@@ -1008,24 +1133,32 @@ class ConsoleManager:
         zero writers when one was held before.
 
         Returns:
-            Tuple[bool, str]: (success, reason). ``reason`` is ``"ok"`` or a
-            short denial code.
+            AccessDecision: ``granted`` with the demoted holder as its victim, or
+            the reason the transfer did not happen.
         """
         victim_id = victim.get("client_id")
         victim_username = victim.get("username", "unknown")
-        if not await self.demote_client_to_read_only(victim_id, port_name):
-            return False, "victim_not_current"
-        ok = await self.promote_client_to_read_write(taker_id, port_name)
-        if not ok:
+        victim_holder = Holder(
+            client_id=str(victim_id or ""),
+            username=str(victim_username or "unknown"),
+            ip=self._resolve_client_ip(str(victim_id or "")),
+        )
+        if not (await self.demote_client_to_read_only(victim_id, port_name)).ok:
+            return decide(Code.VICTIM_NOT_CURRENT, mode=Mode.READ_ONLY, client_id=taker_id, port_name=port_name)
+        if not (await self.promote_client_to_read_write(taker_id, port_name)).ok:
             # Restore the victim: the transfer failed, the port keeps its writer.
             await self.port_manager.promote_client(port_name, victim_id)
-            return False, "promote_failed"
-        # Push the victim its takeover notice. The "demoted" reason is the one
-        # every console already renders as "your read-write access was taken";
-        # "taken_by" names the taker where the UI can show it.
+            return self._seat_refusal(port, port_name, taker_id)
+        # Push the victim its takeover notice. The producer decides whom to notify;
+        # the notice carries the wording every surface shows, including who took it.
         await self.send_control_frame_to_client(
             victim_id,
-            {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted", "taken_by": taker_username},
+            notice(
+                Code.DEMOTED,
+                client_id=str(victim_id or ""),
+                port_name=port_name,
+                actor=self._taker_display(taker_id, taker_username),
+            ),
         )
         self.logger.info(
             f"WRITE-SLOT TAKEOVER port={port_name} "
@@ -1046,7 +1179,14 @@ class ConsoleManager:
             )
         except Exception:
             self.logger.debug("DataLogger takeover record failed for %s", port_name, exc_info=True)
-        return True, "ok"
+        return decide(
+            Code.GRANTED,
+            mode=Mode.READ_WRITE,
+            client_id=taker_id,
+            port_name=port_name,
+            victim=victim_holder,
+            capacity=_port_capacity(port),
+        )
 
     def _log_empty_slot_grant(self, port: Any, port_name: str, taker_id: str, taker_username: str) -> None:
         """Audit a take that grabbed an EMPTY write slot directly.
@@ -1072,16 +1212,16 @@ class ConsoleManager:
         except Exception:
             self.logger.debug("DataLogger takeover record failed for %s", port_name, exc_info=True)
 
-    def _take_write_slot_port(self, taker_id: str, port_name: str) -> Tuple[Optional[Any], Optional[str]]:
-        """(port, reason): proceed when attached + port exists, else (None, reason)."""
+    def _take_write_slot_port(self, taker_id: str, port_name: str) -> Tuple[Optional[Any], Optional[Code]]:
+        """(port, None): proceed when attached + port exists, else (None, reason code)."""
         if self.client_port_map.get(taker_id) != port_name:
-            return None, "not_attached"
+            return None, Code.NOT_ATTACHED
         try:
             port = self.port_manager.get_port(port_name)
         except Exception:
             port = None
         if port is None:
-            return None, "port_missing"
+            return None, Code.PORT_MISSING
         return port, None
 
     def _take_write_slot_permissions(self, port: Any, taker_id: str, port_name: str) -> Optional[Tuple[str, str]]:
@@ -1105,15 +1245,22 @@ class ConsoleManager:
 
     async def _take_write_slot_federated(
         self, port: Any, taker_id: str, port_name: str, taker_username: str, target: Optional[str]
-    ) -> Tuple[bool, str]:
+    ) -> AccessDecision:
         """Arbitrate a takeover on a federated port: the origin is the authority."""
         try:
             origin_mode = await port.take_write_slot_for_client(taker_id, target)
         except Exception:
             self.logger.debug("FEDRW TAKE request failed for %s on %s", taker_id, port_name, exc_info=True)
             origin_mode = "read-only"
-        if origin_mode != "read-write":
-            return False, "federation_denied"
+        if origin_mode != Mode.READ_WRITE.value:
+            return decide(
+                Code.FEDERATION_DENIED,
+                mode=Mode.READ_ONLY,
+                client_id=taker_id,
+                port_name=port_name,
+                holders=self._holders_for(port),
+                capacity=_port_capacity(port),
+            )
         # The origin granted the takeover. Mirror it onto our LOCAL view of the
         # taker: the origin's promote only reached the origin's
         # "fed:<peer>:<sid>" pseudo-client, not this node's client record - and
@@ -1123,7 +1270,7 @@ class ConsoleManager:
         # (FEDRWACK, demoting the local mirror) BEFORE the taker's take-ack, in
         # order on the same connection, so when this node promotes the taker
         # the slot already looks free.
-        if not await self.promote_client_to_read_write(taker_id, port_name):
+        if not (await self.promote_client_to_read_write(taker_id, port_name)).ok:
             # The origin held the transfer, but the local record could not
             # follow (the taker has no local seat, or the victim's demotion
             # relay did not land here yet). Report the take as FAILED: a
@@ -1133,11 +1280,25 @@ class ConsoleManager:
             self.logger.warning(
                 f"Federated takeover granted by the origin, but mirroring it locally " f"failed for {taker_id} on {port_name}"
             )
-            return False, "promote_failed"
+            return decide(
+                Code.PROMOTE_FAILED,
+                mode=Mode.READ_ONLY,
+                client_id=taker_id,
+                port_name=port_name,
+                holders=self._holders_for(port),
+                capacity=_port_capacity(port),
+            )
         self._log_takeover_audit(port, port_name, taker_id, taker_username, target or "(latest)")
-        return True, (self._takeover_success_reason(port, target) or "ok")
+        return decide(
+            Code.GRANTED,
+            mode=Mode.READ_WRITE,
+            client_id=taker_id,
+            port_name=port_name,
+            victim=self._victim_holder(port, target),
+            capacity=_port_capacity(port),
+        )
 
-    async def take_write_slot(self, taker_id: str, port_name: str, target: Optional[str] = None) -> Tuple[bool, str]:
+    async def take_write_slot(self, taker_id: str, port_name: str, target: Optional[str] = None) -> AccessDecision:
         """Take the port's write slot from another holder (issue #59 Part 2).
 
         The single write-slot takeover for every client (TCP control frame,
@@ -1176,21 +1337,22 @@ class ConsoleManager:
                 most recently attached other read-write holder is used.
 
         Returns:
-            Tuple[bool, str]: (success, reason). Success reasons: ``"ok"``,
-                ``"already_rw"`` (taker already has the slot; nobody was
-                demoted), and ``takeover from <username> [<id>]`` when a
-                named target was demoted (issue #61: the taker's client
-                renders this as its "taken from" line). Failure reasons
-                include ``not_attached``, ``port_missing``, ``not_entitled``,
+            AccessDecision: the outcome of the take. Successes are ``granted``
+                (a holder was displaced, or the empty slot was taken) and
+                ``already_rw`` (the taker already had the slot; nobody was
+                demoted); ``granted`` names the displaced holder so the taker's
+                console shows its "taken from" line (issue #61, issue #98).
+                Refusals: ``not_attached``, ``port_missing``, ``not_entitled``,
                 ``denied_by_group_acl``, ``denied_by_access_default``,
-                ``no_holder``,
-                ``invalid_target``, ``victim_not_current``, ``promote_failed``,
-                ``federation_denied``. ``no_holder`` applies to ``none``
-                ports and to named targets that match no holder.
+                ``no_holder``, ``invalid_target``, ``victim_not_current``,
+                ``promote_failed``, and ``federation_denied``. A ``none`` Port and
+                a named target that matches no holder both refuse: the first
+                with ``promote_failed`` and no write slot, the second with
+                ``invalid_target``.
         """
         port, reason = self._take_write_slot_port(taker_id, port_name)
         if port is None:
-            return False, (reason or "not_attached")
+            return decide(reason or Code.NOT_ATTACHED, mode=Mode.READ_ONLY, client_id=taker_id, port_name=port_name)
 
         # The taker's username + entitlement are resolved before the port mode
         # gate and federation: the origin only sees a "federation:<peer>"
@@ -1199,11 +1361,18 @@ class ConsoleManager:
         # slot, local or not).
         creds = self._take_write_slot_permissions(port, taker_id, port_name)
         if creds is None:
-            return False, "not_entitled"
+            return decide(Code.NOT_ENTITLED, mode=Mode.READ_ONLY, client_id=taker_id, port_name=port_name)
         taker_username, permissions = creds
-        entitled, deny_reason = self._taker_entitled(port, port_name, permissions, taker_username or taker_id)
-        if not entitled:
-            return False, (deny_reason or "not_entitled")
+        entitlement = self._taker_entitled(port, port_name, permissions, taker_username or taker_id)
+        if not entitlement.may_drive:
+            return decide(
+                entitlement.code or Code.NOT_ENTITLED,
+                mode=Mode.READ_ONLY,
+                client_id=taker_id,
+                port_name=port_name,
+                holders=self._holders_for(port),
+                capacity=_port_capacity(port),
+            )
 
         # Federated port: the origin arbitrates (it sees every holder).
         if hasattr(port, "take_write_slot_for_client"):
@@ -1212,7 +1381,7 @@ class ConsoleManager:
 
     async def _take_write_slot_local(
         self, port: Any, port_name: str, taker_id: str, taker_username: str, target: Optional[str]
-    ) -> Tuple[bool, str]:
+    ) -> AccessDecision:
         """Local (non-federated) takeover: the mode gate, then the transfer.
 
         ``multiple`` gives everyone write (``already_rw`` when the taker has
@@ -1221,49 +1390,91 @@ class ConsoleManager:
         promotes into the EMPTY slot (a named target matching no holder is
         refused - the named victim does not (or no longer) exist).
         """
-        mode = wire_to_mode(getattr(port, "max_read_write_users", "one"))
+        capacity = _port_capacity(port)
+        mode = wire_to_mode(capacity)
         if mode == "multiple":
-            return (True, "already_rw") if self._is_client_rw(port, taker_id) else (False, "promote_failed")
+            if self._is_client_rw(port, taker_id):
+                return decide(
+                    Code.ALREADY_RW, mode=Mode.READ_WRITE, client_id=taker_id, port_name=port_name, capacity=capacity
+                )
+            # Every holder may write at once here, so there is no seat to take.
+            return self._no_seat_refusal(port, port_name, taker_id)
         if mode == "none":
-            return False, "no_holder"
+            return self._no_seat_refusal(port, port_name, taker_id)
         victim, reason = self._resolve_take_target(port, port_name, taker_id, target)
         if victim is not None:
-            ok, take_reason = await self._take_slot_local(port, port_name, taker_id, taker_username, victim)
-            if not ok:
-                return False, take_reason
-            # Targeted take names the demoted holder in the success reason so
-            # the taker's console can show "taken from <holder>"; the no-target
-            # take keeps the plain "ok" reason (see _takeover_success_reason).
-            return True, (self._takeover_success_reason(port, target) or "ok")
-        if target is not None or reason != "no_holder":
-            return False, (reason or "no_holder")
+            return await self._take_slot_local(port, port_name, taker_id, taker_username, victim)
+        # Only an unresolved NAMED target stops the take here. An empty slot with no
+        # target is the legacy force behaviour: the taker takes the empty slot.
+        if target is not None or reason is not Code.NO_HOLDER:
+            return decide(
+                reason or Code.NO_HOLDER,
+                mode=Mode.READ_ONLY,
+                client_id=taker_id,
+                port_name=port_name,
+                holders=self._holders_for(port),
+                capacity=capacity,
+            )
         if self._is_client_rw(port, taker_id):
-            return True, "already_rw"
-        if not await self.promote_client_to_read_write(taker_id, port_name):
-            return False, "promote_failed"
+            return decide(Code.ALREADY_RW, mode=Mode.READ_WRITE, client_id=taker_id, port_name=port_name, capacity=capacity)
+        if not (await self.promote_client_to_read_write(taker_id, port_name)).ok:
+            return self._seat_refusal(port, port_name, taker_id)
         self._log_empty_slot_grant(port, port_name, taker_id, taker_username)
-        return True, "ok"
+        return decide(Code.GRANTED, mode=Mode.READ_WRITE, client_id=taker_id, port_name=port_name, capacity=capacity)
 
-    def _takeover_success_reason(self, port: Any, target: Optional[str]) -> Optional[str]:
-        """Best-effort `takeover from <username> [<id>]` reason for a successful
-        targeted takeover (issue #61).
+    def _seat_refusal(self, port: Any, port_name: str, client_id: str) -> AccessDecision:
+        """Refuse a request to drive because no free Write slot was there.
 
-        Returns the labeled reason when ``target`` is a non-empty client_id
-        that resolves to a record in ``port.connected_clients`` (matched by
-        id regardless of current mode - the victim is demoted by the time this
-        runs, so mode is not filtered). Returns ``None`` otherwise, and the
-        caller falls back to ``"ok"``. On a federated port the demoted holder
-        lives on the origin and is not in the local ``connected_clients``, so
-        this returns None there and the taker simply sees "granted" - the
-        victim still gets its own demotion notice.
+        A ``none`` Port has no slot at all and a ``multiple`` Port has none to take. A
+        one-slot Port that refused the promote did have a seat, so the server own
+        failure is the honest answer there: ``promote_failed``. The wording lives in the
+        rows; this is the one place that picks between them, so the same facts read the
+        same everywhere.
+        """
+        capacity = write_capacity(getattr(port, "max_read_write_users", 1))
+        if capacity == 0:
+            code = Code.NO_WRITE_SLOT
+        elif capacity > 1:
+            code = Code.TAKE_WITHOUT_SLOT
+        else:
+            code = Code.PROMOTE_FAILED
+        return decide(
+            code,
+            mode=Mode.READ_ONLY,
+            client_id=client_id,
+            port_name=port_name,
+            holders=self._holders_for(port),
+            capacity=_port_capacity(port),
+        )
+
+    def _no_seat_refusal(self, port: Any, port_name: str, taker_id: str) -> AccessDecision:
+        """Refuse a take for want of a seat, naming who holds it and the limit.
+
+        One refusal shape for every "there was nothing to take" outcome, so a
+        console renders it once: a ``none`` Port, and a ``multiple`` Port where
+        this verb is meaningless because everyone may hold write at once.
+        """
+        return self._seat_refusal(port, port_name, taker_id)
+
+    def _victim_holder(self, port: Any, target: Optional[str]) -> Optional[Holder]:
+        """The holder a takeover displaced, labelled, for the taker's "Taken from" line.
+
+        ``None`` when ``target`` is empty or names no local record: on a
+        federated Port the demoted holder lives on the origin and is not in the
+        local ``connected_clients``, so the taker simply sees "granted". Matched
+        by id regardless of mode, because the victim is demoted by the time this
+        runs.
         """
         if not target:
             return None
         for c in getattr(port, "connected_clients", []) or []:
             if c.get("client_id") == target:
                 victim_id = str(c.get("client_id") or "")
-                victim_username = str(c.get("username") or "unknown")
-                return f"takeover from {victim_username} [{holder_id_short(victim_id)}]"
+                return Holder(
+                    client_id=victim_id,
+                    username=str(c.get("username") or "unknown"),
+                    ip=self._resolve_client_ip(victim_id),
+                )
         return None
 
     def _client_permissions(self, port_name: str, client_id: str) -> Optional[str]:
@@ -1305,49 +1516,39 @@ class ConsoleManager:
         except Exception:
             self.logger.debug("DataLogger takeover record failed for %s", port_name, exc_info=True)
 
-    def _read_write_holders(self, port_name: str) -> List[Dict[str, Any]]:
-        """Return the raw connected-client records currently in read-write mode."""
-        try:
-            port = self.port_manager.ports.get(port_name) if hasattr(self.port_manager, "ports") else None
-        except Exception:
-            port = None
-        if port is None:
-            return []
-        return [c for c in getattr(port, "connected_clients", []) if c.get("mode") == "read-write"]
-
     def get_rw_holders_display(self, port_name: str) -> List[str]:
         """Return one entry per read-write client on a port, labeled
         ``[id] username@ip (rw)`` (see `holder_id_short` for the id form).
 
-        Resolves IPs across adapter types via each owning adapter's
+        The label comes from ``Holder.label`` in the Access decision module, so
+        every console shows the same text for the same Client (issue #98). It
+        resolves IPs across adapter types via each owning adapter's
         `_resolve_client_meta`, so e.g. a telnet client can see that a web
-        console user currently holds read-write access. The label format is
-        shared by every console (telnet/SSH `w`, the TCP/WebSocket
-        `rw_holders` control frames, the web holder lines - issue #61); it
-        doubles as the target for a takeover: the `client_id` in brackets is
-        exactly the value the `force_promote` target field matches on.
+        console user currently holds read-write access. The label doubles as the
+        target for a takeover: the `client_id` in brackets is exactly the value
+        the `force_promote` target field matches on.
         """
-        holders: List[str] = []
-        for c in self._read_write_holders(port_name):
-            cid = c.get("client_id", "")
-            username = c.get("username", "unknown")
-            holders.append(f"[{holder_id_short(cid)}] {username}@{self._resolve_client_ip(cid)} (rw)")
-        return holders
+        try:
+            port = self.port_manager.ports.get(port_name) if hasattr(self.port_manager, "ports") else None
+        except Exception:
+            port = None
+        return [h.label for h in self._holders_for(port)]
+
+    def rw_holders_frame(self, port_name: Optional[str]) -> Dict[str, Any]:
+        """The one answer to "who holds the Write slot on this Port?".
+
+        Serves the ``query_rw_holders`` control frame and the Control menu ``w``
+        command, on every surface, from this one builder (issue #98).
+        """
+        try:
+            port = self.port_manager.ports.get(port_name) if hasattr(self.port_manager, "ports") else None
+        except Exception:
+            port = None
+        return holders_frame(self._holders_for(port), capacity=_port_capacity(port))
 
     def _resolve_client_ip(self, client_id: str) -> str:
         """Resolve a client's source IP via its owning adapter's `_resolve_client_meta`."""
-        mgr = self.client_to_manager.get(client_id)
-        resolver = getattr(mgr, "_resolve_client_meta", None)
-        if callable(resolver):
-            try:
-                meta = resolver(client_id) or {}
-                ip = meta.get("ip")
-                if ip:
-                    return str(ip)
-            except Exception:
-                # justification: optional metadata; the default applies
-                pass
-        return "unknown"
+        return str(self._client_meta_for(client_id).get("ip") or "unknown")
 
     def get_viewers_display(self, port_name: str) -> List[Dict[str, str]]:
         """Return viewer entries for every client attached to a port, local and federated.
@@ -1414,7 +1615,7 @@ class ConsoleManager:
                 self.port_manager.notify_meta_updated(port_name, {"event": "presence_changed", "viewers": viewers})
             except Exception:
                 self.logger.debug("notify_meta_updated(presence_changed) failed for %s", port_name, exc_info=True)
-        return await self.broadcast_control_frame_to_port(port_name, {"type": "presence", "viewers": viewers})
+        return await self.broadcast_control_frame_to_port(port_name, presence_frame(viewers))
 
     def get_client_mode(self, client_id: str, port_name: str) -> Optional[str]:
         """Return access mode for a client on a specific port.

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import asyncssh
 from cryptography.hazmat.primitives import serialization
 
+from ..access_decision import AccessDecision, Code, Mode, decide
 from ..locations import ssh_host_key_dir as _ssh_host_key_dir_default
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .listener_common import (
@@ -27,6 +28,7 @@ from .listener_common import (
     EscapeState,
     _dispatch_control_command,
     _origin_entry_matches,
+    access_manager_missing_frame,
     compile_acl,
     feed_escape_byte,
     format_rw_notice,
@@ -584,18 +586,19 @@ class SshListenerAdapter(BaseGenericAdapter):
             remote_host=peer_ip,
             username=username,
         )
-        attach_ok, attach_reason = await self._attach_session(session)
-        if not attach_ok:
+        attached = await self._attach_session(session)
+        if attached is None:
+            text = decide(Code.INTERNAL, mode=Mode.READ_ONLY).text
+        elif attached.ok:
+            text = ""
+        else:
+            text = attached.text
+        if text:
             try:
-                if attach_reason == "denied_by_group_acl":
-                    process.stdout.write(b"Access denied to this port\r\n")
-                elif attach_reason == "no_permissions":
-                    process.stdout.write(b"No permissions assigned to this account\r\n")
-                else:
-                    process.stdout.write(b"Failed to attach to port\r\n")
+                process.stdout.write(text.encode())
                 await process.stdout.drain()
             except Exception:
-                self.logger.debug("SSH: could not deliver attach-denied notice", exc_info=True)
+                self.logger.debug("SSH: could not deliver attach refusal", exc_info=True)
             process.exit(1)
             return
         self.sessions[client_id] = session
@@ -736,15 +739,8 @@ class SshListenerAdapter(BaseGenericAdapter):
         if session.listener.read_only:
             await self._write_session(session, "\r\n[This listener is configured read-only]\r\n")
             return
-        ok = bool(cm and await cm.promote_client_to_read_write(session.client_id, session.port_name))
-        if ok:
-            session.port_mode = "read-write"
-        payload: Dict[str, Any] = {"type": "client_mode", "ok": ok, "mode": session.port_mode}
-        if not ok and cm:
-            holders = cm.get_rw_holders_display(session.port_name)
-            if holders:
-                payload["rw_holders"] = holders
-        await self._write_session(session, format_rw_notice(payload))
+        decision = await cm.promote_client_to_read_write(session.client_id, session.port_name) if cm else None
+        await self._reply_access_decision(session, decision)
 
     async def _cmd_force_rw(self, session: SshSession, cm: Any) -> None:
         if session.listener.read_only:
@@ -756,24 +752,26 @@ class SshListenerAdapter(BaseGenericAdapter):
         target, keep_going = await read_take_target(session.process.stdin, session.process.stdout)
         if not keep_going:
             return
-        ok = False
-        reason = ""
-        if cm:
-            ok, reason = await cm.take_write_slot(session.client_id, session.port_name, target)
-        if ok:
-            session.port_mode = "read-write"
-        payload: Dict[str, Any] = {"type": "client_mode", "ok": ok, "mode": session.port_mode}
-        if reason:
-            payload["reason"] = reason
-        if ok and reason.startswith("takeover from "):
-            payload["takeover"] = reason.removeprefix("takeover from ")
-        await self._write_session(session, format_rw_notice(payload))
+        decision = await cm.take_write_slot(session.client_id, session.port_name, target) if cm else None
+        await self._reply_access_decision(session, decision)
 
     async def _cmd_release_rw(self, session: SshSession, cm: Any) -> None:
-        ok = bool(cm and await cm.demote_client_to_read_only(session.client_id, session.port_name))
-        if ok:
-            session.port_mode = "read-only"
-        await self._write_session(session, format_rw_notice({"type": "client_mode", "ok": ok, "mode": session.port_mode}))
+        decision = await cm.demote_client_to_read_only(session.client_id, session.port_name) if cm else None
+        await self._reply_access_decision(session, decision)
+
+    async def _reply_access_decision(self, session: SshSession, decision: Optional[AccessDecision]) -> None:
+        """Print one Access decision and record the mode it reports.
+
+        The decision owns the wording, including a takeover's "taken from" line
+        (issue #98). This listener owns only the mode the session shows, and takes
+        it from the decision, so the session, the printed line, and the Port agree
+        - including after a release that failed, which leaves the session read-write.
+        """
+        if decision is None:
+            await self._write_session(session, format_rw_notice(access_manager_missing_frame(session.port_mode)))
+            return
+        session.port_mode = decision.mode.value
+        await self._write_session(session, decision.text)
 
     def _format_session_info(self, session: SshSession) -> str:
         esc = session.escape
@@ -806,8 +804,10 @@ class SshListenerAdapter(BaseGenericAdapter):
         session = self.sessions.get(client_id)
         if session is None:
             return False
-        if payload.get("reason") == "demoted":
-            session.port_mode = "read-only"
+        # An access frame states the mode its Client holds afterwards, so the
+        # session follows the Port instead of guessing from one reason value.
+        if payload.get("mode"):
+            session.port_mode = payload["mode"]
         await self._write_session(session, format_rw_notice(payload))
         return True
 
@@ -936,33 +936,39 @@ class SshListenerAdapter(BaseGenericAdapter):
             self.logger.error("SSH: failed to deliver port list before exit", exc_info=True)
         process.exit(1)
 
-    async def _attach_session(self, session: SshSession) -> Tuple[bool, Optional[str]]:
+    async def _attach_session(self, session: SshSession) -> Optional[AccessDecision]:
+        """Attach a session and return the access decision for it.
+
+        Returns None when there is no console manager or the attach raised. The caller
+        prints the refusal carried by a decision, so an SSH refusal says what the
+        access module says instead of what this adapter guessed (issue #98).
+        """
         if not self.console_manager:
-            return False, None
+            return None
         try:
-            ok, mode, reason = await self.console_manager.connect_client_to_port(
+            attached = await self.console_manager.connect_client_to_port(
                 session.client_id,
                 session.port_name,
                 session.username,
             )
         except Exception as exc:
             self.logger.error("Console manager attach failed for %s: %s", session.client_id, exc)
-            return False, None
-        if ok:
-            session.port_mode = mode
+            return None
+        if attached.ok:
+            session.port_mode = attached.mode.value
         else:
             self.logger.warning(
-                "Console manager rejected SSH client %s for port %s (reason=%s)",
+                "Console manager rejected SSH client %s for port %s (code=%s)",
                 session.client_id,
                 session.port_name,
-                reason,
+                attached.code.value,
             )
-        if ok and hasattr(self.console_manager, "register_client_channel"):
+        if attached.ok and hasattr(self.console_manager, "register_client_channel"):
             try:
                 self.console_manager.register_client_channel(session.client_id, self)
             except Exception:
                 self.logger.error("register_client_channel failed for SSH client %s", session.client_id, exc_info=True)
-        return bool(ok), reason
+        return attached
 
     async def _disconnect_session(self, client_id: str, *, reason: str) -> None:
         session = self.sessions.pop(client_id, None)

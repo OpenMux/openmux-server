@@ -21,11 +21,29 @@ Changes since v1.0.4 (2026-10-19).
   `/etc/openmux/actions`; a script you edited is never overwritten.
 
 ### Behavior changes (no config change required)
+- **The server now words every access answer.** A write-slot or attach answer reaches the Client as the server's own
+  sentence. Before, each surface turned a status word into English with its own table, so the same fact read differently in
+  the CLI, Telnet, SSH, and the web console, and an unknown status printed text in one place and nothing in another. The
+  `client_mode` control frame now carries `lines` (the sentences to show), `message` (one line for a log or a close
+  reason), and `code` (for state only), and it no longer carries `reason`, `takeover`, or `taken_by`. An `openmux` Client
+  or web console older than this release shows no sentence for these answers, because it cannot read a table it no longer
+  has; its mode still changes. Upgrade the server and its Clients together. See
+  `docs/adr/0001-access-wording-belongs-to-the-server.md`. No config key changed.
+- **Two access answers now name the real reason.** `promote_failed` means only "the server failed to grant read-write
+  access". A port with `max_read_write_users: 0` answers `no_write_slot` instead, and a Take control on a port that lets
+  several clients write at once answers `take_without_slot`. A tool that matched `promote_failed` for a capacity-none port
+  must now match `no_write_slot`. The refused Client also reads the difference: "This port has no write slots" rather than
+  a failed promotion that never happened.
+- **A refused console stream says why.** `openmux-client` now prints the server's sentence when the server refuses a
+  WebSocket console stream, for example `Failed to connect to openmux.example:443: 4003 Access denied to this port`.
+  Before, a close during the handshake left only `Failed to connect to openmux.example:443`, and an attach or refusal answer
+  that arrived during the handshake was thrown away, so the Client never applied the mode the server had already set.
+  No config key changed.
 
 - **A `port_actions` section the loader cannot read no longer removes the endpoints.** One value of the wrong type
   (for example `port_actions: true`, or `action_ports` written as a list) made the route registration fail at start, so
   `/api/ports/<port>/actions` and `/api/port-actions/health` answered 404 for the life of the process: the routes register once
-  per start, so only a restart could bring them back. The loader now drops what it cannot read and logs the key by name, and the
+  per start, so only a restart could bring them back. The loader now drops what it cannot read and logs the key by name. The
   endpoints answer the same empty result as they do with no section. Fix the value in the config, and the next request uses
   it: no restart is needed.
 - **A grant that names one port now grants that port.** `action_ports: {echo_probe: loopback}` — one port name without the
@@ -40,6 +58,14 @@ Changes since v1.0.4 (2026-10-19).
   twice. No key changed: fix the value the log names in `server.yaml`.
 
 ### Web console and observability
+- **Web console pages ask for their assets by version.** Each page now requests its scripts and stylesheets as
+  `/static/<path>?v=<version>`, for example `/static/js/console.js?v=1.0.5`. A browser keeps an asset until its URL
+  changes, so an upgrade used to leave an open or reloadable page running the previous release's script. Nothing to clear
+  by hand after this upgrade. The logo image keeps its plain URL: an operator owns that file, and a release stamp would
+  hide a logo replaced inside one release.
+- **The viewer list has its own frame.** The viewer count and list now arrive in a `presence` frame instead of reusing
+  `client_mode`, because a viewer badge is not a mode change. A page that read viewers from `client_mode` must read
+  `presence`. The web console page already does.
 
 - **The Port Actions endpoints are core.** The web console now registers the action routes itself, like the Power routes:
   `/api/ports/<port>/actions` (catalog, run, history, close, takeover), `/ws/actions/<run>`, `/api/port-actions/health` and

@@ -4,10 +4,12 @@ import asyncio
 
 import pytest
 
+from openmux.server.access_decision import Code, Holder, Mode, decide, holders_frame, notice
 from openmux.server.adapters.listener_common import (
     CONTROL_MENU_HELP,
     TAKE_TARGET_PROMPT,
     EscapeState,
+    access_manager_missing_frame,
     feed_escape_byte,
     format_rw_notice,
     read_take_target,
@@ -124,84 +126,56 @@ def test_control_menu_help_lists_all_commands():
 
 
 # ---------------------------------------------------------------------------
-# format_rw_notice
+# format_rw_notice: renders a server-authored access frame (issue #98)
+#
+# The wording belongs to the access module and is pinned in
+# tests/server/test_access_decision.py. Pinned here is the renderer's own job: which
+# frames reach a raw terminal, and in what frame.
 
 
-def test_format_rw_notice_granted():
-    text = format_rw_notice({"type": "client_mode", "ok": True, "mode": "read-write"})
-    assert "granted" in text.lower()
+def test_grant_frame_writes_its_own_line():
+    assert format_rw_notice(decide(Code.GRANTED, mode=Mode.READ_WRITE).frame()) == "\r\n[Read-write access granted]\r\n"
 
 
-def test_format_rw_notice_switched_read_only():
-    text = format_rw_notice({"type": "client_mode", "ok": True, "mode": "read-only"})
-    assert "read-only" in text.lower()
+def test_takeover_frame_writes_the_taken_from_line():
+    victim = Holder(client_id="A", username="alice", ip="10.0.0.5")
+    frame = decide(Code.GRANTED, mode=Mode.READ_WRITE, victim=victim).frame()
+    assert format_rw_notice(frame) == "\r\n[Read-write access granted]\r\n[Taken from: [A] alice@10.0.0.5 (rw)]\r\n"
 
 
-def test_format_rw_notice_demoted_by_other_user():
-    text = format_rw_notice({"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"})
-    assert "taken by another user" in text.lower()
+def test_refusal_frame_writes_the_servers_sentence():
+    frame = decide(Code.INVALID_TARGET, mode=Mode.READ_ONLY).frame()
+    assert "does not hold read-write" in format_rw_notice(frame).lower()
 
 
-def test_format_rw_notice_denied_with_holders():
-    text = format_rw_notice({"type": "client_mode", "ok": False, "rw_holders": ["alice@1.2.3.4"]})
-    assert "alice@1.2.3.4" in text
-    assert "denied" in text.lower()
+def test_demotion_notice_writes_its_line():
+    frame = notice(Code.DEMOTED, client_id="c1").frame()
+    assert "your read-write access was taken by another user" in format_rw_notice(frame).lower()
 
 
-def test_format_rw_notice_denied_without_holders():
-    text = format_rw_notice({"type": "client_mode", "ok": False})
-    assert "not available" in text.lower()
+def test_a_frame_with_no_wording_writes_nothing():
+    # An attach grant stays silent on a terminal that already printed its banner, and a
+    # frame the server does not word stays silent: this renderer invents no wording.
+    assert format_rw_notice(decide(Code.ATTACHED, mode=Mode.READ_WRITE).frame()) == ""
+    assert format_rw_notice({"type": "client_mode", "ok": True, "mode": "read-write"}) == ""
+    assert format_rw_notice({}) == ""
 
 
-def test_format_rw_notice_rw_holders_query_with_holders():
-    text = format_rw_notice({"type": "rw_holders", "holders": ["bob@10.0.0.1"]})
-    assert "bob@10.0.0.1" in text
+def test_presence_push_stays_off_the_terminal():
+    assert format_rw_notice({"type": "presence", "holders": ["[A] alice@1.2.3.4 (rw)"]}) == ""
 
 
-def test_format_rw_notice_rw_holders_query_empty():
-    text = format_rw_notice({"type": "rw_holders", "holders": []})
-    assert "no client" in text.lower()
+def test_holders_frame_lists_the_labels():
+    frame = holders_frame([Holder(client_id="A", username="alice", ip="1.2.3.4")])
+    assert format_rw_notice(frame) == "\r\n[Read-write held by: [A] alice@1.2.3.4 (rw)]\r\n"
 
 
-def test_format_rw_notice_targeted_take_success_names_victim():
-    # Targeted success (issue #61): the grant plus the displaced holder.
-    text = format_rw_notice({"type": "client_mode", "ok": True, "mode": "read-write", "takeover": "[A] alice@10.0.0.5 (rw)"})
-    assert "granted" in text.lower()
-    assert "[Taken from: [A] alice@10.0.0.5 (rw)]" in text
+def test_holders_frame_says_when_no_one_holds_the_slot():
+    assert format_rw_notice(holders_frame([])) == "\r\n[No client currently holds read-write access]\r\n"
 
 
-def test_format_rw_notice_untargeted_success_has_no_taken_from():
-    text = format_rw_notice({"type": "client_mode", "ok": True, "mode": "read-write"})
-    assert "Taken from" not in text
-
-
-def test_format_rw_notice_invalid_target():
-    text = format_rw_notice({"type": "client_mode", "ok": False, "mode": "read-only", "reason": "invalid_target"})
-    assert "does not hold read-write" in text.lower()
-
-
-def test_format_rw_notice_federation_denied():
-    text = format_rw_notice({"type": "client_mode", "ok": False, "mode": "read-only", "reason": "federation_denied"})
-    assert "origin server did not grant" in text.lower()
-
-
-def test_format_rw_notice_promote_failed_with_holders():
-    text = format_rw_notice(
-        {
-            "type": "client_mode",
-            "ok": False,
-            "mode": "read-only",
-            "reason": "promote_failed",
-            "rw_holders": ["[A] alice@1.2.3.4 (rw)"],
-        }
-    )
-    assert "no free read-write seat" in text.lower()
-    assert "[A] alice@1.2.3.4 (rw)" in text
-
-
-def test_format_rw_notice_promote_failed_without_holders():
-    text = format_rw_notice({"type": "client_mode", "ok": False, "mode": "read-only", "reason": "promote_failed"})
-    assert "no free read-write seat" in text.lower()
+def test_a_frame_with_no_access_manager_says_so():
+    assert "could not complete the request" in format_rw_notice(access_manager_missing_frame("read-write")).lower()
 
 
 # ---------------------------------------------------------------------------

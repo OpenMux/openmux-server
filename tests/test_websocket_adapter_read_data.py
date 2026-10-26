@@ -14,6 +14,11 @@ websocket (no server) and pin every branch:
 - timeout while open: `b""`
 - receive raising: marks disconnected, closes the session, returns None
 - not connected: immediate None
+
+The last tests cover the connect peek in `_ws_handshake_session`. The server answers an
+attach with one control frame, and refuses with that frame followed by a close whose reason
+carries its sentence (issue #98). Both arrive before the reader starts, so the peek has to
+hand them on instead of dropping them.
 """
 
 import asyncio
@@ -23,7 +28,9 @@ import types
 import pytest
 from aiohttp import WSMsgType
 
-from openmux.client.adapters.websocket_adapter import WebSocketClientAdapter
+from openmux.client.adapters.websocket_adapter import WebSocketClientAdapter, ws_close_reason
+from openmux.server.access_decision import CLOSE_ATTACH_DENIED, Code, Mode, decide
+from tests.support.decisions import holders_frame_of
 
 
 class _FakeMessage:
@@ -54,6 +61,17 @@ class _FakeAiohttpSession:
         self.closed = True
 
 
+class _FakeHandshakeSession(_FakeAiohttpSession):
+    """A session whose handshake yields a prepared message queue."""
+
+    def __init__(self, ws) -> None:
+        super().__init__()
+        self._ws = ws
+
+    async def ws_connect(self, url, headers=None):
+        return self._ws
+
+
 def _adapter(ws) -> WebSocketClientAdapter:
     """A bare adapter with `ws` as its websocket (no real connection)."""
     adapter = WebSocketClientAdapter.__new__(WebSocketClientAdapter)
@@ -67,6 +85,8 @@ def _adapter(ws) -> WebSocketClientAdapter:
     adapter.rw_holders = None
     adapter.max_rw_users = None
     adapter._port_up = None
+    adapter._pending_ws_messages = []
+    adapter.close_reason = ""
     return adapter
 
 
@@ -98,23 +118,37 @@ async def test_read_data_power_switch_stashed_returns_empty():
 
 
 @pytest.mark.asyncio
-async def test_read_data_client_mode_returns_formatted_text():
-    info = {"type": "client_mode", "mode": "read-write", "ok": True}
+async def test_read_data_client_mode_returns_the_servers_lines():
+    # The frame is the one the server builds, so the CLI is tested against the real wire
+    # shape instead of a hand-written dict (issue #98).
+    info = decide(Code.GRANTED, mode=Mode.READ_WRITE, client_id="c1").frame()
     adapter = _adapter(_FakeWebSocket([_FakeMessage(WSMsgType.TEXT, _ctrl_frame(info))]))
     out = await adapter.read_data()
     assert isinstance(out, str)
-    assert "[Read-write access granted]" in out
+    assert out == "\r\n[Read-write access granted]\r\n"
+    assert adapter.access_mode == "read-write"
+
+
+@pytest.mark.asyncio
+async def test_read_data_client_mode_without_lines_is_silent():
+    # An attach grant carries no line: the CLI stays silent behind its connect banner.
+    info = decide(Code.ATTACHED, mode=Mode.READ_WRITE, client_id="c1").frame()
+    adapter = _adapter(_FakeWebSocket([_FakeMessage(WSMsgType.TEXT, _ctrl_frame(info))]))
+    assert await adapter.read_data() == b""
     assert adapter.access_mode == "read-write"
 
 
 @pytest.mark.asyncio
 async def test_read_data_rw_holders_returns_formatted_text():
-    info = {"type": "rw_holders", "holders": ["[A] a (rw)"], "max_rw_users": 1}
+    port = type(
+        "P", (), {"connected_clients": [{"client_id": "A", "username": "a", "mode": "read-write"}], "max_read_write_users": 1}
+    )()
+    info = holders_frame_of(port)
     adapter = _adapter(_FakeWebSocket([_FakeMessage(WSMsgType.TEXT, _ctrl_frame(info))]))
     out = await adapter.read_data()
     assert isinstance(out, str)
-    assert "Held by: [A] a (rw)" in out
-    assert adapter.rw_holders == ["[A] a (rw)"]
+    assert out == "\r\n[Read-write held by: [A] a@unknown (rw)]\r\n"
+    assert adapter.rw_holders == ["[A] a@unknown (rw)"]
     assert adapter.max_rw_users == 1
 
 
@@ -213,3 +247,58 @@ async def test_read_data_receive_exception_closes_and_returns_none():
     assert await adapter.read_data() is None
     assert adapter.is_connected is False
     assert adapter._aiohttp_session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_connect_peek_hands_the_attach_answer_to_the_reader():
+    """A frame the peek already read is replayed, so the reader still applies it."""
+    granted = decide(Code.ATTACHED, mode=Mode.READ_WRITE, client_id="c1").frame()
+    ws = _FakeWebSocket([_FakeMessage(WSMsgType.TEXT, _ctrl_frame(granted))])
+    adapter = _adapter(None)
+
+    assert await adapter._ws_handshake_session(_FakeHandshakeSession(ws), "ws://x/ws/p1", {}) is ws
+
+    assert await adapter.read_data() == b""  # a silent grant renders nothing
+    assert adapter.access_mode == "read-write"  # the frame was applied, not dropped
+    assert adapter._pending_ws_messages == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_sentence_reaches_the_reader_before_the_close():
+    """Refusal frame then close: the reader gets the sentence, then the close."""
+    refusal = decide(Code.PROMOTE_FAILED, mode=Mode.READ_ONLY, client_id="c1")
+    ws = _FakeWebSocket(
+        [
+            _FakeMessage(WSMsgType.TEXT, _ctrl_frame(refusal.frame())),
+            _FakeMessage(WSMsgType.CLOSE, CLOSE_ATTACH_DENIED, refusal.message.encode()),
+        ]
+    )
+    adapter = _adapter(None)
+
+    assert await adapter._ws_handshake_session(_FakeHandshakeSession(ws), "ws://x/ws/p1", {}) is ws
+
+    message = await adapter.read_data()
+    text = message if isinstance(message, str) else message.decode("utf-8", "replace")
+    assert "failed to grant read-write access" in text
+    assert await adapter.read_data() is None
+    assert adapter.is_connected is False
+
+
+@pytest.mark.asyncio
+async def test_a_close_before_any_frame_keeps_its_reason():
+    """When the server closes first, its code and sentence survive on the adapter."""
+    ws = _FakeWebSocket([_FakeMessage(WSMsgType.CLOSE, CLOSE_ATTACH_DENIED, b"Access denied to this port")])
+    adapter = _adapter(None)
+
+    assert await adapter._ws_handshake_session(_FakeHandshakeSession(ws), "ws://x/ws/p1", {}) is None
+    assert adapter.websocket is None
+    assert adapter.close_reason == f"{CLOSE_ATTACH_DENIED} Access denied to this port"
+
+
+def test_ws_close_reason_reads_code_and_sentence():
+    """`ws_close_reason` handles a code alone, a reason alone, and neither."""
+    assert ws_close_reason(_FakeMessage(WSMsgType.CLOSE, 4003, b"Denied")) == "4003 Denied"
+    assert ws_close_reason(_FakeMessage(WSMsgType.CLOSE, 1011, None)) == "1011"
+    assert ws_close_reason(_FakeMessage(WSMsgType.CLOSE, None, None)) == ""
+    # Undecodable bytes must not raise: the reason is shown, never parsed.
+    assert ws_close_reason(_FakeMessage(WSMsgType.CLOSE, 4003, b"\xff\xfe")).startswith("4003")

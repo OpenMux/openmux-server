@@ -234,8 +234,8 @@ async def test_websocket_transport_failure_prunes_delivery_channel_only():
     adapter.set_auth_manager(auth)
     adapter.set_console_manager(cm)
 
-    ok, _mode, _reason = await cm.connect_client_to_port("ws:test", "console1", "u")
-    assert ok is True
+    attached = await cm.connect_client_to_port("ws:test", "console1", "u")
+    assert attached.ok
     cm.register_client_channel("ws:test", adapter)
     failing_ws = FailingWS()
     adapter._clients["ws:test"] = failing_ws
@@ -286,8 +286,8 @@ async def test_websocket_send_uses_falsy_socket_object():
     adapter.set_auth_manager(auth)
     adapter.set_console_manager(cm)
 
-    ok, _mode, _reason = await cm.connect_client_to_port("ws:test", "console1", "u")
-    assert ok is True
+    attached = await cm.connect_client_to_port("ws:test", "console1", "u")
+    assert attached.ok
     cm.register_client_channel("ws:test", adapter)
     falsy_ws = FalsyWS()
     adapter._clients["ws:test"] = falsy_ws

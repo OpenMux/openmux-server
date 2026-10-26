@@ -393,5 +393,5 @@
     powerDrivers: {{ power_drivers_json|default('[]')|safe }}
   };
 </script>
-<script src="{{ base_path }}/static/js/config_editor.js"></script>
+<script src="{{ asset_url(base_path ~ '/static/js/config_editor.js') }}"></script>
 {% endblock %}

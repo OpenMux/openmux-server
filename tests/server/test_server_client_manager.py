@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
+from openmux.server.access_decision import Code, Mode, decide
 from tests.support.protocol_handler import (
     ClientConnection,
 )
@@ -459,10 +460,8 @@ class TestClientManager:
 
         # Mock console_manager methods
         client_manager.console_manager.port_exists.return_value = True
-        client_manager.console_manager.connect_client_to_port.return_value = (
-            True,
-            "read-only",
-            None,
+        client_manager.console_manager.connect_client_to_port.return_value = decide(
+            Code.READ_ONLY_STANDING, mode=Mode.READ_ONLY
         )
 
         # Mock _handle_console_mode to avoid running the console mode loop
@@ -489,11 +488,7 @@ class TestClientManager:
 
         # Mock console_manager methods
         client_manager.console_manager.port_exists.return_value = True
-        client_manager.console_manager.connect_client_to_port.return_value = (
-            True,
-            "read-write",
-            None,
-        )
+        client_manager.console_manager.connect_client_to_port.return_value = decide(Code.ATTACHED, mode=Mode.READ_WRITE)
 
         # Mock _handle_console_mode to avoid running the console mode loop
         client_manager._handle_console_mode = AsyncMock()
@@ -524,7 +519,7 @@ class TestClientManager:
             patch.object(
                 client_manager.console_manager,
                 "connect_client_to_port",
-                new=AsyncMock(return_value=(False, None, "port_full")),
+                new=AsyncMock(return_value=decide(Code.PORT_UNAVAILABLE, mode=Mode.READ_ONLY)),
             ),
         ):
 
@@ -638,7 +633,7 @@ class TestClientManager:
         client.reader.readline.side_effect = [b"r\n", b"q\n"]
 
         # Mock promote_client_to_read_write
-        client_manager.console_manager.promote_client_to_read_write.return_value = True
+        client_manager.console_manager.promote_client_to_read_write.return_value = decide(Code.GRANTED, mode=Mode.READ_WRITE)
 
         await client_manager._handle_control_menu(client)
 
@@ -662,7 +657,9 @@ class TestClientManager:
         client.reader.readline.side_effect = [b"r\n", b"q\n"]
 
         # Mock promote_client_to_read_write
-        client_manager.console_manager.promote_client_to_read_write.return_value = False
+        client_manager.console_manager.promote_client_to_read_write.return_value = decide(
+            Code.PROMOTE_FAILED, mode=Mode.READ_ONLY
+        )
 
         await client_manager._handle_control_menu(client)
 
@@ -684,7 +681,9 @@ class TestClientManager:
 
         # Mock console manager unified attach/detach methods
         client_manager.console_manager.disconnect_client_from_port = AsyncMock()
-        client_manager.console_manager.connect_client_to_port = AsyncMock(return_value=(True, "read-only", None))
+        client_manager.console_manager.connect_client_to_port = AsyncMock(
+            return_value=decide(Code.READ_ONLY_STANDING, mode=Mode.READ_ONLY)
+        )
 
         # Mock asyncio.sleep
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
@@ -712,7 +711,9 @@ class TestClientManager:
 
         # Mock console manager unified attach/detach methods
         client_manager.console_manager.disconnect_client_from_port = AsyncMock()
-        client_manager.console_manager.connect_client_to_port = AsyncMock(return_value=(False, None, "port_full"))
+        client_manager.console_manager.connect_client_to_port = AsyncMock(
+            return_value=decide(Code.PORT_UNAVAILABLE, mode=Mode.READ_ONLY)
+        )
 
         # Mock asyncio.sleep
         with patch("asyncio.sleep", new_callable=AsyncMock):

@@ -16,6 +16,21 @@ _USER_HASH = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918" 
 _AUTH = {"Authorization": f"Basic {base64.b64encode(b'u:admin').decode()}"}
 
 
+def _env_with_page_helpers(tdir) -> "Environment":
+    """One Jinja env over the shipped templates, with the helpers they call.
+
+    The adapter registers these itself; a test that swaps in its own env must register
+    them too, or a page fails on a helper instead of on the thing under test.
+    """
+    from jinja2 import Environment, FileSystemLoader
+
+    import openmux.server.web_console as wc
+
+    env = Environment(loader=FileSystemLoader(str(tdir)))
+    wc.register_template_helpers(env)
+    return env
+
+
 def _make_adapter(port, **cfg):
     config = {
         "web_console": {
@@ -104,11 +119,10 @@ def test_read_package_version(monkeypatch, tmp_path):
 
 
 def test_render_about_shows_package_version():
-    from jinja2 import Environment, FileSystemLoader
 
     tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
     adapter = _make_adapter(0)
-    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    adapter._jinja_env = _env_with_page_helpers(tdir)
 
     html = adapter._render_about(username="u", package_version="1.0.3-16~git202609261620.019a9e4").decode()
     assert "package 1.0.3-16~git202609261620.019a9e4" in html
@@ -119,14 +133,13 @@ def test_render_about_shows_package_version():
 
 
 def test_login_page_shows_server_version(monkeypatch):
-    from jinja2 import Environment, FileSystemLoader
 
     import openmux.server.web_console as wc
 
     adapter = _make_adapter(0)
     # Templates ship inside the package (openmux/server/webui).
     tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
-    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    adapter._jinja_env = _env_with_page_helpers(tdir)
 
     monkeypatch.setattr(wc, "_get_dist_version", lambda: "9.8.7.post3+gabc1234.d20260101")
     html = adapter._render_login().decode()
@@ -139,13 +152,12 @@ def test_login_page_shows_server_version(monkeypatch):
 
 
 def test_login_page_shows_motd():
-    from jinja2 import Environment, FileSystemLoader
 
     tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
     motd = "Planned maintenance\nSaturday 22:00-02:00"
 
     adapter = _make_adapter(0, motd=motd)
-    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    adapter._jinja_env = _env_with_page_helpers(tdir)
     html = adapter._render_login().decode()
     assert "login-motd" in html
     assert "Planned maintenance" in html
@@ -153,13 +165,13 @@ def test_login_page_shows_motd():
 
     # No motd in config -> no MOTD block at all
     adapter_no_motd = _make_adapter(0)
-    adapter_no_motd._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    adapter_no_motd._jinja_env = _env_with_page_helpers(tdir)
     html = adapter_no_motd._render_login().decode()
     assert "login-motd" not in html
 
     # Blank motd -> hidden (same as unset)
     adapter_blank = _make_adapter(0, motd="   \n  ")
-    adapter_blank._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    adapter_blank._jinja_env = _env_with_page_helpers(tdir)
     html = adapter_blank._render_login().decode()
     assert "login-motd" not in html
     assert adapter_blank.motd == ""
@@ -167,13 +179,12 @@ def test_login_page_shows_motd():
 
 def test_login_page_never_shows_logged_in_motd():
     """The logged-in MOTD may hold sensitive text; it must not leak pre-auth."""
-    from jinja2 import Environment, FileSystemLoader
 
     tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
     li_motd = "Internal detail: rack B42, PSU 2 failing"
 
     adapter = _make_adapter(0, logged_in_motd=li_motd)
-    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    adapter._jinja_env = _env_with_page_helpers(tdir)
     html = adapter._render_login().decode()
     assert "login-motd" not in html
     assert "rack B42" not in html
@@ -262,11 +273,10 @@ async def test_about_page_shows_hardware_info(tmp_path):
 
 def test_render_about_shows_logged_in_user():
     """The About page shows the caller's username, permission, and groups."""
-    from jinja2 import Environment, FileSystemLoader
 
     tdir = Path(__file__).resolve().parents[1] / "openmux" / "server" / "webui" / "templates" / "web_console"
     adapter = _make_adapter(0)
-    adapter._jinja_env = Environment(loader=FileSystemLoader(str(tdir)))
+    adapter._jinja_env = _env_with_page_helpers(tdir)
 
     html = adapter._render_about(username="admin1", user_groups={"ops", "user"}, user_permission="admin").decode()
     assert "<h2>User</h2>" in html

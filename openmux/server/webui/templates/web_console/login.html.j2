@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="omx-base-path" content="{{ base_path }}" />
     <title>{{ realm }} Login</title>
-  <link rel="stylesheet" href="{{ base_path }}/static/web_console.css" />
-  <script src="{{ base_path }}/static/js/theme-init.js"></script>
+  <link rel="stylesheet" href="{{ asset_url(base_path ~ '/static/web_console.css') }}" />
+  <script src="{{ asset_url(base_path ~ '/static/js/theme-init.js') }}"></script>
   </head>
   <body class="login">
   <button id="themeToggle" type="button" class="btn btn-icon" style="position: fixed; top: 8px; right: 8px; width: 32px; height: 32px; font-size: 16px; border-radius: 50%; background: transparent; border: none; color: var(--text-muted);" title="Toggle Theme">☀️</button>
@@ -43,5 +43,5 @@
       <div class="login-version">OpenMux v{{ version }}</div>
     </form>
   </body>
-  <script src="{{ base_path }}/static/js/login.js"></script>
+  <script src="{{ asset_url(base_path ~ '/static/js/login.js') }}"></script>
 </html>

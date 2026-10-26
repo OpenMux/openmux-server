@@ -80,6 +80,7 @@ def test_template_markers_match_expected_regions():
         assert text.count(f"<!--OMX-STATUS-FRAGMENT:END:{name}-->") == 1
     # Renderable, and the split yields all four regions with a representative context.
     env = Environment(loader=FileSystemLoader(str(tdir)))
+    wc.register_template_helpers(env)
     env.filters["fmt_ts"] = lambda v: str(v)
     html = env.get_template("status_content.html.j2").render(
         data={},

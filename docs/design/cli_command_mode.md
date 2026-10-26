@@ -14,7 +14,10 @@ sees what they type, can discover the commands with `help`, and never loses the
 session by pressing Enter.
 
 The on-the-wire protocol stays stable. The server command phase stays prompt-free:
-the prompt, the echo, and the help text are all client-side.
+the prompt, the echo, and the help text are all client-side. Access answers are the
+one exception: the server states them. The client prints the `lines` a `client_mode`
+frame carries and keeps no status-to-sentence table of its own (issue #98,
+`docs/adr/0001-access-wording-belongs-to-the-server.md`).
 
 ## When command mode is active
 

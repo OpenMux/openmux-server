@@ -23,7 +23,9 @@ from openmux.server.access_control import (
     wire_to_mode,
     write_capacity,
 )
+from openmux.server.access_decision import Code
 from openmux.server.console_manager import ConsoleManager
+from tests.support.decisions import attach_result, ladder_result
 
 # ---------------------------------------------------------------------------
 # Parse / migration matrix
@@ -175,56 +177,62 @@ class TestCapacityLadder:
 
     def test_admin_under_one_free_slot_gets_write(self):
         cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
-        assert cm._resolve_access_mode(_CapPort("one"), "p1", "admin", "root") == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(_CapPort("one"), "p1", "admin", "root")) == ("read-write", None)
 
     def test_admin_under_one_full_slot_demotes(self):
         cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
-        assert cm._resolve_access_mode(_CapPort("one", rw_clients=1), "p1", "admin", "root") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(_CapPort("one", rw_clients=1), "p1", "admin", "root")) == (
+            "read-only",
+            None,
+        )
 
     def test_admin_under_multiple_always_gets_write(self):
         cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
         full = _CapPort("multiple", rw_clients=7)
-        assert cm._resolve_access_mode(full, "p1", "admin", "root") == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(full, "p1", "admin", "root")) == ("read-write", None)
 
     def test_admin_under_none_is_read_only(self):
         """issue #59 behavior change: a slot is a resource, not a privilege."""
         cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
-        assert cm._resolve_access_mode(_CapPort("none"), "p1", "admin", "root") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(_CapPort("none"), "p1", "admin", "root")) == ("read-only", None)
 
     def test_admin_under_none_demotes_even_with_group_grant(self):
         cm = self._cm({"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]})
         port = _CapPort("none", rw_groups=("ops",))
-        assert cm._resolve_access_mode(port, "p1", "admin", "root") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "admin", "root")) == ("read-only", None)
 
     def test_global_rw_under_multiple_never_demotes(self):
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
         full = _CapPort("multiple", rw_clients=9)
-        assert cm._resolve_access_mode(full, "p1", "read-write", "alice") == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(full, "p1", "read-write", "alice")) == ("read-write", None)
 
     def test_global_rw_under_one_demotes_when_full(self):
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
-        assert cm._resolve_access_mode(_CapPort("one"), "p1", "read-write", "alice") == ("read-write", None)
-        assert cm._resolve_access_mode(_CapPort("one", rw_clients=1), "p1", "read-write", "alice") == (
+        assert ladder_result(cm._resolve_access_mode(_CapPort("one"), "p1", "read-write", "alice")) == ("read-write", None)
+        assert ladder_result(cm._resolve_access_mode(_CapPort("one", rw_clients=1), "p1", "read-write", "alice")) == (
             "read-only",
             None,
         )
 
     def test_global_rw_under_none_demotes(self):
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x"}]})
-        assert cm._resolve_access_mode(_CapPort("none"), "p1", "read-write", "alice") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(_CapPort("none"), "p1", "read-write", "alice")) == ("read-only", None)
 
     def test_read_only_user_under_multiple_stays_read_only(self):
         cm = self._cm({"users": [{"username": "auditor", "password_hash": "x", "permissions": "read-only"}]})
-        assert cm._resolve_access_mode(_CapPort("multiple"), "p1", "read-only", "auditor") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(_CapPort("multiple"), "p1", "read-only", "auditor")) == (
+            "read-only",
+            None,
+        )
 
     def test_group_rw_grant_under_none_demotes(self):
         cm = self._cm({"users": [{"username": "alice", "password_hash": "x", "groups": ["ops"]}]})
         port = _CapPort("none", rw_groups=("ops",))
-        assert cm._resolve_access_mode(port, "p1", "read-write", "alice") == ("read-only", None)
+        assert ladder_result(cm._resolve_access_mode(port, "p1", "read-write", "alice")) == ("read-only", None)
 
     def test_group_ro_grant_unaffected_by_capacity(self):
         cm = self._cm({"users": [{"username": "bob", "password_hash": "x", "groups": ["viewers"]}]})
-        assert cm._resolve_access_mode(_CapPort("none", ro_groups=("viewers",)), "p1", "read-only", "bob") == (
+        assert ladder_result(cm._resolve_access_mode(_CapPort("none", ro_groups=("viewers",)), "p1", "read-only", "bob")) == (
             "read-only",
             None,
         )
@@ -273,7 +281,7 @@ class TestLoopbackCapacityEndToEnd:
             {"name": "p1", "max_read_write_users": "none"},
             {"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "root")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "root"))
         assert (ok, mode, reason) == (True, "read-only", None)
 
     @pytest.mark.asyncio
@@ -284,9 +292,14 @@ class TestLoopbackCapacityEndToEnd:
             {"name": "p1", "max_read_write_users": "none"},
             {"users": [{"username": "alice", "password_hash": "x"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
         assert (ok, mode, reason) == (True, "read-only", None)
-        assert await cm.promote_client_to_read_write("c1", "p1") is False
+        promotion = await cm.promote_client_to_read_write("c1", "p1")
+        assert promotion.ok is False
+        # A "none" port refuses promotion by capacity, and says so (issue #98).
+        assert promotion.code is Code.NO_WRITE_SLOT
+        assert promotion.capacity == "none"
+        assert "no write slot" in promotion.message
         # The seat stayed read-only.
         port = cm.port_manager.ports["p1"]
         assert all(c["mode"] == "read-only" for c in port.connected_clients)
@@ -298,8 +311,8 @@ class TestLoopbackCapacityEndToEnd:
             {"name": "p1", "max_read_write_users": "multiple"},
             {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
         )
-        ok1, m1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
-        ok2, m2, _ = await cm.connect_client_to_port("c2", "p1", "bob")
+        ok1, m1, _ = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
+        ok2, m2, _ = attach_result(await cm.connect_client_to_port("c2", "p1", "bob"))
         assert (ok1, m1) == (True, "read-write")
         assert (ok2, m2) == (True, "read-write")
 
@@ -310,8 +323,8 @@ class TestLoopbackCapacityEndToEnd:
             {"name": "p1", "max_read_write_users": "one"},
             {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
         )
-        ok1, m1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
-        ok2, m2, _ = await cm.connect_client_to_port("c2", "p1", "bob")
+        ok1, m1, _ = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
+        ok2, m2, _ = attach_result(await cm.connect_client_to_port("c2", "p1", "bob"))
         assert (ok1, m1) == (True, "read-write")
         assert (ok2, m2) == (True, "read-only")
 
@@ -322,8 +335,8 @@ class TestLoopbackCapacityEndToEnd:
             {"name": "p1", "max_read_write_users": 2},
             {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
         )
-        ok1, m1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
-        ok2, m2, _ = await cm.connect_client_to_port("c2", "p1", "bob")
+        ok1, m1, _ = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
+        ok2, m2, _ = attach_result(await cm.connect_client_to_port("c2", "p1", "bob"))
         assert m1 == "read-write" and m2 == "read-write"
 
 
@@ -617,7 +630,7 @@ class TestTcpInitiatorCapacityEndToEnd:
             {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "none"},
             {"users": [{"username": "root", "password_hash": "x", "permissions": "admin"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "root")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "root"))
         assert (ok, mode, reason) == (True, "read-only", None)
 
     @pytest.mark.asyncio
@@ -628,9 +641,14 @@ class TestTcpInitiatorCapacityEndToEnd:
             {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "none"},
             {"users": [{"username": "alice", "password_hash": "x"}]},
         )
-        ok, mode, reason = await cm.connect_client_to_port("c1", "p1", "alice")
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
         assert (ok, mode, reason) == (True, "read-only", None)
-        assert await cm.promote_client_to_read_write("c1", "p1") is False
+        promotion = await cm.promote_client_to_read_write("c1", "p1")
+        assert promotion.ok is False
+        # A "none" port refuses promotion by capacity, and says so (issue #98).
+        assert promotion.code is Code.NO_WRITE_SLOT
+        assert promotion.capacity == "none"
+        assert "no write slot" in promotion.message
         # The seat stayed read-only.
         port = cm.port_manager.ports["p1"]
         assert all(c["mode"] == "read-only" for c in port.connected_clients)
@@ -642,8 +660,8 @@ class TestTcpInitiatorCapacityEndToEnd:
             {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "multiple"},
             {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
         )
-        ok1, m1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
-        ok2, m2, _ = await cm.connect_client_to_port("c2", "p1", "bob")
+        ok1, m1, _ = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
+        ok2, m2, _ = attach_result(await cm.connect_client_to_port("c2", "p1", "bob"))
         assert (ok1, m1) == (True, "read-write")
         assert (ok2, m2) == (True, "read-write")
 
@@ -654,8 +672,8 @@ class TestTcpInitiatorCapacityEndToEnd:
             {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": "one"},
             {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
         )
-        ok1, m1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
-        ok2, m2, _ = await cm.connect_client_to_port("c2", "p1", "bob")
+        ok1, m1, _ = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
+        ok2, m2, _ = attach_result(await cm.connect_client_to_port("c2", "p1", "bob"))
         assert (ok1, m1) == (True, "read-write")
         assert (ok2, m2) == (True, "read-only")
 
@@ -666,8 +684,8 @@ class TestTcpInitiatorCapacityEndToEnd:
             {"name": "p1", "host": "127.0.0.1", "port": 1, "max_read_write_users": 2},
             {"users": [{"username": "alice", "password_hash": "x"}, {"username": "bob", "password_hash": "x"}]},
         )
-        ok1, m1, _ = await cm.connect_client_to_port("c1", "p1", "alice")
-        ok2, m2, _ = await cm.connect_client_to_port("c2", "p1", "bob")
+        ok1, m1, _ = attach_result(await cm.connect_client_to_port("c1", "p1", "alice"))
+        ok2, m2, _ = attach_result(await cm.connect_client_to_port("c2", "p1", "bob"))
         assert m1 == "read-write" and m2 == "read-write"
 
 
