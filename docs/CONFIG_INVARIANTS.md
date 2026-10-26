@@ -78,15 +78,15 @@ CHANGELOG.
 
 Any future sidecar files (e.g., secrets) require expanding this section with invariants before implementation.
 
-## 8. Backward Compatibility Window
+## 9. Backward Compatibility Window
 If a new format is introduced, the old format stays functional for a minimum of two minor versions unless a security issue
 mandates earlier removal. Such exceptions must be documented.
 
-## 9. Documentation Synchronization
+## 10. Documentation Synchronization
 `README.md` and configuration examples under `docs/configuration/` MUST match these invariants. Pull requests altering config
 parsing MUST update examples in the same commit.
 
-## 10. Change Control Checklist
+## 11. Change Control Checklist
 Any PR affecting configuration parsing MUST include a checklist in its description:
 - [ ] Maintains canonical section acceptance
 - [ ] Does not auto-generate or mutate user config
@@ -95,40 +95,40 @@ Any PR affecting configuration parsing MUST include a checklist in its descripti
 - [ ] Adds/updates migration notes (if deprecating)
 - [ ] Verified no new warnings for existing sample configs
 
-## 11. Unknown Top-Level Sections
+## 12. Unknown Top-Level Sections
 Any top-level key not in the canonical list (or an explicitly documented optional key) is a configuration error and MUST abort
 startup with a clear message listing the unknown keys. This catches typos early. No auto-ignore, no fallback.
 
-## 12. Environment Variable Expansion
+## 13. Environment Variable Expansion
 Automatic `${VAR}` interpolation is NOT performed globally. Only explicitly whitelisted boolean/debug toggles MAY consult
 environment variables (e.g. a `DEBUG` mode) and must be documented. All other literal `${...}` strings are treated as plain
 text. Introducing general env expansion requires an update to this file and an opt-in toggle.
 
-## 13. Ordering Guarantees
+## 14. Ordering Guarantees
 Parsing is order-independent. Adapter instantiation order MUST be deterministic: sort by adapter type key, then by declared
 port/name within that section. Tests SHOULD assert determinism to prevent flaky comparisons or hash/order dependent bugs.
 
-## 14. Duplicate Name Handling
+## 15. Duplicate Name Handling
 Local adapter/port names MUST be unique across all locally defined sections; duplicates cause a startup error with both source
 sections identified. Federated/muxcon obtained remote ports MAY collide in name with local ones but MUST be namespaced or
 otherwise disambiguated at runtime (e.g. `remote:<origin>:<name>` or an internal unique identifier) to prevent cross-talk. No
 silent override of a local definition by a federated one.
 
-## 15. TLS / Security Invariants
+## 16. TLS / Security Invariants
 If `tls.enabled` (or equivalent) is true for a section:
 - Required cert/key parameters MUST be present; absence is a startup error.
 - There is NO silent downgrade to plaintext.
 - Partial specification (e.g. cert without key) aborts with a clear diagnostic.
 - Explicit plaintext operation only occurs when `tls.enabled` is false or omitted.
 
-## 16. Forward Compatibility of Nested Keys
+## 17. Forward Compatibility of Nested Keys
 Within a known section, unknown nested keys MAY be ignored but only emit a DEBUG-level log (never WARNING/ERROR) unless a
 security-related key is malformed. This allows forward extension without breaking older binaries while keeping noise low.
 
-## 17. Include / Import Mechanisms
+## 18. Include / Import Mechanisms
 Implicit multi-file include/import features are DISALLOWED. YAML anchors & aliases are permitted as inherent YAML features but
 MUST NOT be relied upon by core logic beyond standard parsing. Adding an explicit `include:` or similar directive requires a
 new invariant section, tests, and security review (path traversal, recursion limits).
 
 ---
-*Last updated: 2025-08-24*
+*Last updated: 2026-10-26*
