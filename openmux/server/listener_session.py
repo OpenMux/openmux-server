@@ -233,7 +233,9 @@ class ListenerConfig:
     read_only: bool = False
     acl_raw: List[str] = field(default_factory=list)
     enabled: bool = True
-    require_auth: bool = False
+    # Both transports require auth unless the config entry disables it (issue #100);
+    # build_listener passes the per-transport default explicitly.
+    require_auth: bool = True
     compiled_acl: List[AclEntry] = field(default_factory=list)
     effective_host: Optional[str] = None
     effective_port: Optional[int] = None

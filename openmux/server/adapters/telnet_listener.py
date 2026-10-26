@@ -550,8 +550,8 @@ class TelnetListenerAdapter(BaseGenericAdapter):
     # Helpers
 
     def _build_listener(self, entry: Dict[str, Any]) -> Optional[ListenerConfig]:
-        """Shared builder (issue #100); only the require_auth default differs per transport."""
-        return build_listener(entry, display_name="Telnet", require_auth_default=False, logger=self.logger)
+        """Shared builder; both transports require auth unless the entry disables it (issue #100)."""
+        return build_listener(entry, display_name="Telnet", require_auth_default=True, logger=self.logger)
 
     def _client_allowed(self, listener: ListenerConfig, peer_ip: str) -> bool:
         return ip_allowed(peer_ip, listener.compiled_acl)

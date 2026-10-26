@@ -15,10 +15,12 @@ remaining compatible with both local and muxcon-hosted ports.
 logic per adapter type.
 - **ACL**: Per-listener allow list of host/subnet strings (exact IP or CIDR). Missing ACL means "allow all". Enforcement
 happens before any port interaction.
-- **Authentication**: Access control relies on the network ACL plus the optional read-only flag. A listener can also set
-`require_auth: true` to prompt for an OpenMux username and password (via `AuthManager`) before it attaches a session.
+- **Authentication**: Access control relies on the network ACL plus the optional read-only flag. By default the listener
+also prompts for an OpenMux username and password (via `AuthManager`) before it attaches a session; set
+`require_auth: false` on an entry to skip the prompt and rely on the ACL alone.
 - **Port Menu**: A listener with `target: '*'` does not attach to a fixed port. Instead, it prints a port list and prompts
-`Port: ` so the user can pick a target. Pair `target: '*'` with `require_auth: true`.
+`Port: ` so the user can pick a target. On a `target: '*'` listener with `require_auth: false`, every client inside the
+ACL can browse and attach to any port.
 - **Embedded Login**: When `require_auth` is set, the `login:` prompt accepts `<username>+<port>` or `<username>:<port>` (a
 literal `+` always wins over `:`; a doubled `::` is treated as part of the target, not a delimiter). On a fixed-target listener
 the embedded port is ignored, because the target is fixed. On a `target: '*'` listener, a valid embedded port skips the port
