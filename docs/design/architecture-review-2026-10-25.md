@@ -83,14 +83,36 @@ approved term is **Control menu**. Retire that naming while the files move.
 Result (issue #100, landed on `tech-debt/listener-session-module`). `scripts/audit_duplication.py` re-measures the
 pair with one rule: the profile normalises section keys and transport words only. Baseline at commit `23edd96`:
 37 shared names, 21 byte-identical (239 Telnet lines against 239 SSH lines), 30 at or above 0.90 similarity; with
-docstrings stripped: 26 shared, 32 identical. After the move: 13 identical and 17 at or above 0.90. The remaining
-shared names are the plugin contract (`get_adapter_type`, `get_capabilities`, `validate_config`, `create_port`,
-`destroy_port`, `get_port_configurations`, `set_console_manager`, `set_auth_manager`), the names ConsoleManager
-pins on a client adapter (`send_data_to_client`, `send_control_frame_to_client`, `_resolve_client_meta`,
-`sessions`), and the listener lifecycle the fences keep per transport (`reconcile_ports`, the bind calls inside
-`_do_start`/`_start_single_listener`, the auth/menu phase). The session module lives at
+docstrings stripped: 26 shared, 32 identical. After the move: 21 shared names, 14 byte-identical, 17 at or above
+0.90 (docstrings stripped). The remaining shared names are the plugin contract (`get_adapter_type`,
+`get_capabilities`, `validate_config`, `create_port`, `destroy_port`, `get_port_configurations`,
+`set_console_manager`, `set_auth_manager`), the names ConsoleManager pins on a client adapter
+(`send_data_to_client`, `send_control_frame_to_client`, `_resolve_client_meta`, `sessions`), and the listener
+lifecycle the fences keep per transport (`reconcile_ports`, the bind calls inside `_do_start`/`_start_single_listener`,
+the auth/menu phase). The session module lives at
 `openmux/server/listener_session.py`; `listener_common.py` shrank to the pure leaf that the auth/menu phase still
-needs, and `tests/server/test_listener_session.py` now holds the shared-behaviour suite once.
+needs, and `tests/server/test_listener_session.py` now holds the shared-behaviour suite once. For scale, the same
+script on `WebConsoleAdapter` versus `MuxconAdapter` (candidate 6 pair) measures 122 shared names, 92
+byte-identical, which is why that pair stays a later candidate.
+
+### Coupling discovered during the move (used by candidates 5 and 7)
+
+These pairs are duplicated between the two adapters, and no move can separate them cleanly. A future candidate must
+change the pair together.
+
+- Password failure: `:fail N of 5` plus a `login_failed` audit event, as a 48-line Telnet mirror of a 45-line SSH
+  block. Candidate 5 must fix both at once.
+- Account lock messaging: a 14-line exact mirror, plus SSH-only `_is_locked` pre-checks (45 lines) that Telnet
+  lacks. Telnet shows the truth only when the HMAC login attempt fails — inconsistent today.
+- Client allow-lists: a 14–20 line mirror over the same regex; `_client_allowed` versus `_peer_allowed`.
+- The access-manager-missing frame: 875 Telnet against 734 SSH characters, byte-identical. This call collapsed into
+  `listener_session` with candidate 1.
+- Escape detection: 10 versus 13 lines, different detectors (`bytes == seq` versus `str.endswith`), zero shared
+  text. Worth one implementation.
+- `client_mode` wire construction: 3 identical lines, plus a per-transport exit asymmetry (process exit code
+  versus WebSocket close code 4003) that no shared module can abstract.
+- The session registry: a 1241 versus 1088 character mirror, the same map. This moved into
+  `ListenerSessionManager` with candidate 1.
 
 ## 2. One access-decision module behind the Write slot and attach interface — Strong
 
