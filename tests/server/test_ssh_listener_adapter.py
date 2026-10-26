@@ -598,7 +598,7 @@ async def test_read_only_listener_drops_client_input(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_help_lists_commands(tmp_path, monkeypatch):
+async def test_control_menu_help_lists_commands(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -619,7 +619,7 @@ async def test_escape_menu_help_lists_commands(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_version_and_info(tmp_path, monkeypatch):
+async def test_control_menu_version_and_info(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -643,7 +643,7 @@ async def test_escape_menu_version_and_info(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_request_rw_promotes_and_enables_writes(tmp_path, monkeypatch):
+async def test_control_menu_request_rw_promotes_and_enables_writes(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth, console_mode="read-only")
@@ -669,7 +669,7 @@ async def test_escape_menu_request_rw_promotes_and_enables_writes(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_release_rw_disables_writes(tmp_path, monkeypatch):
+async def test_control_menu_release_rw_disables_writes(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -695,7 +695,7 @@ async def test_escape_menu_release_rw_disables_writes(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_show_holders(tmp_path, monkeypatch):
+async def test_control_menu_show_holders(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -715,7 +715,7 @@ async def test_escape_menu_show_holders(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_force_take_demotes_other_session(tmp_path, monkeypatch):
+async def test_control_menu_force_take_demotes_other_session(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret", "bob": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -759,7 +759,7 @@ async def test_escape_menu_force_take_demotes_other_session(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_change_escape_sequence(tmp_path, monkeypatch):
+async def test_control_menu_change_escape_sequence(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
