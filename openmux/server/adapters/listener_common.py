@@ -1,20 +1,20 @@
-"""Shared helpers for interactive listener adapters (telnet_listener, ssh_listener).
+"""Pure leaf helpers below the listener session seam (issue #100, ADR-0002).
 
-Pure, transport-agnostic logic used by both listener adapters: login-line
-delimiter parsing, ACL compilation/matching, and port-list text rendering.
-Keeping these here avoids duplicating identical behavior across adapters that
-speak different wire protocols (raw TCP/Telnet vs SSH).
+Transport-agnostic logic that both listener transports still need during their
+auth/menu phase: login-line delimiter parsing, ACL compilation/matching, entry
+validation, port-list text rendering, and the echoing prompt primitives
+(``read_prompt_line``, ``read_take_target``).
+
+``read_prompt_line`` must stay here, not in ``listener_session``: the power menu
+(``power_command.run_power_menu``) imports it, and importing it from the session
+module would close an import cycle. Everything with session state moved to
+``openmux/server/listener_session.py``.
 """
 
 from __future__ import annotations
 
 import ipaddress
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
-
-from openmux import __version__ as _OPENMUX_VERSION
-from openmux.common.access_wire import holders_text, render_terminal_text
-from openmux.server.access_decision import FRAME_HOLDERS, Code, decide, mode_or_read_only
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 AclEntry = Union[
     ipaddress.IPv4Address,
@@ -219,68 +219,6 @@ def resolve_server_label(main_port_manager: Any) -> str:
         return ""
 
 
-@dataclass
-class EscapeState:
-    """Per-session state for detecting the in-band control-menu escape sequence.
-
-    `escape_char1`/`escape_char2` are always exactly one byte each; the `e`
-    control command lets a session change them at runtime (see
-    `feed_escape_byte`'s state==2 handling in the calling adapter).
-    """
-
-    escape_char1: bytes = b"\x05"  # Ctrl+E
-    escape_char2: bytes = b"c"
-    state: int = 0
-
-
-def feed_escape_byte(state: EscapeState, b: bytes) -> Tuple[bytes, Optional[str]]:
-    """Feed one byte through the control-menu escape-sequence state machine.
-
-    Mirrors the CLI client's (`openmux/client/console.py`) escape handling:
-    a lone first byte that isn't followed by the second escape byte is
-    replayed as ordinary data rather than dropped.
-
-    Args:
-        state: Session-scoped state, mutated across calls to carry a partial
-            sequence across chunk/read boundaries.
-        b: Single input byte to evaluate.
-
-    Returns:
-        Tuple[bytes, Optional[str]]: bytes that should be forwarded to the
-        port right now (empty if `b` was absorbed into pending escape
-        state), and a completed single-character command mnemonic, or None.
-    """
-    if state.state == 0:
-        if b == state.escape_char1:
-            state.state = 1
-            return b"", None
-        return b, None
-    if state.state == 1:
-        state.state = 0
-        if b == state.escape_char2:
-            state.state = 2
-            return b"", None
-        return state.escape_char1 + b, None
-    # state.state == 2: this byte is the command mnemonic.
-    state.state = 0
-    return b"", b.decode("latin1", errors="ignore")
-
-
-CONTROL_MENU_HELP = (
-    "\r\n--- OpenMux Control Menu ---\r\n"
-    "a  Request read-write access\r\n"
-    "f  Take the write slot (ask which holder, or latest)\r\n"
-    "s  Release read-write access (switch to read-only)\r\n"
-    "w  Show who holds read-write access\r\n"
-    "u  Show who is viewing this port\r\n"
-    "i  Show session info\r\n"
-    "v  Show version\r\n"
-    "p  Power (this console's feeds: number = toggle, a = all)\r\n"
-    "e  Change escape sequence\r\n"
-    ".  Disconnect\r\n"
-    "?  Show this menu\r\n"
-)
-
 #: Prompt shown by the `f` control-menu command before a targeted takeover
 #: (issue #61). The `w` command's `[id] username@ip (rw)` labels carry the
 #: client_id to type here; Enter takes the most recently attached holder.
@@ -362,55 +300,6 @@ async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], boo
     return raw or None, True
 
 
-async def _cmd_disconnect(write_line: Callable[[str], Awaitable[None]]) -> bool:
-    """Control-menu ``.`` (disconnect): say goodbye, request the session close.
-
-    Shared by the telnet and SSH listeners; the write callback carries the
-    per-transport differences (raw StreamWriter vs. asyncssh process).
-    """
-    await write_line("\r\n[Disconnecting...]\r\n")
-    return True
-
-
-async def _dispatch_control_command(
-    session: Any,
-    cmd: str,
-    cm: Any,
-    write_line: Callable[[str], Awaitable[None]],
-    request_rw: Callable[[], Awaitable[None]],
-    force_rw: Callable[[], Awaitable[None]],
-    release_rw: Callable[[], Awaitable[None]],
-    power_menu: Callable[[], Awaitable[None]],
-    session_info: Callable[[], str],
-) -> bool:
-    """Shared control-menu dispatch for the telnet and SSH listeners.
-
-    ``write_line`` writes a line of text to the session; the other callbacks
-    are bound by the adapter (session, console manager, transport I/O).
-    Returns True to request the session close.
-    """
-    rw_handler = {"a": request_rw, "f": force_rw, "s": release_rw}.get(cmd)
-    if rw_handler is not None:
-        await rw_handler()
-    elif cmd == "w":
-        holders = cm.get_rw_holders_display(session.port_name) if cm else []
-        await write_line(format_rw_notice({"type": "rw_holders", "holders": holders}))
-    elif cmd == "u":
-        viewers = cm.get_viewers_display(session.port_name) if cm else []
-        await write_line(format_viewers_notice(viewers))
-    elif cmd == "?":
-        await write_line(CONTROL_MENU_HELP)
-    elif cmd == "i":
-        await write_line(session_info())
-    elif cmd == "v":
-        await write_line(f"\r\n[OpenMux Server v{_OPENMUX_VERSION}]\r\n")
-    elif cmd == "p":
-        await power_menu()
-    elif cmd == ".":
-        return await _cmd_disconnect(write_line)
-    return False
-
-
 def _origin_entry_matches(entry: Dict[str, Any], port_name: str, server_id: Optional[str]) -> bool:
     """Whether a port-list entry matches ``port_name`` + the origin filter.
 
@@ -426,92 +315,15 @@ def _origin_entry_matches(entry: Dict[str, Any], port_name: str, server_id: Opti
     return origin == server_id
 
 
-def format_rw_notice(payload: Dict[str, Any]) -> str:
-    """Render an access frame as CRLF-terminated human text for a raw terminal.
-
-    Telnet and SSH sessions are raw terminals and cannot parse the JSON control
-    frames the TCP/WebSocket adapters use, so this turns a frame into its lines.
-
-    Since issue #98 the server owns the wording: an access decision arrives with
-    its lines already rendered, and this function only frames them. It prints
-    nothing for a frame that carries no line, which is how an attach grant stays
-    silent on a terminal that already shows its connect banner.
-
-    Args:
-        payload: Control payload, e.g. `{"type": "client_mode", "code": "ok",
-            "lines": [...]}` or `{"type": "rw_holders", "holders": [...]}`.
-
-    Returns:
-        str: CRLF-terminated message ready to write directly to the session.
-    """
-    if payload.get("type") == FRAME_HOLDERS:
-        # A holders list is data, not a decision, so it keeps its own sentence here.
-        return render_terminal_text([f"[{holders_text(payload.get('holders') or [], payload.get('max_rw_users'))}]"])
-
-    if payload.get("type") == "presence":
-        # Presence pushes are ambient/web-only (see the badge in console.js); CLI
-        # sessions stay silent here and query the same data on demand via 'u'.
-        return ""
-
-    return render_terminal_text(payload.get("lines"))
-
-
-def access_manager_missing_frame(current_mode: Optional[str]) -> Dict[str, Any]:
-    """The refusal frame for a session whose console manager is gone.
-
-    The Client keeps the mode it already holds: losing the manager does not take
-    a seat away, and a false mode here stops a session from typing.
-    """
-    return decide(Code.INTERNAL, mode=mode_or_read_only(current_mode)).frame()
-
-
-def format_viewer_label(viewer: Dict[str, str]) -> str:
-    """Render one viewer entry as `<muxcon-server>/username@<ip>` or `username@<ip>`.
-
-    The `<muxcon-server>/` prefix is only shown for entries reporting a
-    `server_id` (i.e. a viewer attached to a *different*, federated server -
-    see `ConsoleManager.get_viewers_display`); a viewer local to this same
-    server omits it, since it's implied.
-    """
-    who = f"{viewer.get('username', 'unknown')}@{viewer.get('ip', 'unknown')}"
-    server_id = viewer.get("server_id")
-    return f"{server_id}/{who}" if server_id else who
-
-
-def format_viewers_notice(viewers: List[Dict[str, str]]) -> str:
-    """Render the current per-port viewer list as CRLF-terminated human text.
-
-    Used by the Ctrl+E control menu's "show viewers" ('u') command, the CLI
-    counterpart to the web console's ambient viewer badge (see console.js).
-
-    Args:
-        viewers: Entries as returned by `ConsoleManager.get_viewers_display`,
-            e.g. `[{"username": "alice", "mode": "read-write", "ip": "10.0.0.5"}, ...]`.
-
-    Returns:
-        str: CRLF-terminated message ready to write directly to the session.
-    """
-    if not viewers:
-        return "\r\n[No one is currently viewing this port]\r\n"
-    lines = [f"{format_viewer_label(v)} ({v.get('mode', 'read-only')})" for v in viewers]
-    return "\r\n--- Viewers on this port ---\r\n" + "\r\n".join(lines) + "\r\n"
-
-
 __all__ = [
     "AclEntry",
     "parse_login",
     "compile_acl",
     "ip_allowed",
+    "validate_listener_entries",
     "render_port_list",
     "resolve_server_label",
-    "EscapeState",
-    "feed_escape_byte",
-    "CONTROL_MENU_HELP",
     "TAKE_TARGET_PROMPT",
     "read_prompt_line",
     "read_take_target",
-    "format_rw_notice",
-    "access_manager_missing_frame",
-    "format_viewer_label",
-    "format_viewers_notice",
 ]
