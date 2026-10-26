@@ -9,6 +9,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from openmux.server.access_decision import Code, Holder, Mode, decide, notice
 from openmux.server.adapters import ssh_listener as ssh_listener_module
 from openmux.server.adapters.ssh_listener import (
     ListenerConfig,
@@ -63,7 +64,12 @@ class FakeAuthManager:
 
 
 class FakeConsoleManager:
-    """Echoes any data written to a port straight back to the same client."""
+    """Echoes any data written to a port straight back to the same client.
+
+    Answers with real ``AccessDecision`` values. The adapter renders a decision, so a
+    fake returning the old ``(ok, mode, reason)`` tuple would exercise a shape that no
+    longer exists anywhere (issue #98).
+    """
 
     def __init__(self, mode: str = "read-write"):
         self.mode = mode
@@ -76,10 +82,10 @@ class FakeConsoleManager:
 
     async def connect_client_to_port(self, client_id: str, port_name: str, username: str):
         if not self.attach_ok:
-            return False, None, "port_full"
+            return decide(Code.PORT_UNAVAILABLE, mode=Mode.READ_ONLY)
         self.attached[client_id] = port_name
         self.client_modes[client_id] = self.mode
-        return True, self.mode, None
+        return decide(Code.ATTACHED, mode=Mode(self.mode))
 
     async def disconnect_client_from_port(self, client_id: str, port_name: str) -> None:
         self.attached.pop(client_id, None)
@@ -89,14 +95,15 @@ class FakeConsoleManager:
         if self.adapter:
             await self.adapter.send_data_to_client(client_id, data)
 
-    async def promote_client_to_read_write(self, client_id: str, port_name: str) -> bool:
+    async def promote_client_to_read_write(self, client_id: str, port_name: str):
         if self.promote_result:
             self.client_modes[client_id] = "read-write"
-        return self.promote_result
+            return decide(Code.GRANTED, mode=Mode.READ_WRITE)
+        return decide(Code.PROMOTE_FAILED, mode=Mode.READ_ONLY)
 
-    async def demote_client_to_read_only(self, client_id: str, port_name: str) -> bool:
+    async def demote_client_to_read_only(self, client_id: str, port_name: str):
         self.client_modes[client_id] = "read-only"
-        return True
+        return decide(Code.RELEASED, mode=Mode.READ_ONLY)
 
     async def take_write_slot(self, client_id: str, port_name: str, target=None):
         """Demote the other attached client, promote `client_id`, and push
@@ -106,11 +113,11 @@ class FakeConsoleManager:
             if other_id == client_id:
                 continue
             self.client_modes[other_id] = "read-only"
-            demotion = {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"}
+            demotion = notice(Code.DEMOTED, client_id=other_id, port_name=port_name).frame()
             if self.adapter is not None:
                 await self.adapter.send_control_frame_to_client(other_id, demotion)
         self.client_modes[client_id] = "read-write"
-        return True, "ok"
+        return decide(Code.GRANTED, mode=Mode.READ_WRITE)
 
     def get_rw_holders_display(self, port_name: str) -> List[str]:
         return list(self.rw_holders)
@@ -869,13 +876,15 @@ class _FakeSshProcess:
 
 
 class _FakeSshCm:
-    def __init__(self, take_result=(True, "ok")):
+    """A console manager that answers a takeover with one real ``AccessDecision``."""
+
+    def __init__(self, decision=None):
         self.take_calls = []
-        self.take_result = take_result
+        self.decision = decision if decision is not None else decide(Code.GRANTED, mode=Mode.READ_WRITE)
 
     async def take_write_slot(self, client_id, port_name, target=None):
         self.take_calls.append((client_id, port_name, target))
-        return self.take_result
+        return self.decision
 
 
 def _make_ssh_session(read_only=False, chunks=None):
@@ -900,7 +909,7 @@ async def test_ssh_force_rw_prompts_and_passes_target():
 
     adapter = SshListenerAdapter("s1", {"ssh_listener": []})
     session = _make_ssh_session(read_only=False, chunks=[b"f4", b"\n"])
-    cm = _FakeSshCm((True, "takeover from alice [f4]"))
+    cm = _FakeSshCm(decide(Code.GRANTED, mode=Mode.READ_WRITE, victim=Holder(client_id="f4", username="alice")))
 
     await adapter._cmd_force_rw(session, cm)
 
@@ -908,7 +917,7 @@ async def test_ssh_force_rw_prompts_and_passes_target():
     out = session.process.stdout.buffer.decode()
     assert "[Take from holder" in out
     assert "Read-write access granted" in out
-    assert "[Taken from: alice [f4]]" in out
+    assert "[Taken from: [f4] alice@unknown (rw)]" in out
     assert session.port_mode == "read-write"
 
 
@@ -918,7 +927,7 @@ async def test_ssh_force_rw_enter_is_no_target_fallback():
 
     adapter = SshListenerAdapter("s1", {"ssh_listener": []})
     session = _make_ssh_session(read_only=False, chunks=[b"\n"])
-    cm = _FakeSshCm((True, "ok"))
+    cm = _FakeSshCm()
 
     await adapter._cmd_force_rw(session, cm)
 
@@ -934,7 +943,7 @@ async def test_ssh_force_rw_invalid_target_refusal():
 
     adapter = SshListenerAdapter("s1", {"ssh_listener": []})
     session = _make_ssh_session(read_only=False, chunks=[b"ghost", b"\n"])
-    cm = _FakeSshCm((False, "invalid_target"))
+    cm = _FakeSshCm(decide(Code.INVALID_TARGET, mode=Mode.READ_ONLY))
 
     await adapter._cmd_force_rw(session, cm)
 

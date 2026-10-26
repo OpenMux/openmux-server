@@ -187,13 +187,31 @@ async def test_self_demote_and_auto_restore_notifies_console_manager(dummy_logge
     run = await runner.start_run(action, "p1", {"text": "hi"}, username="tester", requesting_client_id="human1")
 
     assert run.status == "success"
-    demote_frames = [f for f in console_manager.frames if f["reason"] == "action_self_demoted"]
-    restore_frames = [f for f in console_manager.frames if f["reason"] == "action_restored"]
+    # The runner pushes access notices (issue #98): each frame names the outcome code and
+    # carries the server's own line, so no console decodes a reason string.
+    demote_frames = [f for f in console_manager.frames if f["code"] == "action_self_demoted"]
+    restore_frames = [f for f in console_manager.frames if f["code"] == "action_restored"]
     assert demote_frames == [
-        {"client_id": "human1", "type": "client_mode", "ok": False, "mode": "read-only", "reason": "action_self_demoted"}
+        {
+            "client_id": "human1",
+            "type": "client_mode",
+            "ok": False,
+            "mode": "read-only",
+            "code": "action_self_demoted",
+            "lines": ["[Your read-write access was set aside to run a Port Action]"],
+            "message": "Your read-write access was set aside to run a Port Action",
+        }
     ]
     assert restore_frames == [
-        {"client_id": "human1", "type": "client_mode", "ok": True, "mode": "read-write", "reason": "action_restored"}
+        {
+            "client_id": "human1",
+            "type": "client_mode",
+            "ok": True,
+            "mode": "read-write",
+            "code": "action_restored",
+            "lines": ["[Read-write access restored after the Port Action finished]"],
+            "message": "Read-write access restored after the Port Action finished",
+        }
     ]
     await adapter.stop()
 
@@ -614,9 +632,17 @@ async def test_take_over_operator_moves_pending_read_write_restore(dummy_logger)
     assert run.status == "success"
     assert pm.get_client_mode("human2", "p1") == "read-write"
     assert pm.get_client_mode("human1", "p1") == "read-only"
-    restore_frames = [f for f in console_manager.frames if f["reason"] == "action_restored"]
+    restore_frames = [f for f in console_manager.frames if f["code"] == "action_restored"]
     assert restore_frames == [
-        {"client_id": "human2", "type": "client_mode", "ok": True, "mode": "read-write", "reason": "action_restored"}
+        {
+            "client_id": "human2",
+            "type": "client_mode",
+            "ok": True,
+            "mode": "read-write",
+            "code": "action_restored",
+            "lines": ["[Read-write access restored after the Port Action finished]"],
+            "message": "Read-write access restored after the Port Action finished",
+        }
     ]
     await adapter.stop()
 

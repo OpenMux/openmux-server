@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.x509 import NameOID, load_pem_x509_certificate
 
+from openmux.server import access_decision
 from openmux.server.adapters.muxcon import FederationPeer, UnifiedMuxConAdapter
 
 
@@ -3608,7 +3609,15 @@ async def test_handle_fedrw_ack_unmatched_readonly_demotes_local_client(monkeypa
     # so no redundant FEDRW RELEASE round-trip should be sent back to it (that
     # would self-deadlock the very read loop handling this ack).
     assert fake_cm.demoted == [("local_bob", "p1", False)]
-    assert fake_cm.notified == [("local_bob", {"type": "client_mode", "ok": False, "mode": "read-only", "reason": "demoted"})]
+    # The notice is an access notice (issue #98): the frame carries the mode the client
+    # holds afterwards and the server's own line, worded from the port and the taker.
+    assert len(fake_cm.notified) == 1
+    client_id, frame = fake_cm.notified[0]
+    assert client_id == "local_bob"
+    assert frame["type"] == access_decision.FRAME_MODE
+    assert frame["ok"] is False
+    assert frame["mode"] == access_decision.Mode.READ_ONLY.value
+    assert frame["lines"] == ["[Your read-write access was taken by another user]"]
 
 
 @pytest.mark.asyncio
@@ -3719,8 +3728,8 @@ async def test_end_to_end_local_force_take_notifies_federated_peers_own_client()
         cm_a.client_port_map["human1"] = "p1"
         pm_a.ports["p1"].connected_clients.append({"client_id": "human1", "username": "human1", "mode": "read-only"})
 
-        ok, reason = await cm_a.take_write_slot("human1", "p1")
-        assert (ok, reason) == (True, "ok")
+        attached = await cm_a.take_write_slot("human1", "p1")
+        assert attached.ok is True
 
         # Origin-side bookkeeping demoted the federated holder...
         assert next(c for c in pm_a.ports["p1"].connected_clients if c["client_id"] == fed_client_id)["mode"] == "read-only"
@@ -3733,9 +3742,10 @@ async def test_end_to_end_local_force_take_notifies_federated_peers_own_client()
             await asyncio.sleep(0.02)
         assert (
             browser.received
-        ), f"Peer's own local client was never notified live of the federated demotion - take reason={reason!r}"
+        ), f"Peer's own local client was never notified live of the federated demotion - take code={attached.code.value!r}"
         assert browser.received[-1]["mode"] == "read-only"
-        assert browser.received[-1]["reason"] == "demoted"
+        assert browser.received[-1]["code"] == "demoted"
+        assert browser.received[-1]["lines"] == ["[Your read-write access was taken by another user]"]
     finally:
         read_task_a.cancel()
         read_task_b.cancel()

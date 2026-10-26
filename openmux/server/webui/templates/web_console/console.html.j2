@@ -5,7 +5,7 @@
 {% block title %}{{ title }}{% endblock %}
 
 {% block head_extras %}
-  <link rel="stylesheet" href="{{ base_path }}/static/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="{{ asset_url(base_path ~ '/static/xterm/css/xterm.css') }}" />
 {% endblock %}
 
 {% block body_class %}console{% endblock %}
@@ -202,7 +202,7 @@
 {% endblock %}
 
 {% block scripts %}
-  <script src="{{ base_path }}/static/xterm/lib/xterm.js"></script>
-  <script src="{{ base_path }}/static/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-  <script src="{{ base_path }}/static/js/console.js"></script>
+  <script src="{{ asset_url(base_path ~ '/static/xterm/lib/xterm.js') }}"></script>
+  <script src="{{ asset_url(base_path ~ '/static/xterm-addon-fit/lib/xterm-addon-fit.js') }}"></script>
+  <script src="{{ asset_url(base_path ~ '/static/js/console.js') }}"></script>
 {% endblock %}

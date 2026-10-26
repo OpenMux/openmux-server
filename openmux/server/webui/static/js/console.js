@@ -1977,6 +1977,14 @@ function connectSelected() {
     }, 1000);
     console.error(e);
   };
+  // Write the server's wording for one access answer (issue #98). The server sends
+  // `lines` already worded and bracketed; an answer with no line stays silent, which is
+  // how a successful attach tells the operator it took the write slot.
+  function writeCtrlLines(lines) {
+    if (!Array.isArray(lines) || !lines.length) return;
+    try { term.write('\r\n' + lines.join('\r\n') + '\r\n'); } catch (_) {}
+  }
+
   ws.onmessage = (ev) => {
     // Control path: metadata frames prefixed with 'OMXCTRL '
     if (typeof ev.data === 'string' && ev.data.startsWith('OMXCTRL ')) {
@@ -2013,41 +2021,10 @@ function connectSelected() {
           }
           updateCtrlMenuButtons();
           if (Array.isArray(msg.rw_holders) || msg.max_rw_users !== undefined) updateRoMenuInfo(msg.rw_holders || [], msg.max_rw_users);
-          if (msg.takeover) {
-            // Targeted takeover success (issue #61): the `takeover` field is
-            // the demoted holder's label `[id] username@ip (rw)`.
-            try { term.write('\r\n[Taken from: ' + msg.takeover + ']\r\n'); } catch (_) {}
-          }
-          const silentReasons = ['demoted', 'action_self_demoted', 'action_restored', 'action_restore_denied'];
-          if (msg.reason === 'invalid_target') {
-            // Targeted takeover where the named client_id is not (or no
-            // longer) a read-write holder: no slot moved, say so.
-            try { term.write('\r\n[Take refused: that user does not hold read-write access (check the id in the holders list)]\r\n'); } catch (_) {}
-          } else if (msg.reason === 'federation_denied') {
-            try { term.write('\r\n[Take refused: the origin server did not grant the takeover]\r\n'); } catch (_) {}
-          } else if (msg.ok === false && !silentReasons.includes(msg.reason)) {
-            if (msg.max_rw_users === 0) {
-              // 0 = the port's write-slot capacity is 'none' (issue #59): it has no driver at all.
-              try { term.write('\r\n[read-write is not available on this port – it has no write slots (capacity: none)]\r\n'); } catch (_) {}
-            } else {
-              const who = (lastRwHolders.length ? ' (held by: ' + lastRwHolders.join(', ') + ')' : '');
-              try { term.write('\r\n[read-write request denied' + who + ' – use Take control if needed]\r\n'); } catch (_) {}
-            }
-          }
-          if (msg.reason === 'demoted') {
-            // "taken_by" names the taker on a local write-slot takeover
-            // (issue #59 Part 2); federation relays of the same takeover omit
-            // it, so fall back to the generic "another user".
-            const by = msg.taken_by ? msg.taken_by : 'another user';
-            try { term.write('\r\n[Your read-write access was taken by ' + by + ']\r\n'); } catch (_) {}
-          } else if (msg.reason === 'action_self_demoted') {
-            try { term.write('\r\n[Your read-write access was set aside to run a Port Action]\r\n'); } catch (_) {}
-          } else if (msg.reason === 'action_restored') {
-            try { term.write('\r\n[Read-write access restored after the Port Action finished]\r\n'); } catch (_) {}
-          } else if (msg.reason === 'action_restore_denied') {
-            try { term.write('\r\n[Read-write not restored after the Port Action – the slot is held by another client]\r\n'); } catch (_) {}
-          }
-          if (clientMode === 'read-write' && msg.ok !== false && msg.reason !== 'demoted') {
+          // The server words every access answer in `lines` (issue #98), so this page writes
+          // those lines and holds no reason-to-sentence table of its own.
+          writeCtrlLines(msg.lines);
+          if (clientMode === 'read-write' && msg.ok !== false) {
             hideCtrlMenu();
             try { term.focus(); } catch (_) {}
           }

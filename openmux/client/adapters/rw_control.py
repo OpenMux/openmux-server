@@ -1,87 +1,42 @@
 """Shared access-mode (read-only/read-write) control-frame helpers.
 
 Both the TCP adapter and the WebSocket adapter exchange the same JSON control
-payloads with the server (``request_rw``, ``release_rw``, ``force_promote``,
-``query_rw_holders`` and their ``client_mode``/``rw_holders`` responses); only
-the wire framing differs (NUL-prefixed line vs. a WebSocket text frame). This
-module centralizes response formatting so the CLI console shows identical
-messages regardless of which adapter is in use, matching the web console.
+Since issue #98 the server sends the wording of every access answer in the frame's
+``lines``, so this module holds no reason-to-sentence table. It records the state a
+frame reports and prints the lines it was given. A frame with no line prints nothing,
+which is how an attach grant stays silent behind the connect banner.
 """
 
 from typing import Any, Dict, Optional, Tuple
 
-
-def _denied_rw_message(payload: Dict[str, Any], adapter: Any) -> str:
-    """Message line for a denied read-write request or a refused takeover.
-
-    Encodes the same refusal reasons the `ok is False` branch of
-    `apply_client_mode_response` reports (targeted-takeover refusals,
-    no-capacity ports, and a plain seat-full/missing denial).
-    """
-    reason = payload.get("reason")
-    if reason == "invalid_target":
-        return "[Take refused: that user does not hold read-write access (check the id in the holders list)]"
-    if reason == "federation_denied":
-        return "[Take refused: the origin server did not grant the takeover]"
-    if reason == "no_holder":
-        return "[Take refused: this port has no read-write holder to take from]"
-    if payload.get("max_rw_users") == 0:
-        return "[Read-write is not available on this port (it has no write slots: capacity 'none')]"
-    # Covers a plain request_rw denial and a takeover whose promote hit
-    # capacity ("promote_failed"): either way the seat is full or missing.
-    holders = payload.get("rw_holders") or getattr(adapter, "rw_holders", None) or []
-    who = f" (held by: {', '.join(holders)})" if holders else ""
-    if reason == "promote_failed":
-        return f"[Request denied: no free read-write seat{who}]"
-    return f"[Read-write request denied{who} - use Take control if needed]"
+from openmux.common.access_wire import holders_text, render_terminal_text
 
 
 def apply_client_mode_response(adapter: Any, payload: Dict[str, Any]) -> str:
-    """Update adapter access-mode state from a `client_mode` response and format a message.
+    """Update adapter access-mode state from a `client_mode` reply and format its message.
 
     Args:
         adapter: Adapter instance exposing `access_mode`, `rw_holders`, `max_rw_users`.
-        payload: Decoded JSON payload with at least a `mode` key.
+        payload: Decoded JSON payload with at least a `mode` key, plus the `lines` and
+            `code` the server rendered for this outcome.
 
     Returns:
         str: Human-readable status line(s) (including leading/trailing CRLF), or
         an empty string if nothing user-facing needs to be shown.
     """
-    mode = "read-write" if payload.get("mode") == "read-write" else "read-only"
-    adapter.access_mode = mode
+    adapter.access_mode = "read-write" if payload.get("mode") == "read-write" else "read-only"
     if "rw_holders" in payload:
         adapter.rw_holders = payload.get("rw_holders") or []
     if "max_rw_users" in payload:
         adapter.max_rw_users = payload.get("max_rw_users")
-
-    ok = payload.get("ok", True)
-    reason = payload.get("reason")
-    lines = []
-    if reason == "demoted":
-        # "taken_by" names the taker when the demotion was a write-slot
-        # takeover (issue #59 Part 2) - local takes send it; a federation
-        # relay of the same takeover does not, so fall back to the generic
-        # "another user".
-        by = payload.get("taken_by") or "another user"
-        lines.append(f"[Your read-write access was taken by {by}]")
-    elif ok is False:
-        lines.append(_denied_rw_message(payload, adapter))
-    elif mode == "read-write":
-        lines.append("[Read-write access granted]")
-        # Targeted takeover success (issue #61): `takeover` is the demoted
-        # holder's label ("[id] username@ip (rw)").
-        if payload.get("takeover"):
-            lines.append(f"[Taken from: {payload['takeover']}]")
-    else:
-        lines.append("[Switched to read-only mode]")
-
-    if not lines:
-        return ""
-    return "\r\n" + "\r\n".join(lines) + "\r\n"
+    return render_terminal_text(payload.get("lines"))
 
 
 def apply_rw_holders_response(adapter: Any, payload: Dict[str, Any]) -> str:
-    """Update adapter holder state from an `rw_holders` response and format a message.
+    """Update adapter holder state from an `rw_holders` reply and format its message.
+
+    A holders list is data rather than a decision, so its sentence is the one shared with
+    the Telnet, SSH, and raw TCP `w` command (`openmux.common.access_wire`).
 
     Args:
         adapter: Adapter instance exposing `rw_holders`, `max_rw_users`.
@@ -94,14 +49,7 @@ def apply_rw_holders_response(adapter: Any, payload: Dict[str, Any]) -> str:
     adapter.rw_holders = holders
     if "max_rw_users" in payload:
         adapter.max_rw_users = payload.get("max_rw_users")
-
-    if adapter.max_rw_users == 0:
-        text = "Read-write is disabled on this port"
-    elif holders:
-        text = "Held by: " + ", ".join(holders)
-    else:
-        text = "No current read-write holder"
-    return f"\r\n[{text}]\r\n"
+    return render_terminal_text([f"[{holders_text(holders, adapter.max_rw_users)}]"])
 
 
 def format_control_response(adapter: Any, payload: Dict[str, Any]) -> Tuple[Optional[str], str]:

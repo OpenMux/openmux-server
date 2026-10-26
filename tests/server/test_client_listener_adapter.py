@@ -4,7 +4,9 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 
 import pytest
 
+from openmux.server.access_decision import Code, Holder, Mode, decide, holders_of
 from openmux.server.adapters.client_listener import ClientSession, TcpServerAdapter
+from tests.support.decisions import holders_frame_of
 
 
 class FakeReader:
@@ -198,7 +200,7 @@ async def test_connect_disconnect_and_forwarding():
 
         async def connect_client_to_port(self, cid, port, user):
             self.connected.append((cid, port, user))
-            return True, "read-write", None
+            return decide(Code.ATTACHED, mode=Mode.READ_WRITE)
 
         async def disconnect_client_from_port(self, cid, port):
             self.disconnected.append((cid, port))
@@ -422,19 +424,59 @@ async def test_handle_client_connection_lifecycle(monkeypatch):
 
 
 class _TakeCm:
-    """Console-manager stand-in that records take_write_slot calls and
-    serves a fixed holder list / port capacity for the label paths."""
+    """Console-manager stand-in for the access-control frame paths.
 
-    def __init__(self, port_clients, take_result=(True, "ok")):
+    It answers with real ``AccessDecision`` values and builds the holders frame the
+    same way ``ConsoleManager`` does, so the adapter is tested against the frames its
+    real collaborator produces (issue #98).
+    """
+
+    def __init__(
+        self,
+        port_clients,
+        take_decision=None,
+        promote_decision=None,
+        demote_decision=None,
+        refusal=Code.PROMOTE_FAILED,
+    ):
         self.take_calls = []
-        self.take_result = take_result
+        self.promote_calls = []
+        self.demote_calls = []
+        self.take_decision = take_decision
+        self.promote_decision = promote_decision
+        self.demote_decision = demote_decision
+        self.refusal = refusal
         self.holder_list = port_clients
-        self.client_to_manager: Any = {}
         self.port_manager = _TakePm(port_clients)
 
     async def take_write_slot(self, taker_id, port_name, target=None):
         self.take_calls.append((taker_id, port_name, target))
-        return self.take_result
+        return self.take_decision or decide(Code.GRANTED, mode=Mode.READ_WRITE)
+
+    async def promote_client_to_read_write(self, client_id, port_name):
+        self.promote_calls.append((client_id, port_name))
+        return self.promote_decision or self._refusal(port_name, Mode.READ_ONLY)
+
+    async def demote_client_to_read_only(self, client_id, port_name, notify_origin=True):
+        self.demote_calls.append((client_id, port_name, notify_origin))
+        return self.demote_decision or decide(Code.RELEASED, mode=Mode.READ_ONLY)
+
+    def rw_holders_frame(self, port_name):
+        return holders_frame_of(self.port_manager.ports.get(port_name))
+
+    def _refusal(self, port_name, mode):
+        """A refusal listing the port's holders, as ``ConsoleManager`` builds one."""
+        if self.refusal is None:
+            return decide(Code.GRANTED, mode=Mode.READ_WRITE)
+        port = self.port_manager.ports.get(port_name)
+        holders = holders_of(getattr(port, "connected_clients", None) or [], ip_of=lambda cid: "unknown")
+        return decide(
+            self.refusal,
+            mode=mode,
+            port_name=port_name,
+            holders=holders,
+            capacity=getattr(port, "max_read_write_users", None),
+        )
 
 
 class _TakePm:
@@ -445,10 +487,9 @@ class _TakePm:
 async def _make_attached_client(adapter: TcpServerAdapter, writer: FakeWriter) -> ClientSession:
     class _Cm:
         port_manager = _TakePm([])
-        client_to_manager = {}
 
         async def connect_client_to_port(self, cid, port, user):
-            return True, "read-write", None
+            return decide(Code.ATTACHED, mode=Mode.READ_WRITE)
 
     adapter.set_console_manager(_Cm())
     client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
@@ -479,7 +520,7 @@ async def test_force_promote_frame_defaults_to_no_target():
     adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
     writer = FakeWriter()
     client = await _make_attached_client(adapter, writer)
-    cm = _TakeCm([], take_result=(True, "ok"))
+    cm = _TakeCm([])
     adapter.set_console_manager(cm)
 
     handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "force_promote"}))
@@ -489,7 +530,9 @@ async def test_force_promote_frame_defaults_to_no_target():
     resp = _last_ctrl_json(writer)
     assert resp["type"] == "client_mode"
     assert resp["ok"] is True
-    assert resp.get("takeover") is None
+    assert resp["code"] == "ok"
+    # The removed keys (issue #98): a client never decodes these again.
+    assert "takeover" not in resp and "reason" not in resp
 
 
 @pytest.mark.asyncio
@@ -497,7 +540,8 @@ async def test_force_promote_frame_passes_target_and_surfaces_victim():
     adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
     writer = FakeWriter()
     client = await _make_attached_client(adapter, writer)
-    cm = _TakeCm([], take_result=(True, "takeover from alice [A]"))
+    victim = Holder(client_id="A", username="alice")
+    cm = _TakeCm([], take_decision=decide(Code.GRANTED, mode=Mode.READ_WRITE, victim=victim))
     adapter.set_console_manager(cm)
 
     handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "force_promote", "client_id": "A"}))
@@ -506,9 +550,9 @@ async def test_force_promote_frame_passes_target_and_surfaces_victim():
     assert cm.take_calls == [("c1", "p1", "A")]
     resp = _last_ctrl_json(writer)
     assert resp["ok"] is True
-    # The victim's label rides along; the reason is carried too.
-    assert resp["takeover"] == "alice [A]"
-    assert resp["reason"].startswith("takeover from ")
+    # The victim rides along in the server's own wording, as one labelled line.
+    assert resp["lines"] == ["[Read-write access granted]", "[Taken from: [A] alice@unknown (rw)]"]
+    assert "takeover" not in resp and "taken_by" not in resp and "reason" not in resp
 
 
 @pytest.mark.asyncio
@@ -525,71 +569,65 @@ async def test_force_promote_frame_non_string_client_id_is_no_target():
     assert cm.take_calls == [("c1", "p1", None)]
 
 
-def test_rw_holders_label_format_and_id_shortening():
-    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
-    clients = [
-        {"client_id": "0123456789abcdef", "username": "alice", "mode": "read-write"},
-        {"client_id": "fed:peerA:3", "username": "peerAuser", "mode": "read-write"},
-        {"client_id": "ro1", "username": "carol", "mode": "read-only"},  # excluded
-    ]
-    adapter.set_console_manager(_TakeCm(clients))
-
-    labels = adapter._rw_holders_for_port("p1")
-
-    # Long local id shortened; federated id kept verbatim; read-only excluded.
-    assert labels == ["[89abcdef] alice@unknown (rw)", "[fed:peerA:3] peerAuser@unknown (rw)"]
-
-
 @pytest.mark.asyncio
 async def test_client_mode_denial_carries_holder_labels():
     # A request_rw denial lists the current holders with their take-target
-    # labels (issue #61): "[id] username@ip (rw)".
+    # labels (issue #61): "[id] username@ip (rw)", built by the access module (issue #98).
     clients = [{"client_id": "A", "username": "alice", "mode": "read-write"}]
-    adapter = _TakeAdapter(clients)
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    adapter.set_console_manager(_TakeCm(clients))
     writer = FakeWriter()
-    client = ClientSession("c9", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.adapter.logger)
+    client = ClientSession("c9", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
     client.username = "u"
     client.connected_port = "p1"
 
-    await adapter.adapter._handle_control_frame(client, _ctrl_frame({"type": "request_rw"}))
+    handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "request_rw"}))
 
+    assert handled is True
     resp = _last_ctrl_json(writer)
     assert resp["type"] == "client_mode"
     assert resp["ok"] is False
+    assert resp["code"] == "promote_failed"
     assert resp["rw_holders"] == ["[A] alice@unknown (rw)"]
+    assert resp["max_rw_users"] == 1
+    assert resp["mode"] == "read-only"
 
 
 @pytest.mark.asyncio
-async def test_force_promote_refusal_carries_reason_not_takeover():
-    # A refused take (invalid_target): the frame carries the reason so the
-    # client can show a specific refusal, and no takeover field.
+async def test_holders_query_lists_the_write_slot_of_the_port():
+    # The adapter asks its console manager for the holders frame and answers with it.
+    clients = [
+        {"client_id": "0123456789abcdef", "username": "alice", "mode": "read-write"},
+        {"client_id": "ro1", "username": "carol", "mode": "read-only"},
+    ]
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+    adapter.set_console_manager(_TakeCm(clients))
+
+    frame = await adapter._ctrl_holders_reply("p1")
+
+    assert frame["type"] == "rw_holders"
+    assert frame["holders"] == ["[89abcdef] alice@unknown (rw)"]
+    assert frame["max_rw_users"] == 1
+
+
+@pytest.mark.asyncio
+async def test_force_promote_refusal_carries_code_and_wording():
+    # A refused take (invalid_target): the frame carries the outcome code and the
+    # server's sentence, and none of the removed keys (issue #98).
     adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
     writer = FakeWriter()
     client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
     client.connected_port = "p1"
-    adapter.set_console_manager(_TakeCm([], take_result=(False, "invalid_target")))
+    adapter.set_console_manager(_TakeCm([], take_decision=decide(Code.INVALID_TARGET, mode=Mode.READ_ONLY)))
 
     handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "force_promote", "client_id": "ghost"}))
 
     assert handled is True
     resp = _last_ctrl_json(writer)
     assert resp["ok"] is False
-    assert resp["reason"] == "invalid_target"
-    assert "takeover" not in resp
-
-
-class _TakeAdapter:
-    """A TcpServerAdapter with a console manager wired for holder labels."""
-
-    def __init__(self, clients):
-        self.adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
-        cm = _TakeCm(clients)
-
-        async def _promote(self, cid, port_name):
-            return False  # the denial branch attaches the holder list
-
-        cm.promote_client_to_read_write = _promote.__get__(cm, type(cm))
-        self.adapter.set_console_manager(cm)
+    assert resp["code"] == "invalid_target"
+    assert "does not hold read-write" in resp["message"]
+    assert "reason" not in resp and "takeover" not in resp and "taken_by" not in resp
 
 
 # --- Reconcile (soft reload) -------------------------------------------------
@@ -873,7 +911,7 @@ async def test_power_frames_not_configured_reply_types():
 
 
 class _PromoteFailureCm:
-    """Console manager whose promote/demote record calls and return a fixed flag."""
+    """Console manager whose promote/demote record calls and answer with a decision."""
 
     def __init__(self, clients, promote=True, demote=True):
         self.promote_calls = []
@@ -881,7 +919,6 @@ class _PromoteFailureCm:
         self.promote_ok = promote
         self.demote_ok = demote
         self.holder_list = clients
-        self.client_to_manager = {}
 
         class _Pm:
             pass
@@ -891,11 +928,30 @@ class _PromoteFailureCm:
 
     async def promote_client_to_read_write(self, client_id, port_name):
         self.promote_calls.append((client_id, port_name))
-        return self.promote_ok
+        if self.promote_ok:
+            return decide(Code.GRANTED, mode=Mode.READ_WRITE)
+        return self._refusal(port_name)
 
     async def demote_client_to_read_only(self, client_id, port_name, notify_origin=True):
         self.demote_calls.append((client_id, port_name, notify_origin))
-        return self.demote_ok
+        if self.demote_ok:
+            return decide(Code.RELEASED, mode=Mode.READ_ONLY)
+        return decide(Code.DEMOTE_FAILED, mode=Mode.READ_WRITE, client_id=client_id, port_name=port_name)
+
+    def rw_holders_frame(self, port_name):
+        return holders_frame_of(self.port_manager.ports.get(port_name))
+
+    def _refusal(self, port_name):
+        """The no-free-seat refusal ``ConsoleManager`` builds, holders included."""
+        port = self.port_manager.ports.get(port_name)
+        holders = holders_of(getattr(port, "connected_clients", None) or [], ip_of=lambda cid: "unknown")
+        return decide(
+            Code.PROMOTE_FAILED,
+            mode=Mode.READ_ONLY,
+            port_name=port_name,
+            holders=holders,
+            capacity=getattr(port, "max_read_write_users", None),
+        )
 
 
 @pytest.mark.asyncio
@@ -921,15 +977,13 @@ class _NoPortCm:
     """Console manager with a port manager that owns no `p1` port."""
 
     def __init__(self):
-        self.client_to_manager = {}
-
         class _Pm:
             ports = {}
 
         self.port_manager = _Pm()
 
     async def promote_client_to_read_write(self, client_id, port_name):
-        return True
+        return decide(Code.GRANTED, mode=Mode.READ_WRITE)
 
 
 @pytest.mark.asyncio
@@ -953,6 +1007,7 @@ async def test_promote_frame_grant_updates_client_mode():
     resp = _last_ctrl_json(writer)
     assert resp["type"] == "client_mode"
     assert resp["ok"] is True
+    assert resp["code"] == "ok"
     assert client.mode == "read-write"
 
 
@@ -1000,16 +1055,24 @@ async def test_query_rw_holders_frame_returns_holders():
 
 
 @pytest.mark.asyncio
-async def test_unknown_control_type_is_swallowed():
+async def test_unknown_control_type_gets_a_typed_refusal():
+    # A request this server cannot answer is answered (issue #98): a Client that
+    # waits for a reply never gets silence.
     adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
     writer = FakeWriter()
     client = ClientSession("c1", "127.0.0.1", cast(Any, FakeReader([])), cast(Any, writer), adapter.logger)
     client.username = "u"
+    client.mode = "read-only"
 
     handled = await adapter._handle_control_frame(client, _ctrl_frame({"type": "bogus"}))
 
     assert handled is True
-    assert bytes(writer.buffer) == b""
+    resp = _last_ctrl_json(writer)
+    assert resp["type"] == "client_mode"
+    assert resp["ok"] is False
+    assert resp["code"] == "unsupported_request"
+    assert resp["mode"] == "read-only"
+    assert "does not support that control request" in resp["message"]
 
 
 @pytest.mark.asyncio

@@ -348,7 +348,11 @@ class OpenMuxClient:
 
         # Connect to server
         if not await connection.connect():
-            self.logger.error("Failed to connect to %s:%s", host, port)
+            # A console-stream refusal carries the server's own sentence (issue #98);
+            # without it the user only sees an unreachable host.
+            reason = str(getattr(connection, "close_reason", "") or "")
+            detail = f": {reason}" if reason else ""
+            self.logger.error("Failed to connect to %s:%s%s", host, port, detail)
             return None
 
         # Authenticate (priority: api key > pubkey > username/password; the

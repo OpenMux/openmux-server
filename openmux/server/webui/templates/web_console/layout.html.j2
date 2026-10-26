@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="omx-base-path" content="{{ base_path }}" />
     <title>{% block title %}{{ title }}{% endblock %}</title>
-    <link rel="stylesheet" href="{{ base_path }}/static/web_console.css" />
-    <script src="{{ base_path }}/static/js/theme-init.js"></script>
+    <link rel="stylesheet" href="{{ asset_url(base_path ~ '/static/web_console.css') }}" />
+    <script src="{{ asset_url(base_path ~ '/static/js/theme-init.js') }}"></script>
     {% block head_extras %}{% endblock %}
   </head>
   <body class="{% block body_class %}{% endblock %}">
@@ -161,10 +161,10 @@
         {% endblock %}
       </div>
     </div>
-    <script src="{{ base_path }}/static/js/layout.js"></script>
+    <script src="{{ asset_url(base_path ~ '/static/js/layout.js') }}"></script>
     {# Sidebar status annotations: dots on the console list from the last
        action outcome per port (no-op when the Port Actions plugin is absent). #}
-    <script src="{{ base_path }}/static/js/port_status.js"></script>
+    <script src="{{ asset_url(base_path ~ '/static/js/port_status.js') }}"></script>
     {% block scripts %}{% endblock %}
   </body>
 </html>

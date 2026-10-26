@@ -30,6 +30,25 @@ from .base_adapter import BaseClientAdapter
 from .rw_control import format_control_response
 
 
+def ws_close_reason(msg: Any) -> str:
+    """The server's close detail from one CLOSE message, as ``<code> <sentence>``.
+
+    aiohttp carries the close code in ``msg.data`` and the reason in ``msg.extra``. The
+    server puts its access sentence in that reason (issue #98), so a dropped reason is a
+    refused attach the user cannot explain. Returns "" when the frame carries neither.
+    """
+    code = getattr(msg, "data", None)
+    extra = getattr(msg, "extra", None)
+    if isinstance(extra, (bytes, bytearray)):
+        text = bytes(extra).decode("utf-8", "replace")
+    else:
+        text = str(extra or "")
+    parts = [str(code)] if isinstance(code, int) else []
+    if text:
+        parts.append(text)
+    return " ".join(parts).strip()
+
+
 class WebSocketClientAdapter(BaseClientAdapter):
     """Raw streaming WebSocket adapter.
 
@@ -63,11 +82,14 @@ class WebSocketClientAdapter(BaseClientAdapter):
         self.protocol_version = "websocket-stream-1.0"
         # Track port up/down state from OMXCTRL meta frames
         self._port_up = None
+        # Frames the connect peek already read, replayed to the reader in order.
+        self._pending_ws_messages: List[Any] = []
+        # Why the server closed the socket: its close code and its own sentence.
+        self.close_reason = ""
 
     async def connect(self) -> bool:
         if self.is_connected:
-            return True
-        # Ensure required client dependency is present even for discovery mode.
+            return True  # Ensure required client dependency is present even for discovery mode.
         # Tests expect connect() to fail if the WebSocket/HTTP client import fails.
         try:
             import aiohttp
@@ -98,6 +120,10 @@ class WebSocketClientAdapter(BaseClientAdapter):
             self.websocket = await self._ws_handshake_session(session, url, headers)
             if self.websocket is None:
                 self.is_connected = False
+                if self.close_reason:
+                    # The server said why in its own sentence; passing it on is the only
+                    # way the user learns an attach was refused rather than unreachable.
+                    self.logger.warning("Server refused the console stream: %s", self.close_reason)
                 return False
             self.is_connected = True
             self.is_authenticated = True
@@ -179,7 +205,13 @@ class WebSocketClientAdapter(BaseClientAdapter):
             try:
                 msg = await asyncio.wait_for(self.websocket.receive(), timeout=0.05)
                 if msg and msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    self.close_reason = ws_close_reason(msg)
                     raise RuntimeError("websocket closed on first receive")
+                if msg is not None and msg.type in (WSMsgType.TEXT, WSMsgType.BINARY):
+                    # The peek read a real frame. A refusal answer arrives before the server
+                    # closes, and an attach answer right after the upgrade, so dropping the
+                    # peeked frame would hide the server's sentence.
+                    self._pending_ws_messages.append(msg)
             except asyncio.TimeoutError:
                 # justification: no handshake frame yet; the loop keeps waiting
                 pass
@@ -303,8 +335,11 @@ class WebSocketClientAdapter(BaseClientAdapter):
     async def _ws_receive(self, timeout: Optional[float]) -> Any:
         """Fetch the next websocket message, honoring an optional deadline.
 
-        A timeout propagates as `asyncio.TimeoutError` to the caller.
+        A frame the connect peek already read is returned first, so a message is never
+        lost. A timeout propagates as `asyncio.TimeoutError` to the caller.
         """
+        if self._pending_ws_messages:
+            return self._pending_ws_messages.pop(0)
         if timeout is not None:
             return await asyncio.wait_for(self.websocket.receive(), timeout=timeout)
         return await self.websocket.receive()
@@ -390,6 +425,7 @@ class WebSocketClientAdapter(BaseClientAdapter):
                 return msg.data
             if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                 self.is_connected = False
+                self.close_reason = self.close_reason or ws_close_reason(msg)
                 # proactively close session if not already
                 await self._ws_close_session()
                 return None

@@ -254,9 +254,17 @@ async def test_restore_left_read_only_when_origin_slot_moved_on(dummy_logger):
     # told so explicitly, instead of being silently marked read-write locally.
     assert pm.get_client_mode("human1", "rf1") == "read-only"
     assert origin.holders == ["intruder"]
-    denied = [f for f in console_manager.frames if f.get("reason") == "action_restore_denied"]
+    denied = [f for f in console_manager.frames if f.get("code") == "action_restore_denied"]
     assert denied == [
-        {"client_id": "human1", "type": "client_mode", "ok": False, "mode": "read-only", "reason": "action_restore_denied"}
+        {
+            "client_id": "human1",
+            "type": "client_mode",
+            "ok": False,
+            "mode": "read-only",
+            "code": "action_restore_denied",
+            "lines": ["[Read-write not restored after the Port Action: another client holds the slot]"],
+            "message": "Read-write not restored after the Port Action: another client holds the slot",
+        }
     ]
 
 

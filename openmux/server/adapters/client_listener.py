@@ -21,7 +21,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from openmux.common.identity import get_server_id, get_server_label
-from openmux.server.access_control import capacity_to_wire, holder_id_short
+from openmux.server.access_decision import AccessDecision, Code, decide, mode_or_read_only
 from openmux.server.port_utils import resolve_port_connected_state, safe_get_port
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
@@ -828,79 +828,56 @@ class TcpServerAdapter(BaseGenericAdapter):
     async def _ctrl_promote_reply(self, client: "ClientSession", port_name: str) -> Dict[str, Any]:
         """request_rw / promote: try to grant read-write on the port.
 
-        A refusal carries the current holder labels and, when the capacity
-        is determinable, the wire capacity value.
+        The reply is the decision's own frame: it carries the mode the Client holds
+        afterwards, the outcome code, and the server's wording (issue #98).
         """
-        ok = await self.console_manager.promote_client_to_read_write(client.client_id, port_name)
-        resp: Dict[str, Any] = {
-            "type": "client_mode",
-            "ok": bool(ok),
-            "mode": "read-write" if ok else "read-only",
-        }
-        if not ok:
-            holders = self._rw_holders_for_port(port_name)
-            if holders:
-                resp["rw_holders"] = holders
-            max_rw = self._max_rw_users_for_port(port_name)
-            if max_rw is not None:
-                resp["max_rw_users"] = max_rw
-        return resp
+        decision = await self.console_manager.promote_client_to_read_write(client.client_id, port_name)
+        return decision.frame()
 
     async def _ctrl_force_reply(self, client: "ClientSession", port_name: str, req: Dict[str, Any]) -> Dict[str, Any]:
         """force_promote: single write-slot takeover (issue #59 Part 2).
 
         The frame name is kept for old clients; the target is optional
-        (default: the most recently attached holder). A named target
-        (issue #61) returns its victim's holder label in `takeover` so the
-        client can show "taken from <holder>".
+        (default: the most recently attached holder). A named target (issue #61)
+        names the demoted holder in the reply's lines, so the Client prints its
+        "taken from" line from the server's wording instead of decoding a reason
+        string (issue #98).
         """
         target = req.get("client_id") if isinstance(req.get("client_id"), str) else None
-        ok, reason = await self.console_manager.take_write_slot(client.client_id, port_name, target)
-        resp: Dict[str, Any] = {
-            "type": "client_mode",
-            "ok": bool(ok),
-            "mode": "read-write" if ok else "read-only",
-        }
-        if reason and ok and reason.startswith("takeover from "):
-            resp["takeover"] = reason.removeprefix("takeover from ")
-        if reason:
-            resp["reason"] = reason
-        else:
-            max_rw = self._max_rw_users_for_port(port_name)
-            if max_rw is not None:
-                resp["max_rw_users"] = max_rw
-        return resp
+        decision = await self.console_manager.take_write_slot(client.client_id, port_name, target)
+        return decision.frame()
 
     async def _ctrl_holders_reply(self, port_name: str) -> Dict[str, Any]:
-        """query_rw_holders: the current holder labels plus wire capacity."""
-        resp: Dict[str, Any] = {"type": "rw_holders", "holders": self._rw_holders_for_port(port_name)}
-        max_rw = self._max_rw_users_for_port(port_name)
-        if max_rw is not None:
-            resp["max_rw_users"] = max_rw
-        return resp
+        """query_rw_holders: the ConsoleManager's one holders answer for this port."""
+        return self.console_manager.rw_holders_frame(port_name)
 
     async def _ctrl_dispatch(
         self, client: "ClientSession", port_name: str, req_type: Any, req: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """Pick the per-type control-frame handler and build its reply.
 
-        Returns None for an unknown `req_type` (the caller swallows the
-        frame and sends no reply).
+        An unknown `req_type` gets a typed refusal rather than silence, so a
+        Client never waits on a request this server cannot answer (issue #98).
         """
         if req_type in ("power_query", "power_switch"):
             return await self._ctrl_power_reply(port_name, req_type, req, client)
         if req_type in ("request_rw", "promote"):
             return await self._ctrl_promote_reply(client, port_name)
         if req_type == "release_rw":
-            await self.console_manager.demote_client_to_read_only(client.client_id, port_name)
-            return {"type": "client_mode", "ok": True, "mode": "read-only"}
+            decision = await self.console_manager.demote_client_to_read_only(client.client_id, port_name)
+            return decision.frame()
         if req_type == "force_promote":
             return await self._ctrl_force_reply(client, port_name, req)
         if req_type == "query_rw_holders":
             return await self._ctrl_holders_reply(port_name)
         if req_type == "detach":
             return await self._ctrl_detach_reply(client)
-        return None
+        return decide(
+            Code.UNSUPPORTED_REQUEST,
+            mode=mode_or_read_only(client.mode),
+            client_id=client.client_id,
+            port_name=port_name or "",
+        ).frame()
 
     async def _ctrl_detach_reply(self, client: "ClientSession") -> Dict[str, Any]:
         """detach: release the port and return the session to its command phase (issue #88).
@@ -963,77 +940,17 @@ class TcpServerAdapter(BaseGenericAdapter):
             self.logger.error(
                 "Error handling control frame '%s' for client %s: %s", req_type, client.client_id, e, exc_info=True
             )
-            resp = {"type": "client_mode", "ok": False, "mode": client.mode or "read-only"}
-
-        if resp is None:
-            return True  # Unknown control type; swallow to avoid leaking to the port
+            # The Client's standing is unknown here, but its mode is not: answer with
+            # the mode it already had, so an internal failure never demotes it.
+            resp = decide(
+                Code.INTERNAL,
+                mode=mode_or_read_only(client.mode),
+                client_id=client.client_id,
+                port_name=port_name or "",
+            ).frame()
 
         await self._ctrl_send_reply(client, resp)
         return True
-
-    def _connected_clients_for_port(self, port_name: Optional[str]) -> List[Dict[str, Any]]:
-        """Return the raw connected-client records for a port, or an empty list."""
-        try:
-            pm = getattr(self.console_manager, "port_manager", None)
-            port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
-            if port_obj is not None:
-                return list(getattr(port_obj, "connected_clients", []))
-        except Exception:
-            # justification: optional metadata; an empty list is the safe answer
-            pass
-        return []
-
-    def _rw_holders_for_port(self, port_name: Optional[str]) -> List[str]:
-        """Return holder labels for all read-write clients on a port.
-
-        Format: ``[<id>] username@ip (rw)`` - the same label the telnet/SSH
-        `w` command and the web holder lines show (issue #61). The `client_id`
-        in brackets is the exact value a targeted takeover's `client_id`
-        field matches on.
-        """
-        holders: List[str] = []
-        for c in self._connected_clients_for_port(port_name):
-            if c.get("mode") != "read-write":
-                continue
-            cid = c.get("client_id", "")
-            username = c.get("username", "unknown")
-            holders.append(f"[{holder_id_short(cid)}] {username}@{self._resolve_client_ip(cid)} (rw)")
-        return holders
-
-    def _resolve_client_ip(self, client_id: str) -> str:
-        """Resolve a client's source IP, including clients owned by other adapters.
-
-        Falls back to the owning adapter's own resolver (e.g. the web console's
-        websocket client metadata) when the client is not one of ours.
-        """
-        session = self.clients.get(client_id)
-        if session is not None and getattr(session, "address", None):
-            return session.address
-        try:
-            mgr = self.console_manager.client_to_manager.get(client_id)
-        except Exception:
-            mgr = None
-        resolver = getattr(mgr, "_resolve_client_meta", None)
-        if callable(resolver):
-            try:
-                meta = resolver(client_id) or {}
-                return meta.get("ip") or "unknown"
-            except Exception:
-                # justification: optional metadata; the caller default applies
-                pass
-        return "unknown"
-
-    def _max_rw_users_for_port(self, port_name: Optional[str]) -> Optional[int]:
-        """Return the UI wire capacity for a port (0/1/WIRE_MULTIPLE), or None if not determinable."""
-        try:
-            pm = getattr(self.console_manager, "port_manager", None)
-            port_obj = pm.ports.get(port_name) if (pm is not None and hasattr(pm, "ports")) else None
-            if port_obj is not None:
-                return capacity_to_wire(getattr(port_obj, "max_read_write_users", 1))
-        except Exception:
-            # justification: optional metadata; None is the safe answer
-            pass
-        return None
 
     async def handle_power_command_text(self, client: "ClientSession", command: str):
         """Handle the ``POWER`` command (PDU power over the text protocol).
@@ -1146,13 +1063,11 @@ class TcpServerAdapter(BaseGenericAdapter):
         try:
             # Use console manager to handle the connection
             if self.console_manager:
-                success, mode, reason = await self.console_manager.connect_client_to_port(
-                    client.client_id, port_name, client.username
-                )
-                if success:
-                    await self._finish_tcp_connect(client, port_name, mode)
+                attached = await self.console_manager.connect_client_to_port(client.client_id, port_name, client.username)
+                if attached.ok:
+                    await self._finish_tcp_connect(client, port_name, attached)
                 else:
-                    await self._send_connect_error(client, port_name, reason)
+                    await self._send_connect_error(client, attached)
             else:
                 await client.send_line("ERROR:CONNECT:Console manager not available")
 
@@ -1160,12 +1075,12 @@ class TcpServerAdapter(BaseGenericAdapter):
             self.logger.error("Error connecting client to port %s: %s", port_name, e, exc_info=True)
             await client.send_line("ERROR:CONNECT:Connection error")
 
-    async def _finish_tcp_connect(self, client: "ClientSession", port_name: str, mode: Optional[str]) -> None:
+    async def _finish_tcp_connect(self, client: "ClientSession", port_name: str, decision: AccessDecision) -> None:
         """Finalize a successful text-protocol attach (tracking, routing, reply).
 
-        Records the client on the port, registers explicit routing, resolves the
-        access mode, sends the ``CONNECTED`` line, and warns when the target port
-        is currently disconnected.
+        Records the client on the port, registers explicit routing, sends the
+        ``CONNECTED`` line with the mode the Port granted, and warns when the
+        target port is currently disconnected.
         """
         client.connected_port = port_name
 
@@ -1178,9 +1093,10 @@ class TcpServerAdapter(BaseGenericAdapter):
         # deliver broadcasts directly via this adapter in multi-manager setups
         self._register_tcp_routing(client)
 
-        # Determine access mode from returned mode, fallback to querying if needed
-        access_mode = self._tcp_access_mode(client, port_name, mode)
-        client.mode = "read-write" if access_mode == "READ_WRITE" else "read-only"
+        # The mode the Port granted, read back by the decision's producer. The CLI
+        # gates keystrokes on this token, so it is never inferred here.
+        access_mode = decision.mode.wire
+        client.mode = decision.mode.value
         await client.send_line(f"CONNECTED:{port_name}:{access_mode}")
 
         # If the target port (federated proxy or local serial/tcp_initiator
@@ -1198,25 +1114,6 @@ class TcpServerAdapter(BaseGenericAdapter):
             # justification: optional routing registration; delivery falls back to the manager broadcast loop
             pass
 
-    def _tcp_access_mode(self, client: "ClientSession", port_name: str, mode: Optional[str]) -> str:
-        """Resolve the wire access mode (``READ_WRITE``/``READ_ONLY``) for a fresh attach.
-
-        Prefers the console manager's returned ``mode``; falls back to querying
-        ``get_client_mode`` when it is empty. Any lookup error yields ``READ_ONLY``.
-        """
-        access_mode = "READ_ONLY"
-        try:
-            effective_mode = mode
-            if not effective_mode and hasattr(self.console_manager, "get_client_mode"):
-                effective_mode = self.console_manager.get_client_mode(client.client_id, port_name)
-            if effective_mode == "read-write":
-                access_mode = "READ_WRITE"
-            elif effective_mode == "read-only":
-                access_mode = "READ_ONLY"
-        except Exception as e:
-            self.logger.error("Error determining client mode: %s", e, exc_info=True)
-        return access_mode
-
     async def _notify_port_disconnected(self, client: "ClientSession", port_name: str) -> None:
         """Warn the client if the target port is currently disconnected (best-effort).
 
@@ -1233,14 +1130,14 @@ class TcpServerAdapter(BaseGenericAdapter):
             # justification: best-effort notice; the connect request proceeds
             pass
 
-    async def _send_connect_error(self, client: "ClientSession", port_name: str, reason: Optional[str]) -> None:
-        """Send the connect error line that matches the denial reason."""
-        if reason == "denied_by_group_acl":
-            await client.send_line(f"ERROR:CONNECT:Access denied to port {port_name}")
-        elif reason == "no_permissions":
-            await client.send_line("ERROR:CONNECT:No permissions assigned to this account")
-        else:
-            await client.send_line(f"ERROR:CONNECT:Cannot connect to port {port_name}")
+    async def _send_connect_error(self, client: "ClientSession", decision: AccessDecision) -> None:
+        """Refuse a connect with the one sentence this outcome has (issue #98).
+
+        The old per-code lines repeated wording the server already owned, and each
+        surface kept its own variant. The line keeps its ``ERROR:CONNECT:`` prefix,
+        which is what the CLI detects on.
+        """
+        await client.send_line(f"ERROR:CONNECT:{decision.message}")
 
     async def _resolve_port_by_origin(self, port_name: str, server_id: str) -> Optional[str]:
         """Resolve port uniquely by (origin_server_id, name) using PortManager listing.

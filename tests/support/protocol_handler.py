@@ -152,13 +152,11 @@ class OpenMuxProtocolHandler:
         if not await self.console_manager.port_exists(port_name):
             await client.send(f"Port {port_name} not found\r\n".encode())
             return
-        success, mode, _reason = await self.console_manager.connect_client_to_port(
-            client.client_id, port_name, client.username
-        )
-        if success:
+        attached = await self.console_manager.connect_client_to_port(client.client_id, port_name, client.username)
+        if attached.ok:
             client.connected_port = port_name
-            client.mode = mode
-            status = "read-write" if mode == "read-write" else "read-only"
+            client.mode = attached.mode.value
+            status = attached.mode.value
             await client.send(f"Connected to {port_name} in {status} mode\r\n".encode())
             await client.send(b"Use Ctrl+] to access control menu\r\n")
             await self._handle_console_mode(client)
@@ -227,8 +225,8 @@ class OpenMuxProtocolHandler:
                 if client.mode == "read-write":
                     await client.send(b"You already have read-write access\r\n")
                 else:
-                    success = await self.console_manager.promote_client_to_read_write(client.client_id, client.connected_port)
-                    if success:
+                    promoted = await self.console_manager.promote_client_to_read_write(client.client_id, client.connected_port)
+                    if promoted.ok:
                         client.mode = "read-write"
                         await client.send(b"Promoted to read-write access\r\n")
                     else:
@@ -239,10 +237,9 @@ class OpenMuxProtocolHandler:
                 # Unified-only: simulate reconnect by detaching and re-attaching the client
                 await self.console_manager.disconnect_client_from_port(client.client_id, client.connected_port)
                 await asyncio.sleep(0.2)
-                success, mode, _reason = await self.console_manager.connect_client_to_port(
-                    client.client_id, port_name, client.username
-                )
-                if success:
+                reattached = await self.console_manager.connect_client_to_port(client.client_id, port_name, client.username)
+                if reattached.ok:
+                    mode = reattached.mode.value
                     client.connected_port = port_name
                     client.mode = mode
                     await client.send(f"Reconnected to {port_name} in {mode} mode\r\n".encode())

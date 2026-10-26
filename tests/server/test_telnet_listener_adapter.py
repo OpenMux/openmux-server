@@ -474,14 +474,35 @@ async def test_forward_payload_readonly_reannounces_on_enter():
 # _cmd_force_rw: targeted takeover prompt (issue #61)
 
 
+from openmux.server.access_decision import Code, Holder, Mode, decide
+
+
 class _FakeCm:
-    def __init__(self, take_result=(True, "ok")):
+    """A console manager that answers with one real ``AccessDecision``.
+
+    The adapter renders whatever the decision says, so a fake that returned the
+    old ``(ok, reason)`` tuple would test a shape that no longer exists (issue #98).
+    """
+
+    def __init__(self, decision=None, promote_decision=None, demote_decision=None):
         self.take_calls = []
-        self.take_result = take_result
+        self.decision = decision if decision is not None else decide(Code.GRANTED, mode=Mode.READ_WRITE)
+        self.promote_decision = promote_decision
+        self.demote_decision = demote_decision
+        self.promote_calls = []
+        self.demote_calls = []
 
     async def take_write_slot(self, client_id, port_name, target=None):
         self.take_calls.append((client_id, port_name, target))
-        return self.take_result
+        return self.decision
+
+    async def promote_client_to_read_write(self, client_id, port_name):
+        self.promote_calls.append((client_id, port_name))
+        return self.promote_decision or decide(Code.GRANTED, mode=Mode.READ_WRITE)
+
+    async def demote_client_to_read_only(self, client_id, port_name):
+        self.demote_calls.append((client_id, port_name))
+        return self.demote_decision or decide(Code.RELEASED, mode=Mode.READ_ONLY)
 
 
 @pytest.mark.asyncio
@@ -489,7 +510,8 @@ async def test_force_rw_prompts_and_passes_target():
     adapter = make_adapter(["loopback1"])
     session = make_session(read_only=False)
     session.reader = FakeReader([b"f", b"4", b"\n"])
-    cm = _FakeCm((True, "takeover from alice [f4]"))
+    victim = Holder(client_id="f4", username="alice", ip="10.0.0.5")
+    cm = _FakeCm(decide(Code.GRANTED, mode=Mode.READ_WRITE, victim=victim))
     adapter.console_manager = cm
 
     await adapter._cmd_force_rw(session, cm)
@@ -498,7 +520,7 @@ async def test_force_rw_prompts_and_passes_target():
     out = session.writer.buffer.decode()
     assert "[Take from holder" in out
     assert "Read-write access granted" in out
-    assert "[Taken from: alice [f4]]" in out
+    assert "[Taken from: [f4] alice@10.0.0.5 (rw)]" in out
     assert session.port_mode == "read-write"
 
 
@@ -507,7 +529,7 @@ async def test_force_rw_enter_is_no_target_fallback():
     adapter = make_adapter(["loopback1"])
     session = make_session(read_only=False)
     session.reader = FakeReader([b"\n"])
-    cm = _FakeCm((True, "ok"))
+    cm = _FakeCm()
     adapter.console_manager = cm
 
     await adapter._cmd_force_rw(session, cm)
@@ -523,7 +545,7 @@ async def test_force_rw_invalid_target_refusal_text():
     adapter = make_adapter(["loopback1"])
     session = make_session(read_only=False)
     session.reader = FakeReader([b"ghost", b"\n"])
-    cm = _FakeCm((False, "invalid_target"))
+    cm = _FakeCm(decide(Code.INVALID_TARGET, mode=Mode.READ_ONLY))
     adapter.console_manager = cm
 
     await adapter._cmd_force_rw(session, cm)
@@ -531,6 +553,39 @@ async def test_force_rw_invalid_target_refusal_text():
     assert session.port_mode != "read-write"
     out = session.writer.buffer.decode()
     assert "does not hold read-write" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_request_rw_grant_prints_the_servers_line():
+    adapter = make_adapter(["loopback1"])
+    session = make_session(read_only=False)
+    cm = _FakeCm(promote_decision=decide(Code.GRANTED, mode=Mode.READ_WRITE))
+    adapter.console_manager = cm
+
+    await adapter._cmd_request_rw(session, cm)
+
+    assert session.port_mode == "read-write"
+    assert "[Read-write access granted]\r\n" in session.writer.buffer.decode()
+
+
+@pytest.mark.asyncio
+async def test_release_that_failed_keeps_the_session_read_write():
+    """A refused release must not drop the session to read-only (issue #98).
+
+    The session decides whether to forward keystrokes from ``port_mode``, so a
+    session that believed a failed release would stop typing while the Port still
+    listed it as the writer.
+    """
+    adapter = make_adapter(["loopback1"])
+    session = make_session(read_only=False)
+    session.port_mode = "read-write"
+    cm = _FakeCm(demote_decision=decide(Code.DEMOTE_FAILED, mode=Mode.READ_WRITE))
+    adapter.console_manager = cm
+
+    await adapter._cmd_release_rw(session, cm)
+
+    assert session.port_mode == "read-write"
+    assert "you do not hold the read-write slot" in session.writer.buffer.decode().lower()
 
 
 @pytest.mark.asyncio

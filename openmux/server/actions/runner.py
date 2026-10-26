@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from openmux.server.access_decision import Code, notice
 from openmux.server.actions.errors import ActionTimeoutError, PortBusyError
 from openmux.server.actions.registry import ActionScript, redact_params, validate_params
 from openmux.server.actions.session import ActionSession, _PowerContext
@@ -725,7 +726,7 @@ class ActionRunner:
                 await self._release_origin_slot(port, requesting_client_id, port_name)
                 await self.port_manager.demote_client(port_name, requesting_client_id)
                 run.auto_demoted_client_id = requesting_client_id
-                await self._notify_client_mode(requesting_client_id, mode="read-only", ok=False, reason="action_self_demoted")
+                await self._notify_client_mode(requesting_client_id, Code.ACTION_SELF_DEMOTED, port_name=port_name)
                 attached = await self.port_manager.add_client_to_port(
                     port_name, run.client_id, username=f"action:{run.action_id}", mode="read-write"
                 )
@@ -770,16 +771,21 @@ class ActionRunner:
         except Exception:
             logger.debug("Failed to broadcast action_run event %s for run %s", event, run.run_id, exc_info=True)
 
-    async def _notify_client_mode(self, client_id: str, *, mode: str, ok: bool, reason: str) -> None:
-        """Push a `client_mode` control frame to `client_id`, if a console_manager is set."""
+    async def _notify_client_mode(self, client_id: str, code: Code, *, port_name: str = "") -> None:
+        """Push one access notice to `client_id`, if a console manager is set.
+
+        The notice is an ``AccessDecision`` notice (issue #98): its frame carries the mode
+        the Client holds afterwards and the server's own sentence, so no console needs an
+        ``action_*`` reason table.
+        """
         if self.console_manager is None:
             return
         try:
             await self.console_manager.send_control_frame_to_client(
-                client_id, {"type": "client_mode", "ok": ok, "mode": mode, "reason": reason}
+                client_id, notice(code, client_id=client_id, port_name=port_name).frame()
             )
         except Exception:
-            logger.debug("Failed to notify client %s of mode change (%s)", client_id, reason, exc_info=True)
+            logger.debug("Failed to notify client %s of mode change (%s)", client_id, code.value, exc_info=True)
 
     async def _detach_and_restore(self, run: ActionRun) -> None:
         """Detach the action's client and restore any self-demoted launcher (finally-safe).
@@ -806,14 +812,12 @@ class ActionRunner:
                         run.run_id,
                     )
                     await self._notify_client_mode(
-                        run.auto_demoted_client_id, mode="read-only", ok=False, reason="action_restore_denied"
+                        run.auto_demoted_client_id, Code.ACTION_RESTORE_DENIED, port_name=run.port_name
                     )
                     return
                 try:
                     await self.port_manager.promote_client(run.port_name, run.auto_demoted_client_id)
-                    await self._notify_client_mode(
-                        run.auto_demoted_client_id, mode="read-write", ok=True, reason="action_restored"
-                    )
+                    await self._notify_client_mode(run.auto_demoted_client_id, Code.ACTION_RESTORED, port_name=run.port_name)
                 except Exception:
                     logger.error(
                         "Failed to auto-restore read-write for %s on %s",

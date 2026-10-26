@@ -19,6 +19,7 @@ import pytest
 from aiohttp import web
 from jinja2 import DictLoader, Environment, FileSystemLoader, StrictUndefined
 
+from openmux.server import web_console
 from openmux.server.web_plugins import ADAPTER_APP_KEY
 from openmux.server.web_plugins.config_editor import _handle_data, _handle_view
 
@@ -89,7 +90,9 @@ async def _call_data(username: str, config: dict = None) -> web.StreamResponse:
 
 
 def _real_jinja_env() -> Environment:
-    return Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)))
+    env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)))
+    web_console.register_template_helpers(env)
+    return env
 
 
 def _broken_jinja_env() -> Environment:

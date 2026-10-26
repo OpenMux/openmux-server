@@ -48,5 +48,5 @@
 
 {% block scripts %}
   {{ super() }}
-  <script src="{{ base_path }}/static/js/logs.js"></script>
+  <script src="{{ asset_url(base_path ~ '/static/js/logs.js') }}"></script>
 {% endblock %}

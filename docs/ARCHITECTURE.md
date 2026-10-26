@@ -489,11 +489,14 @@ Per-console (per-port) access control layers on top of the global `permissions` 
 
 ### 17.2 Enforcement Chokepoint
 All local console attachment goes through `ConsoleManager.connect_client_to_port()` (`openmux/server/console_manager.py`), used
-identically by `client_listener`, `ssh_listener`, `telnet_listener`, and `web_console`. It returns `(success, mode, reason)`;
-`reason` is one of `"no_permissions"`, `"denied_by_group_acl"`, `"denied_by_access_default"`, `"port_full"`, or `None` on
-success, and each adapter surfaces a reason-specific message to the client. Enforcement reads `read_write_groups`/
-`read_only_groups` off the port object generically (`getattr`), so it works the same way for every adapter type, including
-federated ports, without any per-adapter special-casing.
+identically by `client_listener`, `ssh_listener`, `telnet_listener`, and `web_console`. It returns an **Access decision**
+(`openmux/server/access_decision.py`): the mode attached in, or the reason the Client may not attach, plus the sentence the
+surface shows. Adapters render `decision.frame()` and never build their own message, so one refusal reads the same on every
+surface (issue #98, `docs/adr/0001-access-wording-belongs-to-the-server.md`). The same rule covers the Write slot verbs
+(`take_write_slot`, `release_write_slot`, `set_client_mode`) and the notices a Client never asked for, such as `demoted`. See
+`docs/GLOSSARY.md` for **Access decision** and **Outcome code**. Enforcement reads `read_write_groups`/`read_only_groups` off
+the port object generically (`getattr`), so it works the same way for every adapter type, including federated ports, without
+per-adapter special-casing.
 
 ### 17.3 Federation (MuxCon) Propagation
 `read_write_groups`/`read_only_groups` are threaded onto `PortMetadata` (`openmux/common/federation_types.py`) and included in

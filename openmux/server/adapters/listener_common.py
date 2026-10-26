@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from openmux import __version__ as _OPENMUX_VERSION
+from openmux.common.access_wire import holders_text, render_terminal_text
+from openmux.server.access_decision import FRAME_HOLDERS, Code, decide, mode_or_read_only
 
 AclEntry = Union[
     ipaddress.IPv4Address,
@@ -424,80 +426,43 @@ def _origin_entry_matches(entry: Dict[str, Any], port_name: str, server_id: Opti
     return origin == server_id
 
 
-def _rw_denied_notice(payload: Dict[str, Any]) -> str:
-    """CRLF line for a refused read-write request (``ok`` is False).
-
-    Wording mirrors the CLI client rw_control refusal lines; only the
-    present ``reason`` and holder context pick the line.
-    """
-    reason = payload.get("reason")
-    if reason == "invalid_target":
-        # The named client_id is not (or no longer) a read-write holder:
-        # no slot moved (issue #61).
-        return "\r\n[Take refused: that user does not hold read-write access (check the id in the holders list)]\r\n"
-    if reason == "federation_denied":
-        return "\r\n[Take refused: the origin server did not grant the takeover]\r\n"
-    if reason == "promote_failed":
-        # Capacity refused the seat (e.g. an old client on a full port,
-        # or a port with no write slots) - "Take control" cannot help
-        # here, the slot simply has no room.
-        holders = payload.get("rw_holders") or []
-        if holders:
-            return "\r\n[Request denied: no free read-write seat (held by: " + ", ".join(holders) + ")]\r\n"
-        return "\r\n[Request denied: this port has no free read-write seat]\r\n"
-    holders = payload.get("rw_holders") or []
-    if holders:
-        return "\r\n[Read-write request denied (held by: " + ", ".join(holders) + ") - use Take control if needed]\r\n"
-    return "\r\n[Read-write is not available on this port]\r\n"
-
-
 def format_rw_notice(payload: Dict[str, Any]) -> str:
-    """Render a read-write control payload as CRLF-terminated human text.
+    """Render an access frame as CRLF-terminated human text for a raw terminal.
 
-    Used by telnet/SSH sessions, which are raw terminals and cannot parse the
-    JSON control frames used by the TCP/WebSocket client adapters. Wording is
-    kept consistent with the CLI client (`console.py`) and `rw_control.py`.
+    Telnet and SSH sessions are raw terminals and cannot parse the JSON control
+    frames the TCP/WebSocket adapters use, so this turns a frame into its lines.
+
+    Since issue #98 the server owns the wording: an access decision arrives with
+    its lines already rendered, and this function only frames them. It prints
+    nothing for a frame that carries no line, which is how an attach grant stays
+    silent on a terminal that already shows its connect banner.
 
     Args:
-        payload: Control payload, e.g. `{"type": "client_mode", "ok": True,
-            "mode": "read-write"}` or `{"type": "rw_holders", "holders": [...]}`.
+        payload: Control payload, e.g. `{"type": "client_mode", "code": "ok",
+            "lines": [...]}` or `{"type": "rw_holders", "holders": [...]}`.
 
     Returns:
         str: CRLF-terminated message ready to write directly to the session.
     """
+    if payload.get("type") == FRAME_HOLDERS:
+        # A holders list is data, not a decision, so it keeps its own sentence here.
+        return render_terminal_text([f"[{holders_text(payload.get('holders') or [], payload.get('max_rw_users'))}]"])
+
     if payload.get("type") == "presence":
         # Presence pushes are ambient/web-only (see the badge in console.js); CLI
         # sessions stay silent here and query the same data on demand via 'u'.
         return ""
 
-    if payload.get("type") == "rw_holders":
-        holders = payload.get("holders") or []
-        if holders:
-            return "\r\n[Read-write held by: " + ", ".join(holders) + "]\r\n"
-        return "\r\n[No client currently holds read-write access]\r\n"
+    return render_terminal_text(payload.get("lines"))
 
-    ok = payload.get("ok")
-    mode = payload.get("mode")
-    reason = payload.get("reason")
-    if reason == "demoted":
-        # "taken_by" names the taker when the demotion was a write-slot
-        # takeover (issue #59 Part 2) - local takes send it; a federation
-        # relay of the same takeover does not, so fall back to the generic
-        # "another user".
-        by = str(payload.get("taken_by")) if payload.get("taken_by") else "another user"
-        return "\r\n[Your read-write access was taken by " + by + "]\r\n"
-    if ok and mode == "read-write":
-        # A targeted takeover adds the demoted holder's label (issue #61):
-        # show it after the grant so the taker sees who was displaced.
-        takeover = payload.get("takeover")
-        if takeover:
-            return "\r\n[Read-write access granted]\r\n[Taken from: " + str(takeover) + "]\r\n"
-        return "\r\n[Read-write access granted]\r\n"
-    if ok and mode == "read-only":
-        return "\r\n[Switched to read-only mode]\r\n"
-    if not ok:
-        return _rw_denied_notice(payload)
-    return "\r\n[Access mode updated]\r\n"
+
+def access_manager_missing_frame(current_mode: Optional[str]) -> Dict[str, Any]:
+    """The refusal frame for a session whose console manager is gone.
+
+    The Client keeps the mode it already holds: losing the manager does not take
+    a seat away, and a false mode here stops a session from typing.
+    """
+    return decide(Code.INTERNAL, mode=mode_or_read_only(current_mode)).frame()
 
 
 def format_viewer_label(viewer: Dict[str, str]) -> str:
@@ -546,6 +511,7 @@ __all__ = [
     "read_prompt_line",
     "read_take_target",
     "format_rw_notice",
+    "access_manager_missing_frame",
     "format_viewer_label",
     "format_viewers_notice",
 ]

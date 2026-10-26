@@ -15,12 +15,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..access_decision import AccessDecision, Code, Mode, decide
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .listener_common import (
     AclEntry,
     EscapeState,
     _dispatch_control_command,
     _origin_entry_matches,
+    access_manager_missing_frame,
     compile_acl,
     feed_escape_byte,
     format_rw_notice,
@@ -387,14 +389,12 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             remote_host=peer_ip,
             username=username,
         )
-        attach_ok, attach_reason = await self._attach_session(session)
-        if not attach_ok:
-            if attach_reason == "denied_by_group_acl":
-                await self._send_and_close(writer, b"Access denied to this port\r\n")
-            elif attach_reason == "no_permissions":
-                await self._send_and_close(writer, b"No permissions assigned to this account\r\n")
-            else:
-                await self._send_and_close(writer, b"Failed to attach to port\r\n")
+        attached = await self._attach_session(session)
+        if attached is None:
+            await self._send_and_close(writer, decide(Code.INTERNAL, mode=Mode.READ_ONLY).text.encode())
+            return
+        if not attached.ok:
+            await self._send_and_close(writer, attached.text.encode())
             return
         self.sessions[client_id] = session
         self.logger.info(
@@ -526,15 +526,8 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         if session.listener.read_only:
             await self._write_session(session, "\r\n[This listener is configured read-only]\r\n")
             return
-        ok = bool(cm and await cm.promote_client_to_read_write(session.client_id, session.port_name))
-        if ok:
-            session.port_mode = "read-write"
-        payload: Dict[str, Any] = {"type": "client_mode", "ok": ok, "mode": session.port_mode}
-        if not ok and cm:
-            holders = cm.get_rw_holders_display(session.port_name)
-            if holders:
-                payload["rw_holders"] = holders
-        await self._write_session(session, format_rw_notice(payload))
+        decision = await cm.promote_client_to_read_write(session.client_id, session.port_name) if cm else None
+        await self._reply_access_decision(session, decision)
 
     async def _cmd_force_rw(self, session: TelnetSession, cm: Any) -> None:
         if session.listener.read_only:
@@ -546,24 +539,26 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         target, keep_going = await read_take_target(session.reader, session.writer)
         if not keep_going:
             return
-        ok = False
-        reason = ""
-        if cm:
-            ok, reason = await cm.take_write_slot(session.client_id, session.port_name, target)
-        if ok:
-            session.port_mode = "read-write"
-        payload: Dict[str, Any] = {"type": "client_mode", "ok": ok, "mode": session.port_mode}
-        if reason:
-            payload["reason"] = reason
-        if ok and reason.startswith("takeover from "):
-            payload["takeover"] = reason.removeprefix("takeover from ")
-        await self._write_session(session, format_rw_notice(payload))
+        decision = await cm.take_write_slot(session.client_id, session.port_name, target) if cm else None
+        await self._reply_access_decision(session, decision)
 
     async def _cmd_release_rw(self, session: TelnetSession, cm: Any) -> None:
-        ok = bool(cm and await cm.demote_client_to_read_only(session.client_id, session.port_name))
-        if ok:
-            session.port_mode = "read-only"
-        await self._write_session(session, format_rw_notice({"type": "client_mode", "ok": ok, "mode": session.port_mode}))
+        decision = await cm.demote_client_to_read_only(session.client_id, session.port_name) if cm else None
+        await self._reply_access_decision(session, decision)
+
+    async def _reply_access_decision(self, session: TelnetSession, decision: Optional[AccessDecision]) -> None:
+        """Print one Access decision and record the mode it reports.
+
+        The decision owns the wording, including a takeover's "taken from" line
+        (issue #98). This listener owns only the mode the session shows, and takes
+        it from the decision, so the session, the printed line, and the Port agree
+        - including after a release that failed, which leaves the session read-write.
+        """
+        if decision is None:
+            await self._write_session(session, format_rw_notice(access_manager_missing_frame(session.port_mode)))
+            return
+        session.port_mode = decision.mode.value
+        await self._write_session(session, decision.text)
 
     def _format_session_info(self, session: TelnetSession) -> str:
         esc = session.escape
@@ -596,8 +591,10 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         session = self.sessions.get(client_id)
         if session is None:
             return False
-        if payload.get("reason") == "demoted":
-            session.port_mode = "read-only"
+        # An access frame states the mode its Client holds afterwards, so the
+        # session follows the Port instead of guessing from one reason value.
+        if payload.get("mode"):
+            session.port_mode = payload["mode"]
         await self._write_session(session, format_rw_notice(payload))
         return True
 
@@ -793,33 +790,39 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             # justification: shutdown cleanup; the transport may already be closed
             pass
 
-    async def _attach_session(self, session: TelnetSession) -> Tuple[bool, Optional[str]]:
+    async def _attach_session(self, session: TelnetSession) -> Optional[AccessDecision]:
+        """Attach a session and return the access decision for it.
+
+        Returns None when there is no console manager or the attach raised. The caller
+        prints the refusal carried by a decision, so a Telnet refusal says what the
+        access module says instead of what this adapter guessed (issue #98).
+        """
         if not self.console_manager:
-            return False, None
+            return None
         try:
-            ok, mode, reason = await self.console_manager.connect_client_to_port(
+            attached = await self.console_manager.connect_client_to_port(
                 session.client_id,
                 session.port_name,
                 session.username,
             )
         except Exception as exc:
             self.logger.error("Console manager attach failed for %s: %s", session.client_id, exc)
-            return False, None
-        if ok:
-            session.port_mode = mode
+            return None
+        if attached.ok:
+            session.port_mode = attached.mode.value
         else:
             self.logger.warning(
-                "Console manager rejected telnet client %s for port %s (reason=%s)",
+                "Console manager rejected telnet client %s for port %s (code=%s)",
                 session.client_id,
                 session.port_name,
-                reason,
+                attached.code.value,
             )
-        if ok and hasattr(self.console_manager, "register_client_channel"):
+        if attached.ok and hasattr(self.console_manager, "register_client_channel"):
             try:
                 self.console_manager.register_client_channel(session.client_id, self)
             except Exception:
                 self.logger.error("register_client_channel failed for telnet client %s", session.client_id, exc_info=True)
-        return bool(ok), reason
+        return attached
 
     async def _disconnect_session(self, client_id: str, *, reason: str) -> None:
         session = self.sessions.pop(client_id, None)
