@@ -18,7 +18,16 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import pytest
 
 from .console import Browser, ConsoleSession, browser_available, login
-from .harness import TEST_PASSWORD, Api, ConfigBuilder, E2EServer, HttpSession, ServerAddress, free_ports
+from .harness import (
+    TEST_PASSWORD,
+    Api,
+    ConfigBuilder,
+    DeviceStation,
+    E2EServer,
+    HttpSession,
+    ServerAddress,
+    free_ports,
+)
 from .story import Story, Timeline, artifact_dir_for, environment_flags
 from .textclients import CliSession, TelnetSession, open_cli_client, open_telnet_client
 
@@ -534,6 +543,48 @@ def clients(request: pytest.FixtureRequest, server: E2EServer, story: Story) -> 
         registry.close_all()
 
 
+class _DeviceRegistry:
+    """Tracks the fake TCP devices one test started, which are the far end of a TCP-initiator port."""
+
+    def __init__(self, story: Story):
+        self.story = story
+        self.stations: List[DeviceStation] = []
+
+    def tcp(self, name: str = "device", *, surface: Optional[str] = None, echo: bool = False) -> DeviceStation:
+        """Start one listening device on a free port, so OpenMux has something to dial."""
+        station = DeviceStation(name=name, echo=echo)
+        self.story.cast(
+            f"{(surface or 'tcp:device'):<11} {station.name} on 127.0.0.1:{station.port}  fake device, unpluggable"
+        )
+        self.stations.append(station)
+        return station
+
+    def close_all(self) -> None:
+        """Close every station, keeping the first failure so a real cause is not swallowed."""
+        problem: Optional[BaseException] = None
+        for station in reversed(self.stations):
+            try:
+                station.close()
+            except Exception as exc:  # justification: reported after the rest are closed
+                problem = problem or exc
+        if problem is not None:
+            raise problem
+
+
+@pytest.fixture
+def devices(story: Story) -> Any:
+    """Start and close the fake TCP devices this test uses.
+
+    A scenario builds a station before its world, because the world's TCP-initiator port points at the
+    station's port. That is how a scenario drops a live console's link with no external process.
+    """
+    registry = _DeviceRegistry(story)
+    try:
+        yield registry
+    finally:
+        registry.close_all()
+
+
 class _ClientRegistry:
     """Opens CLI and Telnet sessions and guarantees each one is closed, reader thread included."""
 
@@ -550,10 +601,15 @@ class _ClientRegistry:
         surface: Optional[str] = None,
         attach_to: Optional[str] = None,
         password: str = TEST_PASSWORD,
+        server: Optional[E2EServer] = None,
     ) -> CliSession:
-        """Open a CLI session, authenticated, and optionally attached to one port."""
+        """Open a CLI session, authenticated, and optionally attached to one port.
+
+        ``server`` names the world to dial when the test started its own; the shared world is the
+        default, because most scenarios never look up.
+        """
         session = open_cli_client(
-            self.server,
+            server or self.server,
             user=user,
             password=password,
             surface=surface or f"cli:{user}",

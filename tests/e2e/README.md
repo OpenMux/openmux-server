@@ -52,12 +52,12 @@ tier.
 
 | File | Job |
 | --- | --- |
-| `harness.py` | `ConfigBuilder` writes an isolated config, `E2EServer` starts and stops one server process, `Api` calls the HTTP API with Basic auth, `HttpSession` keeps a session cookie and never follows a redirect, `BasicSession` adds credentials to that session, `sso_v1_header` signs a trust header, `free_ports` reserves ports. |
+| `harness.py` | `ConfigBuilder` writes an isolated config, `E2EServer` starts and stops one server process, `DeviceStation` is a fake device a scenario can unplug, `Api` calls the HTTP API with Basic auth, `HttpSession` keeps a session cookie and never follows a redirect, `BasicSession` adds credentials to that session, `sso_v1_header` signs a trust header, `free_ports` reserves ports. |
 | `textclients.py` | `CliSession` speaks the CLI protocol through the product's own `TcpClientAdapter`. `TelnetSession` drives the port menu over a raw socket. |
 | `console.py` | `ConsoleSession` and `login()` drive a Chromium page and read it through the page hook. Playwright is imported lazily. |
 | `story.py` | `Timeline` merges every surface into one log, `Story` numbers the steps of a scenario, `step()` marks a block, `surfaces()` names what a test observes, `concurrently()` runs two clients at once. |
 | `index.py` | Builds the scenario table from the test files themselves, for [`docs/E2E_TESTS.md`](../../docs/E2E_TESTS.md). |
-| `conftest.py` | The fixtures: `server`, `servers`, `api`, `api_for`, `web`, `web_for`, `story`, `timeline`, `console`, `clients`, `browser`. |
+| `conftest.py` | The fixtures: `server`, `servers`, `devices`, `api`, `api_for`, `web`, `web_for`, `story`, `timeline`, `console`, `clients`, `browser`. |
 | `test_*.py` | The scenarios. One file per suite. |
 
 ## The world a test gets
@@ -81,9 +81,12 @@ def test_rw07_a_blocked_world_refuses_every_client(servers, story):
 
 The `configure` hook also sets the policy a scenario needs: `with_login_lockout` for
 `security.yaml` `rate_limits.authentication`, `with_sso` for the `web_console` trust header,
-`with_dummy_pdu` for a power outlet, and `with_actions` for Port Actions. `web_for` gives a scenario
-an `HttpSession` for a named surface, which is how a scenario reads a redirect, a cookie, or a
-refusal that a browser would hide.
+`with_dummy_pdu` for a power outlet, `with_actions` for Port Actions, `with_tcp_initiator_port` for a
+port that dials a device of ours, and `scrollback_size=` on `with_command_port` when a scenario needs
+a port that remembers. `web_for` gives a scenario an `HttpSession` for a named surface, which is how a
+scenario reads a redirect, a cookie, or a refusal that a browser would hide. `devices.tcp()` starts
+one fake device: it answers the dial, and `unplug()` closes its socket *and* stops listening, so the
+port really cannot reconnect until `plug_back_in()`.
 
 Never edit `config/` to make a test pass. It holds the shipped defaults. A test that needs a config
 file writes it through `ConfigBuilder`, or replaces the generated `server.yaml` with
@@ -110,10 +113,31 @@ file writes it through `ConfigBuilder`, or replaces the generated `server.yaml` 
 7. Prove the negative case in the same way. `expect_no_text` and `expect_absent` watch for a moment
    and fail if the thing appears.
 8. Run the scenario, then run `make e2e-doc`. The index test fails until the committed table matches
-   the scenarios that exist.
+   the scenarios that exist. That command rewrites `docs/E2E_TESTS.md` whole, so write prose here or
+   in the design doc, never there.
+
+Before you settle on an assertion, read
+["How a scenario gets a real answer"](../../docs/design/e2e_test_suite.md) in the design doc. It gives
+the order to prefer: the frame the port sent, then a string the product wrote, then the page's own
+DOM. A string typed into a test is a claim, not a proof.
 
 Read [`CONTRIBUTING.md`](../../CONTRIBUTING.md) before you touch an `except Exception` block in this
 tier: the same rule applies here, and a harness that swallows an error hides a product fault.
+
+### How to extend a scenario
+
+You do not need a new test to prove one more fact. Add a step, and put the assert on the artifact that
+already records it: the `view` snapshot, the frame list, or `timeline.log`. `CON-01` grows this way.
+
+When you need state the default world does not have — a second port, a policy such as
+`rate_limits.authentication`, `power:`, or a device to unplug — build it with `servers`, the
+`configure` hook above, and `devices`. Only reach for a `raw_server_yaml=` when the builder cannot
+express the key at all.
+
+If a fact has no readable place, that is a finding about the product, not permission to guess: the
+state is not observable, and neither the operator nor a test can reach it. The page hook exists
+because the state behind the menus was invisible from the DOM, and `CON-09` proves the scrollback ring
+holds its first bytes because the ring has no indicator at all.
 
 ## When a scenario fails
 
@@ -179,12 +203,12 @@ function and nothing else.
 | `connected`, `port`, `connected_port`, `port_up` | The session state of this page. |
 | `lines` | The whole xterm buffer, scrollback first, trailing spaces stripped. The Loopback port answers Enter with `[ENTER]`, so match a round trip with a substring. |
 | `notices` | The `lines` of every frame that carried a `code`, oldest first, capped at 200. |
-| `banner` | `{text, class}` of the banner region, `{null, null}` when hidden. |
-| `badge`, `badge_state` | The power badge label, and its tint: `all`, `some`, `none`, `unknown`, `hidden`. |
+| `banner` | `{text, class}` of the banner region, `{null, null}` when hidden. `text` is the page's first sentence; the reason the server sent follows it in the DOM, which `text_of("#banner")` reads. |
+| `badge`, `badge_state` | The power badge label, and its tint: `all`, `some`, `none`, `unknown`, `hidden`. `ConsoleSession` exposes them as `power_badge()` and `power_state()`. |
 | `viewers` | The viewer count shown in the header. |
 | `frames` | Every control frame this page received, as `{type, code, ok, dir}`. |
 | `body_class` | `document.body` classes, which carry `mode-readonly`, `ws-down`, and `port-down`. |
-| `menus` | The visible items of `ro`, `ctrl`, and `viewers`, each as `{label, disabled}`. |
+| `menus` | `ro` and `ctrl` as the visible items `{label, disabled}`; `viewers` as the text of each viewer row the page holds, shown or not, because that list carries no menu markup. |
 
 Two rules keep that hook small enough to trust:
 
@@ -210,3 +234,13 @@ openmux/server/webui/static/js/console.js` catches the syntax error before a tes
   menu. The server logs a warning about it at boot, which is expected and not a failure.
 - One test server costs about 1 second to boot. The whole tier is a few tens of seconds, which is why
   it does not run inside `make test`.
+- Browser scenarios ask for a page with the `console` fixture: `page = console(user="admin").open(
+  "/healthz")` lands on a page, and `.open("/console", port="loop1")` opens the console. The fixture
+  signs the user in once and reuses that context, so one scenario's pages share cookies and
+  `localStorage`. `console.reset(user=...)` throws that away when a scenario must be a stranger.
+- Scrolling back is a per-port setting, named `scrollback_size` in `server.yaml`. A ring starts empty,
+  so a port with scrolling on must be *written to* before a page can read anything back — that is the
+  whole of `CON-09`, and the reason a loopback port never replays on its own.
+- A command port whose child exits does not go down. The port stays up, the server sends no notice, and
+  the next Enter prints `[OpenMux:PROCESS_NOT_RUNNING <server>/<port> …]` into the terminal itself, so
+  a scenario matches that line in `lines` and not in `notices`.

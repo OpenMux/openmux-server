@@ -2264,6 +2264,15 @@ function e2eBadgeState() {
   }
   return 'shown';
 }
+function e2eViewerRows() {
+  // The viewer list is built from plain divs by updateViewersBadge(), which e2eMenuItems() does not
+  // select, and the menu itself stays hidden until a reader clicks the badge. Report the rows either
+  // way: who the page counts is the fact a scenario needs, and each row carries the page's own text.
+  if (!viewersMenuList) return [];
+  return Array.from(viewersMenuList.children)
+    .map((row) => e2eText(row))
+    .filter((text) => text);
+}
 if (e2eEnabled) {
   window.__omxE2E = {
     view: function () {
@@ -2281,7 +2290,7 @@ if (e2eEnabled) {
         viewers: viewersCount ? e2eText(viewersCount) : null,
         frames: e2eFrames.slice(),
         body_class: String(document.body.className),
-        menus: { ro: e2eMenuItems(roMenu), ctrl: e2eMenuItems(ctrlMenu), viewers: e2eMenuItems(viewersMenuList || viewersMenu) },
+        menus: { ro: e2eMenuItems(roMenu), ctrl: e2eMenuItems(ctrlMenu), viewers: e2eViewerRows() },
       };
     },
   };

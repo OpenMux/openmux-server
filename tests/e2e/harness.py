@@ -134,6 +134,7 @@ class ConfigBuilder:
         self._users: List[Dict[str, Any]] = []
         self._loopback: List[Dict[str, Any]] = []
         self._command: List[Dict[str, Any]] = []
+        self._tcp: List[Dict[str, Any]] = []
         self._telnet: List[Dict[str, Any]] = []
         self._pdus: List[Dict[str, Any]] = []
         self._web: Optional[Dict[str, Any]] = None
@@ -208,16 +209,54 @@ class ConfigBuilder:
         self._loopback.append(port)
         return self
 
-    def with_command_port(self, name: str, command: str = "/bin/cat", write_slot_capacity: str = "one") -> "ConfigBuilder":
-        """Add one command port that runs ``command`` as a real child process."""
-        self._command.append(
+    def with_command_port(
+        self,
+        name: str,
+        command: str = "/bin/cat",
+        write_slot_capacity: str = "one",
+        scrollback_size: Optional[int] = None,
+    ) -> "ConfigBuilder":
+        """Add one command port that runs ``command`` as a real child process.
+
+        ``scrollback_size`` keeps the last that many bytes of output for a late viewer to replay. The
+        key stays out of server.yaml when it is None, because the server default is no history.
+        """
+        entry: Dict[str, Any] = {
+            "name": name,
+            "description": f"e2e command port {name}",
+            "command": command,
+            "shell": False,
+            "normalize_newlines": True,
+            "max_read_write_users": write_slot_capacity,
+        }
+        if scrollback_size is not None:
+            entry["scrollback_size"] = int(scrollback_size)
+        self._command.append(entry)
+        return self
+
+    def with_tcp_initiator_port(
+        self,
+        name: str,
+        host: str,
+        port: int,
+        description: Optional[str] = None,
+        auto_reconnect: bool = True,
+        reconnect_delay: float = 0.5,
+    ) -> "ConfigBuilder":
+        """Add one TCP-initiator port: OpenMux dials out to ``host``:``port`` as the console source.
+
+        The dial-out direction is what makes a port's link controllable from a test: a scenario owns the
+        listening side, so it can drop the link and bring it back without touching the server.
+        ``reconnect_delay`` stays short so a recovery is visible inside a scenario, not after 5 s.
+        """
+        self._tcp.append(
             {
                 "name": name,
-                "description": f"e2e command port {name}",
-                "command": command,
-                "shell": False,
-                "normalize_newlines": True,
-                "max_read_write_users": write_slot_capacity,
+                "description": description or f"e2e TCP initiator {name}",
+                "host": host,
+                "port": int(port),
+                "auto_reconnect": bool(auto_reconnect),
+                "reconnect_delay": float(reconnect_delay),
             }
         )
         return self
@@ -368,6 +407,8 @@ class ConfigBuilder:
             config["loopback_ports"] = self._loopback
         if self._command:
             config["command_ports"] = self._command
+        if self._tcp:
+            config["tcp_initiator_ports"] = self._tcp
         if self._client_listener:
             config["client_listener"] = self._client_listener
         if self._telnet:
@@ -1153,6 +1194,139 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 - stdlib signature
         return None
+
+
+class DeviceStation:
+    """A fake TCP device on 127.0.0.1 that an OpenMux TCP-initiator port dials, and that a test unplugs.
+
+    OpenMux is the client here, so this is the listener. It runs on one thread with a self-pipe, and holds
+    one accepted connection at a time. ``unplug`` closes that connection and refuses the next one, which is
+    what a device losing power looks like on the wire; ``plug_back_in`` accepts again, and the port's own
+    ``auto_reconnect`` restores the link with no reload.
+
+    This is the only supported way for a scenario to take a port's link down: every other adapter's
+    "down" state needs a real serial device, a real remote host, or a process a test has no handle on.
+    """
+
+    def __init__(self, name: str = "device", echo: bool = False) -> None:
+        """Bind a free port and start accepting. The port number never changes across an unplug."""
+        self.name = name
+        self.echo = echo
+        self.port = int(free_ports(1)[0])
+        self.received = bytearray()
+        self.accept_count = 0
+        self._stopped = threading.Event()
+        self._lock = threading.Lock()
+        self._listener: Optional[socket.socket] = None
+        self._link: Optional[socket.socket] = None
+        self._listen()
+        self._thread = threading.Thread(target=self._serve, name=f"omx-e2e-device-{name}", daemon=True)
+        self._thread.start()
+
+    def _listen(self) -> None:
+        """Open the listener on the station's port, so the address answers a dial."""
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", self.port))
+        listener.listen(4)
+        listener.settimeout(0.2)
+        self._listener = listener
+
+    def _serve(self) -> None:
+        """Accept connections while the listener stands, and read the live one until it closes."""
+        while not self._stopped.is_set():
+            listener = self._listener
+            if listener is None:
+                time.sleep(0.05)
+                continue
+            try:
+                connection, _address = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                continue  # the listener went away, which is an unplug; the loop keeps watching
+            self.accept_count += 1
+            with self._lock:
+                previous = self._link
+                self._link = connection
+            if previous is not None:
+                _close_quietly(previous)
+            threading.Thread(target=self._pump, args=(connection,), daemon=True).start()
+
+    def _pump(self, connection: socket.socket) -> None:
+        """Read one accepted connection until either side closes it."""
+        connection.settimeout(0.2)
+        try:
+            while not self._stopped.is_set():
+                try:
+                    payload = connection.recv(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not payload:
+                    break
+                self.received.extend(payload)
+                if self.echo:
+                    try:
+                        connection.sendall(payload)
+                    except OSError:
+                        break
+        finally:
+            with self._lock:
+                if self._link is connection:
+                    self._link = None
+            _close_quietly(connection)
+
+    def unplug(self) -> None:
+        """Drop the live link and stop answering the dial, so the port goes offline for good.
+
+        Closing the listener is the point: the next dial is refused, which is what a device that lost
+        power looks like. Accepting and then closing instead flaps the link, and the page debounces a
+        brief flicker on purpose, so a flap hides the very warning a scenario wants to see.
+        """
+        with self._lock:
+            link, self._link = self._link, None
+        if link is not None:
+            _close_quietly(link)
+        listener, self._listener = self._listener, None
+        if listener is not None:
+            _close_quietly(listener)
+
+    def plug_back_in(self) -> None:
+        """Answer the dial again on the same port, so the port reconnects on its own."""
+        self._listen()
+
+    def wait_connected(self, timeout: float = 20.0) -> None:
+        """Wait until a live link stands, after the start or after a plug-back-in.
+
+        Raises:
+            AssertionError: when no link stands within ``timeout``, which means the port never dialed.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._link is not None:
+                    return
+            time.sleep(0.05)
+        raise AssertionError(f"device {self.name}:{self.port}: no OpenMux link stood up within {timeout}s")
+
+    def close(self) -> None:
+        """Stop the station and release its port."""
+        self._stopped.set()
+        self.unplug()
+        _close_quietly(self._listener)
+        self._thread.join(timeout=5)
+
+
+def _close_quietly(sock: Optional[socket.socket]) -> None:
+    """Close one socket and ignore a failure, which only says it was already closed or never opened."""
+    if sock is None:
+        return
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def _json_or_text(text: str) -> Any:

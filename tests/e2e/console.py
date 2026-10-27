@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 from .harness import TEST_PASSWORD
@@ -287,6 +287,36 @@ class ConsoleSession:
         """The terminal's scrollback lines, with trailing spaces stripped."""
         return [str(line) for line in self.view().get("lines") or []]
 
+    def text_of(self, selector: str) -> str:
+        """The text one element holds, with surrounding space removed, as a person reads it.
+
+        Use this for a label that is asserted once. For anything the page redraws, read ``view()``
+        instead: those regions are replaced whole, so a handle taken before the redraw is stale.
+        """
+        return str(self.page.text_content(selector) or "").strip()
+
+    def sidebar_width(self) -> float:
+        """The rendered width of the sidebar in CSS pixels, which is 0 when the page hides it.
+
+        The width is what a person sees. An embedded page keeps its navigation in the document and
+        collapses it to nothing, so a check on the box is the honest check.
+        """
+        return float(self.page.evaluate("() => document.getElementById('sidebar').getBoundingClientRect().width"))
+
+    def wait_until(self, condition: Callable[[], bool], timeout: float = 10.0, what: str = "the condition") -> None:
+        """Wait for a Python-side condition, and name it when it does not happen.
+
+        A hook read costs one round trip, so a condition over Python state - the list of dialog
+        messages a page raised, for example - cannot go through ``wait_for_view``.
+        """
+        self.action(f"wait_until {what}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if condition():
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"{self.surface}: {what} never happened within {timeout}s")
+
     def nav_links(self) -> List[Dict[str, Optional[str]]]:
         """The sidebar links the server rendered, as ``{label, href}``, icon glyphs left out.
 
@@ -350,11 +380,12 @@ class ConsoleSession:
         """The visible items of one menu (``ro``, ``ctrl``, ``viewers``), each with ``label`` and ``disabled``.
 
         A greyed-out button proves a permission as strongly as a missing one, so the disabled flag
-        stays visible instead of being filtered out.
+        stays visible instead of being filtered out. The viewer list is plain text rows, so those
+        entries come back with ``disabled`` false.
         """
         menus = self.view().get("menus") or {}
         items = menus.get(menu) or []
-        return [dict(item) for item in items if isinstance(item, dict)]
+        return [dict(item) if isinstance(item, dict) else {"label": str(item), "disabled": False} for item in items]
 
     def menu_text(self, menu: str = "ro") -> List[str]:
         """The visible labels of one menu only, for a test that ignores whether an item is disabled."""

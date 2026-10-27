@@ -1,7 +1,8 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 2. The harness, the `LIFECYCLE` suite, the scenario index, and the browser proof
-(`CON-01`, `CON-02`) run green. Phases 3-9 are not written; see **Build status** near the end.
+**Status:** Implemented through Phase 3. The harness, the `LIFECYCLE` suite, the scenario index, the browser proof,
+the `AUTH` suite driven over HTTP, and the fourteen `CON` console scenarios driven in Chromium run green. Phases 4-9
+are not written; see **Build status** near the end.
 **Date:** 2026-10-27
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
 and Telnet at the same time.
@@ -127,8 +128,9 @@ process, so the page keeps receiving frames while Python waits on a socket.
 
 Most scenarios that read as simultaneous are propagation, not concurrency: one surface acts, then the test waits for a
 predicate on another surface. Sequential code does that. Only a few need real simultaneity — two Takeover requests on
-one freed seat (`RW-15`), one Port Action race (`ACT-06`), and `RW-20` below. `concurrently([...])` runs actions in
-threads behind one `threading.Barrier`, joins with a deadline, and returns every result or raises once with all of them.
+one freed seat (`RW-15`), one Port Action race (`ACT-06`), and `RW-20` below, all three in groups that are not written
+yet. `concurrently([...])` runs actions in threads behind one `threading.Barrier`, joins with a deadline, and returns
+every result or raises once with all of them.
 
 ### Every attached surface keeps a reader
 
@@ -160,9 +162,9 @@ bytes, never on every byte the port ever sent.
 
 `RW-20` tests the control path: attach three viewers, stop one reader on purpose, then change the viewer set so the
 server broadcasts presence, and assert the other two receive the frame inside one deadline. Nothing in the current
-code gives that guarantee, so the test is expected to fail today. If it does, the fix belongs in the server — deliver
-in parallel with `asyncio.gather`, or skip a client whose write is not draining — and not in the test. The test ships
-marked expected-to-fail, so a red first run reads as a product finding and not as a broken harness.
+code gives that guarantee, so the test is expected to fail when it is written. If it does, the fix belongs in the server
+— deliver in parallel with `asyncio.gather`, or skip a client whose write is not draining — and not in the test. The
+scenario is written marked expected-to-fail, so a red first run reads as a product finding and not as a broken harness.
 
 ---
 
@@ -209,20 +211,54 @@ The harness is for a person who has never opened this code.
    reload. Write slot capacity, Access decision, Outcome code, Feed, Outlet ref, port.
 
 A generated index (`--e2e-list`) writes the scenario table into [docs/E2E_TESTS.md](../E2E_TESTS.md), and one test
-fails when the committed file is stale. That catches a new test with no docstring or no named surface.
+fails when the committed file is stale. That catches a new test with no docstring or no named surface. That file is
+regenerated whole, so prose never belongs in it: `make e2e-doc` deletes anything written there.
+
+### How a scenario gets a real answer
+
+Write down what the scenario claims, then give each part the strongest proof that exists for it.
+
+1. **A port state or an Outcome code**: the server's own answer, read from the frame the port sent, or from
+   `/api/ports`. The harness never decides what the code is.
+2. **Words a person reads**: the product's own string. Import it from `openmux` when the product holds it as a
+   constant; read it off the surface when the page or the server wrote it. A test string typed by hand is a claim, not
+   a proof — `AUTH-02` asserts the sentence `login.html.j2` renders, and the scenario fails if the page changes without
+   the test agreeing.
+3. **A browser claim**: a real Chromium page, and the state from the hook or the visible DOM. `CON-06` shows why this
+   tier exists: the hook reported zero viewers while the page showed two. The rows are plain divs and `e2eMenuItems()`
+   selected menu-item elements only, so the read was wrong and the page was right. A scenario that asserted on the read
+   alone would have reported a product defect that never existed.
+4. **Anything the suite cannot prove**: an honest skip or a named outstanding id. A skip names what it proves and what
+   it does not. `AUTH-11` is named outstanding rather than skipped, because writing it needs an external helper script
+   nobody would follow by accident.
+
+### How to fix a failure that touches shared world state
+
+When a scenario changes the world other scenarios read — a `server.yaml`, the login lockout counter, a session cookie —
+the failure usually looks like a product bug in a *different* suite. Do not fix the other suite.
+
+1. Restore the state inside the scenario that broke it, not in a later fixture: `servers.raw_server_yaml(post_restart)`
+   restores what `LIF-05` replaced.
+2. Prove the shared subject clean before you conclude the product regressed. The lockout counts per account across
+   processes, so a probe first signs the account out with wrong passwords and waits it clear; a `401` then means the
+   product, and a `200` means this probe.
+3. Say in one line why the change is safe for the tests that follow.
 
 ---
 
 ## Test inventory
 
-Release 1: 100 tests in 8 suites plus one story test. Full wording for every id lives in the scenario index.
+The suite today runs 41 scenarios in 5 files: `LIFECYCLE` 10, `AUTH` 10, `CON` 14, the index checks 2, and the timeline
+recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what runs, and its count is checked by
+`IDX-02`. Five further groups below are the plan of record: they have ids, boundaries, and assertions written down, and
+they have no test file yet. Full wording for every built id lives in that index.
 
 ### LIFECYCLE — process and listeners (`tests/e2e/test_lifecycle.py`, 10)
 
 Boots, `/healthz` public plus `/api/ports` 401, Loopback and command round trip over the client listener, bad config
 exits non-zero naming the key, SIGINT exits clean, SIGHUP soft reload keeps an attached client, SIGUSR1 full reload
-drops then restores it, a reload with an attached client leaves no cleanup error in the log, control socket status with
-mode 0600.
+drops then restores it, a reload with an attached client leaves no cleanup error in the log, and control socket status
+with mode 0600.
 
 ### AUTH — login and permission matrix (`test_auth.py`, 10 of 11)
 
@@ -232,15 +268,31 @@ through to a valid cookie, `403` per permission level on the Config Editor, the 
 and exempt for Basic, and the SSO trust header with every forgery refused. Open: a user who authenticates through an
 external helper and is refused because that helper granted no permission.
 
-### CON — console page (`test_console.py`, 2 of 14)
+### CON — console page (`test_console.py`, 14)
 
-Built: a real Chromium page signs in and reaches the console (`CON-01`), and the page hook answers under `?e2e=1` and
-is absent without it (`CON-02`). To build: no-port state, sidebar list, `#connect` opens the socket and echoes, second
-viewer and viewers badge, read-only pill and `mode-readonly`, info overlay, scrollback then `scrollback_done`,
-`#liveDataBadge` green then red, port-down banner, `ports_changed` sidebar rebuild, theme persistence, `?embed=1`,
-`/logs/<port>`, `/about`.
+A real Chromium page with a seeded `rw` user signs in and gets her own text back (`CON-01`), which also smoke-checks
+`/logs/loop1` and `/about` and their nav. The page hook answers under `?e2e=1`, and a page without the flag has no hook
+at all (`CON-02`). A console opened with no port says to choose one and its button asks for one (`CON-03`); the sidebar
+links each port by the address the page reports (`CON-04`). The same button is the only way on and off the port, and its
+label follows the state it will leave behind (`CON-05`). A second viewer on the port tells the first who she is and
+keeps her own mode (`CON-06`). A page switched to read-only shows that mode and swallows its own keystrokes (`CON-07`),
+and the info overlay reports the port and seat behind the menu icons (`CON-08`). A reader who arrives mid-line receives
+what the port already carried (`CON-09`). Two different silences look alike to a reader and are told apart here: a
+socket the harness kills is announced as a lost connection and the next connect clears it (`CON-10`), while a device
+that stops answering closes the port and, after the page's debounce, the console names the peer address, marks the port
+down, and clears all of it when the device answers again (`CON-11`). `POST /api/reload` rebuilds the sidebar with one
+POST and no reload, leaving one active port (`CON-12`), the theme survives a reload on its own key (`CON-13`), and
+`embed=1` keeps the console full window while the port still echoes (`CON-14`).
 
-### RW — write slot capacity and Takeover (`test_write_slot.py`, 20)
+Two measurements corrected the plan. The plan asks for `#liveDataBadge` to go red on this page: that badge belongs to
+the overview and the power page, which no console view draws, and the console's equivalent is the banner a dead socket
+raises (`CON-10`) and the stale pill the port-down banner explains (`CON-11`). The plan also expects `scrollback_done`
+to be visible in the terminal: the server sends it as a frame mark before the live stream, and the page uses it to order
+the feed rather than to print a note, so `CON-09` reads it from the frame log. What that scenario proves is the useful
+half — a page that arrives mid-line still gets the bytes behind the mark — with a page that asks for no scrollback as
+the control, because that page must not replay.
+
+### RW — write slot capacity and Takeover (`test_write_slot.py`, planned: 20)
 
 Ports at capacity `one`, `multiple`, `none`, and one with `read_write_groups`. First attach granted, second
 `capacity_full`, holders label, request refused on a full seat, release then grant, Takeover words both terminals and
@@ -253,16 +305,16 @@ records, `read_only: true` listener, stalled viewer (`RW-20`, see
 Two facts from the Access decision module shape these ids. A `promote_failed` answer is worded by the port capacity
 first, so one Outcome code reads differently on a `one`, `multiple`, and `none` port. And the slot count is an
 invariant that `ConsoleManager._take_slot_local` restores on a half-completed transfer: when the taker's promote fails
-after the demotion, the server promotes the victim again, which is exactly what `RW-15` asserts at process level.
+after the demotion, the server promotes the victim again, which is exactly what `RW-15` will assert at process level.
 
-### PWR — power subsystem (`test_power.py`, 16)
+### PWR — power subsystem (`test_power.py`, planned: 16)
 
 `/power` and `/power/<pdu>`, `/api/power` shape and `unresolved_refs`, buttons per permission, off-impact confirms,
 power badge and `OMXCTRL power_switch`, notices on web and CLI and Telnet, all-feeds-off warning, audit lines in the
 server log and the port log, no audit on a failed switch, REST permission and group matrix, CSRF, `POWER` command
 forms, Telnet `p` menu, `power.enabled: false`, poll task reflection.
 
-### CFG — configure, then reload (`test_config_editor.py`, 14)
+### CFG — configure, then reload (`test_config_editor.py`, planned: 14)
 
 All views and the unknown-view fallback, nav, then add a Loopback port and soft reload with a client attached, config
 file preserved, add a PDU and see the `pdus_changed` nudge, add `power:` feeds to an attached console, invalid edit
@@ -271,22 +323,27 @@ adapters, soft reload keeps attached clients, an adapter that cannot start is re
 
 This suite depends on order: each test leaves state the next needs, and each docstring ends with `Depends on:`.
 
-### ACT — Port Actions (`test_actions.py`, 9)
+### ACT — Port Actions (`test_actions.py`, planned: 9)
 
 Button visibility per port and permission, granted list, run output and status classes, progress bar, operator prompt
 kinds, `operator_prompt_closed` reaching a second viewer, `?action=…&autorun=1` toast, stop and takeover and close
 rules, both viewers see the finish.
 
-### ST — status pages (`test_status_pages.py`, 6)
+### ST — status pages (`test_status_pages.py`, planned: 6)
 
 Sort links and summary counts, detail row that stays open across a refresh, `#clientsTbody` across all surfaces,
 federation empty state, power page driven by site events, `/api/status/fragments`.
 
-### Story (`test_story.py`, 1)
+### Story and timeline recorder (`test_story.py`, 5 built, 1 planned)
+
+Built: the five recorder scenarios (`TIM-01` to `TIM-05`) prove what one timeline line looks like — caret notation for
+control bytes, `IAC WILL ECHO` named, a truncated command marked rather than guessed, one record per line, and a long
+payload kept whole beside the file. Planned: one sequence in one process, listed below. Its fixtures exist today, so it
+is the cheapest of the planned groups to write.
 
 One sequence in one process: configure a PDU through the browser, soft reload, web holds the write slot, CLI requests
-and is refused, CLI takes the slot, both terminals show the wording, switch the last feed off, both warn, restore,
-audit present.
+and is refused, CLI takes the slot, both terminals show the wording, switch the last feed off, both warn, restore, and
+the audit line present.
 
 ---
 
@@ -324,10 +381,22 @@ Named now so release 1 fixtures stay sufficient.
 | Phase | State | What exists |
 | --- | --- | --- |
 | 0 — harness | Done | `harness.py`, `story.py`, `textclients.py`, `console.py`, `index.py`, `conftest.py`; markers and `--run-e2e`; `make test-e2e`, `test-e2e-live`, `test-e2e-debug`, `e2e-install`, `e2e-doc`. |
-| 1 — lifecycle | Done | `LIF-01` to `LIF-09`, plus `IDX-01` and `IDX-02`. |
-| 2 — browser proof | Done | `login()`, `ConsoleSession`, `CON-01`, `CON-02`, with Chromium installed by `make e2e-install`. |
-| 3 — AUTH and CON | In progress | `AUTH-01` to `AUTH-10`, driven over HTTP with a real cookie jar. The console scenarios that need a browser are the rest of this phase. |
+| 1 — lifecycle | Done | `LIF-01` to `LIF-10`, plus `IDX-01` and `IDX-02`. |
+| 2 — browser proof | Done | `login()`, `ConsoleSession`, the page hook under `?e2e=1`, with Chromium installed by `make e2e-install`. |
+| 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` waits on a helper-based account, see the note below. |
 | 4-9 | Not started | RW, PWR, CFG, ACT, ST, and the story scenarios. |
+
+- `AUTH-11` (an external helper that grants no permission): outstanding. The `command` authentication backend runs in
+  every e2e server, so only the *no-permission* case differs from `AUTH-10`, and the helper would have to be a fixture
+  script that the packaged `openmux` process can execute — an external path nobody would follow by accident. `CFG-01`
+  is checked with `config/authentication.yaml.example`, which is the same file in a different place.
+- The page hook (`console.js`), `ConsoleSession` state, and `ConsoleSession.menu_text()` (the page's own menu wording,
+  read from the `ro` and `ctrl` menus, which is how `CON-05` avoids a typed-in string): built.
+- `CON-11` to `CON-14`: built. A `DeviceStation` (a fake device behind a `tcp_initiator` port) is unplugged and plugged
+  back in to drive the port-down banner, one `POST /api/reload` rebuilds the sidebar of an open page, the theme is read
+  on its own key, and `embed=1` is measured against a page with the menu visible.
+- `RW-20` a stalled viewer: not written. It needs `test_write_slot.py`, which does not exist yet; see
+  [Concurrency model](#concurrency-model) for what it will assert and why it may report a product defect first.
 
 Three product defects came out of these phases. A clean stop exited 2, which `Restart=on-failure` read as a crash;
 `LIF-06` now proves a SIGINT stop exits 0 with no traceback. A client that left without closing its socket cleanly,
