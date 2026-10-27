@@ -231,6 +231,7 @@ class ServerRegistry:
         command_ports: Sequence[str] = (),
         raw_server_yaml: Optional[str] = None,
         telnet: bool = True,
+        telnet_kwargs: Optional[Dict[str, Any]] = None,
         web: bool = True,
         timeline: Optional[Timeline] = None,
         timeout: float = 45.0,
@@ -249,6 +250,9 @@ class ServerRegistry:
             raw_server_yaml: Write this text over the generated ``server.yaml``, for a scenario that
                 proves the server rejects a bad file.
             telnet: Bind a Telnet listener (port menu).
+            telnet_kwargs: Extra keys for that listener, for example ``{"require_auth": True}`` so a
+                scenario can sign in as a named user, or ``{"read_only": True}`` for a listener that
+                never grants a Write slot. The allocated port stays the factory's to choose.
             web: Bind the web console.
             timeline: Attach the timeline so server output lands on it.
             timeout: Seconds to wait for the server to be ready.
@@ -274,7 +278,7 @@ class ServerRegistry:
             builder.with_web(int(allocated["web"]))
         builder.with_client_listener(int(allocated["cli"]))
         if want["telnet"]:
-            builder.with_telnet_listener(int(allocated["telnet"]))
+            builder.with_telnet_listener(int(allocated["telnet"]), **(telnet_kwargs or {}))
         if configure is not None:
             builder = configure(builder) or builder
         builder.with_log_dir(workdir / "logs")
@@ -621,11 +625,21 @@ class _ClientRegistry:
         return session
 
     def telnet(
-        self, *, user: str = "admin", surface: str = "telnet:viewer", require_auth: bool = False, password: str = TEST_PASSWORD
+        self,
+        *,
+        user: str = "admin",
+        surface: str = "telnet:viewer",
+        require_auth: bool = False,
+        password: str = TEST_PASSWORD,
+        server: Optional[E2EServer] = None,
     ) -> TelnetSession:
-        """Open a Telnet session on the server's Telnet listener."""
+        """Open a Telnet session on one server's Telnet listener.
+
+        ``server`` names the world to dial when the test started its own, the same way
+        ``cli(server=...)`` does.
+        """
         session = open_telnet_client(
-            self.server,
+            server or self.server,
             user=user,
             password=password,
             surface=surface,

@@ -168,15 +168,27 @@ class ConfigBuilder:
 
     # --- users ---------------------------------------------------------------------------
 
-    def with_user(self, username: str, permissions: str, password: str = TEST_PASSWORD) -> "ConfigBuilder":
+    def with_user(
+        self, username: str, permissions: str, password: str = TEST_PASSWORD, groups: Optional[Sequence[str]] = None
+    ) -> "ConfigBuilder":
         """Add one static user. ``permissions`` is ``admin``, ``read-write``, or ``read-only``.
+
+        ``groups`` are the console groups the port access lists match, beside the built-in ``user``
+        group every known account gets. A scenario needs them only to prove ``read_write_groups``.
 
         Fails on an unknown permission: a typo here silently changes what every permission test
         proves.
         """
         if permissions not in _DEFAULT_USER_PERMISSIONS:
             raise ValueError(f"Unknown permission {permissions!r}; use one of {_DEFAULT_USER_PERMISSIONS}")
-        self._users.append({"username": username, "password_hash": password_hash(password), "permissions": permissions})
+        entry: Dict[str, Any] = {
+            "username": username,
+            "password_hash": password_hash(password),
+            "permissions": permissions,
+        }
+        if groups:
+            entry["groups"] = list(groups)
+        self._users.append(entry)
         return self
 
     def with_default_users(self) -> "ConfigBuilder":
@@ -188,7 +200,12 @@ class ConfigBuilder:
     # --- ports ---------------------------------------------------------------------------
 
     def with_loopback(
-        self, name: str, write_slot_capacity: str = "one", feeds: Optional[Sequence[str]] = None
+        self,
+        name: str,
+        write_slot_capacity: str = "one",
+        feeds: Optional[Sequence[str]] = None,
+        read_write_groups: Optional[Sequence[str]] = None,
+        read_only_groups: Optional[Sequence[str]] = None,
     ) -> "ConfigBuilder":
         """Add one Loopback port, which echoes what it receives.
 
@@ -196,6 +213,9 @@ class ConfigBuilder:
             name: Port name.
             write_slot_capacity: ``one``, ``multiple``, or ``none`` (Write slot capacity).
             feeds: Outlet refs for the ``power:`` key, for example ``["rack1.1", "rack1.2"]``.
+            read_write_groups: Console groups that may drive this port. Any group list turns the
+                port into a closed boundary: an identity in neither list is refused.
+            read_only_groups: Console groups that may watch this port and never drive it.
         """
         port: Dict[str, Any] = {
             "name": name,
@@ -206,6 +226,10 @@ class ConfigBuilder:
         }
         if feeds:
             port["power"] = list(feeds)
+        if read_write_groups:
+            port["read_write_groups"] = list(read_write_groups)
+        if read_only_groups:
+            port["read_only_groups"] = list(read_only_groups)
         self._loopback.append(port)
         return self
 

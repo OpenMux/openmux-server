@@ -75,18 +75,35 @@ The `server` fixture starts one server with a small, fixed world:
 Build a different world with the `servers` factory, which takes the same knobs plus a `configure` hook:
 
 ```python
-def test_rw07_a_blocked_world_refuses_every_client(servers, story):
-    server = servers(name="deny-all", configure=lambda builder: builder.with_access_default("deny"))
+def test_example_a_port_with_no_write_slot(servers, story):
+    server = servers(
+        name="capacity-none",
+        configure=lambda builder: builder.with_loopback("slot1", write_slot_capacity="none"),
+    )
 ```
 
 The `configure` hook also sets the policy a scenario needs: `with_login_lockout` for
 `security.yaml` `rate_limits.authentication`, `with_sso` for the `web_console` trust header,
 `with_dummy_pdu` for a power outlet, `with_actions` for Port Actions, `with_tcp_initiator_port` for a
 port that dials a device of ours, and `scrollback_size=` on `with_command_port` when a scenario needs
-a port that remembers. `web_for` gives a scenario an `HttpSession` for a named surface, which is how a
-scenario reads a redirect, a cookie, or a refusal that a browser would hide. `devices.tcp()` starts
-one fake device: it answers the dial, and `unplug()` closes its socket *and* stops listening, so the
-port really cannot reconnect until `plug_back_in()`.
+a port that remembers. A Port takes its Write slot shape on the same call: `write_slot_capacity=`
+(`one`, `multiple`, or `none`), `read_write_groups=`, and `read_only_groups=` on a Loopback port, and
+`access_default=` for the `security.yaml` fallback. `with_user(name, permission, groups=...)` adds an
+account with a console group membership. A scenario that needs a listener the default world does not
+have passes `servers(telnet_kwargs={...})`, whose keys reach that listener: `require_auth=True` asks
+for a login, `read_only=True` gives a read-only listener, and `target` picks a port or the menu. A
+second server of its own is dialed with `clients.telnet(..., server=server)`. `web_for` gives a
+scenario an `HttpSession` for a named surface, which is how a scenario reads a redirect, a cookie, or a
+refusal that a browser would hide. `devices.tcp()` starts one fake device: it answers the dial, and
+`unplug()` closes its socket *and* stops listening, so the port really cannot reconnect until
+`plug_back_in()`.
+
+A Telnet session speaks the port menu the way an operator does: `open_control_menu()` sends the
+escape prefix and waits for the prompt, `press("f")` answers one key, and `answer("c2")` answers one
+line. `pause_reader()` stops the byte pump, which is the only honest way to model a client that stalls;
+clear `reader_paused` to let it drain again. Both text sessions carry
+`expect_no_text(needle, for_seconds=...)`, because "this prompt must not appear" is a guarantee. A CLI
+holders request is `query_holders()`, whose `holders` list carries the holder labels the server built.
 
 Never edit `config/` to make a test pass. It holds the shipped defaults. A test that needs a config
 file writes it through `ConfigBuilder`, or replaces the generated `server.yaml` with

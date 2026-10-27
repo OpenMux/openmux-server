@@ -124,7 +124,8 @@ def login(context: Any, base_url: str, username: str, password: str = TEST_PASSW
         time.sleep(0.05)
     cookies = {cookie["name"] for cookie in context.cookies()}
     if "omx_session" not in cookies:
-        raise AssertionError(f"login as {username!r} set no omx_session cookie; page says: {page.text('body')[:400]!r}")
+        said = page.text_content("body") or ""
+        raise AssertionError(f"login as {username!r} set no omx_session cookie; page says: {said[:400]!r}")
     return page
 
 

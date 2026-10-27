@@ -285,6 +285,28 @@ class CliSession:
         self.write(marker)
         return self.wait_for(marker, timeout=timeout)
 
+    def expect_no_text(self, needle: str, for_seconds: float = 2.0) -> None:
+        """Fail when ``needle`` arrives within ``for_seconds``, and pass while it stays away.
+
+        Absence needs a window, so this watches for a stated moment rather than asserting once. Text
+        still accumulates for a later ``read_text``, because reading here consumes nothing.
+        """
+        deadline = time.monotonic() + for_seconds
+        while time.monotonic() < deadline:
+            if needle in self.read_text():
+                raise AssertionError(f"{self.surface}: {needle!r} arrived, though this test expected it to stay away")
+            self._raise_reader_overflow()
+            time.sleep(0.05)
+
+    def pause_reader(self) -> None:
+        """Stop draining this session's socket, so the server's writes pile up against it.
+
+        The reader thread stays alive and waits on the flag, so no byte is read and the bytes stay in
+        the socket buffer. That is how a scenario reproduces a viewer that stopped reading, which is
+        the one case the server's shared control path can be delayed by.
+        """
+        self.reader_paused = True
+
     def is_eof(self) -> bool:
         """True when the server closed this session."""
         return bool(self._adapter._e2e_eof)
@@ -560,8 +582,12 @@ class TelnetSession:
         raise AssertionError(f"{self.surface}: none of {needles} appeared\nreceived: {self.text()[-800:]!r}")
 
     def open_control_menu(self) -> str:
-        """Send the escape sequence, which opens the Control menu on this session."""
-        self.send_raw(self.escape_sequence, note=f"escape {self.escape_sequence!r}")
+        """Open the Control menu: the escape prefix, then the menu's own help key.
+
+        The prefix is not the whole command. The listener reads two prefix bytes and then treats the
+        next byte as the mnemonic, so ``?`` is what asks for the menu.
+        """
+        self.send_raw(self.escape_sequence + b"?", note="control menu")
         return self.wait_for_prompt(CONTROL_MENU_HELP_MARKER, timeout=10.0)
 
     # --- bytes ---------------------------------------------------------------------------
@@ -576,9 +602,17 @@ class TelnetSession:
         self.send_raw(text.encode("utf-8") + b"\r\n", note=f"line {text!r}")
 
     def press(self, key: str) -> str:
-        """Send one Control menu key and return the text received so far."""
-        self.send_raw(key.encode("utf-8"), note=f"menu key {key!r}")
-        time.sleep(0.05)
+        """Send the escape prefix and one Control menu key, and return the text received so far.
+
+        Each key needs its own prefix: after one mnemonic the listener goes back to looking for the
+        prefix, so a bare letter after a key is device data on the port.
+        """
+        self.send_raw(self.escape_sequence + key.encode("utf-8"), note=f"menu key {key!r}")
+        return self.text()
+
+    def answer(self, text: str) -> str:
+        """Answer a Control menu prompt, such as the holder id a Takeover asks for."""
+        self.send_line(text)
         return self.text()
 
     def text(self) -> str:
@@ -609,6 +643,19 @@ class TelnetSession:
         """The text after the last occurrence of ``mark``, for a reply that repeats earlier output."""
         text = self.text()
         return text.rsplit(mark, 1)[-1]
+
+    def expect_no_text(self, needle: str, for_seconds: float = 2.0) -> None:
+        """Fail when ``needle`` arrives within ``for_seconds``, and pass while it stays away.
+
+        A blocked keystroke and a prompt a listener must not print both show up as an absence, which
+        only a window proves. Reading here consumes nothing, so a later ``wait_for`` still sees it.
+        """
+        deadline = time.monotonic() + for_seconds
+        while time.monotonic() < deadline:
+            if needle in self.text():
+                raise AssertionError(f"{self.surface}: {needle!r} arrived, though this test expected it to stay away")
+            self._raise_reader_overflow()
+            time.sleep(0.05)
 
     # --- teardown ------------------------------------------------------------------------
 

@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-41 scenarios across 5 suites.
+61 scenarios across 6 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -55,6 +55,27 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | LIF-08 | SIGUSR1 stops and starts every adapter: the client drops, then a new one works. | signal, CLI, server log | `tests/e2e/test_lifecycle.py::test_lif08_a_full_reload_stops_and_restores_the_adapters` |
 | LIF-09 | The local control socket answers a status request, and only its owner may use it. | control socket | `tests/e2e/test_lifecycle.py::test_lif09_the_control_socket_answers_status_locally` |
 | LIF-10 | A client that leaves, by exit or by force, must not leave an ERROR or a traceback behind. | CLI, loopback port, server log | `tests/e2e/test_lifecycle.py::test_lif10_a_session_that_ends_is_closed_without_an_error_in_the_log` |
+| **RW** | | | |
+| RW-01 | The first write-entitled client on a free port drives it, and the holders list names that client. | cli:rw | `tests/e2e/test_write_slot.py::test_rw01_the_first_client_on_a_free_port_holds_the_write_slot` |
+| RW-02 | A page that opens a port someone else drives comes up read-only and says why, in the server's words. | web:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw02_the_second_client_on_a_held_port_is_told_the_seat_is_taken` |
+| RW-03 | The holders list and the web page show the same holder label, built in one place. | web:ro, cli:rw | `tests/e2e/test_write_slot.py::test_rw03_one_holder_label_is_shown_on_every_surface` |
+| RW-04 | On a one-seat port whose seat is held, a request is a failed promote, and the server says so plainly. | cli:rw | `tests/e2e/test_write_slot.py::test_rw04_a_request_on_a_held_one_slot_port_answers_with_the_servers_failure` |
+| RW-05 | The same refusal on three surfaces renders one sentence, which is the point of one wording owner. | cli:rw, telnet:rw, web:rw | `tests/e2e/test_write_slot.py::test_rw05_one_outcome_code_reads_the_same_sentence_on_every_surface` |
+| RW-06 | Release gives the seat up without leaving the port, and the next request is granted. | cli:rw | `tests/e2e/test_write_slot.py::test_rw06_releasing_the_seat_lets_the_next_client_take_it` |
+| RW-07 | A session that goes away releases its seat, so a departed client never blocks a port. | cli:rw | `tests/e2e/test_write_slot.py::test_rw07_a_client_that_leaves_frees_the_seat_for_the_next_one` |
+| RW-08 | A Takeover grants the taker, names the victim to both, and keeps the loser on the port as a viewer. | cli:rw | `tests/e2e/test_write_slot.py::test_rw08_a_takeover_words_both_terminals_and_leaves_the_loser_attached` |
+| RW-09 | Naming a holder in a Takeover takes from that holder, and an id nobody holds is refused by name. | cli:rw | `tests/e2e/test_write_slot.py::test_rw09_a_targeted_takeover_names_one_holder_and_refuses_a_wrong_id` |
+| RW-10 | The port menu's holders key names the label, and its request key answers with the same refusal. | telnet:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw10_the_telnet_menu_reports_the_holder_and_refuses_a_held_seat` |
+| RW-11 | Takeover from the port menu grants the seat, names who it took from, and is written to both logs. | telnet:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw11_a_telnet_takeover_displaces_the_holder_and_is_audited` |
+| RW-12 | On a `multiple` port two write-entitled clients drive together, with no seat to win or lose. | cli:rw | `tests/e2e/test_write_slot.py::test_rw12_a_multiple_port_grants_every_entitled_client_at_once` |
+| RW-13 | A read-only account attaches, watches, and is refused in the module's words when it asks to drive. | cli:ro | `tests/e2e/test_write_slot.py::test_rw13_a_read_only_account_is_refused_the_seat_and_cannot_drive` |
+| RW-14 | A port with no Write slot is read-only for every permission, and says its capacity when asked. | cli:admin, cli:rw | `tests/e2e/test_write_slot.py::test_rw14_a_none_port_keeps_even_admin_read_only_and_names_the_capacity` |
+| RW-15 | A listener configured `read_only` answers its two write keys with its own reason and drops what it types. | telnet:admin | `tests/e2e/test_write_slot.py::test_rw15_a_read_only_listener_refuses_both_write_keys_and_blocks_keystrokes` |
+| RW-16 | `read_write_groups` decides who drives: a member drives, a watcher watches, an outsider is refused. | cli:rw, cli:ro | `tests/e2e/test_write_slot.py::test_rw16_a_port_with_group_lists_opens_only_for_the_names_it_lists` |
+| RW-17 | A page whose attach a group list refuses shows the refusal sentence, and does not pretend to be connected. | web:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw17_a_refused_web_attach_reaches_the_page_with_the_servers_reason` |
+| RW-18 | The page's Take control item is the same Takeover: it grants the page and displaces the holder. | cli:rw, web:rw | `tests/e2e/test_write_slot.py::test_rw18_a_web_page_can_take_the_seat_from_a_cli_holder` |
+| RW-19 | A page demoted by another client changes its mode, its pill, and its body class at once. | web:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw19_a_page_that_loses_the_seat_stops_claiming_it` |
+| RW-20 | Three viewers on one port, one stalled on purpose: a control frame still reaches the others. | cli:ro, cli:rw | `tests/e2e/test_write_slot.py::test_rw20_one_client_that_stops_reading_does_not_hold_up_the_others` |
 | **TIM** | | | |
 | TIM-01 | A timeline line shows control bytes as caret notation and omits the line ending that closes it. | recorder | `tests/e2e/test_story.py::test_tim01_control_bytes_use_caret_notation_and_a_trailing_line_ending_is_dropped` |
 | TIM-02 | The listener's ``IAC WILL ECHO`` reaches the timeline by name, with its option named. | recorder | `tests/e2e/test_story.py::test_tim02_telnet_negotiation_is_named_by_the_rfc854_values` |

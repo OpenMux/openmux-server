@@ -1,8 +1,8 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 3. The harness, the `LIFECYCLE` suite, the scenario index, the browser proof,
-the `AUTH` suite driven over HTTP, and the fourteen `CON` console scenarios driven in Chromium run green. Phases 4-9
-are not written; see **Build status** near the end.
+**Status:** Implemented through Phase 4. The harness, the `LIFECYCLE` suite, the scenario index, the browser proof,
+the `AUTH` suite driven over HTTP, the fourteen `CON` console scenarios driven in Chromium, and the twenty `RW`
+write-slot scenarios run green. Phases 5-9 are not written; see **Build status** near the end.
 **Date:** 2026-10-27
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
 and Telnet at the same time.
@@ -128,9 +128,10 @@ process, so the page keeps receiving frames while Python waits on a socket.
 
 Most scenarios that read as simultaneous are propagation, not concurrency: one surface acts, then the test waits for a
 predicate on another surface. Sequential code does that. Only a few need real simultaneity — two Takeover requests on
-one freed seat (`RW-15`), one Port Action race (`ACT-06`), and `RW-20` below, all three in groups that are not written
-yet. `concurrently([...])` runs actions in threads behind one `threading.Barrier`, joins with a deadline, and returns
-every result or raises once with all of them.
+one freed seat, and one Port Action race (`ACT-06`). `concurrently([...])` runs actions in threads behind one
+`threading.Barrier`, joins with a deadline, and returns every result or raises once with all of them. The freed-seat
+race is not built: `RW-13` covers the seat-frees-then-requested sequence in order, and the simultaneous form is
+available in the `RW` file when it is wanted.
 
 ### Every attached surface keeps a reader
 
@@ -161,10 +162,18 @@ bytes, never on every byte the port ever sent.
 ### RW-20: a stalled viewer
 
 `RW-20` tests the control path: attach three viewers, stop one reader on purpose, then change the viewer set so the
-server broadcasts presence, and assert the other two receive the frame inside one deadline. Nothing in the current
-code gives that guarantee, so the test is expected to fail when it is written. If it does, the fix belongs in the server
-— deliver in parallel with `asyncio.gather`, or skip a client whose write is not draining — and not in the test. The
-scenario is written marked expected-to-fail, so a red first run reads as a product finding and not as a broken harness.
+server broadcasts presence, and assert the other two receive the frame inside one deadline. The scenario was written
+marked expected-to-fail, on the reasoning in the section above that one blocking write holds up every client later in
+the loop.
+
+**Measured 2026-10-26: the scenario passes, so the design expectation was wrong for this shape.** The 512 KiB backlog
+for the stalled viewer travels through the data-forwarding task of that client, and its `drain()` waits there, in that
+one task. `broadcast_control_frame_to_port` ran on its own and delivered the presence frame to both readers that keep
+up, inside one second. Two limits on that result, so it is not read as a general guarantee: a stall still blocks the
+broadcast when the control write of the stalled client is the one that waits, which is the shape of a web or Telnet
+client (`ws.send_str`, `await session.transport.drain()`); and because the port data queue drops its oldest chunk, the
+backlog of the stalled viewer ends where the queue dropped, so the test asserts on the newest bytes only. `RW-20` therefore
+asserts what the product delivers — presence reaches every reader that keeps up — and carries no `xfail`.
 
 ---
 
@@ -292,20 +301,57 @@ the feed rather than to print a note, so `CON-09` reads it from the frame log. W
 half — a page that arrives mid-line still gets the bytes behind the mark — with a page that asks for no scrollback as
 the control, because that page must not replay.
 
-### RW — write slot capacity and Takeover (`test_write_slot.py`, planned: 20)
+### RW — write slot capacity and Takeover (`test_write_slot.py`, built: 20)
 
-Ports at capacity `one`, `multiple`, `none`, and one with `read_write_groups`. First attach granted, second
-`capacity_full`, holders label, request refused on a full seat, release then grant, Takeover words both terminals and
-leaves the loser attached, viewers menu rules, cross-surface Takeover CLI→web and Telnet→CLI, menu parity, entitlement
-refusals, two writers on `multiple`, `none` refused for every permission, read-only input blocked on each surface, two
-simultaneous Takeover requests leave one holder, disconnect frees the seat, group ACL with close code 4003, audit
-records, `read_only: true` listener, stalled viewer (`RW-20`, see
-[Concurrency model](#concurrency-model)).
+Ports at capacity `one`, `multiple`, and `none`, one port with `read_write_groups`, one `read_only: true` listener, and
+one viewer stalled on purpose. Every assertion that quotes a sentence takes it from the Access decision module
+(`decide(...).lines`, `notice(...).message`), because a sentence typed into a test is one sentence that lets a surface
+drift.
 
-Two facts from the Access decision module shape these ids. A `promote_failed` answer is worded by the port capacity
-first, so one Outcome code reads differently on a `one`, `multiple`, and `none` port. And the slot count is an
-invariant that `ConsoleManager._take_slot_local` restores on a half-completed transfer: when the taker's promote fails
-after the demotion, the server promotes the victim again, which is exactly what `RW-15` will assert at process level.
+| Id | Proof |
+| --- | --- |
+| `RW-01` | The first write-entitled client attaches read-write and drives, and the holders list names it in the label shape the module builds. |
+| `RW-02` | A page that opens a held port comes up read-only, answers `capacity_full` in its attach frame, prints no refusal line, and still reads what the holder types. |
+| `RW-03` | One holder label appears in the CLI holders reply and after `Held by` on the page, and a second viewer reads the same label. |
+| `RW-04` | A request on a held one-seat port answers `promote_failed` in the module words, and the frame names the holder that has the seat. |
+| `RW-05` | The same refusal renders the same lines on the CLI protocol, on Telnet, and on the page. |
+| `RW-06` | Release gives the seat up without leaving the port, and the next request is granted. |
+| `RW-07` | A closed socket frees the seat, so a departed client never blocks a port. |
+| `RW-08` | A Takeover grants the taker, names the victim on both terminals, and leaves the loser attached as a viewer. |
+| `RW-09` | A Takeover that names the id the holders list prints takes from that holder, and an id nobody holds is refused by name. |
+| `RW-10` | The Telnet menu holders key prints the same label, and its request key answers with the same refusal lines. |
+| `RW-11` | Takeover from the Telnet menu grants the seat on the empty-target answer, and one line lands in the server log and in the port log. |
+| `RW-12` | A `multiple` port grants both entitled clients at once, shows two holders, and refuses a Takeover there as pointless. |
+| `RW-13` | A read-only account watches, is refused `not_entitled` when it asks to drive, and its keystrokes never reach the port. |
+| `RW-14` | A `none` port keeps admin and a read-write account read-only, answers `no_write_slot` with its capacity, and names no holder. |
+| `RW-15` | A `read_only: true` listener answers both write keys with its own reason, never shows the Takeover prompt, and drops what its session types. |
+| `RW-16` | `read_write_groups` decides who drives, `read_only_groups` decides who watches, an unlisted account is refused at attach, and admin passes the boundary but not a held seat. |
+| `RW-17` | A page whose attach a group list refuses shows the refusal sentence, reports that it is not connected, and the listed member still reaches that port. |
+| `RW-18` | The `Take control` item on the page is the same Takeover: the page goes read-write and the CLI holder is told who took the seat. |
+| `RW-19` | A demoted page changes its mode, its pill, and its `mode-readonly` class at once, prints the module sentence naming the taker, and stops sending keystrokes to the port. |
+| `RW-20` | One viewer stalled on purpose still leaves the presence frame reaching the two readers that keep up. See [Concurrency model](#concurrency-model). |
+
+Three facts from the Access decision module shaped these ids, and all three are measured, not assumed.
+
+- A plain attach grant and a `capacity_full` grant render **no** terminal line on any surface: `lines` is empty and the
+  reason lives in the frame `message`. `RW-01` and `RW-02` read the mode and the frame code instead of a sentence.
+- The sentence in the design draft — that a `promote_failed` answer is worded by the port capacity — is wrong. One
+  place, `ConsoleManager._seat_refusal`, picks the Outcome **code**: `no_write_slot` on a `none` port,
+  `take_without_slot` on a `multiple` port, and `promote_failed` only on a one-seat port whose promote failed. Each code
+  has one wording, so capacity never restyles one code.
+- The slot count is an invariant that `ConsoleManager._take_write_slot_local` restores on a half-completed transfer:
+  when the promote of the taker fails after the demotion, the server promotes the victim again. No `RW` id drives that
+  path at process level yet; it needs a port whose promote fails, which the harness cannot build from a config file.
+
+One measured behavior is recorded here because it surprises a reader: a listener with `read_only: true` gates its own
+write keys and its own data path, but not the mode the access ladder grants at Attach. Such a session can therefore hold
+the Write slot of a one-seat port while it cannot drive the port. Measured 2026-10-26: one session attaches over a
+read-only Telnet listener, the holders list of that Port then names it `admin@127.0.0.1 (rw)`, and a second
+write-entitled client attaches read-only because the seat is gone. That session also answers both write keys with
+`[This listener is configured read-only]`, so no operator can drive the Port until the seat is released. `RW-15` asserts
+the guarantees the knob does give — the reason, the missing Takeover prompt, and the dropped keystrokes — and stays clear
+of the slot, because no document says that knob is meant to release a seat. Whether `read_only: true` should attach
+read-only is an open product question.
 
 ### PWR — power subsystem (`test_power.py`, planned: 16)
 
@@ -384,7 +430,8 @@ Named now so release 1 fixtures stay sufficient.
 | 1 — lifecycle | Done | `LIF-01` to `LIF-10`, plus `IDX-01` and `IDX-02`. |
 | 2 — browser proof | Done | `login()`, `ConsoleSession`, the page hook under `?e2e=1`, with Chromium installed by `make e2e-install`. |
 | 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` waits on a helper-based account, see the note below. |
-| 4-9 | Not started | RW, PWR, CFG, ACT, ST, and the story scenarios. |
+| 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
+| 5-9 | Not started | PWR, CFG, ACT, ST, and the story scenarios. |
 
 - `AUTH-11` (an external helper that grants no permission): outstanding. The `command` authentication backend runs in
   every e2e server, so only the *no-permission* case differs from `AUTH-10`, and the helper would have to be a fixture
@@ -395,15 +442,19 @@ Named now so release 1 fixtures stay sufficient.
 - `CON-11` to `CON-14`: built. A `DeviceStation` (a fake device behind a `tcp_initiator` port) is unplugged and plugged
   back in to drive the port-down banner, one `POST /api/reload` rebuilds the sidebar of an open page, the theme is read
   on its own key, and `embed=1` is measured against a page with the menu visible.
-- `RW-20` a stalled viewer: not written. It needs `test_write_slot.py`, which does not exist yet; see
-  [Concurrency model](#concurrency-model) for what it will assert and why it may report a product defect first.
+- `RW-20` a stalled viewer: built, and it passes. It was planned as an expected failure; see
+  [Concurrency model](#concurrency-model) for what one stalled reader does and does not block.
 
-Three product defects came out of these phases. A clean stop exited 2, which `Restart=on-failure` read as a crash;
+Five product defects came out of these phases. A clean stop exited 2, which `Restart=on-failure` read as a crash;
 `LIF-06` now proves a SIGINT stop exits 0 with no traceback. A client that left without closing its socket cleanly,
 or left while the server was stopping, wrote a traceback into the log; `LIF-10` proves a stop with a client attached
 and a client that dies mid-read leave no error, and that one session is torn down once. And the login lockout never
 engaged, because asking whether an account was locked deleted the count of failures; `AUTH-03` proves the configured
-threshold now locks and releases an account. `CHANGELOG.md` carries an entry for each.
+threshold now locks and releases an account. The write-slot suite found two more. A client attached read-only could ask
+its way into the Write slot, because the request path counted the seat and skipped the access ladder that attach and
+Takeover both run; `RW-13` and `RW-16` prove the refusal now. And a targeted Takeover refused the holder id the holders
+list prints, so an operator could not name the holder the console showed them; `RW-09` proves the round trip. Each defect
+carries a unit guard that fails without the fix, and `CHANGELOG.md` carries an entry for each.
 
 ---
 
