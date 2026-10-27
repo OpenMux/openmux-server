@@ -1991,6 +1991,7 @@ function connectSelected() {
       try {
         const payload = ev.data.slice('OMXCTRL '.length);
         const msg = JSON.parse(payload);
+        e2eRecordFrame(msg);
         if (msg && msg.type === 'power_switch') {
           if (msg.ok === false) {
             let m = (msg && msg.error) ? msg.error : 'power switch failed';
@@ -2202,3 +2203,86 @@ window.addEventListener('keydown', (e) => {
     return false;
   }
 }, true);
+
+// Test hook for the end-to-end scenarios in tests/e2e (docs/design/e2e_test_suite.md).
+// A Playwright scenario cannot read the xterm buffer, because 'term' is local to this file, and
+// '.xterm-rows' shows the visible viewport only. So the hook returns one point-in-time picture of
+// this page instead of letting a test scrape the DOM. It only reads: nothing here can change the
+// page. The object stays undefined unless the URL says '?e2e=1', so a normal session never sees it.
+const e2eEnabled = new URLSearchParams(window.location.search).get('e2e') === '1';
+const E2E_MAX_RECORDED = 200;
+const e2eFrames = [];
+const e2eNotices = [];
+function e2eText(el) { return el && el.textContent ? String(el.textContent).replace(/\s+/g, ' ').trim() : ''; }
+function e2eShown(el) { return !!el && getComputedStyle(el).display !== 'none'; }
+function e2eRecordFrame(msg) {
+  if (!e2eEnabled || !msg || !msg.type) return;
+  if (e2eFrames.length >= E2E_MAX_RECORDED) e2eFrames.shift();
+  e2eFrames.push({ type: String(msg.type), code: msg.code == null ? null : String(msg.code), ok: msg.ok === undefined ? null : !!msg.ok, dir: 'in' });
+  // The server words every access answer in 'lines' (issue #98); keep those sentences too, so a
+  // scenario can assert on a notice even after the terminal scrolled it away.
+  if (msg.code && Array.isArray(msg.lines)) {
+    msg.lines.forEach((raw) => {
+      const line = String(raw).replace(/\s+/g, ' ').trim();
+      if (line && e2eNotices[e2eNotices.length - 1] !== line) e2eNotices.push(line);
+    });
+    if (e2eNotices.length > E2E_MAX_RECORDED) e2eNotices.splice(0, e2eNotices.length - E2E_MAX_RECORDED);
+  }
+}
+function e2eMenuItems(menuEl) {
+  if (!e2eShown(menuEl)) return [];
+  const items = [];
+  menuEl.querySelectorAll('button, li, a').forEach((node) => {
+    if (node.offsetParent === null) return;
+    const label = e2eText(node);
+    if (label) items.push({ label: label, disabled: !!node.disabled });
+  });
+  return items;
+}
+function e2eScreenLines() {
+  const buffer = term.buffer.active;
+  const out = [];
+  // 'buffer.length' counts scrollback plus the viewport, so a scenario sees the whole session.
+  for (let i = 0; i < buffer.length; i += 1) {
+    const line = buffer.getLine(i);
+    out.push(line ? line.translateToString(true) : '');
+  }
+  while (out.length && out[out.length - 1] === '') out.pop();
+  return out;
+}
+function e2eBannerState() {
+  if (!e2eShown(bannerEl)) return { text: null, class: null };
+  const kind = bannerEl.classList.contains('warn') ? 'warn' : bannerEl.classList.contains('error') ? 'error' : null;
+  return { text: e2eText(bannerEl.firstElementChild || bannerEl), class: kind };
+}
+function e2eBadgeState() {
+  if (!e2eShown(powerBadgeWrap)) return 'hidden';
+  if (!powerBadge) return 'shown';
+  const states = ['all', 'some', 'none', 'unknown'];
+  for (let i = 0; i < states.length; i += 1) {
+    if (powerBadge.classList.contains(states[i])) return states[i];
+  }
+  return 'shown';
+}
+if (e2eEnabled) {
+  window.__omxE2E = {
+    view: function () {
+      return {
+        mode: clientMode,
+        connected: !!isConnected(),
+        port: currentPort() || null,
+        connected_port: currentConnectedPort || null,
+        port_up: !!portIsUp,
+        lines: e2eScreenLines(),
+        notices: e2eNotices.slice(),
+        banner: e2eBannerState(),
+        badge: powerBadgeLabel ? e2eText(powerBadgeLabel) : null,
+        badge_state: e2eBadgeState(),
+        viewers: viewersCount ? e2eText(viewersCount) : null,
+        frames: e2eFrames.slice(),
+        body_class: String(document.body.className),
+        menus: { ro: e2eMenuItems(roMenu), ctrl: e2eMenuItems(ctrlMenu), viewers: e2eMenuItems(viewersMenuList || viewersMenu) },
+      };
+    },
+  };
+}

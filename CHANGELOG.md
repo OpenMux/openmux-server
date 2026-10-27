@@ -61,6 +61,11 @@ Changes since v1.0.4 (2026-10-19).
   Power`, and the power adapter stayed down with no clue why. The startup log now names the entry and the reason, for example
   `PDU 'rack1' rejected: poll_interval must be >= 0, got -1.0`, and the adapter factory reports the failure once instead of
   twice. No key changed: fix the value the log names in `server.yaml`.
+- **A clean stop now exits 0.** Ctrl-C and `systemctl stop` ended the server with status 2 (`INVALIDARGUMENT`). The run loop
+  returned nothing after a cancelled shutdown, and `main()` read that as a failed start.
+  `debian/openmux-server.service` ships `Restart=on-failure`, so systemd restarted a server an operator had just stopped, and
+  `systemctl status` showed the stop as a failure. A clean stop now exits 0. A bad config file still exits 1, and a start that
+  fails inside the server still exits 2. No config key changed.
 
 ### Web console and observability
 - **Web console pages ask for their assets by version.** Each page now requests its scripts and stylesheets as
@@ -85,6 +90,15 @@ Changes since v1.0.4 (2026-10-19).
   input" notice until the run finished. The run now publishes `operator_prompt_closed` with `reason: answered` or `expired`,
   and reports the answer as an ordinary run log line (`operator_answered: <answer>`), so both reach every viewer and the
   replayed history for anyone who joins later. A prompt whose `timeout=` the script catches now closes too. No config change.
+- **The console page exports a gated view for tests.** `console.js` defines `window.__omxE2E.view()` only when the URL carries
+  `?e2e=1`. The object only reads page state: the access mode, the terminal buffer, the banner, the power badge, the viewer
+  count, the control frames received, and the visible menu items. Without that query parameter the object does not exist, no
+  page behaviour changes, and nothing on the page can be changed through it. See `tests/e2e/README.md`.
+- **A new end-to-end tier runs the real server.** `make test-e2e` starts the server as its own child process and drives it
+  through the web console, the client listener protocol, Telnet, and the HTTP API. `make test` is unchanged: that tier stays
+  out of the run unless you pass `--run-e2e`, and its browser scenarios skip with the install command when Chromium is
+  missing. Run `make e2e-install` once per machine. `tests/e2e/README.md` explains the world each scenario gets, and
+  `docs/E2E_TESTS.md` lists the scenarios that exist.
 
 ## [1.0.4]
 

@@ -88,6 +88,22 @@ def pytest_configure(config):
 # Skip slow tests by default
 def pytest_addoption(parser):
     parser.addoption("--run-slow", action="store_true", default=False, help="run slow tests")
+    # End-to-end tier. These options live here, not in tests/e2e/conftest.py, because pytest parses
+    # options before it loads a conftest this deep, so a deeper file could not define them.
+    parser.addoption("--run-e2e", action="store_true", default=False, help="run the end-to-end suite in tests/e2e")
+    parser.addoption(
+        "--e2e-live", action="store_true", default=False, help="print each e2e story step and server line as it happens"
+    )
+    parser.addoption(
+        "--e2e-reveal", action="store_true", default=False, help="print each e2e failure in full and keep its artifacts"
+    )
+    parser.addoption("--e2e-headed", action="store_true", default=False, help="run e2e browser tests in a visible window")
+    parser.addoption("--e2e-slowmo", type=int, default=0, help="delay each e2e browser action by N ms, to follow it by eye")
+    parser.addoption("--e2e-keep", action="store_true", default=False, help="keep the artifact bundle of a passing e2e test")
+    parser.addoption("--e2e-artifacts", default=None, help="where e2e failure bundles go (default: artifacts/e2e)")
+    parser.addoption(
+        "--e2e-list", action="store_true", default=False, help="write docs/E2E_TESTS.md from the collected e2e tests and stop"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -96,6 +112,45 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
+    _handle_e2e_collection(config, items)
+
+
+def _handle_e2e_collection(config, items):
+    """Deselect tests/e2e unless asked for, or write the scenario index and stop.
+
+    ``make test`` must keep collecting exactly what it collected before this tier existed, so an
+    e2e test is dropped here rather than skipped: a drop leaves the counts untouched.
+    """
+    e2e_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "e2e")
+    selected = [item for item in items if _item_is_under(item, e2e_root)]
+    if config.getoption("--e2e-list"):
+        _write_e2e_index(config)
+        return
+    if config.getoption("--run-e2e") or not selected:
+        return
+    for item in selected:
+        items.remove(item)
+    config.hook.pytest_deselected(items=selected)
+
+
+def _item_is_under(item, directory):
+    """True when one collected item lives in a directory."""
+    path = str(getattr(item, "path", None) or getattr(item, "fspath", ""))
+    return path.startswith(directory + os.sep)
+
+
+def _write_e2e_index(config):
+    """Write docs/E2E_TESTS.md from the scenarios in tests/e2e, then stop the session.
+
+    The table describes the whole tier, so it is built by scanning the directory rather than from
+    ``items``, which is only what this run selected.
+    """
+    from tests.e2e.index import scan_e2e_dir, write_index
+
+    rows = scan_e2e_dir()
+    target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "E2E_TESTS.md")
+    written = write_index(target, rows)
+    pytest.exit(f"wrote {len(rows)} scenarios to {os.path.relpath(written)}", returncode=0)
 
 
 # Common fixtures

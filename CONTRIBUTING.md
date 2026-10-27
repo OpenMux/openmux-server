@@ -85,6 +85,14 @@ except SpecificError as e:
 ## Tests
 - Add regression tests for protocol-level changes.
 - For new adapters, include connection + basic lifecycle tests (connect/auth/list/connect-port/send/read/close).
+- Run `make test` for the in-process suite. It builds objects and passes fakes; it never starts a server process.
+- When a change alters what a user sees on a surface — a permission answer, a banner, a reload, a power badge — add or
+  update a scenario in [`tests/e2e/`](tests/e2e/README.md) and run `make test-e2e`. That tier starts the real server as a
+  child process and drives the web console, the client listener protocol, Telnet, and the HTTP API. Run `make e2e-install`
+  once per machine to get the browser it needs.
+- Three rules keep that tier honest. Never edit `config/` to make a scenario pass; write the config through `ConfigBuilder`.
+  Wait on a condition (`wait_for_text`, `wait_for_view`, `wait_for_log`), never on a fixed sleep. Assert on the sentence the
+  server wrote (see [ADR-0001](docs/adr/0001-access-wording-belongs-to-the-server.md)), not on a sentence the test invented.
 
 
 ## Contributor License Terms (No License Yet)

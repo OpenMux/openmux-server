@@ -702,6 +702,11 @@ class OpenMuxServer:
 
             # Keep server running indefinitely
             await self._run_server_loop()
+            # Reaching this line means shutdown was requested and its handler already ran the
+            # stop sequence, so this is a clean stop rather than a startup failure. Falling off
+            # the end returned None, which made main() exit 2: `systemctl stop` and Ctrl-C both
+            # recorded status=2/INVALIDARGUMENT for a success.
+            return True
 
         except asyncio.CancelledError:
             # Shutdown is being handled by signal handler, exit gracefully

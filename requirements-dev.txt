@@ -16,3 +16,4 @@ black>=22.3.0
 isort>=5.10.0
 ruff>=0.4.0
 setuptools-scm>=8  # build backend for the dynamic (git-derived) version
+playwright>=1.40  # tests/e2e browser tier; also run: make e2e-install

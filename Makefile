@@ -35,6 +35,7 @@ reload-full:
 
 
 .PHONY: test test-unit test-integration test-all test-coverage lint format format-check clean \
+	test-e2e test-e2e-live test-e2e-debug e2e-install e2e-doc e2e-serve \
 	venv venv-dev venv-destroy \
 	build package install install-dev install-user uninstall \
 	dist upload upload-test check \
@@ -271,6 +272,45 @@ test-coverage: venv-dev
 	$(call print_status,"Running tests with coverage...")
 	$(PYTHON_VENV) -m pytest -v --cov=openmux --cov-report=term-missing --cov-report=html
 	$(call print_success,"Coverage tests completed")
+
+# Run the end-to-end tier (tests/e2e). `make test` never collects it: these tests start a real
+# server process, and some start a browser, so they run only through these targets.
+# Coverage is off because the child process is what is measured, and pytest-cov cannot see it.
+test-e2e: venv-dev
+	$(call print_status,"Running end-to-end tests...")
+	$(PYTHON_VENV) -m pytest --run-e2e -m e2e --no-cov -q
+	$(call print_success,"End-to-end tests completed")
+
+# Same, with the timeline and the server output on stdout and a visible browser window.
+test-e2e-live: venv-dev
+	$(call print_status,"Running end-to-end tests with live narration...")
+	$(PYTHON_VENV) -m pytest -s --run-e2e --e2e-live -m e2e --no-cov -q
+	$(call print_success,"End-to-end tests completed")
+
+# One scenario, kept alive and paused on failure so a human can inspect the page.
+# Usage: make test-e2e-debug TEST=rw06
+test-e2e-debug: venv-dev
+	$(call print_status,"Debugging end-to-end scenario $(TEST)...")
+	$(PYTHON_VENV) -m pytest -s --run-e2e --e2e-reveal --e2e-live -m e2e --no-cov -k "$(TEST)"
+	$(call print_success,"End-to-end debug run finished")
+
+# Install the browser the tier drives. Run once per machine.
+e2e-install: venv-dev
+	$(call print_status,"Installing Playwright and Chromium...")
+	$(PYTHON_VENV) -m pip install playwright
+	$(PYTHON_VENV) -m playwright install chromium
+	$(call print_success,"End-to-end browser installed")
+
+# Regenerate docs/E2E_TESTS.md from the collected scenarios. A test fails when it is stale.
+e2e-doc: venv-dev
+	$(call print_status,"Regenerating the end-to-end scenario index...")
+	$(PYTHON_VENV) -m pytest --e2e-list --no-cov -q
+	$(call print_success,"docs/E2E_TESTS.md regenerated")
+
+# The dev server on the working config, for a browser session you drive by hand.
+e2e-serve: init-config
+	$(call print_status,"Serving the web console from $(CONFIG_LOCAL) (Ctrl-C to stop)...")
+	$(PYTHON_VENV) -m openmux.server.main --config-dir $(CONFIG_LOCAL)
 
 # Run linters
 lint: venv-dev

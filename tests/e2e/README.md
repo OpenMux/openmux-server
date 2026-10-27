@@ -1,0 +1,176 @@
+# End-to-end tests
+
+This tier runs the real server as a child process and drives it the way an operator does: with the
+CLI protocol, a Telnet client, the HTTP API, and a Chromium tab. A test here never imports
+`OpenMuxServer` and never patches a product object. It starts a server, watches what a surface shows,
+and stops the server.
+
+Read [`docs/design/e2e_test_suite.md`](../../docs/design/e2e_test_suite.md) for why each scenario
+exists and what it must prove. Read [`docs/E2E_TESTS.md`](../../docs/E2E_TESTS.md) for the list of
+scenarios that exist today. This file explains how to run the tier and how to add to it.
+
+## Run it
+
+The tier is off by default. Plain `make test` deselects every file in this directory, so its results
+and its run time stay out of the unit suite.
+
+| Command | What it does |
+| --- | --- |
+| `make test-e2e` | Runs every scenario, including the browser ones when Chromium is present. |
+| `make test-e2e-live` | Same, and prints the merged timeline to the terminal as the test runs (`-s`). |
+| `make test-e2e-debug TEST=con01` | Runs one scenario with live output, and holds a failure open for a person. |
+| `make e2e-install` | Installs Playwright and Chromium into `.venv`. Needed once per machine. |
+| `make e2e-doc` | Regenerates [`docs/E2E_TESTS.md`](../../docs/E2E_TESTS.md) from the tests. |
+| `make e2e-serve` | Starts the server on the `config-local/` world, for checking a page by hand. |
+
+The same commands without the Makefile:
+
+```bash
+.venv/bin/python -m pytest --run-e2e -m e2e --no-cov -q tests/e2e
+.venv/bin/python -m pytest --run-e2e -m e2e --no-cov -q tests/e2e/test_console.py
+```
+
+| Option | Effect |
+| --- | --- |
+| `--run-e2e` | Include this tier. Without it, pytest deselects every test here. |
+| `--e2e-live` | Echo every timeline line as it is written. Needs `pytest -s` to be useful. |
+| `--e2e-reveal` | On a failure, print the bundle and the live URLs, and wait for Enter when a terminal is attached. Also implies `--e2e-keep`. |
+| `--e2e-headed` | Open a visible browser window. `--e2e-live` implies it. |
+| `--e2e-slowmo N` | Delay each browser action by `N` ms, to follow it by eye. |
+| `--e2e-keep` | Keep the artifact bundle even when the test passes. |
+| `--e2e-artifacts DIR` | Where failure bundles go. Default `artifacts/e2e`. |
+| `--e2e-list` | Write the scenario index and exit without running a test. |
+
+`E2E_LIVE=1` and `E2E_REVEAL=1` do the same as the two matching options, for a shell where you cannot
+add flags.
+
+A browser scenario skips, with the install command in the reason, when Playwright or Chromium is
+missing. It never fails for that reason, so a machine without a browser still runs the rest of the
+tier.
+
+## What is in this directory
+
+| File | Job |
+| --- | --- |
+| `harness.py` | `ConfigBuilder` writes an isolated config, `E2EServer` starts and stops one server process, `Api` calls the HTTP API with Basic auth, `free_ports` reserves ports. |
+| `textclients.py` | `CliSession` speaks the CLI protocol through the product's own `TcpClientAdapter`. `TelnetSession` drives the port menu over a raw socket. |
+| `console.py` | `ConsoleSession` and `login()` drive a Chromium page and read it through the page hook. Playwright is imported lazily. |
+| `story.py` | `Timeline` merges every surface into one log, `Story` numbers the steps of a scenario, `step()` marks a block, `surfaces()` names what a test observes, `concurrently()` runs two clients at once. |
+| `index.py` | Builds the scenario table from the test files themselves, for [`docs/E2E_TESTS.md`](../../docs/E2E_TESTS.md). |
+| `conftest.py` | The fixtures: `server`, `servers`, `api`, `story`, `timeline`, `console`, `clients`, `browser`. |
+| `test_*.py` | The scenarios. One file per suite. |
+
+## The world a test gets
+
+The `server` fixture starts one server with a small, fixed world:
+
+- Users `admin` (admin), `rw` (read-write), `ro` (read-only). Every user uses the password in
+  `harness.TEST_PASSWORD`. The password is synthetic and appears in logs on purpose.
+- Ports `loop1` (a Loopback port, which echoes what it receives) and `cat1` (a command port running
+  `/bin/cat`, so a teardown can prove a child process dies with the server).
+- A web console, a client listener, and a Telnet listener, each on a free port of its own.
+- Its own config directory, state directory, log directory, run directory, and PID file. Nothing here
+  reads or writes `config/`, `config-local/`, or `~/.openmux`.
+
+Build a different world with the `servers` factory, which takes the same knobs plus a `configure` hook:
+
+```python
+def test_rw07_a_blocked_world_refuses_every_client(servers, story):
+    server = servers(name="deny-all", configure=lambda builder: builder.with_access_default("deny"))
+```
+
+Never edit `config/` to make a test pass. It holds the shipped defaults. A test that needs a config
+file writes it through `ConfigBuilder`, or replaces the generated `server.yaml` with
+`servers(raw_server_yaml=...)`.
+
+## Writing a scenario
+
+1. Name the function `test_<suite><number>_<short title>`, for example
+   `test_con01_a_signed_in_user_opens_the_console`. The name carries the scenario id (`CON-01`), which
+   is how the index and [`docs/design/e2e_test_suite.md`](../../docs/design/e2e_test_suite.md) match a
+   row to code.
+2. Write a one-sentence docstring. The index uses it as the scenario title, so it must say what the
+   test proves.
+3. Add `@surfaces("web:rw", "cli:ro")`. Every surface a scenario observes is listed, so a reader can
+   see what a skip costs. Names are `web:<role>`, `cli:<role>`, `telnet:<role>`, `http`,
+   `server log`, and `collection`.
+4. Split the body into `with step("...")` blocks. Each step is one line in the timeline, so a failure
+   says where the story stopped.
+5. Assert on what a user sees or reads: the terminal text, the mode, a banner, a frame's `code`, the
+   server's own sentence. Do not assert on a private attribute, and do not assert on a sentence the
+   product never wrote.
+6. Wait on a condition, never on a fixed sleep. Use `wait_for_view`, `wait_for_text`,
+   `wait_for_frame`, or `wait_for_log`.
+7. Prove the negative case in the same way. `expect_no_text` and `expect_absent` watch for a moment
+   and fail if the thing appears.
+8. Run the scenario, then run `make e2e-doc`. The index test fails until the committed table matches
+   the scenarios that exist.
+
+Read [`CONTRIBUTING.md`](../../CONTRIBUTING.md) before you touch an `except Exception` block in this
+tier: the same rule applies here, and a harness that swallows an error hides a product fault.
+
+## When a scenario fails
+
+A passing test deletes its bundle. A failing test keeps one under `artifacts/e2e/<file>/<test>/`:
+
+| File | What it holds |
+| --- | --- |
+| `timeline.log` | One merged stream: the cast list, numbered steps, every client action, every frame with `OMXCTRL` decoded, every server log line, and one `FAIL` line. Read this first. |
+| `server-<name>.log` | Everything the server process wrote to stdout and stderr. |
+| `portlog-<port>.log` | The data log the port adapter wrote for that port. |
+| `config/` | The exact `server.yaml`, `authentication.yaml`, and `security.yaml` that run used. |
+| `<surface>.failure.png` | A screenshot of each browser page at the moment of failure, named by its surface, for example `web-rw.failure.png`. |
+| `<surface>.trace.zip` | A Playwright trace for that page. Open it with `playwright show-trace <file>`. |
+| `meta.json` | Ports, ports' kinds, the config directory, and the run directory of each server. |
+
+To investigate with the page and the server still alive, run `make test-e2e-debug TEST=<name>`. On a
+failure the run prints the bundle path and each page URL, then waits for Enter. Without a terminal it
+prints and carries on, so a batch run never blocks.
+
+## The page hook
+
+A test cannot read the xterm buffer from outside, because
+[`console.js`](../../openmux/server/webui/static/js/console.js) keeps the terminal in a file-scoped
+`term`, and the `.xterm-rows` DOM shows the visible rows only. So that file exports
+`window.__omxE2E.view()` when, and only when, the URL carries `?e2e=1`. `console.py` reads that one
+function and nothing else.
+
+`view()` returns one point-in-time picture:
+
+| Key | Value |
+| --- | --- |
+| `mode` | `read-write` or `read-only`, as the server's `client_mode` frame said. |
+| `connected`, `port`, `connected_port`, `port_up` | The session state of this page. |
+| `lines` | The whole xterm buffer, scrollback first, trailing spaces stripped. A lone CR shows as a control picture, so match a round trip with a substring. |
+| `notices` | The `lines` of every frame that carried a `code`, oldest first, capped at 200. |
+| `banner` | `{text, class}` of the banner region, `{null, null}` when hidden. |
+| `badge`, `badge_state` | The power badge label, and its tint: `all`, `some`, `none`, `unknown`, `hidden`. |
+| `viewers` | The viewer count shown in the header. |
+| `frames` | Every control frame this page received, as `{type, code, ok, dir}`. |
+| `body_class` | `document.body` classes, which carry `mode-readonly`, `ws-down`, and `port-down`. |
+| `menus` | The visible items of `ro`, `ctrl`, and `viewers`, each as `{label, disabled}`. |
+
+Two rules keep that hook small enough to trust:
+
+- It only reads. Nothing in the hook changes the page, and the object is undefined without `?e2e=1`.
+  `test_con02` proves both.
+- When you add a state region to the console, add it to `view()` and to this table in the same change.
+  A test that reads the DOM instead will break on the next `innerHTML` update.
+
+A stray comma in that file kills every console behaviour with no build error, and the first sign is
+that sub-views stop switching. `ConsoleSession.open()` therefore fails with a message that names
+`console.js` when the hook is missing, and `node --check
+openmux/server/webui/static/js/console.js` catches the syntax error before a test run.
+
+## Machine notes
+
+- Chromium is not downloaded by `pip`. Run `make e2e-install` once; it needs network access.
+- macOS caps a Unix socket path at 104 bytes, and a pytest temp path is close to that already. The
+  run directory is therefore a short directory under `/tmp`, and the harness removes it when the
+  server exits cleanly.
+- Use `pgrep -P <pid>` to list a server's children. The `ps -o pid= -ppid` form is not portable and
+  fails on macOS.
+- The default world's Telnet listener is unauthenticated on purpose, so a scenario can walk the port
+  menu. The server logs a warning about it at boot, which is expected and not a failure.
+- One test server costs about 1 second to boot. The whole tier is a few tens of seconds, which is why
+  it does not run inside `make test`.

@@ -7,6 +7,13 @@ Artifacts
 - Server config: `config/integration_test.yaml` (ports: `loop1`, `cat`, and optional `vserial1`)
 - Script: `scripts/smoke_workflow.py` (starts server, runs client flows)
 
+Automated coverage
+- The same flows also run on every `make test-e2e`. That tier starts its own server, and proves the
+  boot, the anonymous probe, a CLI round trip on a Loopback port, and a command port echo. See the
+  `LIF` rows in [E2E_TESTS.md](E2E_TESTS.md).
+- Keep this script for the two things the automated tier does not do: a check by hand on a machine you
+  just set up, and an optional serial peer through `socat`.
+
 Prerequisites
 - Python venv with project installed (`pip install -r requirements.txt`)
 - Optional serial test: install `socat` and run `./setup_virtual_serial.sh` in another terminal

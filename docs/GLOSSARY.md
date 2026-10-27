@@ -124,6 +124,23 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Control menu | The in-band Ctrl+E,c command menu on telnet/SSH sessions for read-write access control. | escape menu |
 | Escape sequence | The two-byte prefix (default Ctrl+E then `c`) that opens the control menu. | escape code |
 
+## End-to-End Test Harness
+
+These terms name the parts of [`tests/e2e/`](../tests/e2e/README.md). Use **Surface** for the key a scenario labels a
+client with; `Timeline.record` already names its first argument `surface`, so "role" is not a second name for the same
+thing.
+
+| Term | Meaning | Do not use |
+|---|---|---|
+| Scenario | One end-to-end behaviour with a scenario id (`LIF-01`), a one-line title from its docstring, and a surface list from `@surfaces(...)`. The id comes from the test function name, and `docs/E2E_TESTS.md` lists every one. | test case (for the plan entry), story (for the plan entry), case |
+| Surface | One way an operator reaches the server that a scenario observes, named `<transport>:<actor>`: `web:rw`, `web:ro`, `cli:holder`, `telnet:viewer`. The same key names the timeline column, the browser context, and the artifact file. Bare names (`http`, `server log`, `collection`) cover surfaces with no actor. | channel, transport (for the observed surface), role (for the surface key), tab (for the actor) |
+| Timeline | The one merged log a scenario writes: the cast list, numbered steps, every client action, every control frame with `OMXCTRL` decoded, and every server log line, in one order with a monotonic clock. | combined log, journal, server log (for the merged stream) |
+| Story | The harness object that numbers the steps of one scenario and writes them, plus their outcome, onto the **Timeline**. | narrative, script, test log |
+| Failure bundle | The directory one failed scenario keeps under `artifacts/e2e/<file>/<test>/`: the timeline, the server output, the port data logs, the config used, one screenshot and one trace per browser surface, and `meta.json`. A passing scenario deletes it. | report, dump, artifacts (for one directory) |
+| World | The users, ports, and listeners one scenario starts with. The default world is `admin`/`rw`/`ro`, ports `loop1` and `cat1`, and the web, client, and Telnet listeners. | fixture, sandbox, baseline, environment |
+| Reveal mode | `--e2e-reveal`: on a failure, print the bundle path and each live page URL, keep the artifacts, and wait for Enter when a terminal is attached. | debug mode, pause mode |
+| Page hook | `window.__omxE2E.view()`, the read-only picture of the console page that [`console.js`](../openmux/server/webui/static/js/console.js) exports only when the URL carries `?e2e=1`. `tests/e2e/console.py` is its only reader. | debug hook, test API, `__omxE2E` (in prose) |
+
 ## Notes for Writers
 
 - If you must introduce a new term, add it to this file in the same commit.
