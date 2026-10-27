@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import pytest
 
 from .console import Browser, ConsoleSession, browser_available, login
-from .harness import TEST_PASSWORD, Api, ConfigBuilder, E2EServer, ServerAddress, free_ports
+from .harness import TEST_PASSWORD, Api, ConfigBuilder, E2EServer, HttpSession, ServerAddress, free_ports
 from .story import Story, Timeline, artifact_dir_for, environment_flags
 from .textclients import CliSession, TelnetSession, open_cli_client, open_telnet_client
 
@@ -381,6 +381,31 @@ def api_for_server() -> Callable[[E2EServer], Api]:
 def api(api_for: Callable[..., Api]) -> Api:
     """The admin ``Api`` for the running server: setup and cross-checks, never a UI substitute."""
     return api_for("admin")
+
+
+@pytest.fixture
+def web_for(story: Story) -> Callable[..., HttpSession]:
+    """Build one cookie-keeping HTTP session for any server.
+
+    Each session is its own visitor: cookies are not shared, so a scenario can hold a signed-in
+    session and an anonymous one at the same time, and the lockout counter stays per session too.
+    """
+
+    def build(target: E2EServer, surface: str = "http") -> HttpSession:
+        return HttpSession(target.web_url, surface=surface, timeline=story.timeline)
+
+    return build
+
+
+@pytest.fixture
+def web(web_for: Callable[..., HttpSession], server: E2EServer) -> HttpSession:
+    """One anonymous HTTP session on the running server.
+
+    ``Api`` sends Basic credentials and no cookie, which is the path exempt from the CSRF check. This
+    is the other path: the one a browser fence takes, where a redirect, a cookie, or a missing token is
+    what the scenario asserts on.
+    """
+    return web_for(server)
 
 
 # --- browser ---------------------------------------------------------------------------------

@@ -6,10 +6,21 @@ observes, and its location. A test with no scenario id, no title, or no `e2e_sur
 up as `?` and fails the index test.
 
 
-19 scenarios across 4 suites.
+29 scenarios across 5 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
+| **AUTH** | | | |
+| AUTH-01 | The login form accepts a configured user and issues a session cookie with its attributes. | http | `tests/e2e/test_auth.py::test_auth01_the_login_form_hands_out_a_session_cookie` |
+| AUTH-02 | A bad password or an unknown account keeps the visitor signed out, with one shared refusal. | http | `tests/e2e/test_auth.py::test_auth02_a_wrong_password_is_answered_with_the_pages_own_sentence` |
+| AUTH-03 | Repeated failures for one account are refused before the password is checked, then released. | http | `tests/e2e/test_auth.py::test_auth03_too_many_failed_logins_lock_the_account_and_then_release_it` |
+| AUTH-04 | A redirect to the login page carries the requested page, and the form hands it back. | http | `tests/e2e/test_auth.py::test_auth04_the_login_page_returns_the_visitor_to_the_page_they_asked_for` |
+| AUTH-05 | Signing out clears the cookie, and every page behind it asks for a login again. | http | `tests/e2e/test_auth.py::test_auth05_logout_clears_the_cookie_and_the_page_asks_to_sign_in_again` |
+| AUTH-06 | Basic credentials and a session cookie are two separate decisions, not a combined one. | http | `tests/e2e/test_auth.py::test_auth06_a_bad_basic_header_is_refused_even_with_a_valid_cookie` |
+| AUTH-07 | The Config Editor belongs to administrators: an administrator opens it and every other level is told ``403``. | http | `tests/e2e/test_auth.py::test_auth07_the_config_editor_answers_per_permission_level` |
+| AUTH-08 | A cookie alone cannot write config: the token check answers first and the config files stay as they were. | http, config files | `tests/e2e/test_auth.py::test_auth08_a_session_post_without_the_csrf_token_is_refused_before_it_writes` |
+| AUTH-09 | Scripting with credentials skips the token check, and still stops at the caller's permission level. | http, config files | `tests/e2e/test_auth.py::test_auth09_the_basic_path_needs_no_token_and_never_rises_above_its_permission` |
+| AUTH-10 | A trust header signed with ``sso_secret`` is believed, its permission included, and every forgery is refused. | http, server config | `tests/e2e/test_auth.py::test_auth10_only_the_holder_of_the_sso_secret_may_speak_for_a_user` |
 | **CON** | | | |
 | CON-01 | A read-write user opens the console on a Loopback port and sees their own text come back. | web:rw | `tests/e2e/test_console.py::test_con01_a_signed_in_user_opens_the_console_and_gets_their_text_back` |
 | CON-02 | The page exports its test hook only when the URL carries ``?e2e=1``. | web:admin | `tests/e2e/test_console.py::test_con02_the_test_hook_stays_off_unless_the_url_asks_for_it` |

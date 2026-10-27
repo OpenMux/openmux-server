@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -67,6 +68,50 @@ def password_hash(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def sso_v1_header(
+    secret: str,
+    user: str = "sso-user",
+    perm: Optional[str] = None,
+    node: Optional[str] = None,
+    issued_at: Optional[int] = None,
+    expires_at: Optional[int] = None,
+    tamper: bool = False,
+) -> str:
+    """Build one ``v1`` trust-header value, exactly as the server verifies it.
+
+    The format is ``v1;<base64url of the JSON claims>;<hex HMAC-SHA256 of the base64 text>``, and the
+    server reads ``user``, ``perm``, ``node``, ``iat``, and ``exp`` from those claims. A scenario that
+    wants the refusal case passes ``tamper=True``, which keeps a well-formed header and breaks the
+    signature.
+
+    Args:
+        secret: The ``web_console.sso_secret`` the server is configured with.
+        user: Claimed identity.
+        perm: Claimed permission override, for example ``admin``.
+        node: Claimed server id. Leave unset, because a node the server does not know is refused.
+        issued_at: Claim issue time. Defaults to now.
+        expires_at: Claim expiry time. Defaults to five minutes from now.
+        tamper: Flip one signature character while keeping the header well formed.
+
+    Returns:
+        str: The header value.
+    """
+    claims: Dict[str, Any] = {"iat": int(time.time()) if issued_at is None else issued_at}
+    claims["exp"] = int(time.time()) + 300 if expires_at is None else expires_at
+    claims["user"] = user
+    if perm:
+        claims["perm"] = perm
+    if node:
+        claims["node"] = node
+    raw = json.dumps(claims, separators=(",", ":")).encode("utf-8")
+    payload = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    mac = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if tamper:
+        last = "0" if mac[-1] != "0" else "1"
+        mac = mac[:-1] + last
+    return f"v1;{payload};{mac}"
+
+
 class ConfigBuilder:
     """Builds one synthetic server config directory.
 
@@ -97,6 +142,11 @@ class ConfigBuilder:
         self._actions: Dict[str, Any] = {}
         self._writable_sections: Optional[List[str]] = None
         self._access_default = "allow"
+        self._rate_limits: Dict[str, Any] = {
+            "window_seconds": 300,
+            "failure_threshold": 5,
+            "base_lock_seconds": 30,
+        }
 
     # --- guards --------------------------------------------------------------------------
 
@@ -269,6 +319,34 @@ class ConfigBuilder:
         self._access_default = value
         return self
 
+    def with_login_lockout(self, window_seconds: int, failure_threshold: int, base_lock_seconds: int) -> "ConfigBuilder":
+        """Set ``security.yaml`` ``rate_limits.authentication``, which gates the login form.
+
+        The shipped default (5 failures in 300 s, then a 30 s lock) is right for an operator and far
+        too slow for a scenario that proves the lock and its release. A scenario that lowers
+        ``base_lock_seconds`` must keep the lock longer than the network round trip it asserts on.
+        """
+        self._rate_limits = {
+            "window_seconds": int(window_seconds),
+            "failure_threshold": int(failure_threshold),
+            "base_lock_seconds": int(base_lock_seconds),
+        }
+        return self
+
+    def with_sso(self, secret: Optional[str], header: str = "X-OMX-SSO") -> "ConfigBuilder":
+        """Set the ``web_console`` trust-header keys, and rename the header if asked.
+
+        With ``secret`` unset the server accepts no ``v1`` header, because an unsigned header used to
+        allow an unauthenticated admin takeover. ``sso_max_skew_sec`` stays at its default, so a claim
+        signed with a fresh ``iat`` is inside the window.
+        """
+        if self._web is None:
+            raise ValueError("with_sso needs a web console: call with_web() first")
+        self._web["sso_trust_header"] = header
+        if secret is not None:
+            self._web["sso_secret"] = secret
+        return self
+
     def with_log_dir(self, log_dir: Path) -> "ConfigBuilder":
         """Put the server's own log file under ``log_dir`` instead of the working directory."""
         self.log_dir = Path(log_dir)
@@ -320,7 +398,7 @@ class ConfigBuilder:
         return {
             "adapters": {"allowed": ["*"], "disabled": []},
             "config_editor": editor,
-            "rate_limits": {"authentication": {"window_seconds": 300, "failure_threshold": 5, "base_lock_seconds": 30}},
+            "rate_limits": {"authentication": dict(self._rate_limits)},
             "access_default": self._access_default,
         }
 
@@ -838,6 +916,236 @@ class Api:
         )
         payload = _json_or_text(text)
         return payload if isinstance(payload, dict) else {}
+
+
+class HttpSession:
+    """One cookie-keeping HTTP session: what a browser does, which ``Api`` cannot do.
+
+    ``Api`` sends Basic credentials and no cookie, which is the path exempt from the CSRF check. This
+    class keeps the session cookie that ``POST /login`` issues, never follows a redirect, and keeps the
+    raw ``Set-Cookie`` headers, so a scenario can prove the refusal paths a signed-in or anonymous
+    visitor meets: the login page, the redirect target, the cookie attributes, the CSRF rule, and the
+    lockout page.
+
+    A scenario about refusals must see the refusal, so every method accepts any status unless it is
+    told otherwise with ``expect``.
+
+    Args:
+        base_url: Server root, for example ``http://127.0.0.1:53110``.
+        surface: Timeline surface name, default ``http``.
+        timeline: Optional ``Timeline``, so a failure shows each request with its status.
+    """
+
+    def __init__(self, base_url: str, surface: str = "http", timeline: Any = None, cookie_name: str = "omx_session"):
+        self.base_url = base_url.rstrip("/")
+        self.surface = surface
+        self.timeline = timeline
+        self.cookie_name = cookie_name
+        self._jar: Dict[str, str] = {}
+        #: The raw ``Set-Cookie`` headers of the last response, in order. The attributes are what a
+        #: scenario asserts on, and folding them into a dict would lose them.
+        self.set_cookies: List[str] = []
+        self.last_status: int = 0
+        self.last_headers: Dict[str, str] = {}
+        self.last_body: str = ""
+
+    # --- what the last response said -------------------------------------------------------
+
+    @property
+    def cookie(self) -> Optional[str]:
+        """The session cookie value this session holds, or ``None`` when signed out."""
+        return self._jar.get(self.cookie_name)
+
+    @property
+    def csrf_token(self) -> str:
+        """The CSRF token, which for this product is the session id itself."""
+        value = self.cookie
+        if not value:
+            raise AssertionError("this session has no cookie to carry a CSRF token: sign in first")
+        return value
+
+    @property
+    def location(self) -> Optional[str]:
+        """The ``Location`` header of the last response, unmodified."""
+        return self.header("Location")
+
+    def header(self, name: str) -> Optional[str]:
+        """One response header of the last response, whatever case the server sent it in.
+
+        Header names are case-insensitive, and aiohttp and a proxy do not always agree on the case,
+        so a scenario must be able to ask for ``WWW-Authenticate`` and find it.
+        """
+        wanted = name.lower()
+        for key, value in self.last_headers.items():
+            if key.lower() == wanted:
+                return value
+        return None
+
+    def body_contains(self, needle: str) -> bool:
+        """True when the last body holds ``needle`` (the login page says its own sentence)."""
+        return needle in self.last_body
+
+    # --- requests --------------------------------------------------------------------------
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[bytes] = None,
+        content_type: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+        expect: Optional[Tuple[int, ...]] = None,
+        csrf: bool = False,
+    ) -> Tuple[int, Dict[str, str], str]:
+        """Send one request with the current cookie jar, and keep any cookie handed back.
+
+        Raises:
+            AssertionError: when ``expect`` is set and the status is outside it.
+        """
+        url = path if path.startswith("http") else f"{self.base_url}{path}"
+        sent = dict(headers or {})
+        if csrf:
+            sent["X-OMX-CSRF"] = self.csrf_token
+        if self._jar:
+            sent["Cookie"] = "; ".join(f"{name}={value}" for name, value in self._jar.items())
+        if content_type:
+            sent["Content-Type"] = content_type
+        request = urllib.request.Request(url, data=body, headers=sent, method=method.upper())
+        self._record("out", f"{method.upper()} {path}")
+        opener = urllib.request.build_opener(_NoRedirect())
+        try:
+            with opener.open(request, timeout=20) as response:
+                status, raw_headers, payload = response.status, response.headers, response.read()
+        except urllib.error.HTTPError as error:
+            status, raw_headers, payload = error.code, error.headers or {}, error.read()
+        self.set_cookies = list(raw_headers.get_all("Set-Cookie", [])) if raw_headers else []
+        self._apply_cookies(self.set_cookies)
+        self.last_status = int(status)
+        self.last_headers = {key: value for key, value in (raw_headers.items() if raw_headers else [])}
+        self.last_body = payload.decode("utf-8", errors="replace")
+        self._record("in", self._summary_of_last())
+        if expect is not None and self.last_status not in expect:
+            raise AssertionError(
+                f"{method.upper()} {url} -> {self.last_status}, expected {expect}\n{response_snippet(self.last_body)}"
+            )
+        return self.last_status, self.last_headers, self.last_body
+
+    def get(self, path: str, **kwargs: Any) -> Tuple[int, Dict[str, str], str]:
+        """One ``GET``, with the cookie jar."""
+        return self.request("GET", path, **kwargs)
+
+    def post_form(self, path: str, fields: Dict[str, str], **kwargs: Any) -> Tuple[int, Dict[str, str], str]:
+        """One ``POST`` with an ``application/x-www-form-urlencoded`` body, as an HTML form sends."""
+        encoded = urllib.parse.urlencode(fields).encode("utf-8")
+        return self.request("POST", path, body=encoded, content_type="application/x-www-form-urlencoded", **kwargs)
+
+    def post_json(self, path: str, payload: Any, **kwargs: Any) -> Tuple[int, Dict[str, str], str]:
+        """One ``POST`` with a JSON body."""
+        return self.request("POST", path, body=json.dumps(payload).encode("utf-8"), content_type="application/json", **kwargs)
+
+    def with_basic(self, username: str, password: str = TEST_PASSWORD) -> "BasicSession":
+        """A view of this session that also sends Basic credentials, for the CSRF-exempt path."""
+        return BasicSession(self, username, password)
+
+    # --- the login flow --------------------------------------------------------------------
+
+    def login(
+        self,
+        username: str,
+        password: str = TEST_PASSWORD,
+        next_url: Optional[str] = None,
+        expect: Optional[Tuple[int, ...]] = None,
+    ) -> Tuple[int, Dict[str, str], str]:
+        """Fill and submit the real login form. Returns the response without following its redirect.
+
+        Goes through the form, not a hand-built cookie, so a change to the login page fails a scenario
+        instead of being hidden by a shortcut.
+        """
+        fields = {"username": username, "password": password, "next": next_url or "/"}
+        return self.post_form("/login", fields, expect=expect)
+
+    def logout(self, next_url: Optional[str] = None, **kwargs: Any) -> Tuple[int, Dict[str, str], str]:
+        """One ``GET /logout``, the only method that route answers."""
+        target = "/logout" + (f"?next={urllib.parse.quote(next_url, safe='')}" if next_url else "")
+        return self.get(target, **kwargs)
+
+    def sign_out(self) -> None:
+        """Forget the cookie jar locally, without asking the server."""
+        self._jar.clear()
+
+    # --- internals -------------------------------------------------------------------------
+
+    def _apply_cookies(self, headers: Sequence[str]) -> None:
+        """Store or drop each cookie, keeping the jar as a browser would.
+
+        An empty value means the same thing as ``Max-Age=0``: the server is taking the cookie back.
+        aiohttp writes that empty value quoted (``omx_session=""``), so the quotes come off first.
+        """
+        for raw in headers:
+            name, _, rest = raw.partition("=")
+            value, _, attributes = rest.partition(";")
+            value = value.strip().strip('"')
+            attributes = attributes.lower()
+            if not value or "max-age=0" in attributes.replace(" ", ""):
+                self._jar.pop(name.strip(), None)
+                continue
+            self._jar[name.strip()] = value
+
+    def _summary_of_last(self) -> str:
+        """A one-line response summary for the timeline: status, redirect target, cookie change."""
+        parts = [str(self.last_status)]
+        if self.location:
+            parts.append(f"location={self.location}")
+        for raw in self.set_cookies:
+            parts.append(f"set-cookie={raw.split(';')[0]}")
+        return " ".join(parts)
+
+    def _record(self, direction: str, text: str) -> None:
+        """Write one line to the timeline, when this session has one."""
+        if self.timeline is not None:
+            self.timeline.record(self.surface, direction, text)
+
+
+class BasicSession:
+    """The same session, plus a Basic header: the pair a CSRF rule treats differently.
+
+    A request that carries both Basic credentials and a session cookie is not exempt from the CSRF
+    check, so a scenario needs both shapes from the same jar.
+    """
+
+    def __init__(self, session: HttpSession, username: str, password: str = TEST_PASSWORD):
+        self.session = session
+        self.username = username
+        self.password = password
+
+    def auth_header(self) -> Dict[str, str]:
+        """The ``Authorization`` header value for these credentials."""
+        token = base64.b64encode(f"{self.username}:{self.password}".encode("utf-8")).decode("ascii")
+        return {"Authorization": f"Basic {token}"}
+
+    def headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """``extra`` plus these credentials, so a scenario can add a proxy header or a CSRF token.
+
+        The credentials are applied last: a scenario must not lose them by accident.
+        """
+        return {**(extra or {}), **self.auth_header()}
+
+    def get(self, path: str, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Tuple[int, Dict[str, str], str]:
+        """One ``GET`` with Basic credentials, plus any ``headers`` the scenario adds."""
+        return self.session.request("GET", path, headers=self.headers(headers), **kwargs)
+
+    def post_json(
+        self, path: str, payload: Any, headers: Optional[Dict[str, str]] = None, **kwargs: Any
+    ) -> Tuple[int, Dict[str, str], str]:
+        """One JSON ``POST`` with Basic credentials, plus any ``headers`` the scenario adds."""
+        return self.session.request(
+            "POST",
+            path,
+            body=json.dumps(payload).encode("utf-8"),
+            content_type="application/json",
+            headers=self.headers(headers),
+            **kwargs,
+        )
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

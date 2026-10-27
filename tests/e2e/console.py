@@ -287,6 +287,34 @@ class ConsoleSession:
         """The terminal's scrollback lines, with trailing spaces stripped."""
         return [str(line) for line in self.view().get("lines") or []]
 
+    def nav_links(self) -> List[Dict[str, Optional[str]]]:
+        """The sidebar links the server rendered, as ``{label, href}``, icon glyphs left out.
+
+        The sidebar is server-rendered per request, not replaced by ``innerHTML``, so reading it from
+        the DOM is honest here. Permission tests need it because ``view()`` reports one page's session
+        state, and the nav is what a person uses to find out what they may open.
+        """
+        raw = self.page.evaluate(
+            """() => Array.from(document.querySelectorAll('a.nav-item')).map((a) => ({
+                   label: Array.from(a.childNodes)
+                     .filter((n) => n.nodeType === Node.TEXT_NODE)
+                     .map((n) => n.textContent.trim())
+                     .join(' ')
+                     .replace(/\\s+/g, ' '),
+                   href: a.getAttribute('href'),
+                 }))"""
+        )
+        links: List[Dict[str, Optional[str]]] = []
+        for entry in raw or []:
+            label = str(entry.get("label") or "").strip()
+            if label:
+                links.append({"label": label, "href": entry.get("href")})
+        return links
+
+    def nav_labels(self) -> List[str]:
+        """Just the labels of :meth:`nav_links`, for an assertion that reads as a list of names."""
+        return [str(link["label"]) for link in self.nav_links()]
+
     def mode(self) -> Optional[str]:
         """The access mode this page believes it holds: ``read-write`` or ``read-only``."""
         value = self.view().get("mode")

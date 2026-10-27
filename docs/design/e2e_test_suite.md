@@ -217,22 +217,28 @@ fails when the committed file is stale. That catches a new test with no docstrin
 
 Release 1: 100 tests in 8 suites plus one story test. Full wording for every id lives in the scenario index.
 
-### LIFECYCLE — process and listeners (`tests/e2e/test_lifecycle.py`, 9)
+### LIFECYCLE — process and listeners (`tests/e2e/test_lifecycle.py`, 10)
 
 Boots, `/healthz` public plus `/api/ports` 401, Loopback and command round trip over the client listener, bad config
 exits non-zero naming the key, SIGINT exits clean, SIGHUP soft reload keeps an attached client, SIGUSR1 full reload
-drops then restores it, control socket status with mode 0600.
+drops then restores it, a reload with an attached client leaves no cleanup error in the log, control socket status with
+mode 0600.
 
-### AUTH — login and permission matrix (`test_auth.py`, 11)
+### AUTH — login and permission matrix (`test_auth.py`, 10 of 11)
 
-Login form, lockout after failed attempts, `omx_session` plus `?next`, logout, a user with no permission denied, the
-nav and `403` per permission level, CSRF required for a session POST and exempt for Basic, SSO trust header.
+Built: the login form and the cookie attributes it hands out, the wrong-password sentence, lockout after failed
+attempts and its release, `?next` round trip, logout and the cookie taken back, a wrong Basic header not falling
+through to a valid cookie, `403` per permission level on the Config Editor, the CSRF token required for a session POST
+and exempt for Basic, and the SSO trust header with every forgery refused. Open: a user who authenticates through an
+external helper and is refused because that helper granted no permission.
 
-### CON — console page (`test_console.py`, 14)
+### CON — console page (`test_console.py`, 2 of 14)
 
-No-port state, sidebar list, `#connect` opens the socket and echoes, second viewer and viewers badge, read-only pill
-and `mode-readonly`, info overlay, scrollback then `scrollback_done`, `#liveDataBadge` green then red, port-down
-banner, `ports_changed` sidebar rebuild, theme persistence, `?embed=1`, `/logs/<port>`, `/about`.
+Built: a real Chromium page signs in and reaches the console (`CON-01`), and the page hook answers under `?e2e=1` and
+is absent without it (`CON-02`). To build: no-port state, sidebar list, `#connect` opens the socket and echoes, second
+viewer and viewers badge, read-only pill and `mode-readonly`, info overlay, scrollback then `scrollback_done`,
+`#liveDataBadge` green then red, port-down banner, `ports_changed` sidebar rebuild, theme persistence, `?embed=1`,
+`/logs/<port>`, `/about`.
 
 ### RW — write slot capacity and Takeover (`test_write_slot.py`, 20)
 
@@ -320,10 +326,15 @@ Named now so release 1 fixtures stay sufficient.
 | 0 — harness | Done | `harness.py`, `story.py`, `textclients.py`, `console.py`, `index.py`, `conftest.py`; markers and `--run-e2e`; `make test-e2e`, `test-e2e-live`, `test-e2e-debug`, `e2e-install`, `e2e-doc`. |
 | 1 — lifecycle | Done | `LIF-01` to `LIF-09`, plus `IDX-01` and `IDX-02`. |
 | 2 — browser proof | Done | `login()`, `ConsoleSession`, `CON-01`, `CON-02`, with Chromium installed by `make e2e-install`. |
-| 3-9 | Not started | AUTH and CON, RW, PWR, CFG, ACT, ST, and the story scenarios. |
+| 3 — AUTH and CON | In progress | `AUTH-01` to `AUTH-10`, driven over HTTP with a real cookie jar. The console scenarios that need a browser are the rest of this phase. |
+| 4-9 | Not started | RW, PWR, CFG, ACT, ST, and the story scenarios. |
 
-One product defect came out of Phase 1: a clean stop exited 2, which `Restart=on-failure` read as a crash. `LIF-06` now
-proves a SIGINT stop exits 0 with no traceback, and `CHANGELOG.md` carries the entry.
+Three product defects came out of these phases. A clean stop exited 2, which `Restart=on-failure` read as a crash;
+`LIF-06` now proves a SIGINT stop exits 0 with no traceback. A client that left without closing its socket cleanly,
+or left while the server was stopping, wrote a traceback into the log; `LIF-10` proves a stop with a client attached
+and a client that dies mid-read leave no error, and that one session is torn down once. And the login lockout never
+engaged, because asking whether an account was locked deleted the count of failures; `AUTH-03` proves the configured
+threshold now locks and releases an account. `CHANGELOG.md` carries an entry for each.
 
 ---
 

@@ -52,12 +52,12 @@ tier.
 
 | File | Job |
 | --- | --- |
-| `harness.py` | `ConfigBuilder` writes an isolated config, `E2EServer` starts and stops one server process, `Api` calls the HTTP API with Basic auth, `free_ports` reserves ports. |
+| `harness.py` | `ConfigBuilder` writes an isolated config, `E2EServer` starts and stops one server process, `Api` calls the HTTP API with Basic auth, `HttpSession` keeps a session cookie and never follows a redirect, `BasicSession` adds credentials to that session, `sso_v1_header` signs a trust header, `free_ports` reserves ports. |
 | `textclients.py` | `CliSession` speaks the CLI protocol through the product's own `TcpClientAdapter`. `TelnetSession` drives the port menu over a raw socket. |
 | `console.py` | `ConsoleSession` and `login()` drive a Chromium page and read it through the page hook. Playwright is imported lazily. |
 | `story.py` | `Timeline` merges every surface into one log, `Story` numbers the steps of a scenario, `step()` marks a block, `surfaces()` names what a test observes, `concurrently()` runs two clients at once. |
 | `index.py` | Builds the scenario table from the test files themselves, for [`docs/E2E_TESTS.md`](../../docs/E2E_TESTS.md). |
-| `conftest.py` | The fixtures: `server`, `servers`, `api`, `story`, `timeline`, `console`, `clients`, `browser`. |
+| `conftest.py` | The fixtures: `server`, `servers`, `api`, `api_for`, `web`, `web_for`, `story`, `timeline`, `console`, `clients`, `browser`. |
 | `test_*.py` | The scenarios. One file per suite. |
 
 ## The world a test gets
@@ -78,6 +78,12 @@ Build a different world with the `servers` factory, which takes the same knobs p
 def test_rw07_a_blocked_world_refuses_every_client(servers, story):
     server = servers(name="deny-all", configure=lambda builder: builder.with_access_default("deny"))
 ```
+
+The `configure` hook also sets the policy a scenario needs: `with_login_lockout` for
+`security.yaml` `rate_limits.authentication`, `with_sso` for the `web_console` trust header,
+`with_dummy_pdu` for a power outlet, and `with_actions` for Port Actions. `web_for` gives a scenario
+an `HttpSession` for a named surface, which is how a scenario reads a redirect, a cookie, or a
+refusal that a browser would hide.
 
 Never edit `config/` to make a test pass. It holds the shipped defaults. A test that needs a config
 file writes it through `ConfigBuilder`, or replaces the generated `server.yaml` with
