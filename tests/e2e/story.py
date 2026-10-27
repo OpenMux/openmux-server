@@ -29,69 +29,132 @@ READER_QUEUE_CAP = 20000
 
 _ARROWS = {"in": "<-", "out": "->", "<-": "<-", "->": "->", "log": "."}
 
-_TELNET_NAMES = {
+#: Telnet command bytes by value, from RFC 854. ``IAC WILL ECHO`` (255 251 1) is what the Telnet
+#: listener writes before the password prompt, so the timeline names what it sent.
+_TELNET_COMMANDS = {
     255: "IAC",
     254: "DONT",
     253: "DO",
-    252: "WILL",
-    251: "WONT",
+    252: "WONT",
+    251: "WILL",
     250: "SB",
-    240: "SE",
     249: "GA",
     248: "EL",
     247: "EC",
+    246: "AYT",
+    245: "AO",
     244: "IP",
-    243: "AYT",
-    242: "AO",
-    241: "ACP",
-    245: "BRK",
+    243: "BRK",
+    242: "DM",
+    241: "NOP",
+    240: "SE",
     239: "EOR",
 }
 
-_CONTROL_GLYPHS = {i: chr(0x2400 + i) for i in range(32)}
-_CONTROL_GLYPHS[127] = "␡"
+#: Commands whose next byte is an option rather than data. Every other command stands alone.
+_TELNET_WITH_OPTION = frozenset({254, 253, 252, 251, 250})
+
+#: Telnet option bytes the product or the harness negotiates, by value.
+_TELNET_OPTIONS = {
+    0: "BIN",
+    1: "ECHO",
+    3: "SGA",
+    4: "STATUS",
+    6: "TIMING-MARK",
+    31: "NAWS",
+    32: "TERMINAL-TYPE",
+    33: "XON",
+    34: "LINEMODE",
+    39: "NEW-ENVIRON",
+}
 
 _LEGEND = (
     "legend  <- server to client   -> client to server   . server log line\n"
-    "        OMXCTRL = control frame, decoded   IAC/DO/WILL/... = Telnet negotiation\n"
-    "        ␀-␡ = control bytes (␍ CR, ␊ LF)"
+    "        OMXCTRL = control frame, decoded   IAC WILL ECHO = Telnet negotiation, named\n"
+    "        ^M ^J ^[ = control bytes (caret notation)   a line ending at the end of a record is not shown"
 )
 
 #: The story for the running test, so ``step`` in a test body needs no fixture argument.
 _ACTIVE: "contextvars.ContextVar[Optional[Story]]" = contextvars.ContextVar("openmux_e2e_story", default=None)
 
 
+def escape_byte(byte: int) -> str:
+    """Render one byte as text a plain terminal shows correctly: caret notation, hex, or the character.
+
+    Caret notation is what ``cat -v`` and a serial console use. A Unicode control picture (U+2400 and up)
+    needs a font that carries the glyph, and reads as a row of boxes in a terminal without it.
+    """
+    if byte == 0:
+        return "^@"
+    if byte < 32:
+        return f"^{chr(byte + 64)}"
+    if byte == 127:
+        return "^?"
+    if byte < 128:
+        return chr(byte)
+    return f"\\x{byte:02x}"
+
+
+def _strip_line_ending(data: bytes) -> bytes:
+    """Drop a trailing CR/LF run from raw data.
+
+    One record is one line, so a line ending is not content and its caret form is noise. A control byte
+    inside a payload keeps its ``^M``. The option byte that closes ``IAC WILL <opt>`` is not a line ending
+    even when it is 0x0A or 0x0D, so a Telnet command stays whole.
+    """
+    end = len(data)
+    while end > 0 and data[end - 1] in (10, 13):
+        if end >= 3 and data[end - 3] == 255 and data[end - 2] in _TELNET_WITH_OPTION:
+            break
+        end -= 1
+    return data[:end]
+
+
 def render_bytes(data: bytes) -> str:
     """Render raw bytes for the timeline: Telnet negotiation named, control bytes shown.
 
     Telnet options are printed by name because a hand-rolled negotiation responder hides exactly
-    the bytes that break a session.
+    the bytes that break a session. A payload that is only a line ending still gets a record, in caret
+    notation, because "the device sent Enter" is often the event under test.
+    """
+    shown = _render_byte_run(_strip_line_ending(data))
+    if shown:
+        return shown
+    return _render_byte_run(data) or "<empty>"
+
+
+def _render_byte_run(data: bytes) -> str:
+    """The byte loop behind ``render_bytes``, with no line-ending rule applied.
+
+    A Telnet command consumes its own bytes, so its option byte never renders as a control picture or as
+    text. A command cut short by the end of the chunk says ``<truncated>``: the next chunk may hold the
+    rest, and guessing there would invent an option the peer never sent.
     """
     out: List[str] = []
     index = 0
     length = len(data)
     while index < length:
         byte = data[index]
-        if byte == 255 and index + 2 < length:
-            command = data[index + 2]
-            out.append(f"IAC {_TELNET_NAMES.get(command, command)}")
-            index += 3
+        # ``IAC IAC`` is how a peer sends a literal 0xFF data byte, so show the escape, not a command.
+        if byte == 255 and index + 1 < length and data[index + 1] != 255 and data[index + 1] in _TELNET_COMMANDS:
+            command = _TELNET_COMMANDS[data[index + 1]]
+            index += 2
+            if data[index - 1] in _TELNET_WITH_OPTION:
+                if index < length:
+                    option = _TELNET_OPTIONS.get(data[index])
+                    command += f" {option}" if option else f" 0x{data[index]:02x}"
+                    index += 1
+                else:
+                    command += " <truncated>"
+            out.append(f"IAC {command}")
+            # The listener sends `IAC WILL ECHO` and the password prompt in one write, so keep a space
+            # between the named command and whatever data follows it.
+            if index < length:
+                out.append(" ")
             continue
-        if byte in _TELNET_NAMES and byte != 255 and _inside_negotiation(data, index):
-            out.append(_TELNET_NAMES[byte])
-            index += 1
-            continue
-        out.append(_CONTROL_GLYPHS.get(byte, chr(byte) if byte >= 32 else "?"))
+        out.append(escape_byte(byte))
         index += 1
     return "".join(out)
-
-
-def _inside_negotiation(data: bytes, index: int) -> bool:
-    """True when this option byte follows an IAC in the three bytes before it."""
-    for back in (1, 2):
-        if index - back >= 0 and data[index - back] == 255:
-            return True
-    return False
 
 
 def render_omxctrl(data: bytes) -> Optional[str]:
@@ -211,12 +274,16 @@ class Timeline:
         return shown, note
 
     def _raw_for(self, surface: str) -> Optional[Path]:
-        """The raw-bytes file for one surface, inside the artifact dir."""
+        """The spill file for one surface, beside ``timeline.log`` in the artifact dir.
+
+        ``self.path`` is the timeline file itself, so the spill goes to its parent. Building the path from
+        ``self.path`` names a path under a file, which cannot be opened and loses the payload.
+        """
         if self.path is None:
             return None
         safe = surface.replace(":", "-").replace("/", "-")
         if safe not in self._raw_files:
-            self._raw_files[safe] = self.path / f"raw-{safe}.bin"
+            self._raw_files[safe] = self.path.parent / f"raw-{safe}.bin"
         return self._raw_files[safe]
 
     def _emit(self, line: str) -> None:

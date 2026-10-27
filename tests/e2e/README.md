@@ -116,6 +116,7 @@ A passing test deletes its bundle. A failing test keeps one under `artifacts/e2e
 | File | What it holds |
 | --- | --- |
 | `timeline.log` | One merged stream: the cast list, numbered steps, every client action, every frame with `OMXCTRL` decoded, every server log line, and one `FAIL` line. Read this first. |
+| `raw-<surface>.bin` | The payloads too long for one timeline line, appended in full and pointed at by a `raw=<file>@<offset>` note. |
 | `server-<name>.log` | Everything the server process wrote to stdout and stderr. |
 | `portlog-<port>.log` | The data log the port adapter wrote for that port. |
 | `config/` | The exact `server.yaml`, `authentication.yaml`, and `security.yaml` that run used. |
@@ -126,6 +127,35 @@ A passing test deletes its bundle. A failing test keeps one under `artifacts/e2e
 To investigate with the page and the server still alive, run `make test-e2e-debug TEST=<name>`. On a
 failure the run prints the bundle path and each page URL, then waits for Enter. Without a terminal it
 prints and carries on, so a batch run never blocks.
+
+### How to read a timeline line
+
+Every record is one line, and one line is one event:
+
+```
++  0.543s cli:holder   -> lif03-ping
++  0.544s cli:holder   <- lif03-ping
++  0.544s server       -> 2026-10-27 19:41:25.772 openmux.console console_manager.py:469 INFO: ...
+```
+
+| Part | Meaning |
+| --- | --- |
+| `+0.543s` | Seconds since the test started, not a wall-clock time. Compare two lines by these. |
+| `cli:holder` | The surface: `<transport>:<actor>`, for example `web:rw`, `telnet:viewer`, `cli:holder`. |
+| `<-` | Server to client. `->` is client to server, and `.` is a server log line. |
+| Payload | What moved. `OMXCTRL` frames arrive decoded as JSON, and a Telnet command arrives named, for example `IAC WILL ECHO`. |
+
+Every record starts with its offset, so read the word after it: `STEP <n> <text>` is one numbered step of
+the scenario, `FAIL` states what the test wanted against what it got, `cast` and `server` describe the
+world the test built, and `snapshot` holds what a surface looked like at a moment. Read the `FAIL` line
+and the lines above it before you read the pytest traceback.
+
+Control bytes use caret notation (`^M` CR, `^J` LF, `^[` ESC), the same notation `cat -v` uses, so the
+log reads the same in any terminal. A line ending that closes a payload is framing rather than content
+and is left off: `hi\r\n` shows as `hi`. A line ending inside a payload stays, and a payload that is
+only a line ending shows as `^M^J`. A payload longer than `MAX_PAYLOAD` characters is cut with `…`, and
+the whole payload is appended to `raw-<surface>.bin`, pointed at by the `raw=<file>@<offset>` note on
+that line.
 
 ## The page hook
 
@@ -141,7 +171,7 @@ function and nothing else.
 | --- | --- |
 | `mode` | `read-write` or `read-only`, as the server's `client_mode` frame said. |
 | `connected`, `port`, `connected_port`, `port_up` | The session state of this page. |
-| `lines` | The whole xterm buffer, scrollback first, trailing spaces stripped. A lone CR shows as a control picture, so match a round trip with a substring. |
+| `lines` | The whole xterm buffer, scrollback first, trailing spaces stripped. The Loopback port answers Enter with `[ENTER]`, so match a round trip with a substring. |
 | `notices` | The `lines` of every frame that carried a `code`, oldest first, capped at 200. |
 | `banner` | `{text, class}` of the banner region, `{null, null}` when hidden. |
 | `badge`, `badge_state` | The power badge label, and its tint: `all`, `some`, `none`, `unknown`, `hidden`. |

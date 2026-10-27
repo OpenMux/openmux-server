@@ -6,7 +6,7 @@ observes, and its location. A test with no scenario id, no title, or no `e2e_sur
 up as `?` and fails the index test.
 
 
-13 scenarios across 3 suites.
+18 scenarios across 4 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -26,3 +26,9 @@ up as `?` and fails the index test.
 | LIF-07 | SIGHUP reloads the config and keeps an attached client usable. | signal, CLI, server log | `tests/e2e/test_lifecycle.py::test_lif07_a_soft_reload_keeps_an_attached_client` |
 | LIF-08 | SIGUSR1 stops and starts every adapter: the client drops, then a new one works. | signal, CLI, server log | `tests/e2e/test_lifecycle.py::test_lif08_a_full_reload_stops_and_restores_the_adapters` |
 | LIF-09 | The local control socket answers a status request, and only its owner may use it. | control socket | `tests/e2e/test_lifecycle.py::test_lif09_the_control_socket_answers_status_locally` |
+| **TIM** | | | |
+| TIM-01 | A timeline line shows control bytes as caret notation and omits the line ending that closes it. | recorder | `tests/e2e/test_story.py::test_tim01_control_bytes_use_caret_notation_and_a_trailing_line_ending_is_dropped` |
+| TIM-02 | The listener's ``IAC WILL ECHO`` reaches the timeline by name, with its option named. | recorder | `tests/e2e/test_story.py::test_tim02_telnet_negotiation_is_named_by_the_rfc854_values` |
+| TIM-03 | A split negotiation says it was truncated, because guessing would invent an option. | recorder | `tests/e2e/test_story.py::test_tim03_a_command_cut_short_by_the_chunk_end_is_marked_not_guessed` |
+| TIM-04 | A payload with embedded newlines still writes a single timeline record. | recorder | `tests/e2e/test_story.py::test_tim04_one_record_is_always_one_line` |
+| TIM-05 | A capped line points at the full payload, written next to ``timeline.log``. | recorder | `tests/e2e/test_story.py::test_tim05_a_long_payload_is_cut_on_the_line_and_kept_whole_beside_it` |

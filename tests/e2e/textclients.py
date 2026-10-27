@@ -28,9 +28,10 @@ from .story import READER_QUEUE_CAP, Timeline
 #: Bytes the client listener sends before a session may issue a command.
 AUTH_BANNER = b"Authentication required"
 
+#: Telnet command bytes, from RFC 854. The product opens a session with ``IAC WILL ECHO`` (251).
 IAC = 255
-WILL = 252
-WONT = 251
+WILL = 251
+WONT = 252
 DO = 253
 DONT = 254
 SB = 250

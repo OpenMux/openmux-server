@@ -178,7 +178,7 @@ list and a legend:
 cast    web:rw     user 'rw'    read-write   browser tab 1
         cli:holder user 'admin' read-write   CLI over the client listener
 port    loop1  write slot capacity=one  feeds=rack1.1,rack1.2
-legend  <- server to client   -> client to server   ␍␊ CR LF   OMXCTRL = control frame
+legend  <- server to client   -> client to server   ^M ^J control bytes   OMXCTRL = control frame
 ```
 
 | Flag | Effect |
