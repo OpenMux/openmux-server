@@ -274,8 +274,12 @@ class ServerRegistry:
             (config_dir / "server.yaml").write_text(raw_server_yaml, encoding="utf-8")
 
         server = E2EServer(workdir=workdir, config_dir=config_dir, addresses=addresses, name=name)
-        server.recorder = timeline if timeline is not None else self.story.timeline
-        server.live_output = self.options["live"]
+        recorder = timeline if timeline is not None else self.story.timeline
+        if self.options["live"]:
+            # One live channel only: the timeline prints every line it stores, with the offset and the
+            # surface label, so a scenario that passes its own timeline still narrates.
+            recorder.echo = True
+        server.recorder = recorder
         self.servers.append(server)
         self.story.cast(f"{name}      server  {name} on {[a.name for a in addresses]}")
         if start:

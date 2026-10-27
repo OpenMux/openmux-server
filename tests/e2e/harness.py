@@ -392,8 +392,9 @@ class E2EServer:
         self._lines_lock = threading.Lock()
         self._reader: Optional[threading.Thread] = None
         self._log_file: Optional[Path] = None
-        self.recorder: Optional[Any] = None  # set by the story fixture: records [server] lines
-        self.live_output = False
+        # Set by the story fixture. The timeline is also the live channel when ``--e2e-live`` is on,
+        # so the reader below never prints: a second print here would duplicate every line.
+        self.recorder: Optional[Any] = None
         self.expected_exit: Optional[int] = None
         """Exit code a scenario expects, for a server meant to fail. ``stop_clean`` accepts it."""
 
@@ -453,7 +454,11 @@ class E2EServer:
         return self
 
     def _start_reader(self) -> None:
-        """Drain the child's combined output into memory, the artifact file, and the timeline."""
+        """Drain the child's combined output into memory, the artifact file, and the timeline.
+
+        The reader writes to no console. ``Timeline.record`` echoes each line once, with its offset and
+        its ``server`` label, when the timeline runs in echo mode (``--e2e-live``).
+        """
         handle = self.proc.stdout if self.proc else None
         if handle is None:  # pragma: no cover - only absent when Popen was built without a pipe
             return
@@ -477,8 +482,6 @@ class E2EServer:
                         pass  # justification: the artifact copy is a convenience, the memory copy is the record
                 if self.recorder is not None:
                     self.recorder.record("server", "out", line)
-                if self.live_output:
-                    print(f"[server] {line}", flush=True)
             close = getattr(handle, "close", None)
             if callable(close):
                 close()
