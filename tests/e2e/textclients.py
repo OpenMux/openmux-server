@@ -15,6 +15,7 @@ import asyncio
 import json
 import queue
 import socket
+import struct
 import threading
 import time
 from collections import deque
@@ -367,6 +368,35 @@ class CliSession:
             self._loop.call(self._adapter.close(), timeout=10.0)
         except Exception as exc:  # justification: teardown must not mask the test's own failure
             self._note(self.surface, "log", f"close failed: {type(exc).__name__}: {exc}")
+        self._loop.close()
+
+    def abort(self) -> None:
+        """Reset the socket instead of closing it, the way a killed client process leaves it.
+
+        ``SO_LINGER`` with a zero timeout makes the kernel send RST and discard whatever the peer has
+        not read yet. A plain ``close`` lets the server drain and take its clean path, which is exactly
+        what a scenario that proves the abrupt path must not do.
+        """
+        if self.closed:
+            return
+        self.closed = True
+        self._note(self.surface, "log", "socket reset (SO_LINGER 0), no FIN")
+
+        async def _reset() -> None:
+            writer = getattr(self._adapter, "writer", None)
+            if writer is None:
+                return
+            sock = writer.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            transport = writer.transport
+            if transport is not None:
+                transport.abort()
+
+        try:
+            self._loop.call(_reset(), timeout=10.0)
+        except Exception as exc:  # justification: the reset is the point, a loop already gone is the same outcome
+            self._note(self.surface, "log", f"reset failed: {type(exc).__name__}: {exc}")
         self._loop.close()
 
     def _send(self, coro: Any, timeout: float, note: str) -> None:

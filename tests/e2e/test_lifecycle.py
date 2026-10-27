@@ -1,8 +1,9 @@
-"""LIFECYCLE: the server process, its listeners, and its signals (LIF-01 to LIF-09).
+"""LIFECYCLE: the server process, its listeners, and its signals (LIF-01 to LIF-10).
 
 No browser here. This suite is the first thing to run on a new machine, because it proves the
 harness and the product agree about the process contract: what boots, what answers without a login,
-what a round trip looks like on the wire, and what a clean stop looks like.
+what a round trip looks like on the wire, what a clean stop looks like, and what a client leaving
+should and should not write to the log.
 """
 
 from __future__ import annotations
@@ -68,6 +69,17 @@ def _control_request(path, request: Dict[str, Any], timeout: float = 10.0) -> Di
         connection.close()
     payload = json.loads(raw.decode("utf-8"))
     return payload if isinstance(payload, dict) else {}
+
+
+def _assert_no_close_error(server: Any) -> None:
+    """Fail with the server tail when closing a client left an error behind.
+
+    The half-close in ``ClientSession.close()`` reports its own failure as ERROR with a traceback, so the
+    markers below name that one path and nothing else.
+    """
+    output = server.output()
+    for marker in ("Error during client close", "write_eof"):
+        assert marker not in output, f"{marker!r} appeared in the server log:\n{server.tail(40)}"
 
 
 @surfaces("http", "server log")
@@ -208,3 +220,35 @@ def test_lif09_the_control_socket_answers_status_locally(server, story):
         refusal = _control_request(path, {"action": "not-a-real-action"})
         assert refusal.get("ok") is False, refusal
         assert "unknown_action" in str(refusal.get("error")), refusal
+
+
+@surfaces("CLI", "loopback port", "server log")
+def test_lif10_a_session_that_ends_is_closed_without_an_error_in_the_log(server, clients, story):
+    """A client that leaves, by exit or by force, must not leave an ERROR or a traceback behind."""
+    with step("a client attaches to loop1 and completes one round trip"):
+        cli_leaver = clients.cli(user="rw", surface="cli:leaver", attach_to="loop1")
+        cli_leaver.write_line("lif10-before-close")
+        assert "lif10-before-close" in cli_leaver.wait_for("lif10-before-close", timeout=15), cli_leaver.read_text()
+    with step("that client closes its connection, the way `openmux` does on exit"):
+        cli_leaver.close()
+        server.wait_for_log("disconnected from port loop1")
+    with step("closing it logged nothing worse than the disconnect itself"):
+        # The half-close in ClientSession.close() guards only AttributeError and RuntimeError, and a
+        # socket the peer already left raises OSError instead. That escaped to the caller's handler and
+        # logged ERROR plus a traceback for every ordinary client exit.
+        _assert_no_close_error(server)
+    with step("a client that dies without a word is also closed quietly"):
+        cli_killed = clients.cli(user="rw", surface="cli:killed", attach_to="loop1")
+        cli_killed.write_line("lif10-before-reset")
+        assert "lif10-before-reset" in cli_killed.wait_for("lif10-before-reset", timeout=15), cli_killed.read_text()
+        mark = len(server.log_lines())
+        cli_killed.abort()
+        server.wait_for_log("disconnected from port loop1", since=mark, timeout=15)
+        _assert_no_close_error(server)
+    with step("the write slot came free for the next client"):
+        cli_next = clients.cli(user="rw", surface="cli:next", attach_to="loop1")
+        assert cli_next.mode() == "read-write", cli_next.mode()
+        cli_next.write_line("lif10-after")
+        assert "lif10-after" in cli_next.wait_for("lif10-after", timeout=15), cli_next.read_text()
+    with step("and the server still stops cleanly"):
+        assert server.stop_clean() == 0, server.tail(40)

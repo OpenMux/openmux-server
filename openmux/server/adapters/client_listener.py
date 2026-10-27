@@ -1603,8 +1603,11 @@ class ClientSession:
                 if not self.writer.is_closing():
                     try:
                         self.writer.write_eof()
-                    except (AttributeError, RuntimeError):
-                        # justification: graceful half-close unavailable on this transport
+                    except (AttributeError, RuntimeError, OSError):
+                        # justification: redundant best-effort cleanup during shutdown. The peer often
+                        # left first, which makes shutdown(SHUT_WR) raise OSError (ENOTCONN, EPIPE, or
+                        # ECONNRESET), and a transport without write_eof raises the other two. The close
+                        # below is what actually ends the session either way.
                         pass
                 self.writer.close()
                 try:

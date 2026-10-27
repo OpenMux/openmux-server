@@ -646,21 +646,23 @@ class E2EServer:
         with self._lines_lock:
             return list(self._lines)
 
-    def wait_for_log(self, needle: str, timeout: float = 15.0) -> str:
-        """Wait for one line containing ``needle`` and return it.
+    def wait_for_log(self, needle: str, timeout: float = 15.0, since: int = 0) -> str:
+        """Wait for one line containing ``needle`` at or after line ``since``, and return it.
 
         Fails with the last lines of output, so a missing log line reads as what it is: the server
-        never reached that point.
+        never reached that point. Pass ``since=len(server.log_lines())``, taken before the action, when
+        the same line appeared earlier in the run: the server repeats this kind of line per client, and
+        a plain search is satisfied by the older one.
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            for line in self.log_lines():
+            for line in self.log_lines()[since:]:
                 if needle in line:
                     return line
             if self.proc is not None and self.proc.poll() is not None:
                 break
             time.sleep(0.05)
-        raise AssertionError(f"log line {needle!r} never appeared\nlast output:\n{self.tail(40)}")
+        raise AssertionError(f"log line {needle!r} never appeared after line {since}\nlast output:\n{self.tail(40)}")
 
     def port_log_lines(self, port_name: str) -> List[str]:
         """Lines from ``{OPENMUX_LOG_DIR}/ports/<port>.log``, the port data log.

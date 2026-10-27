@@ -99,6 +99,12 @@ Changes since v1.0.4 (2026-10-19).
   out of the run unless you pass `--run-e2e`, and its browser scenarios skip with the install command when Chromium is
   missing. Run `make e2e-install` once per machine. `tests/e2e/README.md` explains the world each scenario gets, and
   `docs/E2E_TESTS.md` lists the scenarios that exist.
+- **A client that leaves no longer fills the log.** Every client session that closed after its peer had gone logged
+  `ERROR: Error during client close` plus a seven-frame traceback: the graceful half-close called `shutdown(SHUT_WR)` on a
+  socket the peer already left, that raised `OSError`, and the guard around it caught only `AttributeError` and
+  `RuntimeError`. A plain `openmux` exit, a closed browser tab, and a killed client now log the ordinary
+  `Client <id> disconnected from port <port>` line and nothing else. The session closes the same way as before, and a close
+  that fails for a real reason still reports ERROR. No config change.
 
 ## [1.0.4]
 
