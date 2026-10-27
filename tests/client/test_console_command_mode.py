@@ -430,6 +430,6 @@ async def test_detach_wait_gives_up_when_connection_drops():
     assert "[Detach timed out]" in out
 
 
-def test_escape_menu_registers_detach_handler():
+def test_control_menu_registers_detach_handler():
     ui = _cm_ui()
     assert ui._esc_cmd_handlers()["d"] == ui._esc_cmd_detach_port

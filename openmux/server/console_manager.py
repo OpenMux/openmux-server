@@ -1302,7 +1302,7 @@ class ConsoleManager:
         """Take the port's write slot from another holder (issue #59 Part 2).
 
         The single write-slot takeover for every client (TCP control frame,
-        web console, telnet/SSH escape menu, CLI). Replaces the old
+        web console, telnet/SSH Control menu, CLI). Replaces the old
         `force_promote_client` (which demoted ALL holders, checked no
         entitlement, and carried no audit line).
 

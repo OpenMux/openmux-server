@@ -13,9 +13,9 @@ instead of a plaintext socket.
 - **ACL**: Per-listener allow list of host/subnet strings, same rules as
   `telnet_listener`. Enforced when the TCP connection is accepted, before
   the SSH handshake completes.
-- **Authentication**: `require_auth` defaults to `true` (opposite of
-  `telnet_listener`, which defaults to `false`) because SSH exposes a
-  standard password/public-key prompt with no extra client tooling needed.
+- **Authentication**: `require_auth` defaults to `true`, the same default as
+  `telnet_listener` since 1.0.5 (issue #100), because both transports
+  should authenticate unless the operator disables it.
   When `require_auth: false`, any client is accepted without a password or
   key (SSH "none" authentication).
   - Password auth reuses `AuthManager.authenticate_user` / `is_user_locked`

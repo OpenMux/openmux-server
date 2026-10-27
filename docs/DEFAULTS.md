@@ -80,9 +80,9 @@ telnet_listener (per-listener entry; upcoming adapter defaults)
 - bind_port: required (no implicit default)
 - target: required (no implicit default); use `'*'` for a port-selection menu
 - read_only: false
-- require_auth: false (opt in for a login/password prompt and the `<user>+<port>`/`<user>:<port>` shortcut)
+- require_auth: true (prompts for an OpenMux username/password before attach, and enables the `<user>+<port>`/`<user>:<port>` shortcut; set `false` for anonymous access) — since 1.0.5, matching `ssh_listener`; entries without the key changed behavior
 - acl: empty / missing list means allow all sources
-- authentication: not performed unless `require_auth: true` (listener otherwise relies solely on ACL + network trust)
+- authentication: performed unless `require_auth: false` (a listener with auth disabled relies solely on ACL + network trust)
 - control menu escape sequence: Ctrl+E then `c` (per-session; changeable at runtime with the `e` command, not persisted)
 
 ssh_listener (per-listener entry)
@@ -90,7 +90,7 @@ ssh_listener (per-listener entry)
 - bind_port: required (no implicit default)
 - target: required (no implicit default); use `'*'` for a port-selection menu
 - read_only: false
-- require_auth: true (opposite default from telnet_listener; disable explicitly for anonymous access)
+- require_auth: true (same default as telnet_listener; set `false` for anonymous access)
 - acl: empty / missing list means allow all sources
 - authentication: password (AuthManager) or Ed25519 public key (AuthManager.public_keys records with `"ssh"` in allowed_uses)
 unless `require_auth: false`

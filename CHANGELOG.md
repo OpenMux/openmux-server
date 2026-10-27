@@ -19,6 +19,11 @@ Changes since v1.0.4 (2026-10-19).
   `/etc/openmux/server.yaml`, and `make init-config` copies only a missing file. To run actions on your own ports, add that
   section with your grants — Config Editor > Actions edits it. A fresh packaged install gets the example scripts in
   `/etc/openmux/actions`; a script you edited is never overwritten.
+- **Telnet listeners now require a login by default.** A `telnet_listener` entry in `server.yaml` without a
+  `require_auth` key now prompts for an OpenMux username and password before it attaches a session, the same posture
+  `ssh_listener` already used. To keep the old anonymous access (ACL and network trust only), add `require_auth: false`
+  to that entry. Menu mode (`target: '*'`) with `require_auth: false` warns at startup, because every client inside the
+  ACL can then browse and attach to any port (issue #100).
 
 ### Behavior changes (no config change required)
 - **The server now words every access answer.** A write-slot or attach answer reaches the Client as the server's own

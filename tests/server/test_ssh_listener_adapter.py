@@ -184,112 +184,6 @@ async def _echo_roundtrip(port: int, payload: bytes = b"hello\n", **connect_kwar
         return await asyncio.wait_for(process.stdout.read(len(payload)), timeout=5)
 
 
-# ---------------------------------------------------------------------------
-# validate_config
-
-
-def test_validate_config_require_auth_bool():
-    ok = {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "loopback1", "require_auth": True}]}
-    bad = {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "loopback1", "require_auth": "yes"}]}
-    assert SshListenerAdapter.validate_config(ok) is True
-    assert SshListenerAdapter.validate_config(bad) is False
-
-
-def test_validate_config_requires_target_and_port():
-    missing_target = {"ssh_listener": [{"name": "s1", "bind_port": 2222}]}
-    bad_port = {"ssh_listener": [{"name": "s1", "bind_port": 70000, "target": "x"}]}
-    assert SshListenerAdapter.validate_config(missing_target) is False
-    assert SshListenerAdapter.validate_config(bad_port) is False
-
-
-def test_validate_config_container_branches():
-    # Non-dict config is rejected outright.
-    assert SshListenerAdapter.validate_config(["s1"]) is False
-    # A config with no "ssh_listener" key is vacuously valid.
-    assert SshListenerAdapter.validate_config({}) is True
-    # A non-list `ssh_listener` value is rejected.
-    assert SshListenerAdapter.validate_config({"ssh_listener": {"name": "s1"}}) is False
-    # A non-dict entry is rejected.
-    assert SshListenerAdapter.validate_config({"ssh_listener": ["s1"]}) is False
-
-
-def test_validate_config_name_and_target_branches():
-    # A missing, non-str, or blank name is rejected.
-    assert SshListenerAdapter.validate_config({"ssh_listener": [{"bind_port": 2222, "target": "x"}]}) is False
-    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": 1, "bind_port": 2222, "target": "x"}]}) is False
-    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "  ", "bind_port": 2222, "target": "x"}]}) is False
-    # A duplicate name is rejected.
-    dup = {
-        "ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x"}, {"name": "s1", "bind_port": 2223, "target": "y"}]
-    }
-    assert SshListenerAdapter.validate_config(dup) is False
-    # A missing, non-str, or blank target is rejected.
-    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 2222}]}) is False
-    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": 1}]}) is False
-    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": " "}]}) is False
-
-
-def test_validate_config_port_and_host_branches():
-    # A bind_port that is not an int or out of range is rejected.
-    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": "abc", "target": "x"}]}) is False
-    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 0, "target": "x"}]}) is False
-    assert SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": None, "target": "x"}]}) is False
-    # A present but blank / non-str bind_host is rejected; a None bind_host is allowed.
-    assert (
-        SshListenerAdapter.validate_config(
-            {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "bind_host": " "}]}
-        )
-        is False
-    )
-    assert (
-        SshListenerAdapter.validate_config(
-            {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "bind_host": 1}]}
-        )
-        is False
-    )
-    assert (
-        SshListenerAdapter.validate_config(
-            {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "bind_host": None}]}
-        )
-        is True
-    )
-
-
-def test_validate_config_read_only_and_enabled_bools():
-    # read_only / enabled / require_auth, when present, must be bools.
-    for key in ("read_only", "enabled", "require_auth"):
-        bad = {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", key: 1}]}
-        assert SshListenerAdapter.validate_config(bad) is False
-    ok = {
-        "ssh_listener": [
-            {"name": "s1", "bind_port": 2222, "target": "x", "read_only": False, "enabled": True, "require_auth": False}
-        ]
-    }
-    assert SshListenerAdapter.validate_config(ok) is True
-
-
-def test_validate_config_acl_branches():
-    # acl, when present, must be a list of valid IP / CIDR strings.
-    # (None acl is allowed; a non-list acl is rejected.)
-    assert (
-        SshListenerAdapter.validate_config(
-            {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "acl": "1.2.3.4"}]}
-        )
-        is False
-    )
-    assert (
-        SshListenerAdapter.validate_config({"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "acl": None}]})
-        is True
-    )
-    # A non-str rule, a blank rule, or an invalid IP/CIDR is rejected.
-    for rule in (1, "  ", "not-an-ip", "10.0.0.0/33", "10.0.0.256"):
-        bad = {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "acl": [rule]}]}
-        assert SshListenerAdapter.validate_config(bad) is False
-    # A valid mix of single IPs and CIDRs passes.
-    ok = {"ssh_listener": [{"name": "s1", "bind_port": 2222, "target": "x", "acl": ["10.0.0.1", "192.168.0.0/24", "::1/128"]}]}
-    assert SshListenerAdapter.validate_config(ok) is True
-
-
 def test_build_listener_defaults_require_auth_true():
     adapter = SshListenerAdapter("s1", {"ssh_listener": []})
     spec = adapter._build_listener({"name": "s1", "bind_port": 2222, "target": "loopback1"})
@@ -598,7 +492,7 @@ async def test_read_only_listener_drops_client_input(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_help_lists_commands(tmp_path, monkeypatch):
+async def test_control_menu_help_lists_commands(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -619,7 +513,7 @@ async def test_escape_menu_help_lists_commands(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_version_and_info(tmp_path, monkeypatch):
+async def test_control_menu_version_and_info(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -643,7 +537,7 @@ async def test_escape_menu_version_and_info(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_request_rw_promotes_and_enables_writes(tmp_path, monkeypatch):
+async def test_control_menu_request_rw_promotes_and_enables_writes(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth, console_mode="read-only")
@@ -669,7 +563,7 @@ async def test_escape_menu_request_rw_promotes_and_enables_writes(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_release_rw_disables_writes(tmp_path, monkeypatch):
+async def test_control_menu_release_rw_disables_writes(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -695,7 +589,7 @@ async def test_escape_menu_release_rw_disables_writes(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_show_holders(tmp_path, monkeypatch):
+async def test_control_menu_show_holders(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -715,7 +609,7 @@ async def test_escape_menu_show_holders(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_force_take_demotes_other_session(tmp_path, monkeypatch):
+async def test_control_menu_force_take_demotes_other_session(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret", "bob": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -759,7 +653,7 @@ async def test_escape_menu_force_take_demotes_other_session(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_escape_menu_change_escape_sequence(tmp_path, monkeypatch):
+async def test_control_menu_change_escape_sequence(tmp_path, monkeypatch):
     auth = FakeAuthManager(valid={"alice": "secret"})
     entry = make_entry(target="loopback1")
     adapter = await make_running_adapter(tmp_path, monkeypatch, entry, ["loopback1"], auth)
@@ -834,363 +728,3 @@ async def test_match_ssh_pubkey_true_and_false(tmp_path, monkeypatch):
     auth = FakeAuthManager(pubkeys={"alice": {"k1": pub}})
     assert _match_ssh_pubkey(auth, "alice", presented) is True
     assert _match_ssh_pubkey(auth, "bob", presented) is False
-
-
-# ---------------------------------------------------------------------------
-# _cmd_force_rw: targeted takeover prompt (issue #61) - lightweight unit test
-
-
-class _FakeSshReader:
-    """Streams queued bytes one `read(n)`-sized slice at a time."""
-
-    def __init__(self, chunks=None):
-        self.pending = bytearray()
-        self.chunks = list(chunks or [])
-
-    async def read(self, n):
-        if not self.pending:
-            await asyncio.sleep(0)
-            if not self.chunks:
-                return b""
-            self.pending = bytearray(self.chunks.pop(0))
-        out = bytes(self.pending[:n])
-        del self.pending[:n]
-        return out
-
-
-class _FakeSshStdout:
-    def __init__(self):
-        self.buffer = bytearray()
-
-    def write(self, data):
-        self.buffer += data
-
-    async def drain(self):
-        await asyncio.sleep(0)
-
-
-class _FakeSshProcess:
-    def __init__(self, chunks=None):
-        self.stdin = _FakeSshReader(chunks)
-        self.stdout = _FakeSshStdout()
-
-
-class _FakeSshCm:
-    """A console manager that answers a takeover with one real ``AccessDecision``."""
-
-    def __init__(self, decision=None):
-        self.take_calls = []
-        self.decision = decision if decision is not None else decide(Code.GRANTED, mode=Mode.READ_WRITE)
-
-    async def take_write_slot(self, client_id, port_name, target=None):
-        self.take_calls.append((client_id, port_name, target))
-        return self.decision
-
-
-def _make_ssh_session(read_only=False, chunks=None):
-    listener = ListenerConfig(name="s1", bind_host="0.0.0.0", bind_port=2200, target="loop1", read_only=read_only)
-    from openmux.server.adapters.ssh_listener import SshSession
-
-    return SshSession(
-        client_id="c1",
-        listener=listener,
-        process=_FakeSshProcess(chunks),
-        port_name="loop1",
-        read_only=read_only,
-        remote_host="127.0.0.1",
-        username="bob",
-        port_mode="read-only",
-    )
-
-
-@pytest.mark.asyncio
-async def test_ssh_force_rw_prompts_and_passes_target():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    session = _make_ssh_session(read_only=False, chunks=[b"f4", b"\n"])
-    cm = _FakeSshCm(decide(Code.GRANTED, mode=Mode.READ_WRITE, victim=Holder(client_id="f4", username="alice")))
-
-    await adapter._cmd_force_rw(session, cm)
-
-    assert cm.take_calls == [("c1", "loop1", "f4")]
-    out = session.process.stdout.buffer.decode()
-    assert "[Take from holder" in out
-    assert "Read-write access granted" in out
-    assert "[Taken from: [f4] alice@unknown (rw)]" in out
-    assert session.port_mode == "read-write"
-
-
-@pytest.mark.asyncio
-async def test_ssh_force_rw_enter_is_no_target_fallback():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    session = _make_ssh_session(read_only=False, chunks=[b"\n"])
-    cm = _FakeSshCm()
-
-    await adapter._cmd_force_rw(session, cm)
-
-    assert cm.take_calls == [("c1", "loop1", None)]
-    out = session.process.stdout.buffer.decode()
-    assert "granted" in out.lower()
-    assert "Taken from" not in out
-
-
-@pytest.mark.asyncio
-async def test_ssh_force_rw_invalid_target_refusal():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    session = _make_ssh_session(read_only=False, chunks=[b"ghost", b"\n"])
-    cm = _FakeSshCm(decide(Code.INVALID_TARGET, mode=Mode.READ_ONLY))
-
-    await adapter._cmd_force_rw(session, cm)
-
-    assert session.port_mode != "read-write"
-    assert "does not hold read-write" in session.process.stdout.buffer.decode().lower()
-
-
-@pytest.mark.asyncio
-async def test_ssh_force_rw_read_only_listener_rejects_before_prompt():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    session = _make_ssh_session(read_only=True, chunks=[b"f4", b"\n"])
-    cm = _FakeSshCm()
-
-    await adapter._cmd_force_rw(session, cm)
-
-    assert cm.take_calls == []
-    assert b"configured read-only" in session.process.stdout.buffer
-
-
-# ---------------------------------------------------------------------------
-# `p` control-menu command: interactive, per-console power menu (v3)
-
-
-def _chunks(text: str):
-    return [c.encode("latin1") for c in text]
-
-
-class _FakePdu:
-    """Duck-typed PDU adapter: one PDU, two outlets."""
-
-    def __init__(self):
-        self.enabled = True
-        self.set_calls = []
-        self.blocked = {}
-        self.meta_emit = None  # when set: called(ref->port,changes) on switch, like the real fan-out
-
-    def get_adapter_type(self):
-        return "power"
-
-    def port_power_map(self, port_name):
-        # This one console is fed by both outlets of the single PDU.
-        return ["rack1.1", "rack1.2"]
-
-    def _outlet_on_state(self, ref):
-        return True
-
-    def feed_states(self, port_name):
-        # Mirrors the real PduAdapter's local branch (live PDU readings).
-        return {ref: self._outlet_on_state(ref) for ref in self.port_power_map(port_name)}
-
-    def compute_off_impact(self, ref):
-        return {"losing_power": [], "staying_up": []}
-
-    def _power_blocked_ports(self, ref, _username):
-        return self.blocked.get(ref, [])
-
-    async def set_outlet(self, ref, on, user=None, client_id=None):
-        self.set_calls.append((ref, on, user, client_id))
-        if self.meta_emit is not None:
-            self.meta_emit(
-                "loop1",
-                {"event": "power_outlet_changed", "outlet": ref, "on": on, "all_power_lost": False},
-            )
-        return {"ok": True, "reading": {"on": on}}
-
-    def get_power_snapshot(self):
-        return {
-            "pdus": [
-                {
-                    "name": "rack1",
-                    "driver": "dummy",
-                    "online": True,
-                    "outlets_on": 2,
-                    "outlet_count": 2,
-                    "outlets": [
-                        {"ref": "rack1.1", "on": True, "watts": None, "volts": None, "mapped_ports": []},
-                        {"ref": "rack1.2", "on": True, "watts": None, "volts": None, "mapped_ports": []},
-                    ],
-                }
-            ],
-            "unresolved_refs": [],
-        }
-
-
-class _FakeAuth:
-    def get_user_permissions(self, username):
-        return {"admin": "admin", "rw": "read-write"}.get(username)
-
-
-class _FakePowerPortManager:
-    def __init__(self, pdu):
-        self.unified_adapters = [pdu]
-
-
-def _wire_power(adapter, pdu):
-    cm = types.SimpleNamespace(port_manager=_FakePowerPortManager(pdu))
-    adapter.console_manager = cm
-    adapter.main_port_manager = cm.port_manager
-    adapter.auth_manager = _FakeAuth()
-    return cm
-
-
-@pytest.mark.asyncio
-async def test_ssh_power_switch_on_numbered_entry():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    pdu = _FakePdu()
-    _wire_power(adapter, pdu)
-    session = _make_ssh_session(read_only=False, chunks=_chunks("1\n"))
-    session.username = "rw"
-
-    await adapter._handle_control_command(session, "p")
-
-    assert pdu.set_calls == [("rack1.1", False, "rw", "c1")]
-    out = session.process.stdout.buffer.decode()
-    assert " 1  [on]   rack1.1" in out  # numbered, one per line
-    assert " 2  [on]   rack1.2" in out
-    assert "POWER rack1.1 -> off" in out
-
-
-@pytest.mark.asyncio
-async def test_ssh_power_menu_empty_exits():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    pdu = _FakePdu()
-    _wire_power(adapter, pdu)
-    session = _make_ssh_session(read_only=False, chunks=[b"\n"])
-    session.username = "rw"
-
-    await adapter._handle_control_command(session, "p")
-
-    assert pdu.set_calls == []
-    out = session.process.stdout.buffer.decode()
-    assert " 1  [on]   rack1.1" in out  # feeds listed
-    assert "[EXITING POWER]" in out
-
-
-@pytest.mark.asyncio
-async def test_ssh_power_menu_notice_printed_before_prompt():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    pdu = _FakePdu()
-    _wire_power(adapter, pdu)
-    session = _make_ssh_session(read_only=False, chunks=_chunks("1\n\n"))
-    session.username = "rw"
-    adapter.sessions["c1"] = session
-
-    # Mimic the real fan-out: pm.notify_meta_updated runs the (sync) meta
-    # listener synchronously, and the listener pushes the [POWER] notice to
-    # the session as a background task (ensure_future).
-    def emit_meta(port_name, changes):
-        adapter._on_port_meta_update(port_name, changes)
-
-    pdu.meta_emit = emit_meta
-
-    await adapter._handle_control_command(session, "p")
-
-    assert pdu.set_calls == [("rack1.1", False, "rw", "c1")]
-    out = session.process.stdout.buffer.decode()
-    notice_i = out.find("[POWER] feed rack1.1 is now off")
-    # The header prints once; the list re-renders without it. Mark the
-    # re-render by the last feed line's second occurrence.
-    feed = " 2  [on]   rack1.2"
-    rerender_i = out.find(feed, out.find("POWER rack1.1 -> off"))
-    assert notice_i != -1 and rerender_i != -1
-    assert notice_i < rerender_i  # the notice must not displace the re-rendered list
-    assert out.rfind(feed) > notice_i  # the loop re-renders the list after the notice
-
-
-@pytest.mark.asyncio
-async def test_ssh_power_menu_requires_read_write():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    pdu = _FakePdu()
-    _wire_power(adapter, pdu)
-    session = _make_ssh_session(read_only=False, chunks=_chunks("1\n"))
-    session.username = "nobody"  # not in the fake auth map -> no read-write
-
-    await adapter._handle_control_command(session, "p")
-
-    assert pdu.set_calls == []
-    assert "insufficient permission" in session.process.stdout.buffer.decode()
-
-
-@pytest.mark.asyncio
-async def test_ssh_power_menu_group_blocked():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    pdu = _FakePdu()
-    pdu.blocked = {"rack1.2": ["c2"]}
-    _wire_power(adapter, pdu)
-    session = _make_ssh_session(read_only=False, chunks=_chunks("2\n"))
-    session.username = "rw"
-
-    await adapter._handle_control_command(session, "p")
-
-    assert pdu.set_calls == []
-    out = session.process.stdout.buffer.decode()
-    assert "ERROR:POWER: rack1.2 feeds consoles outside your groups (c2)" in out
-    assert "needs admin" in out
-
-
-@pytest.mark.asyncio
-async def test_ssh_power_menu_invalid_entry_keeps_looping():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    pdu = _FakePdu()
-    _wire_power(adapter, pdu)
-    session = _make_ssh_session(read_only=False, chunks=_chunks("9\n2\n\n"))
-    session.username = "rw"
-
-    await adapter._handle_control_command(session, "p")
-
-    assert pdu.set_calls == [("rack1.2", False, "rw", "c1")]
-    out = session.process.stdout.buffer.decode()
-    assert "number out of range (1-2)" in out
-    assert "POWER rack1.2 -> off" in out
-
-
-@pytest.mark.asyncio
-async def test_ssh_power_notice_pushed_to_attached_session():
-    from openmux.server.adapters.ssh_listener import SshListenerAdapter
-
-    adapter = SshListenerAdapter("s1", {"ssh_listener": []})
-    pdu = _FakePdu()
-    _wire_power(adapter, pdu)
-    session = _make_ssh_session()
-    adapter.sessions["c1"] = session
-
-    adapter._on_port_meta_update(
-        "loop1",
-        {"event": "power_outlet_changed", "outlet": "rack1.1", "on": False, "all_power_lost": False},
-    )
-    await asyncio.sleep(0)
-    assert b"[POWER] feed rack1.1 is now off" in session.process.stdout.buffer
-
-    adapter._on_port_meta_update(
-        "loop1",
-        {"event": "power_outlet_changed", "outlet": "rack1.2", "on": False, "all_power_lost": True},
-    )
-    await asyncio.sleep(0)
-    assert b"[POWER WARNING] all power feeds are now OFF" in session.process.stdout.buffer

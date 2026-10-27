@@ -13,36 +13,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import uuid
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import asyncssh
 from cryptography.hazmat.primitives import serialization
 
-from ..access_decision import AccessDecision, Code, Mode, decide
+from ..access_decision import Code, Mode, decide
+from ..listener_session import MENU_TARGET, ListenerConfig, ListenerSessionManager, build_listener
 from ..locations import ssh_host_key_dir as _ssh_host_key_dir_default
 from .base_adapter import AdapterCapability, BaseGenericAdapter
-from .listener_common import (
-    AclEntry,
-    EscapeState,
-    _dispatch_control_command,
-    _origin_entry_matches,
-    access_manager_missing_frame,
-    compile_acl,
-    feed_escape_byte,
-    format_rw_notice,
-    ip_allowed,
-    parse_login,
-    read_take_target,
-    render_port_list,
-    resolve_server_label,
-    validate_listener_entries,
-)
-from .power_command import format_power_notice, run_power_menu
+from .listener_common import ip_allowed, parse_login, validate_listener_entries
 
 # Sentinel 'target' value that puts a listener into interactive port-menu mode.
-_MENU_TARGET = "*"
+_MENU_TARGET = MENU_TARGET
 
 # Menu-phase tuning (only applies to the port-selection prompt, after SSH auth
 # has already completed at the protocol level; the post-attach data pump has
@@ -68,34 +51,35 @@ _HOST_KEY_DIR = _ssh_host_key_dir_default()
 _HOST_KEY_PATH = os.path.join(_HOST_KEY_DIR, "ssh_host_key")
 
 
-@dataclass
-class ListenerConfig:
-    name: str
-    bind_host: str
-    bind_port: int
-    target: str
-    read_only: bool = False
-    acl_raw: List[str] = field(default_factory=list)
-    enabled: bool = True
-    require_auth: bool = True
-    compiled_acl: List[AclEntry] = field(default_factory=list)
-    effective_host: Optional[str] = None
-    effective_port: Optional[int] = None
+class _ProcessSessionTransport:
+    """The SessionTransport seam over an asyncssh process (issue #100).
 
+    ``stdin``/``stdout`` are the raw (``encoding=None``) asyncssh streams, so
+    the session module forwards bytes byte for byte, exactly as the old pump
+    did - including the Control menu escape sequence over a pty.
+    """
 
-@dataclass
-class SshSession:
-    client_id: str
-    listener: ListenerConfig
-    process: Any
-    port_name: str
-    read_only: bool
-    remote_host: str
-    username: str
-    port_mode: str = "read-only"
-    bytes_in: int = 0
-    bytes_out: int = 0
-    escape: EscapeState = field(default_factory=EscapeState)
+    def __init__(self, process: Any):
+        self._process = process
+
+    async def read(self, n: int) -> bytes:
+        return await self._process.stdin.read(n)
+
+    async def readexactly(self, n: int) -> bytes:
+        data = await self._process.stdin.read(n)
+        if len(data) < n:
+            raise asyncio.IncompleteReadError(data, n)
+        return data
+
+    def write(self, data: bytes) -> None:
+        self._process.stdout.write(data)
+
+    async def drain(self) -> None:
+        await self._process.stdout.drain()
+
+    async def close(self) -> None:
+        self._process.close()
+        await self._process.wait_closed()
 
 
 def _match_ssh_pubkey(auth_manager: Any, username: str, presented_key: "asyncssh.SSHKey") -> bool:
@@ -250,10 +234,26 @@ class SshListenerAdapter(BaseGenericAdapter):
                 if spec:
                     self.listeners.append(spec)
         self.servers: Dict[str, Any] = {}
-        self.sessions: Dict[str, SshSession] = {}
         self.console_manager = None
         self.auth_manager = None
         self._host_key: Optional[Any] = None
+        # Everything from attach to detach lives in the listener session module
+        # (issue #100); this adapter keeps only the SSH transport.
+        # `channel_owner=self` keeps the ConsoleManager channel contract on this
+        # adapter's pinned delegation names.
+        self._sessions = ListenerSessionManager(
+            display_name="SSH",
+            logger=self.logger,
+            channel_owner=self,
+            get_console_manager=lambda: self.console_manager,
+            get_auth_manager=lambda: self.auth_manager,
+            get_port_manager=lambda: self.main_port_manager,
+        )
+
+    @property
+    def sessions(self) -> Dict[str, Any]:
+        """Attached sessions, owned by the listener session module (issue #100)."""
+        return self._sessions.sessions
 
     # ------------------------------------------------------------------
     # Adapter contract
@@ -351,8 +351,7 @@ class SshListenerAdapter(BaseGenericAdapter):
 
     async def _stop_single_listener(self, name: str) -> None:
         """Close one listener's server and disconnect only its sessions."""
-        for client_id in [cid for cid, s in list(self.sessions.items()) if s.listener.name == name]:
-            await self._disconnect_session(client_id, reason="listener removed")
+        await self._sessions.drop_listener_sessions(name, reason="listener removed")
         server = self.servers.pop(name, None)
         if server is not None:
             try:
@@ -476,8 +475,7 @@ class SshListenerAdapter(BaseGenericAdapter):
 
     async def stop(self) -> None:
         self.is_running = False
-        for client_id in list(self.sessions.keys()):
-            await self._disconnect_session(client_id, reason="adapter stop")
+        await self._sessions.disconnect_all(reason="adapter stop")
         for name, server in list(self.servers.items()):
             try:
                 server.close()
@@ -521,38 +519,12 @@ class SshListenerAdapter(BaseGenericAdapter):
         self.auth_manager = auth_manager
 
     def _on_port_meta_update(self, port_name: str, changes: Optional[Dict[str, Any]] = None) -> None:
-        """Push the live power notice to SSH sessions attached to this port.
-
-        A feed change (user switch or out-of-band drift) reaches each attached
-        session as the ``[POWER]`` / ``[POWER WARNING]`` line, the same text the
-        client listener writes.
-        """
-        try:
-            if not isinstance(changes, dict) or changes.get("event") != "power_outlet_changed":
-                return
-            if not port_name:
-                return
-            notice = format_power_notice(changes)
-            for session in list(self.sessions.values()):
-                if session.port_name == port_name:
-                    asyncio.ensure_future(self._write_session(session, notice))
-        except Exception:
-            # justification: best-effort notice; power state is unchanged
-            pass
+        """Live power notice for attached sessions; the session module owns the push."""
+        self._sessions.on_port_meta(port_name, changes)
 
     async def send_data_to_client(self, client_id: str, data: bytes) -> bool:
-        session = self.sessions.get(client_id)
-        if not session:
-            return False
-        try:
-            session.process.stdout.write(data)
-            await session.process.stdout.drain()
-            session.bytes_out += len(data)
-            return True
-        except Exception as exc:
-            self.logger.debug("Failed to send data to SSH client %s: %s", client_id, exc)
-            await self._disconnect_session(client_id, reason="write failure")
-            return False
+        """ConsoleManager cross-adapter channel entry point; delegates to the session module."""
+        return await self._sessions.send_data(client_id, data)
 
     # ------------------------------------------------------------------
     # Session handling
@@ -576,17 +548,14 @@ class SshListenerAdapter(BaseGenericAdapter):
         if not port_name:
             return  # Already messaged + exited.
 
-        client_id = f"ssh:{listener.name}:{uuid.uuid4()}"
-        session = SshSession(
-            client_id=client_id,
-            listener=listener,
-            process=process,
+        session = self._sessions.create_session(
+            listener,
+            _ProcessSessionTransport(process),
             port_name=port_name,
-            read_only=listener.read_only,
-            remote_host=peer_ip,
+            peer_ip=peer_ip,
             username=username,
         )
-        attached = await self._attach_session(session)
+        attached = await self._sessions.attach(session)
         if attached is None:
             text = decide(Code.INTERNAL, mode=Mode.READ_ONLY).text
         elif attached.ok:
@@ -601,20 +570,7 @@ class SshListenerAdapter(BaseGenericAdapter):
                 self.logger.debug("SSH: could not deliver attach refusal", exc_info=True)
             process.exit(1)
             return
-        self.sessions[client_id] = session
-        self.logger.info(
-            "SSH client %s connected (listener=%s, port=%s, ro=%s)",
-            client_id,
-            listener.name,
-            port_name,
-            session.read_only,
-        )
-        if session.listener.read_only or session.port_mode != "read-write":
-            await self._write_session(session, "\r\n[WARNING: console is in read-only mode]\r\n")
-        try:
-            await self._pump_client_input(session)
-        finally:
-            await self._disconnect_session(client_id, reason="disconnect")
+        await self._sessions.serve(session)
 
     async def _write_exit_notice(self, stream: Any, message: bytes) -> None:
         """Best-effort delivery of a pre-exit notice to a process stream."""
@@ -624,200 +580,13 @@ class SshListenerAdapter(BaseGenericAdapter):
         except Exception:
             self.logger.debug("SSH: could not deliver exit notice", exc_info=True)
 
-    async def _pump_client_input(self, session: SshSession) -> None:
-        stdin = session.process.stdin
-        while True:
-            try:
-                data = await stdin.read(4096)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                self.logger.debug("Read error for %s: %s", session.client_id, exc)
-                break
-            if not data:
-                break
-            session.bytes_in += len(data)
-            if await self._process_input_chunk(session, data):
-                return
-
-    async def _process_input_chunk(self, session: SshSession, data: bytes) -> bool:
-        """Scan a chunk for the control-menu escape sequence, forwarding the rest.
-
-        Returns:
-            bool: True if the '.' command requested disconnect (or a forward
-            failed); the caller should stop pumping.
-        """
-        i = 0
-        payload = bytearray()
-        while i < len(data):
-            extra, cmd = feed_escape_byte(session.escape, data[i : i + 1])
-            payload.extend(extra)
-            i += 1
-            if not cmd:
-                continue
-            if payload:
-                if not await self._forward_payload(session, bytes(payload)):
-                    return True
-                payload.clear()
-            if cmd == "e":
-                data, i = await self._change_escape_sequence(session, data, i)
-                continue
-            if await self._handle_control_command(session, cmd):
-                return True
-        if payload and not await self._forward_payload(session, bytes(payload)):
-            return True
-        return False
-
-    async def _forward_payload(self, session: SshSession, payload: bytes) -> bool:
-        """Write `payload` to the attached port, respecting the read-only gate.
-
-        Returns False only on an actual write failure (session should close);
-        a read-only gate silently drops data and still returns True.
-        """
-        if session.listener.read_only or session.port_mode != "read-write":
-            if b"\r" in payload or b"\n" in payload:
-                # Re-announce on every Enter press; the one-time attach warning is easy to miss.
-                await self._write_session(session, "\r\n[WARNING: console is in read-only mode]\r\n")
-            return True
-        try:
-            if self.console_manager:
-                await self.console_manager.write_to_port(session.port_name, payload, session.client_id)
-            return True
-        except Exception as exc:
-            self.logger.warning("Failed forwarding data from %s to port %s: %s", session.client_id, session.port_name, exc)
-            return False
-
-    async def _change_escape_sequence(self, session: SshSession, data: bytes, i: int) -> Tuple[bytes, int]:
-        """Consume the two bytes following an 'e' command as the new escape sequence.
-
-        Takes them from the remaining buffered `data` when available;
-        otherwise reads the remainder directly from the session's transport.
-
-        Returns:
-            Tuple[bytes, int]: the (possibly replaced) buffer and index to
-            resume scanning from.
-        """
-        remaining = data[i:]
-        if len(remaining) < 2:
-            try:
-                remaining += await session.process.stdin.readexactly(2 - len(remaining))
-            except Exception:
-                # justification: a read failure ends the session; the reader loop sees the EOF
-                pass
-        if len(remaining) < 2:
-            return b"", 0
-        session.escape.escape_char1 = remaining[0:1]
-        session.escape.escape_char2 = remaining[1:2]
-        await self._write_session(session, "\r\n[Escape sequence changed]\r\n")
-        return remaining[2:], 0
-
-    async def _handle_control_command(self, session: SshSession, cmd: str) -> bool:
-        """Execute one control-menu command. Returns True to request disconnect."""
-        cm = self.console_manager
-        return await _dispatch_control_command(
-            session,
-            cmd,
-            cm,
-            lambda text: self._write_session(session, text),
-            lambda: self._cmd_request_rw(session, cm),
-            lambda: self._cmd_force_rw(session, cm),
-            lambda: self._cmd_release_rw(session, cm),
-            lambda: run_power_menu(
-                cm,
-                session.port_name,
-                session.process.stdin,
-                session.process.stdout,
-                lambda line: self._write_session(session, line + "\r\n"),
-                session.username,
-                self.auth_manager,
-                session.client_id,
-            ),
-            lambda: self._format_session_info(session),
-        )
-
-    async def _cmd_request_rw(self, session: SshSession, cm: Any) -> None:
-        if session.listener.read_only:
-            await self._write_session(session, "\r\n[This listener is configured read-only]\r\n")
-            return
-        decision = await cm.promote_client_to_read_write(session.client_id, session.port_name) if cm else None
-        await self._reply_access_decision(session, decision)
-
-    async def _cmd_force_rw(self, session: SshSession, cm: Any) -> None:
-        if session.listener.read_only:
-            await self._write_session(session, "\r\n[This listener is configured read-only]\r\n")
-            return
-        # Targeted takeover (issue #61): ask which holder to take the slot
-        # from; Enter keeps the no-target fallback (latest holder). A prompt
-        # the client abandons (disconnect) stops the session pump.
-        target, keep_going = await read_take_target(session.process.stdin, session.process.stdout)
-        if not keep_going:
-            return
-        decision = await cm.take_write_slot(session.client_id, session.port_name, target) if cm else None
-        await self._reply_access_decision(session, decision)
-
-    async def _cmd_release_rw(self, session: SshSession, cm: Any) -> None:
-        decision = await cm.demote_client_to_read_only(session.client_id, session.port_name) if cm else None
-        await self._reply_access_decision(session, decision)
-
-    async def _reply_access_decision(self, session: SshSession, decision: Optional[AccessDecision]) -> None:
-        """Print one Access decision and record the mode it reports.
-
-        The decision owns the wording, including a takeover's "taken from" line
-        (issue #98). This listener owns only the mode the session shows, and takes
-        it from the decision, so the session, the printed line, and the Port agree
-        - including after a release that failed, which leaves the session read-write.
-        """
-        if decision is None:
-            await self._write_session(session, format_rw_notice(access_manager_missing_frame(session.port_mode)))
-            return
-        session.port_mode = decision.mode.value
-        await self._write_session(session, decision.text)
-
-    def _format_session_info(self, session: SshSession) -> str:
-        esc = session.escape
-        esc_display = f"{esc.escape_char1!r}+{esc.escape_char2!r}"
-        return (
-            "\r\n--- Session Info ---\r\n"
-            f"Port: {session.port_name}\r\n"
-            f"Mode: {session.port_mode}\r\n"
-            f"Remote host: {session.remote_host}\r\n"
-            f"Escape sequence: {esc_display}\r\n"
-        )
-
-    async def _write_session(self, session: SshSession, text: str) -> None:
-        try:
-            session.process.stdout.write(text.encode())
-            await session.process.stdout.drain()
-            session.bytes_out += len(text)
-        except Exception:
-            self.logger.error(
-                "SSH session write failed (client=%s port=%s)", session.client_id, session.port_name, exc_info=True
-            )
-
     async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
-        """Deliver a cross-adapter access-mode notice as human text.
-
-        SSH clients are raw terminals and cannot parse JSON control frames,
-        so this renders `payload` via `format_rw_notice` instead of the
-        JSON/OMXCTRL framing used by the TCP/WebSocket adapters.
-        """
-        session = self.sessions.get(client_id)
-        if session is None:
-            return False
-        # An access frame states the mode its Client holds afterwards, so the
-        # session follows the Port instead of guessing from one reason value.
-        if payload.get("mode"):
-            session.port_mode = payload["mode"]
-        await self._write_session(session, format_rw_notice(payload))
-        return True
+        """ConsoleManager frame entry point; the session module renders it for the raw terminal."""
+        return await self._sessions.send_frame(client_id, payload)
 
     def _resolve_client_meta(self, client_id: str) -> Dict[str, Any]:
-        """Return `{"type", "ip", "username"}` for an SSH session (used by
-        `ConsoleManager.get_rw_holders_display` for cross-adapter IP lookup)."""
-        session = self.sessions.get(client_id)
-        if session is None:
-            return {}
-        return {"type": "ssh", "ip": session.remote_host, "username": session.username}
+        """ConsoleManager cross-adapter IP lookup; the session module owns the registry."""
+        return self._sessions.client_meta(client_id)
 
     # ------------------------------------------------------------------
     # Target resolution / port menu (menu phase only; the pump above has no
@@ -827,7 +596,7 @@ class SshListenerAdapter(BaseGenericAdapter):
         self, listener: ListenerConfig, process: Any, embedded_descriptor: Optional[str]
     ) -> Optional[str]:
         if embedded_descriptor and listener.target == _MENU_TARGET:
-            port_name = await self._resolve_target(embedded_descriptor)
+            port_name = await self._sessions.resolve_target(embedded_descriptor)
             if not port_name:
                 await self._send_and_exit(process, f"Port {embedded_descriptor} unavailable\r\n".encode())
                 return None
@@ -836,7 +605,7 @@ class SshListenerAdapter(BaseGenericAdapter):
         if listener.target == _MENU_TARGET:
             return await self._run_port_menu(process)
 
-        port_name = await self._resolve_target(listener.target)
+        port_name = await self._sessions.resolve_target(listener.target)
         if not port_name:
             await self._send_and_exit(process, f"Port {listener.target} unavailable\r\n".encode())
             return None
@@ -844,7 +613,7 @@ class SshListenerAdapter(BaseGenericAdapter):
 
     async def _run_port_menu(self, process: Any) -> Optional[str]:
         """Print the port list, prompt for a selection, and resolve it."""
-        await self._send_port_list(process)
+        await self._sessions.send_port_list(process.stdout)
         for _ in range(_MENU_MAX_ATTEMPTS):
             process.stdout.write(b"Port: ")
             await process.stdout.drain()
@@ -854,12 +623,12 @@ class SshListenerAdapter(BaseGenericAdapter):
                 return None
             choice = choice.strip()
             if not choice or choice in ("?", "list"):
-                await self._send_port_list(process)
+                await self._sessions.send_port_list(process.stdout)
                 continue
             if choice in ("quit", "exit"):
                 process.exit(0)
                 return None
-            port_name = await self._resolve_target(choice)
+            port_name = await self._sessions.resolve_target(choice)
             if port_name:
                 return port_name
             process.stdout.write(f"Unknown port: {choice}\r\n".encode())
@@ -917,17 +686,6 @@ class SshListenerAdapter(BaseGenericAdapter):
         process.stdout.write(data)
         await process.stdout.drain()
 
-    async def _send_port_list(self, process: Any) -> None:
-        entries: List[Dict[str, Any]] = []
-        try:
-            getter = getattr(self.main_port_manager, "get_port_list_with_federation", None)
-            if getter:
-                entries = await asyncio.wait_for(getter(), timeout=1.0)
-        except Exception:
-            entries = []
-        process.stdout.write(render_port_list(entries, header=resolve_server_label(self.main_port_manager)))
-        await process.stdout.drain()
-
     async def _send_and_exit(self, process: Any, payload: bytes) -> None:
         try:
             process.stdout.write(payload)
@@ -936,157 +694,12 @@ class SshListenerAdapter(BaseGenericAdapter):
             self.logger.error("SSH: failed to deliver port list before exit", exc_info=True)
         process.exit(1)
 
-    async def _attach_session(self, session: SshSession) -> Optional[AccessDecision]:
-        """Attach a session and return the access decision for it.
-
-        Returns None when there is no console manager or the attach raised. The caller
-        prints the refusal carried by a decision, so an SSH refusal says what the
-        access module says instead of what this adapter guessed (issue #98).
-        """
-        if not self.console_manager:
-            return None
-        try:
-            attached = await self.console_manager.connect_client_to_port(
-                session.client_id,
-                session.port_name,
-                session.username,
-            )
-        except Exception as exc:
-            self.logger.error("Console manager attach failed for %s: %s", session.client_id, exc)
-            return None
-        if attached.ok:
-            session.port_mode = attached.mode.value
-        else:
-            self.logger.warning(
-                "Console manager rejected SSH client %s for port %s (code=%s)",
-                session.client_id,
-                session.port_name,
-                attached.code.value,
-            )
-        if attached.ok and hasattr(self.console_manager, "register_client_channel"):
-            try:
-                self.console_manager.register_client_channel(session.client_id, self)
-            except Exception:
-                self.logger.error("register_client_channel failed for SSH client %s", session.client_id, exc_info=True)
-        return attached
-
-    async def _disconnect_session(self, client_id: str, *, reason: str) -> None:
-        session = self.sessions.pop(client_id, None)
-        if not session:
-            return
-        try:
-            if self.console_manager:
-                try:
-                    if hasattr(self.console_manager, "unregister_client_channel"):
-                        self.console_manager.unregister_client_channel(client_id)
-                except Exception:
-                    # justification: teardown routing cleanup; the port disconnect below is logged on failure
-                    pass
-                await self.console_manager.disconnect_client_from_port(client_id, session.port_name)
-        except Exception:
-            self.logger.debug("Failed disconnecting client %s from port", client_id, exc_info=True)
-        try:
-            session.process.close()
-            await session.process.wait_closed()
-        except Exception:
-            # justification: teardown cleanup; the session is exiting regardless
-            pass
-        self.logger.info(
-            "SSH client %s closed (%s) in=%d out=%d",
-            client_id,
-            reason,
-            session.bytes_in,
-            session.bytes_out,
-        )
-
     # ------------------------------------------------------------------
     # Helpers
 
     def _build_listener(self, entry: Dict[str, Any]) -> Optional[ListenerConfig]:
-        if not isinstance(entry, dict):
-            return None
-        try:
-            bind_host = entry.get("bind_host", "0.0.0.0")
-            if not isinstance(bind_host, str) or not bind_host.strip():
-                bind_host = "0.0.0.0"
-            bind_port = int(entry.get("bind_port"))
-            spec = ListenerConfig(
-                name=str(entry.get("name")),
-                bind_host=bind_host,
-                bind_port=bind_port,
-                target=str(entry.get("target")),
-                read_only=bool(entry.get("read_only", False)),
-                acl_raw=[str(a).strip() for a in entry.get("acl", []) if str(a).strip()],
-                enabled=bool(entry.get("enabled", True)),
-                require_auth=bool(entry.get("require_auth", True)),
-            )
-            if not spec.name:
-                return None
-            if not spec.target:
-                return None
-            if spec.target == _MENU_TARGET and not spec.require_auth:
-                self.logger.warning(
-                    "SSH listener '%s' uses menu mode (target: '*') without require_auth; "
-                    "any client can browse and attach to any port",
-                    spec.name,
-                )
-            spec.compiled_acl = compile_acl(
-                spec.acl_raw,
-                on_invalid=lambda rule: self.logger.warning("Ignoring invalid ACL '%s' for listener %s", rule, spec.name),
-            )
-            return spec
-        except Exception:
-            self.logger.error("Invalid SSH listener entry: %s", entry, exc_info=True)
-            return None
-
-    async def _resolve_target(self, descriptor: str) -> Optional[str]:
-        if not self.main_port_manager:
-            return None
-        descriptor = descriptor.strip()
-        if not descriptor:
-            return None
-        if "::" in descriptor:
-            prefix, base = descriptor.split("::", 1)
-            if prefix.lower() == "local":
-                return base if self._is_local_port(base) else None
-            return await self._resolve_remote_by_origin(base, prefix)
-        if self._is_local_port(descriptor):
-            return descriptor
-        return await self._resolve_remote_by_origin(descriptor, None)
-
-    def _is_local_port(self, port_name: str) -> bool:
-        try:
-            port = self.main_port_manager.get_port(port_name)
-        except Exception:
-            port = None
-        if port is None:
-            return False
-        metadata = getattr(port, "metadata", None)
-        if metadata is not None:
-            origin = getattr(metadata, "origin_server", None)
-            if origin is not None and getattr(origin, "server_id", None):
-                return False
-        return True
-
-    async def _resolve_remote_by_origin(self, port_name: str, server_id: Optional[str]) -> Optional[str]:
-        """Resolve a port name to an unambiguous origin-matched entry.
-
-        ``server_id`` None matches any federated port, "local"/"localhost"
-        matches the local-only port, anything else must match the origin's
-        server id. Returns the port name only when exactly one entry
-        matches; ambiguity returns None.
-        """
-        entries = []
-        try:
-            getter = getattr(self.main_port_manager, "get_port_list_with_federation", None)
-            if getter:
-                entries = await asyncio.wait_for(getter(), timeout=1.0)
-        except Exception:
-            entries = []
-        matches = [e for e in (entries or []) if _origin_entry_matches(e, port_name, server_id)]
-        if len(matches) == 1:
-            return matches[0].get("name")
-        return None
+        """Shared builder (issue #100); only the require_auth default differs per transport."""
+        return build_listener(entry, display_name="SSH", require_auth_default=True, logger=self.logger)
 
 
 __all__ = ["SshListenerAdapter"]
