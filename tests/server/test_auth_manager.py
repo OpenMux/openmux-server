@@ -72,6 +72,60 @@ def test_failure_tracking_and_lockout():
     assert am.is_user_locked(user, ip) is False
 
 
+def _lockout_manager(failure_threshold: int = 3, base_lock_seconds: int = 60, window_seconds: int = 600) -> AuthManager:
+    """Return an auth manager whose lockout limits come from a security policy, as in the server."""
+    from openmux.server.security_policy import SecurityPolicy
+
+    policy = SecurityPolicy.from_mapping(
+        {
+            "rate_limits": {
+                "authentication": {
+                    "failure_threshold": failure_threshold,
+                    "base_lock_seconds": base_lock_seconds,
+                    "window_seconds": window_seconds,
+                }
+            }
+        }
+    )
+    return AuthManager({"users": [{"username": "u", "password_hash": sha256_hex("pw")}]}, security_policy=policy)
+
+
+def test_the_lock_question_between_failures_does_not_reset_the_count():
+    # The login path asks for the lock state before every attempt. That question used to delete a
+    # record with fewer failures than the threshold, so each wrong password erased its own count and
+    # no account was ever locked at any threshold.
+    am = _lockout_manager(failure_threshold=3)
+    for attempt in range(1, 3):
+        assert am.is_user_locked("u", "10.0.0.1") is False
+        am.register_auth_failure("u", "10.0.0.1")
+    assert am.is_user_locked("u", "10.0.0.1") is False, "two failures are still below the threshold"
+    am.register_auth_failure("u", "10.0.0.1")
+    assert am.is_user_locked("u", "10.0.0.1") is True, "the third failure must lock the account"
+    assert am.is_user_locked("u", "10.0.0.2") is False, "a different address has its own counter"
+
+
+def test_a_lock_that_ran_out_is_extended_by_the_next_wrong_password():
+    am = _lockout_manager(failure_threshold=2, base_lock_seconds=90)
+    am.register_auth_failure("u", "10.0.0.1")
+    am.register_auth_failure("u", "10.0.0.1")
+    assert am.is_user_locked("u", "10.0.0.1") is True
+    record = am._fail_tracker[("u", "10.0.0.1")]
+    record["locked_until"] = time.time() - 1  # The lock has run out.
+    assert am.is_user_locked("u", "10.0.0.1") is False
+    am.register_auth_failure("u", "10.0.0.1")
+    assert am.is_user_locked("u", "10.0.0.1") is True, "one more wrong password locks it again"
+    remaining = record["locked_until"] - time.time()
+    assert remaining > 90, "a repeat mistype extends the lock on the documented curve"
+
+
+def test_a_failure_record_older_than_the_window_is_forgotten():
+    am = _lockout_manager(failure_threshold=5, window_seconds=600)
+    am.register_auth_failure("u", "10.0.0.1")
+    am._fail_tracker[("u", "10.0.0.1")]["first_failure"] = time.time() - 601
+    assert am.is_user_locked("u", "10.0.0.1") is False
+    assert ("u", "10.0.0.1") not in am._fail_tracker, "a spent window must not linger in the tracker"
+
+
 def test_public_key_loading_and_pk_challenge_verify_openssh():
     # Generate a keypair and export public in OpenSSH format
     priv = Ed25519PrivateKey.generate()

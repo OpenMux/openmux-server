@@ -315,19 +315,28 @@ class AuthManager:
             self._fail_tracker.pop(key, None)
 
     def is_user_locked(self, username: str, src_ip: Optional[str]) -> bool:
+        # A lock is active while its deadline lies ahead. Asking must never throw away the failures
+        # counted so far: every login path asks this before it checks the password, so clearing a
+        # record that was not locked yet reset the count on every attempt and the lockout could
+        # never be reached at any threshold.
         key = (username, src_ip or "?")
         rec = self._fail_tracker.get(key)
         if not rec:
             return False
+        now = time.time()
         locked_until = rec.get("locked_until", 0)
-        if locked_until <= time.time():
-            # Auto clear after lock expiry (per IP)
-            if rec.get("failures") < self._failure_threshold:
-                self._fail_tracker.pop(key, None)
-            else:
-                rec["locked_until"] = 0
-            return False
-        return True
+        if locked_until > now:
+            return True
+        if locked_until:
+            # The lock ran out. Keep the failure count, so a further mistype extends the lock on the
+            # documented curve instead of looking like a first failure.
+            rec["locked_until"] = 0
+        if now - rec.get("first_failure", now) > self._max_fail_window:
+            # The counting window closed with no lock in force, so the record has served its purpose.
+            # Drop it: the key carries a caller-supplied username, and forgotten records keep the
+            # tracker small when many names or addresses mistype once each.
+            self._fail_tracker.pop(key, None)
+        return False
 
     # =================== Public Key (Ed25519) Authentication ===================
     def _resolve_public_key_record(self, username: str, key_id: Optional[str]) -> Optional[Dict[str, Any]]:

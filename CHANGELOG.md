@@ -66,6 +66,12 @@ Changes since v1.0.4 (2026-10-19).
   `debian/openmux-server.service` ships `Restart=on-failure`, so systemd restarted a server an operator had just stopped, and
   `systemctl status` showed the stop as a failure. A clean stop now exits 0. A bad config file still exits 1, and a start that
   fails inside the server still exits 2. No config key changed.
+- **The login lockout now engages.** Asking whether an account was locked deleted that account's failure count, so the count
+  never reached `rate_limits.authentication.failure_threshold` in `security.yaml`, and no account was ever locked. That check
+  now only reports. An operator who mistypes the password `failure_threshold` times within `window_seconds` from one address
+  now reads "Too many failed attempts for this account. Please try again later." and waits `base_lock_seconds` (30 s by
+  default, longer for each further failure) before the correct password works again. No key changed, and the counters stay per
+  account and per address.
 
 ### Web console and observability
 - **Web console pages ask for their assets by version.** Each page now requests its scripts and stylesheets as
