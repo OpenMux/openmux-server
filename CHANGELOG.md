@@ -44,6 +44,21 @@ Changes since v1.0.4 (2026-10-19).
   Before, a close during the handshake left only `Failed to connect to openmux.example:443`, and an attach or refusal answer
   that arrived during the handshake was thrown away, so the Client never applied the mode the server had already set.
   No config key changed.
+- **Asking for the Write slot no longer grants what Takeover refuses.** A Client attached read-only could read-write a port
+  by asking for it — the `r` key on a listener, the request from the web console, or `request_read_write` on the client
+  protocol — when its account had `read-only` permission, when a `read_only_groups` or `read_write_groups` list on that
+  Port excluded it for writing, or when the Port had `access_default: deny`. Only the seat count was checked. The same
+  identity was refused the same seat by Takeover, so a weak account could drive a Port it could not take. The request now
+  answers `not_entitled`, `denied_by_group_acl`, or `denied_by_access_default` like every other path, and the Client stays
+  read-only. Entitlement follows from the keys you already set (`access_default`, `read_write_groups`, `read_only_groups`
+  in `server.yaml`, and the permission in `authentication.yaml`); nothing new to configure. A script that relied on the
+  request succeeding for a read-only account must grant that account write access instead.
+- **A targeted Takeover accepts the holder id the console prints.** Name the holder shown in the holders list — the short
+  id, such as `ef012345` — on the `w` key of a listener, in the Takeover prompt, or in `take_write_slot`, and that holder
+  loses the seat. Before, the server matched only the full `client_id`, so the id it printed back was refused with
+  `invalid_target` by the sentence that tells you to check that id. The full `client_id` still works and wins when both
+  forms could match; an ambiguous answer is refused rather than aimed at one holder by guess. A Federated holder still
+  takes its origin verbatim. No config key changed.
 
 - **A `port_actions` section the loader cannot read no longer removes the endpoints.** One value of the wrong type
   (for example `port_actions: true`, or `action_ports` written as a list) made the route registration fail at start, so

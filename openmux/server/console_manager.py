@@ -12,7 +12,7 @@ from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 # Import the helper module to set the console manager reference
-from openmux.server.access_control import wire_to_mode, write_capacity
+from openmux.server.access_control import holder_id_short, wire_to_mode, write_capacity
 from openmux.server.access_decision import (
     AccessDecision,
     Code,
@@ -37,6 +37,22 @@ def _port_capacity(port: Optional[Any]) -> Optional[Any]:
     Port could not be resolved, which leaves the key off the frame.
     """
     return getattr(port, "max_read_write_users", None) if port is not None else None
+
+
+def _match_take_target(holders: List[Dict[str, Any]], target: str) -> Optional[Dict[str, Any]]:
+    """Resolve the target a console named to exactly one read-write holder record.
+
+    A console shows each holder with ``holder_id_short`` - the id inside the label in
+    its holders list - and that is the id an operator copies and types back. So accept
+    the exact ``client_id`` first, which is what the web console and the CLI protocol
+    send, then the short form when exactly one holder shows it. Two holders printing
+    the same short form is a collision: refuse rather than demote the wrong writer.
+    """
+    for record in holders:
+        if record.get("client_id") == target:
+            return record
+    printed = [record for record in holders if holder_id_short(str(record.get("client_id") or "")) == target]
+    return printed[0] if len(printed) == 1 else None
 
 
 class ConsoleManager:
@@ -619,10 +635,12 @@ class ConsoleManager:
 
         Returns:
             AccessDecision: ``granted`` when the Client now drives; otherwise
-            ``not_attached``, ``federation_denied``, or ``promote_failed`` with
-            the holders that took the seat and the Port's capacity. ``mode`` is
-            the mode the Client holds afterwards, so a refusal still reads
-            read-only here and the Client keeps its read-only seat.
+            ``not_attached``, ``not_entitled``, ``denied_by_group_acl``,
+            ``denied_by_access_default``, ``federation_denied``, or
+            ``promote_failed`` with the holders that took the seat and the Port's
+            capacity. ``mode`` is the mode the Client holds afterwards, so a
+            refusal still reads read-only here and the Client keeps its read-only
+            seat.
         """
         # Check if client is connected to this port
         if client_id not in self.client_port_map or self.client_port_map[client_id] != port_name:
@@ -632,6 +650,33 @@ class ConsoleManager:
             port = self.port_manager.get_port(port_name)
         except Exception:
             port = None
+
+        # Re-check the access ladder before granting, as an attach and a
+        # take-over both do (SEC-07). ``port_manager.promote_client`` counts the
+        # write slot and nothing else, so without this a Client that attached
+        # read-only could drive the Port by asking: a read-only account, a name in
+        # ``read_only_groups``, or an ``access_default: deny`` port. The ladder is
+        # ``_taker_entitled``, which is the attach ladder without the slot
+        # question; ``take_write_slot`` refuses the same identity with
+        # ``not_entitled``, so a request must not be easier than a take.
+        if port is not None:
+            creds = self._take_write_slot_permissions(port, client_id, port_name)
+            entitlement = (
+                self._taker_entitled(port, port_name, creds[1], creds[0] or client_id)
+                if creds is not None
+                else Entitlement.denied(Code.NOT_ENTITLED)
+            )
+            if not entitlement.may_drive:
+                refusal = entitlement.code or Code.NOT_ENTITLED
+                self.logger.info("Refusing read-write for %s on port %s: %s", client_id, port_name, refusal.value)
+                return decide(
+                    refusal,
+                    mode=Mode.READ_ONLY,
+                    client_id=client_id,
+                    port_name=port_name,
+                    holders=self._holders_for(port),
+                    capacity=_port_capacity(port),
+                )
 
         # A federated (remote_muxcon) port's origin server is the sole authority on
         # its shared read-write slot (issue #52) - ask it before granting locally.
@@ -1093,10 +1138,12 @@ class ConsoleManager:
         """Pick the holder a write-slot takeover demotes (issue #59 Part 2).
 
         With an explicit ``target`` that record must be a current read-write
-        holder (the taker's own seat can never be taken). Without one, fall
-        back to the most recently attached read-write holder that is not the
-        taker itself (max ``connected_at``; records lacking the field compare
-        as 0).
+        holder (the taker's own seat can never be taken). The name may be the
+        full ``client_id`` or the short form this server prints for it in the
+        holders list, because that label is what an operator reads (see
+        ``_match_take_target``). Without a target, fall back to the most recently
+        attached read-write holder that is not the taker itself (max
+        ``connected_at``; records lacking the field compare as 0).
 
         Local ``fed:`` pseudo-clients (muxcon's mirrored holders on a local
         port) are legitimate targets - their demotion reaches the owning
@@ -1114,10 +1161,10 @@ class ConsoleManager:
         if not holders:
             return None, Code.NO_HOLDER
         if target is not None:
-            for c in holders:
-                if c.get("client_id") == target:
-                    return c, None
-            return None, Code.INVALID_TARGET
+            chosen = _match_take_target(holders, target)
+            if chosen is None:
+                return None, Code.INVALID_TARGET
+            return chosen, None
         chosen = max(holders, key=lambda c: (c.get("connected_at") or 0.0))
         return chosen, None
 

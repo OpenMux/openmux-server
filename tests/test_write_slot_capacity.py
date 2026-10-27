@@ -23,7 +23,7 @@ from openmux.server.access_control import (
     wire_to_mode,
     write_capacity,
 )
-from openmux.server.access_decision import Code
+from openmux.server.access_decision import Code, Mode
 from openmux.server.console_manager import ConsoleManager
 from tests.support.decisions import attach_result, ladder_result
 
@@ -688,10 +688,116 @@ class TestTcpInitiatorCapacityEndToEnd:
         ok2, m2, _ = attach_result(await cm.connect_client_to_port("c2", "p1", "bob"))
         assert m1 == "read-write" and m2 == "read-write"
 
+    # ---------------------------------------------------------------------------
+    # MuxCon wire: local mode travels, remote side evaluates
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# MuxCon wire: local mode travels, remote side evaluates
-# ---------------------------------------------------------------------------
+    @pytest.mark.asyncio
+    async def test_read_only_account_cannot_ask_its_way_into_the_slot(self, monkeypatch):
+        """A request re-runs the access ladder, it does not only count seats (SEC-07).
+
+        The Client attached read-only because its account may not drive. Asking for
+        the write slot must not be easier than taking it: ``take_write_slot`` already
+        refuses this identity, and ``port_manager.promote_client`` alone would grant it.
+        """
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "host": "127.0.0.1", "port": 1},
+            {"users": [{"username": "viewer", "password_hash": "x", "permissions": "read-only"}]},
+        )
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "viewer"))
+        assert (ok, mode, reason) == (True, "read-only", None)
+
+        promotion = await cm.promote_client_to_read_write("c1", "p1")
+        assert promotion.ok is False
+        assert promotion.code is Code.NOT_ENTITLED
+        assert promotion.mode is Mode.READ_ONLY
+        port = cm.port_manager.ports["p1"]
+        assert [c["mode"] for c in port.connected_clients] == ["read-only"]
+
+    @pytest.mark.asyncio
+    async def test_read_only_group_member_cannot_be_promoted_by_request(self, monkeypatch):
+        """A ``read_only_groups`` name holds a read-only seat and stays there."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {
+                "name": "p1",
+                "host": "127.0.0.1",
+                "port": 1,
+                "read_only_groups": ["watchers"],
+            },
+            {"users": [{"username": "watcher", "password_hash": "x", "permissions": "read-write", "groups": ["watchers"]}]},
+        )
+        ok, mode, reason = attach_result(await cm.connect_client_to_port("c1", "p1", "watcher"))
+        assert (ok, mode, reason) == (True, "read-only", None)
+
+        promotion = await cm.promote_client_to_read_write("c1", "p1")
+        assert promotion.ok is False
+        assert promotion.code is Code.NOT_ENTITLED
+
+    @pytest.mark.asyncio
+    async def test_entitled_client_gets_the_slot_when_the_seat_frees(self, monkeypatch):
+        """Entitlement and capacity are separate questions: a free seat plus a
+        write-entitled account is still a grant after the holder releases."""
+        cm = await self._make_manager(
+            monkeypatch,
+            {"name": "p1", "host": "127.0.0.1", "port": 1},
+            {
+                "users": [
+                    {"username": "driver", "password_hash": "x", "permissions": "read-write"},
+                    {"username": "second", "password_hash": "x", "permissions": "read-write"},
+                ]
+            },
+        )
+        assert attach_result(await cm.connect_client_to_port("c1", "p1", "driver"))[1] == "read-write"
+        assert attach_result(await cm.connect_client_to_port("c2", "p1", "second"))[1] == "read-only"
+
+        await cm.demote_client_to_read_only("c1", "p1")
+        promotion = await cm.promote_client_to_read_write("c2", "p1")
+        assert promotion.ok is True
+        assert promotion.code is Code.GRANTED
+        port = cm.port_manager.ports["p1"]
+        assert {c["client_id"]: c["mode"] for c in port.connected_clients} == {"c1": "read-only", "c2": "read-write"}
+
+
+class TestTakeTargetMatching:
+    """The id a console prints is the id a targeted takeover accepts (issue #61).
+
+    ``holder_id_short`` documents the round trip, and the holders list shows only the
+    short form, so a refusal of that id breaks the workflow the refusal message tells
+    the operator to use.
+    """
+
+    HOLDER = "6f1c2d3e-0000-4a5b-8c9d-abcdef012345"
+
+    def test_exact_client_id_wins(self):
+        from openmux.server.console_manager import _match_take_target
+
+        holders = [{"client_id": self.HOLDER, "mode": "read-write"}]
+        assert _match_take_target(holders, self.HOLDER) is holders[0]
+
+    def test_short_id_printed_in_the_holders_list_resolves(self):
+        """The last eight characters are what the label shows, so they must resolve."""
+        from openmux.server.console_manager import _match_take_target
+
+        holders = [{"client_id": self.HOLDER, "mode": "read-write"}]
+        assert _match_take_target(holders, "abcdef012345"[-8:]) is holders[0]
+
+    def test_an_id_no_holder_prints_is_refused(self):
+        from openmux.server.console_manager import _match_take_target
+
+        assert _match_take_target([{"client_id": self.HOLDER, "mode": "read-write"}], "deadbeef") is None
+
+    def test_a_short_form_two_holders_share_is_not_guessed(self):
+        """Ambiguity must not demote an arbitrary writer."""
+        from openmux.server.console_manager import _match_take_target
+
+        holders = [
+            {"client_id": "11111111-2222-4333-8444-0000aabbccdd", "mode": "read-write"},
+            {"client_id": "99999999-8888-4777-8666-1111aabbccdd", "mode": "read-write"},
+        ]
+        assert _match_take_target(holders, "aabbccdd") is None
+        assert _match_take_target(holders, holders[1]["client_id"]) is holders[1]
 
 
 class TestMuxConWire:
