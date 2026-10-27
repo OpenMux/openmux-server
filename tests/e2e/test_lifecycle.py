@@ -71,14 +71,34 @@ def _control_request(path, request: Dict[str, Any], timeout: float = 10.0) -> Di
     return payload if isinstance(payload, dict) else {}
 
 
-def _assert_no_close_error(server: Any) -> None:
-    """Fail with the server tail when closing a client left an error behind.
+def _assert_client_left_quietly(server: Any) -> None:
+    """Fail with the server tail when a client exit left an error behind.
 
-    The half-close in ``ClientSession.close()`` reports its own failure as ERROR with a traceback, so the
-    markers below name that one path and nothing else.
+    The markers are the paths that reported a dead socket as a server fault: the half-close in
+    ``ClientSession.close()``, and the two reads in ``ClientSession``. A client that was killed, or a
+    tab that was closed, ends those calls with ``ConnectionResetError``; that is how a client leaves,
+    not a failure of the server.
     """
     output = server.output()
-    for marker in ("Error during client close", "write_eof"):
+    markers = (
+        "Error during client close",
+        "write_eof",
+        "Error receiving bytes from client",
+        "Error receiving char from client",
+    )
+    for marker in markers:
+        assert marker not in output, f"{marker!r} appeared in the server log:\n{server.tail(40)}"
+
+
+def _assert_no_unhandled_task_error(server: Any) -> None:
+    """Fail with the server tail when a task raised and nobody awaited it.
+
+    asyncio prints such an exception once, with its traceback, when the task object is garbage
+    collected. It never reaches a client and never fails a request, so a log marker is the only sign
+    that a cleanup path raised at all.
+    """
+    output = server.output()
+    for marker in ("Task exception was never retrieved", "Traceback (most recent call last)"):
         assert marker not in output, f"{marker!r} appeared in the server log:\n{server.tail(40)}"
 
 
@@ -199,6 +219,12 @@ def test_lif08_a_full_reload_stops_and_restores_the_adapters(server, clients, st
         cli_next = clients.cli(user="rw", surface="cli:after", attach_to="loop1")
         cli_next.write_line("after-full-reload")
         assert "after-full-reload" in cli_next.wait_for("after-full-reload", timeout=15), cli_next.read_text()
+    with step("the reload left no cleanup error in the log"):
+        # stop() disconnects every client while each connection's own handler is in the same teardown.
+        # Both used to pass the "is this client known" check before their first await, so the loser
+        # reached `del self.clients[client_id]` after the winner had removed it. Nobody awaits the per
+        # connection task, so that KeyError surfaced only as an unhandled task exception in the log.
+        _assert_no_unhandled_task_error(server)
 
 
 @surfaces("control socket")
@@ -236,7 +262,7 @@ def test_lif10_a_session_that_ends_is_closed_without_an_error_in_the_log(server,
         # The half-close in ClientSession.close() guards only AttributeError and RuntimeError, and a
         # socket the peer already left raises OSError instead. That escaped to the caller's handler and
         # logged ERROR plus a traceback for every ordinary client exit.
-        _assert_no_close_error(server)
+        _assert_client_left_quietly(server)
     with step("a client that dies without a word is also closed quietly"):
         cli_killed = clients.cli(user="rw", surface="cli:killed", attach_to="loop1")
         cli_killed.write_line("lif10-before-reset")
@@ -244,7 +270,7 @@ def test_lif10_a_session_that_ends_is_closed_without_an_error_in_the_log(server,
         mark = len(server.log_lines())
         cli_killed.abort()
         server.wait_for_log("disconnected from port loop1", since=mark, timeout=15)
-        _assert_no_close_error(server)
+        _assert_client_left_quietly(server)
     with step("the write slot came free for the next client"):
         cli_next = clients.cli(user="rw", surface="cli:next", attach_to="loop1")
         assert cli_next.mode() == "read-write", cli_next.mode()

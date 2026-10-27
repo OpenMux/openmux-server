@@ -105,6 +105,13 @@ Changes since v1.0.4 (2026-10-19).
   `RuntimeError`. A plain `openmux` exit, a closed browser tab, and a killed client now log the ordinary
   `Client <id> disconnected from port <port>` line and nothing else. The session closes the same way as before, and a close
   that fails for a real reason still reports ERROR. No config change.
+- **A client that dies mid-read is quiet too, and a session is torn down once.** Two more paths reported a dead socket as a
+  server fault. The reads reported it as `ERROR: Error receiving bytes from client <id>: [Errno 54] Connection reset by
+  peer` with a traceback; they now log one INFO line, `Read from client <id> stopped: <reason>`, for a reset, a broken
+  pipe, or a read cut short, and still report ERROR for anything else. A full reload ran the teardown of each client twice,
+  once from `stop()` and once from that connection's own handler, and the second one raised `KeyError` that nobody awaited:
+  it showed as `ERROR: Task exception was never retrieved` with a traceback, and the socket was closed twice. The first
+  caller now claims the session and the second returns. No config change.
 
 ## [1.0.4]
 

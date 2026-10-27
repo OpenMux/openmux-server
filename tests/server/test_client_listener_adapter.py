@@ -1160,3 +1160,108 @@ async def test_power_switch_frame_with_configured_pdu_and_admin():
     assert resp["on"] is True
     assert resp["state"] == "on"
     await pm._pdu.stop()
+
+
+class _LogCatcher:
+    """Collect the level and message of every call, so a test can assert on what was reported."""
+
+    def __init__(self):
+        self.calls: List[Tuple[str, str]] = []
+
+    def _record(self, level: str, message: str, *args) -> None:
+        self.calls.append((level, message % args if args else message))
+
+    def debug(self, message: str, *args, **kwargs) -> None:
+        self._record("debug", message, *args)
+
+    def info(self, message: str, *args, **kwargs) -> None:
+        self._record("info", message, *args)
+
+    def warning(self, message: str, *args, **kwargs) -> None:
+        self._record("warning", message, *args)
+
+    def error(self, message: str, *args, **kwargs) -> None:
+        self._record("error", message, *args)
+
+    def levels(self) -> List[str]:
+        return [level for level, _ in self.calls]
+
+
+class _RaisingReader:
+    """A socket read that fails the way a client that died mid-read fails."""
+
+    def __init__(self, error: BaseException):
+        self.error = error
+
+    async def read(self, n: int) -> bytes:  # pragma: no cover - raises before returning
+        raise self.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionResetError(54, "Connection reset by peer"),
+        BrokenPipeError(32, "Broken pipe"),
+        asyncio.IncompleteReadError(b"", 4),
+    ],
+    ids=["reset", "broken-pipe", "eof-mid-read"],
+)
+async def test_a_read_that_ends_because_the_client_left_is_not_an_error(error):
+    """A client that dies is an ordinary exit: one quiet line, and None to the caller."""
+    logger = _LogCatcher()
+    session = ClientSession("c1", "127.0.0.1", cast(Any, _RaisingReader(error)), cast(Any, FakeWriter()), logger)
+
+    assert await session.receive_bytes(64) is None
+    assert session.connected is False
+    assert "error" not in logger.levels(), logger.calls
+
+    session.connected = True
+    assert await session.receive_char() is None
+    assert session.connected is False
+    assert "error" not in logger.levels(), logger.calls
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_fails_for_another_reason_is_still_reported_as_an_error():
+    """The quiet path covers a vanished peer only; anything else must stay visible."""
+    logger = _LogCatcher()
+    session = ClientSession(
+        "c1", "127.0.0.1", cast(Any, _RaisingReader(RuntimeError("boom"))), cast(Any, FakeWriter()), logger
+    )
+
+    assert await session.receive_bytes(64) is None
+    assert "error" in logger.levels(), logger.calls
+
+
+@pytest.mark.asyncio
+async def test_disconnect_client_from_two_callers_tears_the_session_down_once():
+    """The reload race: `stop()` and the connection's own handler tear the same client down.
+
+    Full reload calls `stop()`, which disconnects every client while each connection's handler is in
+    the same teardown through its `finally`. Both used to pass the "is this client known" check before
+    their first await, so the loser reached `del self.clients[client_id]` after the winner removed it
+    and raised `KeyError`. Nobody awaits the per-connection task, so asyncio reported it as
+    "Task exception was never retrieved" and the client saw nothing.
+    """
+    adapter = TcpServerAdapter("cli", {"client_listener": {"host": "127.0.0.1", "port": 0}})
+
+    class _SlowSession:
+        def __init__(self):
+            self.client_id = "c1"
+            self.connected_port = None
+            self.teardown_started = False
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            await asyncio.sleep(0.01)  # let the other caller reach the removal
+
+    session = _SlowSession()
+    adapter.clients["c1"] = cast(Any, session)
+
+    results = await asyncio.gather(adapter.disconnect_client("c1"), adapter.disconnect_client("c1"), return_exceptions=True)
+
+    assert results == [None, None], results
+    assert "c1" not in adapter.clients
+    assert session.close_calls == 1, f"the session was torn down {session.close_calls} times"

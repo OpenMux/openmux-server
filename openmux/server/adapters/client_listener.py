@@ -1354,22 +1354,30 @@ class TcpServerAdapter(BaseGenericAdapter):
     async def disconnect_client(self, client_id: str):
         """Fully tear down a client session (port detach + socket close).
 
+        A caller claims the session before its first await, so two callers racing on the same client
+        - ``stop()`` during a reload and that connection's own handler - tear it down once. The loser
+        has nothing left to do and returns. The session stays in ``self.clients`` until it is closed,
+        so a final write to it still resolves.
+
         Args:
             client_id: Identifier of the client to disconnect.
         """
-        if client_id not in self.clients:
+        client = self.clients.get(client_id)
+        if client is None or client.teardown_started:
             return
 
-        client = self.clients[client_id]
+        # No await between the check and the claim, so only one caller passes this line.
+        client.teardown_started = True
+        try:
+            # Disconnect from port if connected
+            await self.disconnect_client_from_port(client)
 
-        # Disconnect from port if connected
-        await self.disconnect_client_from_port(client)
-
-        # Close connection
-        await client.close()
-
-        # Remove from tracking
-        del self.clients[client_id]
+            # Close connection
+            await client.close()
+        finally:
+            # Remove from tracking even when a step above failed: the session is claimed, so no later
+            # caller would clean it up, and a stale entry is still offered to senders and to status.
+            self.clients.pop(client_id, None)
 
         self.logger.info("Client %s disconnected", client_id)
 
@@ -1490,6 +1498,12 @@ class TcpServerAdapter(BaseGenericAdapter):
         }
 
 
+#: Read failures that mean only "the client is gone": a killed client, a closed browser
+#: tab, or an adapter stop during a reload. They end a session the way a clean exit does, so
+#: they are reported without a traceback. Anything else stays an ERROR.
+_PEER_GONE_ERRORS = (ConnectionError, asyncio.IncompleteReadError)
+
+
 class ClientSession:
     """Represents a connected client session.
 
@@ -1528,6 +1542,9 @@ class ClientSession:
         # Partial OMXCTRL control frame received with no terminating newline
         # yet; completed by the next chunk (issue #88 framing).
         self._ctrl_rx_frag: bytes = b""
+        # Set once a teardown claimed this session, so a second caller - `stop()` racing the
+        # connection handler during a reload - never detaches, closes, and removes it twice.
+        self.teardown_started: bool = False
 
     async def receive_char(self) -> Optional[bytes]:
         """Receive exactly one byte (unless disconnected).
@@ -1541,6 +1558,13 @@ class ClientSession:
                 self.connected = False
                 return None
             return data
+        except _PEER_GONE_ERRORS as e:
+            # The client left without saying so: a reset, an aborted connection, or a read cut
+            # short. One line naming the reason and no traceback; the caller ends the session on
+            # None, which reports the disconnect itself at INFO.
+            self.connected = False
+            self.logger.info("Read from client %s stopped: %s", self.client_id, e)
+            return None
         except Exception as e:
             self.logger.error("Error receiving char from client %s: %s", self.client_id, e, exc_info=True)
             self.connected = False
@@ -1585,6 +1609,12 @@ class ClientSession:
                 self.connected = False
                 return None
             return data
+        except _PEER_GONE_ERRORS as e:
+            # Same as receive_char(): a client that died mid-read is an ordinary exit, not a server
+            # fault, so it reports one line with the reason and no traceback.
+            self.connected = False
+            self.logger.info("Read from client %s stopped: %s", self.client_id, e)
+            return None
         except Exception as e:
             self.logger.error("Error receiving bytes from client %s: %s", self.client_id, e, exc_info=True)
             self.connected = False
