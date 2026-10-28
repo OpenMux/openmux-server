@@ -175,11 +175,24 @@ the loop.
 
 **Measured 2026-10-26: the scenario passed, so that expectation was wrong for this shape.** The 512 KiB backlog of the
 stalled viewer travels through the data-forwarding task of that client, and its `drain()` waits there, in that one task.
-`broadcast_control_frame_to_port` ran on its own and delivered the presence frame to both readers that keep up. Two
-limits on that result, so it is not read as a general guarantee: a stall still blocks the broadcast when the control
-write of the stalled client is the one that waits, which is the shape of a web or Telnet client (`ws.send_str`,
-`await session.transport.drain()`); and because the port data queue drops its oldest chunk, the backlog of the stalled
-viewer ends where the queue dropped, so the test asserts on the newest bytes only.
+`broadcast_control_frame_to_port` ran on its own and delivered the presence frame to both readers that keep up. One limit
+on that result, so it is not read as a general guarantee: because the port data queue drops its oldest chunk, the backlog
+of the stalled viewer ends where the queue dropped, so the test asserts on the newest bytes only.
+
+**Measured 2026-10-28, the other shape also does not block.** The first result left open the clients whose session write
+happens inside the read of a request: the Telnet and SSH shell (`await session.transport.drain()`,
+`listener_session._write_session`) and the web console (`ws.send_str()`). A viewer on that path was stalled for real by
+stopping its reader thread and shrinking its receive buffer to 8 KiB, proven with `getsockopt`. That viewer took 4335
+bytes while the two CLI readers that kept up drained 9.4 MB and 8.7 MB. The control write to the stalled viewer returned
+in 17 ms and the writes to the readers behind it in 0 ms, and both healthy readers had the frame 0.05 s after the viewer
+set changed. A local client never gets far enough behind to hold a write: its data queue drops its oldest chunk past 100
+chunks (`PortManager._fan_out_to_client_queues`), which keeps its socket below the 64 KiB level where `drain()` waits.
+
+What remains true is the ordering, and it is not reachable over a local socket: the loop in
+`broadcast_control_frame_to_port` awaits one client at a time, so a client that keeps a `drain()` waiting for seconds
+delays every client after it for those seconds. A test with a fake adapter that holds one client for 2 s gives the other
+two a delivery 2 s late, and issue #106 carries that result. A real slow peer, such as a link with a small bandwidth
+delay product, is the only way to show it through the API.
 
 **Measured 2026-10-28: the scenario then failed in a full run, and the broadcast was again not the cause.** It asked for
 a presence frame 512 KiB into the burst it had written itself, and gave that frame 10 s. The fan-out took 0 ms per
