@@ -182,4 +182,12 @@ async def _handle_set_outlet(request: web.Request) -> web.StreamResponse:
         msg = str(result.get("error", ""))
         status = 404 if ("not configured" in msg or "invalid outlet ref" in msg or "unknown outlet" in msg) else 409
         return web.json_response({"error": True, "message": msg, "impact": result.get("impact")}, status=status)
+    # The Power pages re-fetch /api/power on a "power_changed" nudge. That nudge
+    # rides the per-port meta event, so an outlet that feeds no console carries
+    # no port to emit it and an open Power page would keep showing the position
+    # this call just changed. Kick the nudge for every switch: the port path may
+    # kick it too, and the coalescer collapses the pair into one frame.
+    kicker = getattr(adapter, "_kick_site_nudge", None)
+    if callable(kicker):
+        kicker("power_changed")
     return web.json_response({"ok": True, "reading": result.get("reading"), "impact": result.get("impact")})

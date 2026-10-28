@@ -87,6 +87,11 @@ Changes since v1.0.4 (2026-10-19).
   now reads "Too many failed attempts for this account. Please try again later." and waits `base_lock_seconds` (30 s by
   default, longer for each further failure) before the correct password works again. No key changed, and the counters stay per
   account and per address.
+- **A Telnet menu no longer reads one Enter as two lines.** A menu prompt (the `p` power menu, the Takeover target
+  prompt) ended its line at the CR, and a Telnet client sends CR LF, so the paired LF became the next line. The power
+  menu therefore closed itself one turn after the switch you made, and the keystroke you typed next went to the Port
+  instead of the menu. A prompt now marks that boundary and the Telnet transport drops the LF that follows a CR it
+  already answered. A client that sends CR alone is unaffected, and SSH ends lines with LF, so it changed nothing.
 
 ### Web console and observability
 - **Web console pages ask for their assets by version.** Each page now requests its scripts and stylesheets as
@@ -97,6 +102,14 @@ Changes since v1.0.4 (2026-10-19).
 - **The viewer list has its own frame.** The viewer count and list now arrive in a `presence` frame instead of reusing
   `client_mode`, because a viewer badge is not a mode change. A page that read viewers from `client_mode` must read
   `presence`. The web console page already does.
+- **A console terminal reports restored power.** When the last feed of a console fell, its terminal printed
+  `[POWER WARNING: all power feeds are OFF - 2 feed(s) down]` and never printed the matching
+  `[POWER restored: 1/2 feed(s) on]` when power came back: the page compared the previous state only after it had
+  stored the new one, so that line could not run. No config key changed.
+- **A Power page follows a switch that touches no console.** On `/power/<pdu>`, switching an outlet that feeds no
+  console left the row on its old position until the next event or reload, because the page listened only on changes a
+  console carries. A switch made over the power API now nudges the page itself, so every row repaints at once. A change
+  that a poller detects on such an outlet still arrives on the next event or reload.
 
 - **The Port Actions endpoints are core.** The web console now registers the action routes itself, like the Power routes:
   `/api/ports/<port>/actions` (catalog, run, history, close, takeover), `/ws/actions/<run>`, `/api/port-actions/health` and

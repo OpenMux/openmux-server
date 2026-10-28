@@ -245,8 +245,9 @@ async def read_prompt_line(reader: Any, writer: Any, prompt: str) -> Tuple[Optio
     Shared by the telnet and SSH interactive prompts (write-slot takeover
     target, the `p` power menu): both feed stdin through an
     `asyncio.StreamReader`-style `read(n)`, so the loop is transport-agnostic.
-    CR/LF terminate the line; CR alone is handled because telnet clients send
-    ``\r\n``.
+    CR or LF terminates the line. A CR also swallows the LF a Telnet client
+    sends with it (see `_drop_line_feed_tail`), so the next prompt does not read
+    that LF as an empty answer.
 
     Args:
         reader: Object with `async read(n)` returning bytes (``b""`` at EOF).
@@ -276,6 +277,8 @@ async def read_prompt_line(reader: Any, writer: Any, prompt: str) -> Tuple[Optio
             return line, False  # client left mid-prompt
         ch = data[:1]
         if ch in (b"\r", b"\n"):
+            if ch == b"\r":
+                _drop_line_feed_tail(reader)
             await _echo_bytes(writer, b"\r\n")
             return line, True
         if ch in (b"\x7f", b"\x08"):  # backspace: erase the echoed byte
@@ -285,6 +288,20 @@ async def read_prompt_line(reader: Any, writer: Any, prompt: str) -> Tuple[Optio
             continue
         await _echo_bytes(writer, ch)
         line += ch.decode("latin1", errors="ignore")
+
+
+def _drop_line_feed_tail(reader: Any) -> None:
+    """Tell the transport the line just read ended at a CR, so its paired LF is not read as the next line.
+
+    A Telnet client sends CR LF. This reader stops at the CR, so without this the LF becomes the first
+    byte the NEXT prompt reads and looks like an empty answer: the `p` power menu exits by itself and the
+    keystroke the operator typed next lands on the Port. A transport that cannot tell (SSH delivers LF
+    line ends) has no `drop_line_feed` and is left alone, and a client that sends CR alone is unaffected
+    because a next byte that is not an LF is handed back as data.
+    """
+    drop = getattr(reader, "drop_line_feed", None)
+    if callable(drop):
+        drop()
 
 
 async def read_take_target(reader: Any, writer: Any) -> Tuple[Optional[str], bool]:

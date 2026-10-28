@@ -60,6 +60,10 @@ class SessionTransport(Protocol):
     (SSH). Everything a transport must answer is here, so a new transport adds no
     member to this module. Login-phase reads (IAC stripping, pty echo, line caps) are
     NOT part of the interface: they stay with the transport that needs them.
+
+    One member is optional, because only a transport that can read without waiting can
+    answer it: ``drop_line_feed()``. The interactive menu prompts use it to discard the
+    LF that follows the CR ending a Telnet line; a transport without it is left alone.
     """
 
     async def read(self, n: int) -> bytes:

@@ -44,12 +44,50 @@ class _StreamSessionTransport:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self._reader = reader
         self._writer = writer
+        # Set by `drop_line_feed` when a menu prompt ended a line at a CR: the LF that a Telnet client
+        # sends with that CR is part of the line already read, not the next one.
+        self._skip_line_feed = False
+        # Bytes read while dropping that LF, handed back before the stream is read again.
+        self._pushback = b""
 
     async def read(self, n: int) -> bytes:
-        return await self._reader.read(n)
+        """Read up to ``n`` bytes, skipping the LF tail of a CR LF a menu prompt already consumed.
+
+        The flag is cleared by the first byte returned, whatever that byte is: a client that sends CR
+        alone keeps working, because its next keystroke then starts the next line as ordinary data.
+        Anything read along with the dropped LF is kept and returned next, so no byte is lost.
+        """
+        if self._pushback:
+            take, self._pushback = self._pushback[:n], self._pushback[n:]
+            return take
+        while True:
+            chunk = await self._reader.read(n)
+            if not (self._skip_line_feed and chunk[:1] == b"\n"):
+                self._skip_line_feed = False
+                return chunk
+            self._skip_line_feed = False
+            if len(chunk) > 1:
+                self._pushback = chunk[1:]
 
     async def readexactly(self, n: int) -> bytes:
-        return await self._reader.readexactly(n)
+        """Read exactly ``n`` bytes, serving any byte that `read` held back first."""
+        data = bytearray()
+        while len(data) < n:
+            chunk = await self.read(n - len(data))
+            if not chunk:
+                raise asyncio.IncompleteReadError(bytes(data), expected=n)
+            data.extend(chunk)
+        return bytes(data)
+
+    def drop_line_feed(self) -> None:
+        """Mark the CR LF boundary so the paired LF is not read as the next line.
+
+        Optional seam member (issue #100 transport): `listener_common.read_prompt_line` calls it after a
+        CR. A Telnet client may deliver the LF in the same segment as the CR or in the next one, so this
+        records the boundary instead of looking for a byte that may not have arrived yet: the next
+        `read` discards that LF, and the keystroke the operator typed next is read as the next line.
+        """
+        self._skip_line_feed = True
 
     def write(self, data: bytes) -> None:
         self._writer.write(data)

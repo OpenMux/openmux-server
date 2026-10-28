@@ -692,7 +692,8 @@ removed on a soft reload takes effect without a restart; PDUs added, removed, or
 coalesced `pdus_changed` nudge, which rebuilds the sidebar Power menu and re-renders the `/power` page tables on every open
 tab. Each route replies 404 ("Power management is not configured") while no PDU adapter is active. The "Power" sidebar item is
 emitted live per page when a PDU adapter is enabled, like the in-session badge, the power menu, and the live `[POWER]` notices.
-No web power surface depends on a plugin.
+No web power surface depends on a plugin. A switch made through `POST /api/power/outlets/<ref>` nudges the page itself,
+so the row of an outlet that feeds no console repaints at once too.
 
 Example:
 ```yaml

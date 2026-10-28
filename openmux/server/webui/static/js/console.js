@@ -2106,12 +2106,16 @@ function connectSelected() {
           // frame for a mapped port, so the header badge re-derives from it.
           if (currentPort() === msg.name && merged.power) {
             const p = merged.power;
+            // Capture the previous flag before updatePowerBadge(): it assigns
+            // powerState = p, so comparing against powerState afterwards can
+            // never see that power had been lost (the restore line was dead).
+            const wasAllPowerLost = !!(powerState && powerState.all_power_lost);
             updatePowerBadge(p);
             // Visible console notice when ALL power to this console is lost
             // or restored (plan: push a warning on any all-power-loss event).
             if (p.all_power_lost) {
               try { term.write('\r\n[POWER WARNING: all power feeds are OFF - ' + (p.feeds_total || 0) + ' feed(s) down]\r\n'); } catch (_) {}
-            } else if (powerState && powerState.all_power_lost) {
+            } else if (wasAllPowerLost) {
               try { term.write('\r\n[POWER restored: ' + p.feeds_on + '/' + p.feeds_total + ' feed(s) on]\r\n'); } catch (_) {}
             }
           }
