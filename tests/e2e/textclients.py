@@ -151,6 +151,7 @@ class CliSession:
         self.reader_paused = False
         self.reader_overflow: Optional[str] = None
         self._reader_started = False
+        self._command_phase = False
         self._loop = _SessionLoop(f"{surface}-loop")
         self._adapter = _RecordingAdapter("127.0.0.1", server.port_of("cli"))
         self._chunks: "queue.Queue[Optional[bytes]]" = queue.Queue()
@@ -252,9 +253,48 @@ class CliSession:
         """Send one line with a trailing CR LF, which is what a terminal sends."""
         self.write(text + "\r\n", timeout=timeout)
 
+    def command(self, line: str, timeout: float = 20.0) -> str:
+        """Send one command-phase line such as ``POWER rack1.1 off``, and return the text so far.
+
+        The command phase (before :meth:`attach`) has no reader thread, because ``list_ports`` and
+        ``connect_to_port`` read their own replies from the same stream. So this only writes the line
+        and turns on the slice read inside :meth:`read_text`: a scenario still asserts with
+        :meth:`wait_for`, which keeps a slow server slow instead of failing.
+
+        Raises:
+            AssertionError: when this session is attached, because an attached session sends
+                characters to its Port and the server runs no command there.
+        """
+        if self.attached:
+            raise AssertionError(
+                f"{self.surface}: {line!r} is a command-phase line, and this session is attached to "
+                f"{self.port_name!r}; a client in character mode sends those bytes to the Port"
+            )
+        self._command_phase = True
+        payload = (line + "\r\n").encode("utf-8")
+        self._note(self.surface, "->", payload)
+        if not self._loop.call(self._adapter.e2e_send_bytes(payload), timeout=timeout):
+            raise AssertionError(f"{self.surface}: could not send {line!r} on the command phase")
+        return self.read_text()
+
+    def _pump_command_slice(self) -> None:
+        """Pull one short slice of command-phase reply bytes into the session text.
+
+        An empty read is a timeout and is normal; ``None`` is the server closing the session, which
+        :meth:`is_eof` reports.
+        """
+        chunk = self._loop.call(self._adapter.read_data(timeout=0.05), timeout=10.0)
+        if chunk is None:
+            self._adapter._e2e_eof = True
+            return
+        if chunk:
+            self._chunks.put(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
+
     def read_text(self) -> str:
         """Everything received so far, as text. Reading does not consume: the text keeps growing."""
         self._raise_reader_overflow()
+        if self._command_phase and not self._reader_started:
+            self._pump_command_slice()
         while True:
             try:
                 chunk = self._chunks.get_nowait()
@@ -297,6 +337,18 @@ class CliSession:
                 raise AssertionError(f"{self.surface}: {needle!r} arrived, though this test expected it to stay away")
             self._raise_reader_overflow()
             time.sleep(0.05)
+
+    def offset(self) -> int:
+        """How much has been received so far, for :meth:`reply_after`.
+
+        A command-phase answer has no marker in the stream: the server does not echo what was typed, so
+        the only way to isolate one answer is to note the length first.
+        """
+        return len(self.read_text())
+
+    def reply_after(self, offset: int) -> str:
+        """Only the bytes that arrived after ``offset``, which isolates the answer to one command."""
+        return self.read_text()[offset:]
 
     def pause_reader(self) -> None:
         """Stop draining this session's socket, so the server's writes pile up against it.
@@ -509,6 +561,18 @@ class _RecordingAdapter(TcpClientAdapter):
             self.reader = _WireTee(self.reader, self.wire)
         return ok
 
+    async def e2e_send_bytes(self, payload: bytes) -> bool:
+        """Write bytes to the socket whatever phase the session is in.
+
+        ``send_data`` means "forward to the attached Port" and refuses when nothing is attached, which
+        is right for the product and wrong for a harness that types a command-phase line.
+        """
+        if not self.writer:
+            return False
+        self.writer.write(payload)
+        await self.writer.drain()
+        return True
+
     def _process_control_frame(self, data: bytes) -> bytes:
         try:
             body = data[len(b"\x00OMXCTRL ") :].split(b"\n", 1)[0]
@@ -643,6 +707,56 @@ class TelnetSession:
         """The text after the last occurrence of ``mark``, for a reply that repeats earlier output."""
         text = self.text()
         return text.rsplit(mark, 1)[-1]
+
+    def offset(self) -> int:
+        """Where the received text has reached, to read only the reply that follows with `reply_after`."""
+        return len(self.text())
+
+    def reply_after(self, offset: int) -> str:
+        """Everything received since ``offset``, which `offset` returns just before you type."""
+        return self.text()[offset:]
+
+    def choose_port(self, name: str, timeout: float = 2.0) -> None:
+        """Answer the Port prompt and prove the session drives that Port before any keystroke is sent.
+
+        Waiting for the name proves nothing: the Port list printed at connect already contains it, so the
+        next keystroke can still land at the Port prompt and be taken for a choice. Session info (`i`)
+        prints `Port: <name>` only for a session that attached.
+        """
+        self.wait_for_prompt("Port:")
+        self.answer(name)
+        self.press_until("i", f"Port: {name}", timeout=timeout)
+
+    def press_until(self, key: str, needle: str, attempts: int = 8, timeout: float = 3.0) -> None:
+        """Press a Control menu key until ``needle`` arrives, just after a Port was chosen.
+
+        The listener reads the Port choice with a line reader of its own and prints nothing when it
+        attaches, so the first keystroke can land while that is still in flight. A key that lands there is
+        a Port choice, which the listener answers with `Unknown port` and the list again, so retrying is
+        safe and needs no sleep. Prove the attach with `i` (session info), which prints `Port: <name>` only
+        for a session that drives a Port.
+        """
+        last_error: Optional[Exception] = None
+        for _ in range(attempts):
+            self.press(key)
+            try:
+                self.wait_for(needle, timeout=timeout)
+                return
+            except AssertionError as exc:
+                last_error = exc
+        raise AssertionError(f"{self.surface}: pressing {key!r} never brought {needle!r}") from last_error
+
+    def wait_for_echo(self, text: str, timeout: float = 20.0) -> str:
+        """Type ``text`` and return the reply once the Port has echoed it back.
+
+        Only an attached console echoes: an unattached session would take the text as a Port choice. So a
+        Loopback echo proves the console is attached, that keystrokes reach it, and that nothing a menu
+        consumed leaked into the data stream.
+        """
+        mark = self.offset()
+        self.answer(text)
+        self.wait_for(text, timeout=timeout)
+        return self.reply_after(mark)
 
     def expect_no_text(self, needle: str, for_seconds: float = 2.0) -> None:
         """Fail when ``needle`` arrives within ``for_seconds``, and pass while it stays away.

@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-61 scenarios across 6 suites.
+80 scenarios across 7 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -55,6 +55,26 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | LIF-08 | SIGUSR1 stops and starts every adapter: the client drops, then a new one works. | signal, CLI, server log | `tests/e2e/test_lifecycle.py::test_lif08_a_full_reload_stops_and_restores_the_adapters` |
 | LIF-09 | The local control socket answers a status request, and only its owner may use it. | control socket | `tests/e2e/test_lifecycle.py::test_lif09_the_control_socket_answers_status_locally` |
 | LIF-10 | A client that leaves, by exit or by force, must not leave an ERROR or a traceback behind. | CLI, loopback port, server log | `tests/e2e/test_lifecycle.py::test_lif10_a_session_that_ends_is_closed_without_an_error_in_the_log` |
+| **PWR** | | | |
+| PWR-01 | ``/api/power`` reports the configured PDU, and one switch moves only the fields it should. | http | `tests/e2e/test_power.py::test_pwr01_the_power_api_mirrors_the_pdu_and_moves_with_one_switch` |
+| PWR-02 | A console that declares a feed no PDU outlet provides is reported everywhere it appears. | http, web:rw | `tests/e2e/test_power.py::test_pwr02_a_feed_no_outlet_provides_is_named_by_the_api_the_page_and_the_badge` |
+| PWR-03 | Every surface refuses power nobody configured, but an absent section and a disabled one differ. | http, cli:rw, web:rw | `tests/e2e/test_power.py::test_pwr03_power_that_is_absent_and_power_that_is_switched_off_are_refused_differently` |
+| PWR-04 | The landing page counts the estate, its row opens the PDU, and the detail page repaints itself. | web:admin, http | `tests/e2e/test_power.py::test_pwr04_the_power_pages_list_the_pdu_and_follow_a_switch_someone_else_made` |
+| PWR-05 | A read-write page carries the switch, a read-only page is told it is read-only, in words. | web:rw, web:ro | `tests/e2e/test_power.py::test_pwr05_only_a_write_console_page_offers_an_outlet_switch` |
+| PWR-06 | Switching a feed off asks first, and names the console that loses everything in the question. | web:rw, http | `tests/e2e/test_power.py::test_pwr06_the_first_confirm_names_the_console_that_loses_all_power_and_a_dismissal_switches_nothing` |
+| PWR-07 | Accepted, the same two questions switch the feed and the row follows the outlet. | web:rw, http | `tests/e2e/test_power.py::test_pwr07_the_second_confirm_names_the_console_that_stays_up_and_an_acceptance_switches` |
+| PWR-08 | The console badge reads n/m, changes tint as its feeds fall, and warns when none are left. | web:rw, http | `tests/e2e/test_power.py::test_pwr08_the_console_badge_counts_the_feeds_that_are_on_and_warns_when_none_are` |
+| PWR-09 | The badge menu is a switch panel for a read-write console, with the wattage beside each feed. | web:rw, http | `tests/e2e/test_power.py::test_pwr09_the_badge_menu_switches_one_feed_and_states_its_load` |
+| PWR-10 | The same badge menu on a read-only console lists its feeds and offers no switch at all. | web:ro | `tests/e2e/test_power.py::test_pwr10_a_read_only_console_page_offers_no_feed_switch` |
+| PWR-11 | The terminal prints the warning when the last feed falls and the count when power returns. | web:rw, http | `tests/e2e/test_power.py::test_pwr11_the_console_terminal_reports_all_power_lost_and_the_restored_feeds` |
+| PWR-12 | The notice an attached watcher is pushed is one function's output on CLI and on Telnet alike. | cli:rw, telnet:rw | `tests/e2e/test_power.py::test_pwr12_an_attached_text_session_is_told_its_feed_changed_in_the_same_words_on_both_surfaces` |
+| PWR-13 | ``POWER`` prints an inventory, ``POWER <pdu>`` its outlets, and ``POWER <ref>`` one line. | cli:rw | `tests/e2e/test_power.py::test_pwr13_the_power_command_lists_every_pdu_one_pdu_and_one_outlet` |
+| PWR-14 | A malformed command or an unknown target is refused with its own sentence, and changes nothing. | cli:ro | `tests/e2e/test_power.py::test_pwr14_the_power_command_refuses_a_malformed_line_and_an_unknown_target` |
+| PWR-15 | ``POWER <ref> off`` names the consoles it is about to kill and the ones that hold on. | cli:rw | `tests/e2e/test_power.py::test_pwr15_the_power_command_switches_and_warns_who_loses_and_who_keeps_power` |
+| PWR-16 | The ``p`` menu lists this console's feeds, toggles one by number, and refuses a bad number. | telnet:rw, telnet:none | `tests/e2e/test_power.py::test_pwr16_the_console_power_menu_toggles_by_number_and_exits_on_enter` |
+| PWR-17 | Read-only means no switch anywhere: REST, the ``POWER`` command, and the PDU page. | cli:ro, web:ro, http | `tests/e2e/test_power.py::test_pwr17_a_read_only_identity_is_refused_on_every_surface_it_reaches` |
+| PWR-18 | ``read_write_groups`` reaches power: only a member, or an admin, may switch the feeds of those consoles. | http, cli:rw | `tests/e2e/test_power.py::test_pwr18_an_outsider_is_told_which_console_protects_itself_and_a_member_is_not` |
+| PWR-19 | One switch writes one control line and one notice per console; a refusal writes neither. | http, cli:rw, server | `tests/e2e/test_power.py::test_pwr19_a_switch_is_audited_once_where_power_is_recorded_and_a_refusal_not_at_all` |
 | **RW** | | | |
 | RW-01 | The first write-entitled client on a free port drives it, and the holders list names that client. | cli:rw | `tests/e2e/test_write_slot.py::test_rw01_the_first_client_on_a_free_port_holds_the_write_slot` |
 | RW-02 | A page that opens a port someone else drives comes up read-only and says why, in the server's words. | web:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw02_the_second_client_on_a_held_port_is_told_the_seat_is_taken` |

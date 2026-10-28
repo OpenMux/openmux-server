@@ -1,9 +1,10 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 4. The harness, the `LIFECYCLE` suite, the scenario index, the browser proof,
-the `AUTH` suite driven over HTTP, the fourteen `CON` console scenarios driven in Chromium, and the twenty `RW`
-write-slot scenarios run green. Phases 5-9 are not written; see **Build status** near the end.
-**Date:** 2026-10-27
+**Status:** Implemented through Phase 5. The harness, the `LIFECYCLE` suite, the scenario index, the browser proof,
+the `AUTH` suite driven over HTTP, the fourteen `CON` console scenarios driven in Chromium, the twenty `RW`
+write-slot scenarios, and the nineteen `PWR` power scenarios run green. Phases 6-9 are not written; see **Build
+status** near the end.
+**Date:** 2026-10-28
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
 and Telnet at the same time.
 
@@ -241,6 +242,18 @@ Write down what the scenario claims, then give each part the strongest proof tha
    it does not. `AUTH-11` is named outstanding rather than skipped, because writing it needs an external helper script
    nobody would follow by accident.
 
+Three traps in this tier cost a debugging session each, so they are rules now.
+
+- **A confirm dialog arrives only while a Playwright call is in flight.** Sync Playwright hands a modal dialog to its
+  handler when a call is running, so polling a Python list of captured messages never sees one. Arm
+  `accept_dialogs(False)` before the click, then call `wait_for_dialogs(seen, 1)`, which keeps a call in flight.
+- **A Port name proves nothing.** The Port list printed at connect contains every Port name, so waiting for the name you
+  typed returns before the listener has attached anything, and the next keystroke is taken for a Port choice.
+  `choose_port` proves the attach with session info, which prints `Port: <name>` only for a session that drives a Port.
+- **A Telnet line you type right after a choice can vanish.** `_read_auth_line` reads 256 bytes and keeps only the text
+  before the first LF, so a second line in the same read is discarded. Type one line, prove the server consumed it, then
+  type the next. That reader is the reason `choose_port` exists, and the defect itself is recorded under `PWR` below.
+
 ### How to fix a failure that touches shared world state
 
 When a scenario changes the world other scenarios read — a `server.yaml`, the login lockout counter, a session cookie —
@@ -351,14 +364,74 @@ write-entitled client attaches read-only because the seat is gone. That session 
 `[This listener is configured read-only]`, so no operator can drive the Port until the seat is released. `RW-15` asserts
 the guarantees the knob does give — the reason, the missing Takeover prompt, and the dropped keystrokes — and stays clear
 of the slot, because no document says that knob is meant to release a seat. Whether `read_only: true` should attach
-read-only is an open product question.
+read-only is an open product question, tracked in [issue #102](https://github.com/OpenMux/openmux-server/issues/102).
 
-### PWR — power subsystem (`test_power.py`, planned: 16)
+### PWR — power subsystem (`test_power.py`, 19 scenarios)
 
-`/power` and `/power/<pdu>`, `/api/power` shape and `unresolved_refs`, buttons per permission, off-impact confirms,
-power badge and `OMXCTRL power_switch`, notices on web and CLI and Telnet, all-feeds-off warning, audit lines in the
-server log and the port log, no audit on a failed switch, REST permission and group matrix, CSRF, `POWER` command
-forms, Telnet `p` menu, `power.enabled: false`, poll task reflection.
+One world serves the group: a `driver: dummy` PDU `rack1` with three outlets, and three Loopback consoles.
+`rack1.1` feeds `solo` and `dual`, `rack1.2` feeds `dual` alone, and `rack1.3` feeds no console. A scenario that needs a
+feed nobody provides declares `rack1.9` on a fourth console, as `PWR-02` does. The dummy driver adds three fictions,
+listed in the module docstring: an outlet reports 120 W and 230 V whether it is on or off, PDU load is
+`120 W x outlets that are on`, and a switch answers at once with no poll delay. Assertions on watts therefore check
+shape, never a real load.
+
+| Id | What one scenario proves |
+| --- | --- |
+| `PWR-01` | `/api/power` mirrors the configured PDU, and one switch moves that outlet and the totals only. |
+| `PWR-02` | A feed no outlet provides is named by the API, by the landing page, and by the badge of its console. |
+| `PWR-03` | Power nobody configured is refused one way, and power switched off another way, on every surface. |
+| `PWR-04` | The landing page counts the estate, its row opens that PDU, and the detail page repaints after a switch someone else made. |
+| `PWR-05` | A read-write page carries one switch per outlet; a read-only page carries none and says it is read-only. |
+| `PWR-06` | The first confirm names the console that would lose all power, and dismissing it switches nothing. |
+| `PWR-07` | The second confirm names the console that stays up through another feed, and accepting it switches. |
+| `PWR-08` | The console badge counts the feeds that are on, changes tint as they fall, and warns when none are left. |
+| `PWR-09` | The badge menu switches one feed and states its wattage, and the switch travels over the console socket. |
+| `PWR-10` | The same badge menu on a read-only console lists the feeds and their wattage with no switch at all. |
+| `PWR-11` | The console terminal warns when the last feed falls, and reports the count when power returns. |
+| `PWR-12` | An attached watcher on CLI and on Telnet is told about one switch in the same words. |
+| `PWR-13` | `POWER` lists every PDU, `POWER <pdu>` lists its outlets, and `POWER <ref>` answers one line. |
+| `PWR-14` | A malformed line, an unknown PDU, an unknown outlet and a bad state are each refused in one sentence. |
+| `PWR-15` | `POWER <ref> off` warns which consoles lose everything and which hold on, before it switches. |
+| `PWR-16` | The Telnet `p` menu toggles one feed by number, refuses a bad number, and gives the console back on Enter. |
+| `PWR-17` | A read-only identity is refused on REST, on the command line, and on the page, in that surface's words. |
+| `PWR-18` | `read_write_groups` reaches power: an outsider is told which console protects itself, a member is not. |
+| `PWR-19` | One switch writes one control line naming who acted and which consoles fell; a refusal writes none. |
+
+Four measured behaviours are recorded here, because a reader would otherwise assume the tidier version.
+
+- No `power:` section and `enabled: false` are **not** the same state. Without the section there is no power adapter,
+  so all four power routes answer 404 and the `POWER` command says "Power management is not configured". With
+  `enabled: false` the adapter exists: `GET /api/power` answers 200 with `enabled` false, a switch answers 409 and says
+  "power management is disabled", the page carries a banner — and the `POWER` command still says "not configured".
+  `PWR-03` asserts both, including that divergence.
+- A declared feed that no outlet provides still counts. The badge of that console reads `0/1` with state `unknown` and
+  the tooltip `PDU power: 0 of 1 feeds on`; it is never hidden, because silence would read as "no power wired". The ref
+  also appears in `unresolved_refs` and on the landing page, and in no outlet's `mapped_ports`.
+- `mapped_ports` and `off_impact` keep the order the ports are configured in, not sorted order, so `POWER rack1.1`
+  prints `-> solo, dual` because `solo` is configured first. A group refusal names the consoles in that same order.
+- The all-lost notice differs by audience on purpose: a Port's own data log records
+  `[POWER WARNING] all power feeds to this console are now off`, while a terminal attached to it reads
+  `[POWER WARNING] all power feeds are now OFF for this console (<ref>)`. One is an audit line, one is a warning with
+  the ref an operator acts on. `PWR-19` and `PWR-12` assert each where it belongs.
+
+Three defects in the product came out of measuring, and each is fixed with the scenario that proves it.
+
+- The terminal never printed the restore sentence. `console.js` compared `powerState.all_power_lost` **after**
+  `updatePowerBadge` had replaced `powerState`, so the branch was dead code. `PWR-11` prints both sentences, and fails
+  against the previous file.
+- An open Power page kept the old switch position when someone switched an outlet that feeds no console. A change
+  reached the page only through the port meta event of a console that carries that feed, so `rack1.3` never arrived.
+  `power_monitor` now nudges `power_changed` after a successful switch. `PWR-04` repaints both rows, and fails against
+  the previous file. A change a poller detects on an unmapped outlet is still not nudged, because that is the poller's
+  own path and no scenario drives a poller.
+- A Telnet session ended a menu line at the CR and read the paired LF as the next line, so the `p` menu closed itself
+  one line early and the keystroke after it landed on the Port. `read_prompt_line` now tells the transport about a CR,
+  and the Telnet transport drops the LF that follows it. `PWR-16` types a line after the menu and asserts the Port
+  echoes it whole. A related defect is **not** fixed and is recorded instead: `_read_auth_line`, which reads the login
+  and the Port choice, discards every byte after the first LF in the same 256-byte read, so a line typed immediately
+  after a Port choice is lost. A test must therefore prove the attach before it types the next line, which the harness
+  does with session info (`i` prints `Port: <name>` only for a session that attached).
+
 
 ### CFG — configure, then reload (`test_config_editor.py`, planned: 14)
 
@@ -431,7 +504,8 @@ Named now so release 1 fixtures stay sufficient.
 | 2 — browser proof | Done | `login()`, `ConsoleSession`, the page hook under `?e2e=1`, with Chromium installed by `make e2e-install`. |
 | 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` waits on a helper-based account, see the note below. |
 | 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
-| 5-9 | Not started | PWR, CFG, ACT, ST, and the story scenarios. |
+| 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
+| 6-9 | Not started | CFG, ACT, ST, and the story scenarios. |
 
 - `AUTH-11` (an external helper that grants no permission): outstanding. The `command` authentication backend runs in
   every e2e server, so only the *no-permission* case differs from `AUTH-10`, and the helper would have to be a fixture

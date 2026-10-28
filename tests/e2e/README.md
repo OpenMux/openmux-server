@@ -104,7 +104,18 @@ line. `pause_reader()` stops the byte pump, which is the only honest way to mode
 clear `reader_paused` to let it drain again. Both text sessions carry
 `expect_no_text(needle, for_seconds=...)`, because "this prompt must not appear" is a guarantee. A CLI
 holders request is `query_holders()`, whose `holders` list carries the holder labels the server built.
+Attach a Telnet session with `choose_port("slot1")`. Do not wait for the Port name: the Port list printed at
+connect already contains it, so the next keystroke can still land at the `Port:` prompt and be taken for a
+choice. `choose_port` answers the prompt and then proves the attach with session info, which prints
+`Port: <name>` only for a session that drives a Port. `press_until(key, needle)` retries a menu key the same
+way, and `wait_for_echo("text")` types one line and returns when the Loopback sends it back, which proves a
+menu kept its own keystrokes. An unattached CLI session reads commands with `command("POWER")`, and
+`offset()` with `reply_after(mark)` returns only what arrived after a mark.
 
+A Power page reads through `metric_cards()`, `outlet_rows()`, `power_badge()`, `power_badge_title()`,
+`power_menu_items()`, `click_outlet_toggle(ref)`, and `click_power_toggle(ref)`. A confirm dialog arrives only
+while a Playwright call is in flight, so a scenario arms `accept_dialogs(False)` before the click and then
+calls `wait_for_dialogs(seen, 1)`; a plain poll of the recorded messages never sees the dialog.
 Never edit `config/` to make a test pass. It holds the shipped defaults. A test that needs a config
 file writes it through `ConfigBuilder`, or replaces the generated `server.yaml` with
 `servers(raw_server_yaml=...)`.

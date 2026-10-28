@@ -198,9 +198,7 @@ def test_rw05_one_outcome_code_reads_the_same_sentence_on_every_surface(servers,
             asker.wait_for(line, timeout=10)
 
     tel = clients.telnet(user="rw", surface="telnet:asker", server=server, require_auth=True)
-    tel.wait_for_prompt("Port:")
-    tel.send_line("slot1")
-    tel.wait_for("slot1", timeout=10)
+    tel.choose_port("slot1")
     with step("the Telnet session prints the same lines, framed as text it cannot parse"):
         tel.open_control_menu()
         tel.press("a")
@@ -336,9 +334,7 @@ def test_rw10_the_telnet_menu_reports_the_holder_and_refuses_a_held_seat(servers
     holder.attach(port="slot1")
     tel = clients.telnet(user="rw", surface="telnet:viewer", server=server, require_auth=True)
     with step("the session chooses the port and comes up read-only because the seat is held"):
-        tel.wait_for_prompt("Port:")
-        tel.send_line("slot1")
-        tel.wait_for("slot1", timeout=10)
+        tel.choose_port("slot1")
     with step("the holders key prints the same label the CLI got"):
         label = [str(item) for item in holder.query_holders().get("holders") or []][0]
         tel.open_control_menu()
@@ -360,9 +356,8 @@ def test_rw11_a_telnet_takeover_displaces_the_holder_and_is_audited(servers, cli
     victim = clients.cli(user="rw", surface="cli:victim", server=server)
     victim.attach(port="slot1")
     tel = clients.telnet(user="admin", surface="telnet:taker", server=server, require_auth=True)
-    tel.wait_for_prompt("Port:")
-    tel.send_line("slot1")
     with step("the session attaches read-only, because the CLI client already holds the seat"):
+        tel.choose_port("slot1")
         tel.wait_for("read-only mode", timeout=10)
     with step("the menu's Take key accepts the latest holder when the prompt is answered empty"):
         tel.open_control_menu()
@@ -450,8 +445,8 @@ def test_rw15_a_read_only_listener_refuses_both_write_keys_and_blocks_keystrokes
     Measured here and reported rather than asserted as correct: the flag gates this listener's keys
     and its data path, not the Attach. `ConsoleManager.connect_client_to_port` never sees the
     listener, so the Port still records whatever the access ladder granted, and a session on a
-    read-only listener can hold the Write slot while being unable to drive. See
-    docs/design/e2e_test_suite.md.
+    read-only listener can hold the Write slot while being unable to drive. GitHub issue #102
+    tracks that decision; see docs/design/e2e_test_suite.md.
     """
     server = servers(
         name="rolistener",
@@ -460,9 +455,7 @@ def test_rw15_a_read_only_listener_refuses_both_write_keys_and_blocks_keystrokes
         start=True,
     )
     tel = clients.telnet(user="admin", surface="telnet:admin", server=server, require_auth=True)
-    tel.wait_for_prompt("Port:")
-    tel.send_line("slot1")
-    tel.wait_for("slot1", timeout=10)
+    tel.choose_port("slot1")
     with step("the session is announced read-only before it asks for anything"):
         tel.wait_for("read-only mode", timeout=10)
     with step("the request key refuses, and names the listener as the reason"):

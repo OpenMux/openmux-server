@@ -252,6 +252,27 @@ class ConsoleSession:
         self.page.on("dialog", handler)
         return seen
 
+    def wait_for_dialogs(self, seen: List[str], count: int, timeout: float = 10.0) -> List[str]:
+        """Wait until ``count`` dialogs have been answered, and return every message shown.
+
+        A dialog is modal, and the sync Playwright API delivers it only while a call is in flight. Polling
+        the list in plain Python would therefore never see one, so each turn of this loop makes one cheap
+        call, which is what lets the handler registered by :meth:`accept_dialogs` run.
+
+        Args:
+            seen: The list :meth:`accept_dialogs` returned for this page.
+            count: How many dialogs the action is expected to raise.
+            timeout: Seconds before this fails.
+        """
+        self.action(f"wait_for_dialogs {count}")
+        deadline = time.monotonic() + timeout
+        while len(seen) < count:
+            if time.monotonic() > deadline:
+                raise AssertionError(f"{self.surface}: expected {count} dialog(s), saw {seen}")
+            self.page.evaluate("() => 1")
+            time.sleep(0.05)
+        return list(seen)
+
     # --- state --------------------------------------------------------------------------
 
     def view(self) -> Dict[str, Any]:
@@ -295,6 +316,46 @@ class ConsoleSession:
         instead: those regions are replaced whole, so a handle taken before the redraw is stale.
         """
         return str(self.page.text_content(selector) or "").strip()
+
+    def page_text(self, selector: str = "body") -> str:
+        """The text one page shows, for a page with no ``?e2e=1`` hook: a PDU page, the login page.
+
+        The hook belongs to the console page, so a server-rendered page is read as written text here.
+        """
+        return str(self.page.inner_text(selector))
+
+    def wait_for_page_text(self, needle: str, selector: str = "body", timeout: float = 10.0) -> str:
+        """Wait until one element's text contains ``needle``, on a page with no test hook."""
+        self.action(f"wait_for_page_text {needle!r}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if needle in self.page_text(selector):
+                return self.page_text(selector)
+            time.sleep(0.05)
+        raise AssertionError(
+            f"{self.surface}: {selector} never carried {needle!r} in {timeout}s: {self.page_text(selector)[-600:]!r}"
+        )
+
+    def table_rows(self, selector: str) -> List[List[str]]:
+        """Each row of one table as its cell texts, for a table the server rendered."""
+        raw = self.page.evaluate(
+            """(selector) => Array.from(document.querySelectorAll(selector + ' tr')).map(
+                   (tr) => Array.from(tr.querySelectorAll('td,th'))
+                     .map((cell) => (cell.textContent || '').replace(/\\s+/g, ' ').trim()))""",
+            selector,
+        )
+        return [[str(cell) for cell in row] for row in raw or []]
+
+    def rows_referring(self, selector: str, href: str) -> List[List[str]]:
+        """The rows of one table that link to ``href``, which is how a PDU row is named by its target."""
+        raw = self.page.evaluate(
+            """([selector, href]) => Array.from(document.querySelectorAll(selector + ' tr'))
+                 .filter((tr) => Array.from(tr.querySelectorAll('a')).some((a) => a.getAttribute('href') === href))
+                 .map((tr) => Array.from(tr.querySelectorAll('td,th'))
+                   .map((cell) => (cell.textContent || '').replace(/\\s+/g, ' ').trim()))""",
+            [selector, href],
+        )
+        return [[str(cell) for cell in row] for row in raw or []]
 
     def sidebar_width(self) -> float:
         """The rendered width of the sidebar in CSS pixels, which is 0 when the page hides it.
@@ -367,6 +428,83 @@ class ConsoleSession:
     def power_badge(self) -> Dict[str, Any]:
         """The power badge: its tint (``all``, ``some``, ``none``, ``unknown``, ``hidden``) and its label."""
         return {"state": str(self.view().get("badge_state") or "hidden"), "label": str(self.view().get("badge") or "")}
+
+    def power_badge_title(self) -> str:
+        """The tooltip text of the power badge, which is where the page writes ALL POWER LOST."""
+        return str(self.page.get_attribute("#powerBadge", "title") or "")
+
+    def open_power_menu(self) -> None:
+        """Click the power badge so its per-feed menu is on screen, and wait for it."""
+        self.click("#powerBadge")
+        self.page.wait_for_selector("#powerMenu:visible", timeout=10000)
+
+    def power_menu_items(self) -> List[Dict[str, Any]]:
+        """One entry per feed row of the badge menu: the row text and the button it carries.
+
+        The button label is what an operator reads ("Turn off rack1.1"), and it is absent for a page
+        that is not read-write, so returning it or ``None`` proves the permission.
+        """
+        raw = self.page.evaluate(
+            """() => Array.from(document.querySelectorAll('#powerMenuList > div')).map((row) => {
+                   const button = row.querySelector('button');
+                   const text = (row.textContent || '').replace(/\\s+/g, ' ').trim();
+                   const label = button ? (button.textContent || '').trim() : null;
+                   return {feed: label ? text.slice(0, text.indexOf(label)).trim() : text, button: label};
+                 })"""
+        )
+        return [{"feed": str(row.get("feed") or ""), "button": row.get("button")} for row in raw or []]
+
+    def click_power_toggle(self, ref: str, off: bool = True) -> None:
+        """Click the badge menu's button for one feed, by the label a person reads.
+
+        The menu closes on any outside click, so the badge must be open: call :meth:`open_power_menu`
+        first.
+        """
+        label = f"Turn {'off' if off else 'on'} {ref}"
+        self.action(f"click power menu {label!r}")
+        self.page.locator("#powerMenuList").get_by_role("button", name=label, exact=True).first.click()
+
+    def outlet_rows(self) -> List[Dict[str, Any]]:
+        """The rows of one PDU page: the ref, the row text as written, and the toggle label if any.
+
+        A row is found by its ``data-ref``, which the server and the page both stamp, so a click can
+        never land on a neighbouring outlet.
+        """
+        raw = self.page.evaluate(
+            """() => Array.from(document.querySelectorAll('#outlet-rows tr[data-ref]')).map((tr) => {
+                   const button = tr.querySelector('button[data-toggle]');
+                   return {
+                     ref: tr.getAttribute('data-ref'),
+                     text: (tr.textContent || '').replace(/\\s+/g, ' ').trim(),
+                     button: button ? (button.textContent || '').trim() : null,
+                   };
+                 })"""
+        )
+        return [
+            {"ref": str(row.get("ref") or ""), "text": str(row.get("text") or ""), "button": row.get("button")}
+            for row in raw or []
+        ]
+
+    def click_outlet_toggle(self, ref: str) -> None:
+        """Click the Turn off / Turn on button of one outlet row on a PDU page."""
+        row = next((entry for entry in self.outlet_rows() if entry["ref"] == ref), None)
+        if row is None or not row["button"]:
+            raise AssertionError(f"{self.surface}: outlet row for {ref!r} carries no toggle: {self.outlet_rows()}")
+        self.action(f"click {ref} {row['button']!r}")
+        self.page.click(f'#outlet-rows tr[data-ref="{ref}"] button[data-toggle="{ref}"]')
+
+    def metric_cards(self) -> List[Dict[str, str]]:
+        """The metric cards of a page as ``{label, value}`` pairs, in the order shown."""
+        raw = self.page.evaluate(
+            """() => Array.from(document.querySelectorAll('.card')).map((card) => ({
+                   label: (card.querySelector('.muted') || {}).textContent || '',
+                   value: (card.querySelector('.metric') || {}).textContent || '',
+                 }))"""
+        )
+        return [
+            {"label": str(entry.get("label") or "").strip(), "value": str(entry.get("value") or "").strip()}
+            for entry in raw or []
+        ]
 
     def banner(self) -> Dict[str, Any]:
         """The banner region: its text and its class, or an empty dict when hidden."""
@@ -471,6 +609,19 @@ class ConsoleSession:
         """Prove one control is not on the page, which is how a permission test reads."""
         if self.page.locator(selector).count():
             raise AssertionError(f"{self.surface}: {selector} is present, and this permission must not see it")
+
+    def expect_absent_for(self, selector: str, for_seconds: float = 2.0) -> None:
+        """Prove one control stays off the page for a stated moment.
+
+        Absence needs a window, so a dismissed confirm or a blocked switch is proven this way: the
+        control that would appear once the change landed never appears.
+        """
+        self.action(f"expect_absent_for {selector} for {for_seconds}s")
+        deadline = time.monotonic() + for_seconds
+        while time.monotonic() < deadline:
+            if self.page.locator(selector).count():
+                raise AssertionError(f"{self.surface}: {selector} appeared, and this test expected the change to stay away")
+            time.sleep(0.05)
 
     def screenshot(self, path: Path) -> None:
         """Write a PNG of the viewport into the artifact bundle."""
