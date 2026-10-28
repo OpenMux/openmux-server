@@ -160,6 +160,12 @@ later in that loop. Presence rides this path on every attach, Detach, promote, a
 Because the server queue drops the oldest chunk, a test that stalls a reader on purpose must assert on the newest
 bytes, never on every byte the port ever sent.
 
+A control frame shares one socket with the bytes already written to it, so it cannot arrive before them. Measured
+2026-10-28: with a 512 KiB burst in flight, a viewer-set change broadcast one presence frame, every delivery in the
+fan-out took 0 ms, and the frame still reached the two healthy readers 0.25 s later on an idle machine and 7.9 s later
+on a machine held at 2.5x CPU oversubscription. The wait is the bytes in front of the frame, and machine load scales it
+with no ceiling. A scenario that times a control frame must drain that burst from that reader first.
+
 ### RW-20: a stalled viewer
 
 `RW-20` tests the control path: attach three viewers, stop one reader on purpose, then change the viewer set so the
@@ -167,14 +173,31 @@ server broadcasts presence, and assert the other two receive the frame inside on
 marked expected-to-fail, on the reasoning in the section above that one blocking write holds up every client later in
 the loop.
 
-**Measured 2026-10-26: the scenario passes, so the design expectation was wrong for this shape.** The 512 KiB backlog
-for the stalled viewer travels through the data-forwarding task of that client, and its `drain()` waits there, in that
-one task. `broadcast_control_frame_to_port` ran on its own and delivered the presence frame to both readers that keep
-up, inside one second. Two limits on that result, so it is not read as a general guarantee: a stall still blocks the
-broadcast when the control write of the stalled client is the one that waits, which is the shape of a web or Telnet
-client (`ws.send_str`, `await session.transport.drain()`); and because the port data queue drops its oldest chunk, the
-backlog of the stalled viewer ends where the queue dropped, so the test asserts on the newest bytes only. `RW-20` therefore
-asserts what the product delivers — presence reaches every reader that keeps up — and carries no `xfail`.
+**Measured 2026-10-26: the scenario passed, so that expectation was wrong for this shape.** The 512 KiB backlog of the
+stalled viewer travels through the data-forwarding task of that client, and its `drain()` waits there, in that one task.
+`broadcast_control_frame_to_port` ran on its own and delivered the presence frame to both readers that keep up. Two
+limits on that result, so it is not read as a general guarantee: a stall still blocks the broadcast when the control
+write of the stalled client is the one that waits, which is the shape of a web or Telnet client (`ws.send_str`,
+`await session.transport.drain()`); and because the port data queue drops its oldest chunk, the backlog of the stalled
+viewer ends where the queue dropped, so the test asserts on the newest bytes only.
+
+**Measured 2026-10-28: the scenario then failed in a full run, and the broadcast was again not the cause.** It asked for
+a presence frame 512 KiB into the burst it had written itself, and gave that frame 10 s. The fan-out took 0 ms per
+delivery, and the frame arrived when each reader's socket had drained: 0.25 s idle, 5.06 s with a 16 MiB burst idle, and
+7.9 s at 2.5x CPU oversubscription. Nothing in the product sets those numbers, so the deadline measured the machine. The
+same run showed why the stall is not proof of backpressure either: the delivery to the viewer that stopped reading
+finished in 0 ms at 512 KiB, 4 ms at 16 MiB, and 6 ms under a slow 15 MiB feed, because the socket of a local client
+absorbs up to `kern.ipc.maxsockbuf` (8 MiB measured) and the port queue drops the rest.
+
+**The scenario now measures the fan-out only.** It waits until both healthy readers stop receiving bytes
+(`_wait_until_quiet`), it proves the stall happened by comparing what each viewer took (34 bytes for the stalled one
+against the whole burst for the readers that kept up), and it changes the viewer set by closing one client instead of
+attaching one: an attach waits for the broadcast it triggers, so a held-up fan-out hides inside the attach deadline. The
+final report names the position each reader holds in the fan-out, ahead of or behind the stalled client, because the
+shape of the failure is the diagnosis. The reported failure had both readers missing, which a block at the stalled
+client cannot produce: holding that delivery for 15 s moves only the readers behind it, and was measured to make
+`RW-20` fail naming `third` while `first` receives the frame. `RW-20` therefore asserts what the product delivers —
+presence reaches every reader that keeps up — and carries no `xfail`.
 
 ---
 
@@ -610,8 +633,9 @@ Named now so release 1 fixtures stay sufficient.
 - `CON-11` to `CON-14`: built. A `DeviceStation` (a fake device behind a `tcp_initiator` port) is unplugged and plugged
   back in to drive the port-down banner, one `POST /api/reload` rebuilds the sidebar of an open page, the theme is read
   on its own key, and `embed=1` is measured against a page with the menu visible.
-- `RW-20` a stalled viewer: built, and it passes. It was planned as an expected failure; see
-  [Concurrency model](#concurrency-model) for what one stalled reader does and does not block.
+- `RW-20` a stalled viewer: built, and it passes. It was planned as an expected failure, and it later failed once in a
+  full run for a reason inside the scenario; see [Concurrency model](#concurrency-model) for what one stalled reader
+  does and does not block.
 
 Five product defects came out of these phases. A clean stop exited 2, which `Restart=on-failure` read as a crash;
 `LIF-06` now proves a SIGINT stop exits 0 with no traceback. A client that left without closing its socket cleanly,

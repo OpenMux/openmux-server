@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -46,7 +46,10 @@ HOLDER_ID = re.compile(r"^\[([0-9a-f]{8})\]")
 #: product's own prompt, so a reworded prompt is noticed here instead of being re-typed here.
 TAKE_PROMPT = TAKE_TARGET_PROMPT.split("(")[0].strip("[] ")
 
-#: A payload big enough to fill a socket that nobody drains, used to stall one viewer on purpose.
+#: A burst that a viewer which stops reading cannot absorb, so it falls behind by this many bytes. It
+#: does not block the server's write to that viewer: the socket of a local client absorbs up to
+#: ``kern.ipc.maxsockbuf`` (8 MiB measured) and the port queue drops what is left, so ``RW-20`` proves
+#: the stall from the bytes each viewer took rather than from a write that waits.
 STALL_PAYLOAD_BYTES = 512 * 1024
 
 
@@ -89,6 +92,36 @@ def _id_of(label: str) -> str:
 def _codes(session: Any) -> List[str]:
     """The Outcome codes this session's `client_mode` frames carried, oldest first."""
     return [str(frame.get("code")) for frame in session.frames("client_mode")]
+
+
+def _viewers(*sessions: Any) -> List[Tuple[str, Any]]:
+    """Name each session after its surface (``cli:first`` becomes ``first``), so a report says who did what."""
+    return [(str(session.surface).split(":")[-1], session) for session in sessions]
+
+
+def _wait_until_quiet(*sessions: Any, within: float = 30.0, quiet_for: float = 1.0) -> Dict[str, int]:
+    """Wait until every session stops receiving bytes, and return the bytes each took, keyed by surface name.
+
+    A control frame cannot overtake the bytes already written to the same socket. A scenario that
+    floods a port and then changes the viewer set therefore measures how fast that flood drains rather
+    than how fast the broadcast runs, which is machine load rather than product behaviour. Reading is
+    how the harness drains its own queue, so this polls each byte count until all of them stop moving.
+    """
+    named = _viewers(*sessions)
+    taken = {name: [len(session.read_text()), time.monotonic()] for name, session in named}
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        for name, session in named:
+            entry = taken[name]
+            count = len(session.read_text())
+            if count != entry[0]:
+                entry[0], entry[1] = count, now
+        if all(now - entry[1] >= quiet_for for entry in taken.values()):
+            return {name: int(entry[0]) for name, entry in taken.items()}
+        time.sleep(0.1)
+    still_running = {name: int(entry[0]) for name, entry in taken.items()}
+    raise AssertionError(f"these viewers were still receiving bytes after {within}s: {still_running}")
 
 
 @surfaces("cli:rw")
@@ -588,9 +621,18 @@ def test_rw20_one_client_that_stops_reading_does_not_hold_up_the_others(servers,
 
     The data path is decoupled per client, so a stalled reader cannot delay another reader's bytes.
     The control path is not: `ConsoleManager.broadcast_control_frame_to_port` awaits each delivery in
-    turn, and each delivery ends in a write that blocks when the peer stops reading. This scenario
-    fills one client's socket, then changes the viewer set, and asks whether the other two still get
-    the frame that change broadcasts.
+    turn, and each delivery ends in a write that blocks when the peer stops reading. This scenario stops
+    one reader, sends a burst the port must deliver to all three, changes the viewer set, and asks
+    whether the other two still get the frame that change broadcasts.
+
+    Two measurements set the shape of this body. The backlog of a stalled reader is held by that
+    client's own data-forwarding task, and the presence delivery to it finished in 0 ms, so the loop
+    was never held by it. And a control frame shares one socket with the bytes already written to it,
+    so it cannot arrive before them: one presence frame reached both healthy readers 0.25 s after a
+    512 KiB burst on an idle machine and 7.9 s after it on a machine held at 2.5x CPU oversubscription,
+    while the broadcast loop itself stayed at 0 ms. So the burst is drained from the two healthy readers
+    before the viewer set changes, which leaves the deadline measuring the broadcast instead of the
+    socket.
     """
     server = _capacity_world(servers, "stall", "multiple")
     first = clients.cli(user="ro", attach_to="slot1", surface="cli:first", server=server)
@@ -602,18 +644,26 @@ def test_rw20_one_client_that_stops_reading_does_not_hold_up_the_others(servers,
         writer.write("x" * STALL_PAYLOAD_BYTES)
         first.wait_for("xxxx", timeout=30)
         third.wait_for("xxxx", timeout=30)
-    with step("the viewer set now changes, which broadcasts a control frame to all three"):
-        before = {name: len(session.frames("presence")) for name, session in (("first", first), ("third", third))}
-        late = clients.cli(user="ro", attach_to="slot1", surface="cli:late", server=server)
-        assert late.mode() is not None, late.mode()
-    with step("the two readers that kept up receive it, though a client ahead of them is stuck"):
-        for name, session in (("first", first), ("third", third)):
+    with step("the two readers that keep up take the burst, so nothing of it is still in flight to them"):
+        taken = _wait_until_quiet(first, third, stalled)
+    with step("the stalled viewer is behind by the burst, so the stall is real and not only intended"):
+        assert (
+            taken["stalled"] < taken["first"] and taken["stalled"] < taken["third"]
+        ), f"the viewer that stopped reading was not left behind: {taken}"
+        assert (
+            taken["first"] > STALL_PAYLOAD_BYTES // 2 and taken["third"] > STALL_PAYLOAD_BYTES // 2
+        ), f"a reader that kept up did not receive most of the burst: {taken}"
+    with step("the viewer set now changes, which broadcasts a presence frame to the clients still on the port"):
+        before = {name: len(session.frames("presence")) for name, session in _viewers(first, third)}
+        writer.close()
+    with step("the two readers that kept up receive it, though a client between them is stuck"):
+        for (name, session), seat in zip(_viewers(first, third), ("ahead of", "behind")):
             start = before[name]
             deadline = time.monotonic() + 10.0
             while time.monotonic() < deadline and len(session.frames("presence")) <= start:
                 time.sleep(0.05)
             assert len(session.frames("presence")) > start, (
-                f"{name} received no presence frame while another client was stalled; "
-                f"presence counts={before!r} -> {{'first': {len(first.frames('presence'))}, "
-                f"'third': {len(third.frames('presence'))}}}"
+                f"{name}, which the fan-out visits {seat} the stalled client, received no presence frame; "
+                f"presence counts={before!r} -> first={len(first.frames('presence'))}, "
+                f"third={len(third.frames('presence'))}"
             )
