@@ -61,6 +61,22 @@ class SiteEventHub:
         """Number of currently tracked sockets (for tests and diagnostics)."""
         return len(self._clients)
 
+    async def close_all(self) -> None:
+        """Close every tracked socket so its handler returns.
+
+        `WebConsoleAdapter.stop()` calls this before it waits for the HTTP
+        handlers to finish. A `/ws/events` socket stays open until the peer
+        leaves, so the waiter would otherwise block forever and the listener
+        would keep its port. See `WebConsoleAdapter.stop()`.
+        """
+        for ws in list(self._clients):
+            try:
+                await ws.close()
+            except Exception:
+                # justification: shutdown must not fail because one transport is already gone
+                logger.debug("Site event socket did not close cleanly", exc_info=True)
+        self._clients.clear()
+
     def publish(self, event: Dict[str, Any]) -> None:
         """Send one JSON frame to every connected site socket. Never raises.
 

@@ -2573,6 +2573,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
             if _nudge.get("task") is not None:
                 _nudge["task"].cancel()
         self._site_nudges.clear()
+        # Drop the live WebSockets before the cleanups below, which wait for the
+        # handlers they started. The console and `/ws/events` handlers return only
+        # when their socket closes, so a connected browser page would otherwise
+        # keep this listener on its port and the next WebConsole could not bind.
+        # See `_restart_deferred_web_console()` in `openmux/server/main.py`.
+        await self._close_live_sockets()
         try:
             # Close HTTP server
             # New dual-server cleanup first
@@ -2601,16 +2607,24 @@ class WebConsoleAdapter(BaseGenericAdapter):
         except Exception:
             # justification: shutdown cleanup; the transport may already be closed
             pass
-        # Close any open websockets
+        self._clients.clear()
+        self.logger.info("WebConsole server stopped")
+
+    async def _close_live_sockets(self) -> None:
+        """Close every browser socket this adapter holds so its handlers return.
+
+        Covers the per-port console sockets and the site `/ws/events` sockets,
+        which are the two requests a page holds open with no timeout. Used by
+        `stop()`, which must not wait for a peer that never disconnects.
+        """
         for ws in list(self._ws_to_client.keys()):
             try:
                 await ws.close()
             except Exception:
-                # justification: shutdown cleanup; the transport may already be closed
-                pass
-        self._clients.clear()
+                # justification: shutdown must not fail because one transport is already gone
+                self.logger.debug("Console WebSocket did not close cleanly", exc_info=True)
         self._ws_to_client.clear()
-        self.logger.info("WebConsole server stopped")
+        await self._site_events.close_all()
 
     def _build_redirect_app(self) -> web.Application:
         """Build a minimal aiohttp application that redirects all requests to HTTPS.

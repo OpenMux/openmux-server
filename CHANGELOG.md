@@ -26,6 +26,13 @@ Changes since v1.0.4 (2026-10-19).
   ACL can then browse and attach to any port (issue #100).
 
 ### Behavior changes (no config change required)
+- **A full reload no longer leaves the web console down while a browser page is open.** A full reload restarts the web
+  console, and that restart waited for every request the old console had started. A page holds two of them open: its
+  console stream and `/ws/events`. The wait therefore never ended, so the old console kept the port and the new one
+  could not bind — nothing answered on the web console address again until the process restarted. Stopping now closes
+  the sockets the console holds before it waits for anything. A full reload still ends every console session, and it
+  also ends each browser's signed-in session: after one, an open page is refused until someone signs in again. No
+  config key changed.
 - **The server now words every access answer.** A write-slot or attach answer reaches the Client as the server's own
   sentence. Before, each surface turned a status word into English with its own table, so the same fact read differently in
   the CLI, Telnet, SSH, and the web console, and an unknown status printed text in one place and nothing in another. The
