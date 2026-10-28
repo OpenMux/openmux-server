@@ -30,9 +30,14 @@ Changes since v1.0.4 (2026-10-19).
   console, and that restart waited for every request the old console had started. A page holds two of them open: its
   console stream and `/ws/events`. The wait therefore never ended, so the old console kept the port and the new one
   could not bind — nothing answered on the web console address again until the process restarted. Stopping now closes
-  the sockets the console holds before it waits for anything. A full reload still ends every console session, and it
-  also ends each browser's signed-in session: after one, an open page is refused until someone signs in again. No
-  config key changed.
+  the sockets the console holds before it waits for anything. A full reload still ends every console session: an
+  attached Telnet or Client console is dropped, and the next one to connect is served. No config key changed.
+- **A full reload no longer signs browsers out** (issue #104). The login sessions lived in the web console, and a full
+  reload replaces it, so every open page came back with a cookie that named nothing: the page stopped updating and showed
+  its **Signed out – click to sign in again** badge, and clicking it led to the login form. The reload now hands those
+  sessions to the console that replaces the old one, so an open page keeps working. Permission is still read live from
+  `authentication.yaml`, so an account that the same reload removed or demoted is refused on its next click. A visitor
+  with no session is refused as before, and a real process restart still clears every session. No config key changed.
 - **The server now words every access answer.** A write-slot or attach answer reaches the Client as the server's own
   sentence. Before, each surface turned a status word into English with its own table, so the same fact read differently in
   the CLI, Telnet, SSH, and the web console, and an unknown status printed text in one place and nothing in another. The

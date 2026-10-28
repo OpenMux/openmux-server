@@ -464,7 +464,7 @@ device path no host has: the reload starts it and the port reports itself down.
 | `CFG-12` | Feeds given to a running console light the badge of that console's open page, and its terminal is never dropped. |
 | `CFG-13` | A Telnet listener the editor saved answers after a soft reload, and the console on the first listener keeps its Port. |
 | `CFG-14` | The Reload view leaves the summary a soft reload gave on the page, and asks in words before a full one. |
-| `CFG-15` | A full reload recreates every adapter and restarts the web console while a browser page is open. |
+| `CFG-15` | A full reload recreates every adapter, restarts the web console, and keeps an open browser page signed in. |
 | `CFG-16` | A full reload ends an attached console with no message, and the next client that signs in is served. |
 | `CFG-17` | A Serial port whose device is missing is listed, named once in the log, and still takes a console — read-only. |
 
@@ -488,9 +488,10 @@ Six measured behaviours are recorded here, because a reader would otherwise assu
   browser and sends a sessionless visitor to the login page. One early measurement also showed a bare request for the
   page answered differently before and after another authenticated request on the same client, so the suite asserts the
   stable pair — session cookie in, password on the routes — and states nothing about a bare first request.
-- A full reload signs every browser out, because the session lives in the web console that stopped. After the restart
-  `GET /healthz` answers 200 again while the open page's own `GET /api/status` answers 401 until it signs in. `CFG-15`
-  asserts both, because half of that pair reads as a broken server.
+- A full reload keeps the browsers that were signed in. The reload carries the login sessions to the console that
+  replaces the one it stopped, so the operator who pressed **Full reload** is not sent to a login form. `CFG-15` reads
+  the pair that proves both halves of that sentence: the open page's own `GET /api/status` answers 200, while a visitor
+  with no session answers 401. A carry that also admitted a stranger would look exactly like the first half.
 - A port with one Write seat hands it to the first console that asks. A second console on that Port attaches read-only,
   which is why `CFG-13` drives the new listener's console on the Port the same save added rather than on the busy one.
   A Serial port whose device is missing keeps its console page in `read-only` and reports `port_up: false` on the page's
@@ -506,7 +507,7 @@ wrong: `POST /config-editor/apply` runs the same schema and refuses the entry wi
 reconcile should report a Port whose adapter refused to create it is
 [Issue #105](https://github.com/OpenMux/openmux-server/issues/105), and no scenario depends on how it is answered.
 
-One defect in the product came out of measuring, and it is fixed with the scenario that proves it.
+Two defects in the product came out of measuring, and each is fixed with the scenario that proves it.
 
 - A full reload while any browser page was connected left the web console down for good. `WebConsoleAdapter.stop()`
   asked each runner to `cleanup()`, which waits for the handlers that runner started, and the console and `/ws/events`
@@ -519,6 +520,20 @@ One defect in the product came out of measuring, and it is fixed with the scenar
   because aiohttp's cleanup swallows `CancelledError` and the existing 10 s timeout never fired. `CFG-15` keeps a page
   open across a full reload, and it fails against the previous file: run with the old `stop()`, it reports that the
   log line `[deferred] Stopped WebConsole` never appeared, and it passes again with the fix in place.
+- A full reload signed out every browser that was open, including the one that asked for it. The session store lives in
+  the adapter instance (`WebConsoleAdapter.__init__` sets `self._sessions = {}`) and the recreated adapter starts with
+  an empty one, so every cookie on the server named a session that no longer existed. Measured before the fix: the open
+  page's own `GET /api/status/fragments` answered 401 while `GET /healthz` answered 200, `layout.js` stopped
+  reconnecting and wrote `↻ Signed out – click to sign in again` over content that only looked live, and that badge's own
+  click landed on `/login?next=/`. The reload now hands the sessions over: `login_sessions_snapshot()` and
+  `adopt_login_sessions()` on the adapter, read before the stop phase by `OpenMuxServer._capture_login_sessions()` and
+  passed while dependencies are wired in `_reload_full_wire()`. Only the identity moves, because every request asks
+  `auth_manager` for its permission (`_get_effective_permission`), so an account the same reload removed or demoted is
+  refused on its next click. An entry is not carried when its cookie name came from another `base_path`, when it lacks
+  a username, or when `session_ttl_seconds` already passed. Measured after the fix: `Carried 1 login session(s) across
+  the reload`, the page's own request answers 200, and the badge stays `● Live data`. `CFG-15` asserts the carry and the
+  refusal of a sessionless visitor; `tests/test_session_carry_on_full_reload.py` holds the unit half, including the
+  removed account and a reload that follows a reload. [Issue #104](https://github.com/OpenMux/openmux-server/issues/104).
 
 ### ACT — Port Actions (`test_actions.py`, planned: 9)
 

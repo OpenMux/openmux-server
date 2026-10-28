@@ -1244,6 +1244,29 @@ class OpenMuxServer:
     _RELOAD_STOP_TIMEOUT_S = 10.0
     _RELOAD_START_TIMEOUT_S = 10.0
 
+    def _capture_login_sessions(self) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Take the login sessions from the web console this reload is about to replace.
+
+        A web console keeps its login sessions in its own instance, so a full reload would sign out
+        every open browser: each browser cookie would name a session that no longer exists. Returns
+        ``(session cookie name, sessions)``, or None when there is no web console or nothing to carry.
+        Call this before the stop phase, because a self-hosted console stops after the HTTP reply.
+        """
+        adapter = self.web_console
+        if adapter is None:
+            return None
+        snapshot = getattr(adapter, "login_sessions_snapshot", None)
+        if not callable(snapshot):
+            return None
+        try:
+            sessions = snapshot()
+        except Exception as e:
+            self.logger.warning("Could not read login sessions for the reload: %s", e)
+            return None
+        if not sessions:
+            return None
+        return (str(getattr(adapter, "_session_cookie_name", "") or ""), sessions)
+
     def _reload_full_apply_config(self, req_id: str, summary: Dict[str, Any], deferred_old_wc: Optional[Any]) -> bool:
         """Reload config from disk and re-apply logging (full-reload config phase).
 
@@ -1304,8 +1327,19 @@ class OpenMuxServer:
             return (False, None)
         return (True, deferred_new_wc)
 
-    def _reload_full_wire(self, full_config: Dict[str, Any], req_id: str, summary: Dict[str, Any]) -> None:
-        """Wire dependencies (port/console/auth managers, server config) into each adapter."""
+    def _reload_full_wire(
+        self,
+        full_config: Dict[str, Any],
+        req_id: str,
+        summary: Dict[str, Any],
+        carried_sessions: Optional[Tuple[str, Dict[str, Any]]] = None,
+    ) -> None:
+        """Wire dependencies (port/console/auth managers, server config) into each adapter.
+
+        ``carried_sessions`` is what `_capture_login_sessions()` read off the web console before it
+        stopped. Only an adapter that exposes `adopt_login_sessions()` takes it -- the web console --
+        because those cookies are readable only by the console that issued them.
+        """
         self.logger.info("[reload-full:%s] Wiring adapter dependencies", req_id)
         for adapter in self.unified_adapters:
             try:
@@ -1319,6 +1353,9 @@ class OpenMuxServer:
                 set_console = getattr(adapter, "set_console_manager", None)
                 if callable(set_console):
                     set_console(self.console_manager)
+                adopt_sessions = getattr(adapter, "adopt_login_sessions", None)
+                if callable(adopt_sessions) and carried_sessions is not None:
+                    adopt_sessions(carried_sessions[1], carried_sessions[0])
                 try:
                     atype = adapter.get_adapter_type()
                     self.logger.debug(
@@ -1518,6 +1555,9 @@ class OpenMuxServer:
             remote = str(ctx.get("remote") or "?")
             user = str(ctx.get("user") or "?")
 
+            # Read the login sessions before anything stops: the web console that holds them is about
+            # to be replaced, and its browsers must stay signed in (issue #104).
+            carried_sessions = self._capture_login_sessions()
             # Stop existing adapters
             old = list(self.unified_adapters or [])
             deferred_old_wc = await self._reload_full_stop_phase(old, req_id, origin, user, remote, ctx, summary)
@@ -1549,8 +1589,8 @@ class OpenMuxServer:
                 # justification: optional wiring; the port manager keeps its old list
                 pass
 
-            # Wire dependencies
-            self._reload_full_wire(full_config, req_id, summary)
+            # Wire dependencies, including the login sessions the old web console held
+            self._reload_full_wire(full_config, req_id, summary, carried_sessions)
 
             # Start adapters
             await self._reload_full_start(req_id, summary, deferred_old_wc, deferred_new_wc)

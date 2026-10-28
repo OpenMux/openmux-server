@@ -2626,6 +2626,60 @@ class WebConsoleAdapter(BaseGenericAdapter):
         self._ws_to_client.clear()
         await self._site_events.close_all()
 
+    def login_sessions_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """A copy of the login sessions this console holds, for the console that replaces it.
+
+        A full reload re-creates this adapter and the store lives in the instance, so without a
+        handover every open browser comes back signed out. `adopt_login_sessions()` is the receiving
+        half, and `OpenMuxServer._capture_login_sessions()` is what calls this before the stop phase.
+        """
+        try:
+            return {str(sid): dict(entry) for sid, entry in (self._sessions or {}).items() if isinstance(entry, dict)}
+        except Exception:
+            # justification: a console that cannot read its own store hands over nothing
+            self.logger.debug("Login sessions were not snapshotted", exc_info=True)
+            return {}
+
+    def adopt_login_sessions(
+        self, sessions: Optional[Dict[str, Dict[str, Any]]], source_cookie_name: Optional[str] = None
+    ) -> int:
+        """Take over the login sessions of the console a full reload replaced; return how many.
+
+        What survives is only the fact that a browser already proved who it is. Every request still asks
+        `auth_manager` for the permission (`_get_effective_permission`), so a user that the same reload
+        removed or demoted is refused on its next click, and `session_ttl_seconds` still bounds a session
+        nobody uses (`_attach_session_user`).
+
+        Sessions are refused when they came from a console with a different session cookie name: the
+        browser sends the name that console issued, so this console could never read them. That keeps a
+        reload which changes `base_path` honest, because it is the one reload that cannot deliver a carry.
+        """
+        if not sessions:
+            return 0
+        if source_cookie_name is not None and source_cookie_name != self._session_cookie_name:
+            self.logger.info(
+                "Carried no login sessions: their cookie name %r is not this console's %r",
+                source_cookie_name,
+                self._session_cookie_name,
+            )
+            return 0
+        now = time.time()
+        adopted = 0
+        for sid, entry in sessions.items():
+            try:
+                if not isinstance(entry, dict) or not entry.get("username"):
+                    continue
+                if (now - float(entry.get("last_seen", now))) > self.session_ttl_seconds:
+                    continue
+                self._sessions[str(sid)] = dict(entry)
+                adopted += 1
+            except Exception:
+                # justification: one unreadable entry must not cost the other browsers their session
+                self.logger.debug("Login session was not carried across the reload", exc_info=True)
+        if adopted:
+            self.logger.info("Carried %s login session(s) across the reload", adopted)
+        return adopted
+
     def _build_redirect_app(self) -> web.Application:
         """Build a minimal aiohttp application that redirects all requests to HTTPS.
 

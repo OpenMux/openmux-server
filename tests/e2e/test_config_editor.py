@@ -815,12 +815,13 @@ def test_cfg14_the_page_reports_what_a_reload_changed_and_asks_before_a_full_one
 
 @surfaces("http", "web:admin")
 def test_cfg15_a_full_reload_restarts_the_adapters_and_the_web_console_answers_again(servers, api_for_server, console):
-    """A full reload replaces every adapter and brings the web console back, even while a page is open.
+    """A full reload replaces every adapter, brings the web console back, and keeps the browsers signed in.
 
     The console cannot stop itself inside its own reply, so its restart waits until after the reply. A browser page
     holds two sockets open, and the old console must close them before it gives up the port: while it waits for the
-    handlers instead, nothing answers on that port again. The session lives in the console that stopped, so the open
-    page has to sign in again afterwards, which this scenario reads as the pair of answers.
+    handlers instead, nothing answers on that port again. The login sessions live in the console that stopped, so the
+    reload carries them to the one that replaces it, and the open page keeps working instead of landing on the login
+    form. Carrying an identity is not granting one: a visitor with no session stays refused.
     """
     world = servers(name="full", loopback=("keep",), telnet_kwargs={"require_auth": True}, start=True)
     api = api_for_server(world)
@@ -840,11 +841,20 @@ def test_cfg15_a_full_reload_restarts_the_adapters_and_the_web_console_answers_a
     world.wait_ready(timeout=20.0)
     answered = _health_answers(world)
     assert answered == 200, f"the restarted console refused its health route with {answered}"
-    step("and the page that was open has to sign in again, because its session died with the old console")
-    signed_out = viewer.page.evaluate("async () => (await fetch('/api/status')).status")
-    assert signed_out == 401, f"the old page kept a session it should have lost: {signed_out}"
+    step("and the page that was open is still signed in")
+    still_signed_in = viewer.page.evaluate("async () => (await fetch('/api/status')).status")
+    assert still_signed_in == 200, f"the open page lost its session to the reload: {still_signed_in}"
+    step("a reload of that page shows the server again, not the login form")
+    viewer.goto("/")
+    viewer.wait_for_selector("#liveDataBadge", state="visible", timeout=15000)
+    shown = viewer.page_text("body")
+    assert "Sign in to" not in shown, f"the page came back at its login form: {shown[:200]!r}"
+    assert "Signed out" not in viewer.page_text("#liveDataBadge"), viewer.page_text("#liveDataBadge")
     step("and the rebuilt adapter serves the port again")
     assert _running(api) == {"keep"}, api.port_names()
+    step("while a visitor with no session is refused, carry or no carry")
+    anonymous = HttpSession(world.web_url, surface="http").request("GET", "/api/status", expect=(401,))
+    assert anonymous[0] == 401, anonymous
 
 
 @surfaces("telnet:rw", "telnet:fresh", "http")
