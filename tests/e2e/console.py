@@ -336,6 +336,25 @@ class ConsoleSession:
             f"{self.surface}: {selector} never carried {needle!r} in {timeout}s: {self.page_text(selector)[-600:]!r}"
         )
 
+    def wait_for_selector(self, selector: str, *, state: str = "visible", timeout: float = 8000) -> None:
+        """Wait for one element with Playwright's own wait, for a page that has no ``?e2e=1`` hook.
+
+        The Config Editor page carries no hook, so ``wait_until()`` cannot observe it and
+        ``view()`` raises. Its regions appear as its script fills them, which is what this waits for.
+        """
+        self.action(f"wait_for_selector {selector} state={state}")
+        self.page.wait_for_selector(selector, state=state, timeout=timeout)
+
+    def wait_for_page_text_to_clear(self, needle: str, selector: str = "body", timeout: float = 10.0) -> None:
+        """Wait until one element no longer shows ``needle``, on a page with no test hook."""
+        self.action(f"wait_for_page_text_to_clear {needle!r}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if needle not in self.page_text(selector):
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"{self.surface}: {selector} still carried {needle!r} after {timeout}s")
+
     def table_rows(self, selector: str) -> List[List[str]]:
         """Each row of one table as its cell texts, for a table the server rendered."""
         raw = self.page.evaluate(
@@ -463,6 +482,18 @@ class ConsoleSession:
         label = f"Turn {'off' if off else 'on'} {ref}"
         self.action(f"click power menu {label!r}")
         self.page.locator("#powerMenuList").get_by_role("button", name=label, exact=True).first.click()
+
+    def power_nav_pdus(self) -> List[str]:
+        """The PDU names the sidebar lists under Power, in the order it shows them.
+
+        The page rebuilds this list from ``/api/power`` when a ``pdus_changed`` notice arrives, so it is what proves
+        a PDU that appeared later reached an open page.
+        """
+        raw = self.page.evaluate(
+            """() => Array.from(document.querySelectorAll('#power-pdus a.nav-sub-item[data-pdu-name]'))
+                   .map((a) => (a.getAttribute('data-pdu-name') || '').trim())"""
+        )
+        return [str(name) for name in raw or [] if str(name)]
 
     def outlet_rows(self) -> List[Dict[str, Any]]:
         """The rows of one PDU page: the ref, the row text as written, and the toggle label if any.

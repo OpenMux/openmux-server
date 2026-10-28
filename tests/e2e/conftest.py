@@ -632,11 +632,13 @@ class _ClientRegistry:
         require_auth: bool = False,
         password: str = TEST_PASSWORD,
         server: Optional[E2EServer] = None,
+        port: Optional[int] = None,
     ) -> TelnetSession:
         """Open a Telnet session on one server's Telnet listener.
 
         ``server`` names the world to dial when the test started its own, the same way
-        ``cli(server=...)`` does.
+        ``cli(server=...)`` does. ``port`` dials a listener the factory did not allocate, which is how a scenario
+        reaches one it added through the Config Editor.
         """
         session = open_telnet_client(
             server or self.server,
@@ -645,6 +647,7 @@ class _ClientRegistry:
             surface=surface,
             require_auth=require_auth,
             timeline=self.timeline,
+            port=port,
         )
         self.story.cast(f"{surface:<11} user {user!r}  Telnet listener")
         self.sessions.append(session)

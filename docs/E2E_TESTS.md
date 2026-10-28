@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-80 scenarios across 7 suites.
+97 scenarios across 8 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -26,6 +26,24 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | AUTH-08 | A cookie alone cannot write config: the token check answers first and the config files stay as they were. | http, config files | `tests/e2e/test_auth.py::test_auth08_a_session_post_without_the_csrf_token_is_refused_before_it_writes` |
 | AUTH-09 | Scripting with credentials skips the token check, and still stops at the caller's permission level. | http, config files | `tests/e2e/test_auth.py::test_auth09_the_basic_path_needs_no_token_and_never_rises_above_its_permission` |
 | AUTH-10 | A trust header signed with ``sso_secret`` is believed, its permission included, and every forgery is refused. | http, server config | `tests/e2e/test_auth.py::test_auth10_only_the_holder_of_the_sso_secret_may_speak_for_a_user` |
+| **CFG** | | | |
+| CFG-01 | Every editor route is for an administrator, and the entry is not in anyone else's menu. | http, web:admin, web:rw, web:ro | `tests/e2e/test_config_editor.py::test_cfg01_only_an_administrator_may_open_the_editor` |
+| CFG-02 | Each Config Editor sub-page is a view of one page, and anything unrecognised shows the Server page. | web:admin | `tests/e2e/test_config_editor.py::test_cfg02_every_sub_page_opens_and_an_unknown_one_shows_the_server_page` |
+| CFG-03 | The editor reads the config the process runs on, and never sends a stored secret to the browser. | http, web:admin | `tests/e2e/test_config_editor.py::test_cfg03_the_editor_shows_the_running_config_with_every_secret_masked` |
+| CFG-04 | A new row the page cannot complete is refused there, and nothing is written. | web:admin, http | `tests/e2e/test_config_editor.py::test_cfg04_the_page_refuses_a_new_port_row_that_omits_a_required_field` |
+| CFG-05 | A save writes the file and starts nothing: the soft reconcile is what attaches a person to the port. | http, telnet:rw | `tests/e2e/test_config_editor.py::test_cfg05_a_saved_port_starts_on_soft_reload_and_the_next_reload_calls_it_unchanged` |
+| CFG-06 | One bad field stops the whole save, and the reason names the port and the field. | http | `tests/e2e/test_config_editor.py::test_cfg06_an_invalid_edit_is_refused_and_the_file_keeps_the_old_port` |
+| CFG-07 | ``config_editor.allowed`` picks which sections a save may change, and a refusal names the section. | http | `tests/e2e/test_config_editor.py::test_cfg07_a_section_the_security_policy_closes_is_refused_by_name` |
+| CFG-08 | A section ``security.yaml`` closed is shown unusable, not merely refused later. | web:admin | `tests/e2e/test_config_editor.py::test_cfg08_the_page_marks_a_section_the_policy_closed_as_read_only` |
+| CFG-09 | A save writes what the page models and preserves the rest of the file. | http | `tests/e2e/test_config_editor.py::test_cfg09_saving_keeps_what_the_editor_never_shows` |
+| CFG-10 | A save that arrives with a session cookie must also prove it came from that page. | http | `tests/e2e/test_config_editor.py::test_cfg10_a_cookie_save_without_the_csrf_token_is_refused` |
+| CFG-11 | A PDU that appears while a page is open reaches that page's Power menu. | http, web:rw | `tests/e2e/test_config_editor.py::test_cfg11_a_pdu_the_editor_added_lands_in_the_power_menu_of_an_open_page` |
+| CFG-12 | Feeds given to a running console show on that console's page, because the reconcile tells the page. | http, web:rw | `tests/e2e/test_config_editor.py::test_cfg12_feeds_added_to_a_console_show_on_an_open_console_page` |
+| CFG-13 | A listener written to the file is started by a soft reload, and the open listener keeps its client. | http, telnet:rw, telnet:new | `tests/e2e/test_config_editor.py::test_cfg13_a_telnet_listener_the_editor_saved_answers_after_a_soft_reload` |
+| CFG-14 | The Reload view reports the summary it was given, and asks first before a full reload. | web:admin, telnet:rw | `tests/e2e/test_config_editor.py::test_cfg14_the_page_reports_what_a_reload_changed_and_asks_before_a_full_one` |
+| CFG-15 | A full reload replaces every adapter and brings the web console back, even while a page is open. | http, web:admin | `tests/e2e/test_config_editor.py::test_cfg15_a_full_reload_restarts_the_adapters_and_the_web_console_answers_again` |
+| CFG-16 | A full reload ends every session, on purpose, and a client that comes back afterwards is served. | telnet:rw, telnet:fresh, http | `tests/e2e/test_config_editor.py::test_cfg16_a_full_reload_drops_an_attached_console_and_a_new_one_gets_in` |
+| CFG-17 | A Serial port with no device behind it is listed, reported in the log, and still takes a console. | http, web:ro, web:admin | `tests/e2e/test_config_editor.py::test_cfg17_a_port_whose_device_is_missing_is_listed_as_offline_with_the_reason` |
 | **CON** | | | |
 | CON-01 | A read-write user opens the console on a Loopback port and sees their own text come back. | web:rw | `tests/e2e/test_console.py::test_con01_a_signed_in_user_opens_the_console_and_gets_their_text_back` |
 | CON-02 | The page exports its test hook only when the URL carries ``?e2e=1``. | web:admin | `tests/e2e/test_console.py::test_con02_the_test_hook_stays_off_unless_the_url_asks_for_it` |

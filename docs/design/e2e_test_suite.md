@@ -1,9 +1,9 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 5. The harness, the `LIFECYCLE` suite, the scenario index, the browser proof,
+**Status:** Implemented through Phase 6. The harness, the `LIFECYCLE` suite, the scenario index, the browser proof,
 the `AUTH` suite driven over HTTP, the fourteen `CON` console scenarios driven in Chromium, the twenty `RW`
-write-slot scenarios, and the nineteen `PWR` power scenarios run green. Phases 6-9 are not written; see **Build
-status** near the end.
+write-slot scenarios, the nineteen `PWR` power scenarios, and the seventeen `CFG` Config Editor scenarios run green.
+Phases 7-9 are not written; see **Build status** near the end.
 **Date:** 2026-10-28
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
 and Telnet at the same time.
@@ -270,10 +270,11 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 41 scenarios in 5 files: `LIFECYCLE` 10, `AUTH` 10, `CON` 14, the index checks 2, and the timeline
-recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what runs, and its count is checked by
-`IDX-02`. Five further groups below are the plan of record: they have ids, boundaries, and assertions written down, and
-they have no test file yet. Full wording for every built id lives in that index.
+The suite today runs 97 scenarios in 8 files: `LIFECYCLE` 10, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 17, the
+index checks 2, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
+runs, and its count is checked by `IDX-02`. Three further groups below are the plan of record: they have ids,
+boundaries, and assertions written down, and they have no test file yet. Full wording for every built id lives in that
+index.
 
 ### LIFECYCLE — process and listeners (`tests/e2e/test_lifecycle.py`, 10)
 
@@ -429,18 +430,95 @@ Three defects in the product came out of measuring, and each is fixed with the s
   and the Telnet transport drops the LF that follows it. `PWR-16` types a line after the menu and asserts the Port
   echoes it whole. A related defect is **not** fixed and is recorded instead: `_read_auth_line`, which reads the login
   and the Port choice, discards every byte after the first LF in the same 256-byte read, so a line typed immediately
-  after a Port choice is lost. A test must therefore prove the attach before it types the next line, which the harness
+  after a Port choice is lost. [Issue #103](https://github.com/OpenMux/openmux-server/issues/103) tracks it.
+  A test must therefore prove the attach before it types the next line, which the harness
   does with session info (`i` prints `Port: <name>` only for a session that attached).
 
 
-### CFG — configure, then reload (`test_config_editor.py`, planned: 14)
+### CFG — configure, then reload (`test_config_editor.py`, 17 scenarios)
 
-All views and the unknown-view fallback, nav, then add a Loopback port and soft reload with a client attached, config
-file preserved, add a PDU and see the `pdus_changed` nudge, add `power:` feeds to an attached console, invalid edit
-rejected with the file unchanged, non-writable section, read-write `403`, add a Telnet listener, full reload restarts
-adapters, soft reload keeps attached clients, an adapter that cannot start is reported.
+Each scenario builds its own server, edits its own config, and proves its own save-then-reload-then-see order. Four
+owners sit behind one page, so each scenario names the pair a person would otherwise reconcile by hand: access and
+CSRF come from `web_plugins/config_editor.py`, what a save writes comes from that plugin's `/apply` and `/validate`,
+what a save *starts* comes from `main.py` (`reload_adapters_soft()` reconciles in place, `reload_adapters_full()`
+recreates every adapter and restarts the web console after the reply), and what an open page learns without a reload
+comes from `layout.js` (`pdus_changed`) and `console.js` (`reload_applied`) over the socket that page already holds.
 
-This suite depends on order: each test leaves state the next needs, and each docstring ends with `Depends on:`.
+Two parts of these worlds are simulations. The `dummy` PDU driver answers at once and needs no device, so a PDU that
+appears in the file always starts. The one adapter failure this tier can produce on demand is a Serial port whose
+device path no host has: the reload starts it and the port reports itself down.
+
+| Id | What one scenario proves |
+| --- | --- |
+| `CFG-01` | Only an administrator opens the Editor; an operator and a reader are refused each route and see no menu entry. |
+| `CFG-02` | Every sub-page heads itself with its own name, and an unknown or mis-cased view falls back to the Server page. |
+| `CFG-03` | The page reports the config the process runs on with every stored secret masked, and the file keeps a hash that still logs in. |
+| `CFG-04` | A new row that omits a required field is refused inside the panel, names the field, and never reaches the file. |
+| `CFG-05` | A saved port starts on the soft reconcile, an attached console keeps its Port, and the next reconcile calls both unchanged. |
+| `CFG-06` | One field the schema rejects stops the whole save and names itself, and the check button answers the same way without writing. |
+| `CFG-07` | A section the security policy closed is refused by name and the file does not move; opening that section writes the same edit. |
+| `CFG-08` | A section the policy closed arrives on the page disabled, with the reason beside it. |
+| `CFG-09` | A save keeps the stored hash behind the mask and keeps a key the page never renders. |
+| `CFG-10` | A save that carries a session cookie must also carry the CSRF token; the same body with the token is written. |
+| `CFG-11` | A PDU the editor saved appears in the Power menu of a page that was already open, with no reload. |
+| `CFG-12` | Feeds given to a running console light the badge of that console's open page, and its terminal is never dropped. |
+| `CFG-13` | A Telnet listener the editor saved answers after a soft reload, and the console on the first listener keeps its Port. |
+| `CFG-14` | The Reload view leaves the summary a soft reload gave on the page, and asks in words before a full one. |
+| `CFG-15` | A full reload recreates every adapter and restarts the web console while a browser page is open. |
+| `CFG-16` | A full reload ends an attached console with no message, and the next client that signs in is served. |
+| `CFG-17` | A Serial port whose device is missing is listed, named once in the log, and still takes a console — read-only. |
+
+Unlike the plan for this suite, **no scenario depends on another**. Each builds its server and makes its own edit, so
+a failure names the rule it broke instead of the scenario that ran before it. The save-then-reload order is a product
+rule, so it lives inside the scenario that claims it rather than in the order of the file.
+
+Six measured behaviours are recorded here, because a reader would otherwise assume the tidier version.
+
+- A save alone starts nothing, and the soft reconcile reports what it started under the **adapter kind**: `loopback`,
+  `serial`, `telnet_listener`, `client_listener`, `web_console`. A soft answer carries no `errors` key at all; only a
+  full answer does. `CFG-05` and `CFG-17` read those keys.
+- A feeds-only edit is reported as `unchanged` for that port, not `updated`: the reconcile diffs adapters, and a console's
+  `power:` feeds are rewired outside that diff. `CFG-12` therefore pins the measured verdict and proves the feed through
+  `/api/power` (`outlets[].mapped_ports`) and the live badge, which is what a person sees.
+- A save that changes nothing still rewrites the file, with normalised layout. `CFG-07` therefore compares the two
+  readings by value, because a byte comparison would report a change that is not one.
+  [Issue #82](https://github.com/OpenMux/openmux-server/issues/82) tracks that layout churn, and the Editor writing
+  each column's default into every entry it saves; nothing here depends on how that is answered.
+- The Editor page and its JSON routes ask for different proofs. The routes accept a password; the page is written for a
+  browser and sends a sessionless visitor to the login page. One early measurement also showed a bare request for the
+  page answered differently before and after another authenticated request on the same client, so the suite asserts the
+  stable pair — session cookie in, password on the routes — and states nothing about a bare first request.
+- A full reload signs every browser out, because the session lives in the web console that stopped. After the restart
+  `GET /healthz` answers 200 again while the open page's own `GET /api/status` answers 401 until it signs in. `CFG-15`
+  asserts both, because half of that pair reads as a broken server.
+- A port with one Write seat hands it to the first console that asks. A second console on that Port attaches read-only,
+  which is why `CFG-13` drives the new listener's console on the Port the same save added rather than on the busy one.
+  A Serial port whose device is missing keeps its console page in `read-only` and reports `port_up: false` on the page's
+  own state; no page banner calls it offline. `CFG-17` asserts the state it can see.
+
+One measured behaviour is recorded but **not** asserted, because it is an open product question. A Serial entry the
+operator wrote by hand with a `parity` the schema rejects leaves the port uncreated. The server says so in its own
+log — `Failed to create serial port ser1: Parity must be N, E, O, M, or S`, next to `No ports configured for serial
+adapter serial_ports` — yet the soft reload answers `200` and reports that name under `added`, with no `errors` key
+at all, and `GET /api/status` lists no such port. A reload answer therefore claimed a Port that does not exist.
+`security.yaml` keeps `serial_ports` writable, so hand editing reaches that state without the page doing anything
+wrong: `POST /config-editor/apply` runs the same schema and refuses the entry with `400` (`CFG-06`). Whether the
+reconcile should report a Port whose adapter refused to create it is
+[Issue #105](https://github.com/OpenMux/openmux-server/issues/105), and no scenario depends on how it is answered.
+
+One defect in the product came out of measuring, and it is fixed with the scenario that proves it.
+
+- A full reload while any browser page was connected left the web console down for good. `WebConsoleAdapter.stop()`
+  asked each runner to `cleanup()`, which waits for the handlers that runner started, and the console and `/ws/events`
+  handlers return only when their socket closes. With a page connected the wait never ended, so the old listener kept
+  the port and the restarted console could not bind: the last line in the log was `Stopping WebConsole`, and nothing
+  answered on that port again — measured four times in a row, 39 s and longer, never recovered. `stop()` now closes
+  the sockets it holds, through `_close_live_sockets()` and `SiteEventHub.close_all()`, before it waits for anything.
+  Measured after the fix: `Stopped WebConsole 'web_console' in 1.502s`, `Started WebConsole in 0.002s`, and
+  `GET /healthz` answers 200 about 2.5 s after the reload. No `asyncio.wait_for` bound was added around the cleanup,
+  because aiohttp's cleanup swallows `CancelledError` and the existing 10 s timeout never fired. `CFG-15` keeps a page
+  open across a full reload, and it fails against the previous file: run with the old `stop()`, it reports that the
+  log line `[deferred] Stopped WebConsole` never appeared, and it passes again with the fix in place.
 
 ### ACT — Port Actions (`test_actions.py`, planned: 9)
 
@@ -505,12 +583,13 @@ Named now so release 1 fixtures stay sufficient.
 | 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` waits on a helper-based account, see the note below. |
 | 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
 | 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
-| 6-9 | Not started | CFG, ACT, ST, and the story scenarios. |
+| 6 — Config Editor | Done | `CFG-01` to `CFG-17` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, and a Serial port with no device behind it. One product defect came out of it, listed under `CFG` above. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`. |
+| 7-9 | Not started | ACT, ST, and the story scenarios. |
 
 - `AUTH-11` (an external helper that grants no permission): outstanding. The `command` authentication backend runs in
   every e2e server, so only the *no-permission* case differs from `AUTH-10`, and the helper would have to be a fixture
-  script that the packaged `openmux` process can execute — an external path nobody would follow by accident. `CFG-01`
-  is checked with `config/authentication.yaml.example`, which is the same file in a different place.
+  script that the packaged `openmux` process can execute — an external path nobody would follow by accident.
+  `CFG-01` covers who may open the Editor; the no-permission helper case stays open.
 - The page hook (`console.js`), `ConsoleSession` state, and `ConsoleSession.menu_text()` (the page's own menu wording,
   read from the `ro` and `ctrl` menus, which is how `CON-05` avoids a typed-in string): built.
 - `CON-11` to `CON-14`: built. A `DeviceStation` (a fake device behind a `tcp_initiator` port) is unplugged and plugged

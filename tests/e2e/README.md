@@ -92,11 +92,16 @@ a port that remembers. A Port takes its Write slot shape on the same call: `writ
 account with a console group membership. A scenario that needs a listener the default world does not
 have passes `servers(telnet_kwargs={...})`, whose keys reach that listener: `require_auth=True` asks
 for a login, `read_only=True` gives a read-only listener, and `target` picks a port or the menu. A
-second server of its own is dialed with `clients.telnet(..., server=server)`. `web_for` gives a
+second server of its own is dialed with `clients.telnet(..., server=server)`, and `port=` dials a
+listener the harness never allocated, which is how a scenario reaches one the Config Editor added to
+`server.yaml`. A session that a reload ended carries no message, so `wait_for_close()` reads to the end
+of its stream and reports whether the server closed it. `web_for` gives a
 scenario an `HttpSession` for a named surface, which is how a scenario reads a redirect, a cookie, or a
 refusal that a browser would hide. `devices.tcp()` starts one fake device: it answers the dial, and
 `unplug()` closes its socket *and* stops listening, so the port really cannot reconnect until
-`plug_back_in()`.
+`plug_back_in()`. `with_serial_port(name, device)` adds a Serial port; pass a device path no host has
+and the reload starts that port with nothing behind it, which is the only adapter failure this tier can
+produce on demand.
 
 A Telnet session speaks the port menu the way an operator does: `open_control_menu()` sends the
 escape prefix and waits for the prompt, `press("f")` answers one key, and `answer("c2")` answers one
@@ -115,7 +120,13 @@ menu kept its own keystrokes. An unattached CLI session reads commands with `com
 A Power page reads through `metric_cards()`, `outlet_rows()`, `power_badge()`, `power_badge_title()`,
 `power_menu_items()`, `click_outlet_toggle(ref)`, and `click_power_toggle(ref)`. A confirm dialog arrives only
 while a Playwright call is in flight, so a scenario arms `accept_dialogs(False)` before the click and then
-calls `wait_for_dialogs(seen, 1)`; a plain poll of the recorded messages never sees the dialog.
+calls `wait_for_dialogs(seen, 1)`; a plain poll of the recorded messages never sees the dialog. The
+Config Editor page carries no `?e2e=1` hook, so a scenario reads it with `page_text(selector)`,
+`page.evaluate(...)`, and `wait_for_selector(selector, state="visible")`, and reads which sub-page it is
+on from the heading in `.page` — the browser tab title never changes. That page keeps every region in
+the document and hides the others, so wait for the region the query asked for, not for any of them.
+One page belongs to one surface: ask `console.user(surface, ...)` once per surface, because a second
+call signs that page in again and the form is gone.
 Never edit `config/` to make a test pass. It holds the shipped defaults. A test that needs a config
 file writes it through `ConfigBuilder`, or replaces the generated `server.yaml` with
 `servers(raw_server_yaml=...)`.
@@ -258,6 +269,12 @@ openmux/server/webui/static/js/console.js` catches the syntax error before a tes
   server exits cleanly.
 - Use `pgrep -P <pid>` to list a server's children. The `ps -o pid= -ppid` form is not portable and
   fails on macOS.
+- Finish every `make` target before you start a tier. `make lint`, `make format`, `make test`, and
+  `make e2e-doc` each run `pip install -e .` first, which rewrites the editable package tree under
+  `build/__editable__*/`. A server subprocess that imports the package mid-rewrite stops with
+  `ModuleNotFoundError` for a file that exists in the repo. The tier itself never installs anything.
+- An interrupted tier can leave a server running. List them with `ps -ax -o pid,command | grep
+  "[p]ytest-of-runar"`; each path names the run that started it. Stop them before the next run.
 - The default world's Telnet listener is unauthenticated on purpose, so a scenario can walk the port
   menu. The server logs a warning about it at boot, which is expected and not a failure.
 - One test server costs about 1 second to boot. The whole tier is a few tens of seconds, which is why

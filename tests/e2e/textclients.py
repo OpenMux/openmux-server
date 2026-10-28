@@ -708,6 +708,25 @@ class TelnetSession:
         text = self.text()
         return text.rsplit(mark, 1)[-1]
 
+    def wait_for_close(self, timeout: float = 10.0) -> bool:
+        """Whether the server closed this session, which arrives as the end of the stream.
+
+        A dropped session carries no message: the reader puts one end marker when ``recv`` returns nothing, and this
+        consumes up to it. Text before the marker is kept, so ``text()`` still shows what arrived first.
+        """
+        self._note("read", f"<wait for close, {timeout}s>")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                chunk = self._chunks.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                return True
+            self._seen.extend(chunk)
+        self._raise_reader_overflow()
+        return False
+
     def offset(self) -> int:
         """Where the received text has reached, to read only the reply that follows with `reply_after`."""
         return len(self.text())
@@ -889,11 +908,15 @@ def open_telnet_client(
     surface: str = "telnet",
     require_auth: bool = False,
     timeline: Optional[Timeline] = None,
+    port: Optional[int] = None,
 ) -> TelnetSession:
-    """Open one Telnet session on the server's Telnet listener."""
+    """Open one Telnet session on the server's Telnet listener, or on ``port`` when one is named.
+
+    ``port`` is for a listener the harness did not allocate, such as one a scenario added through the Config Editor.
+    """
     return TelnetSession(
         "127.0.0.1",
-        server.port_of("telnet"),
+        int(port) if port else server.port_of("telnet"),
         username=user,
         password=password,
         surface=surface,

@@ -135,6 +135,7 @@ class ConfigBuilder:
         self._loopback: List[Dict[str, Any]] = []
         self._command: List[Dict[str, Any]] = []
         self._tcp: List[Dict[str, Any]] = []
+        self._serial: List[Dict[str, Any]] = []
         self._telnet: List[Dict[str, Any]] = []
         self._pdus: List[Dict[str, Any]] = []
         self._web: Optional[Dict[str, Any]] = None
@@ -231,6 +232,40 @@ class ConfigBuilder:
         if read_only_groups:
             port["read_only_groups"] = list(read_only_groups)
         self._loopback.append(port)
+        return self
+
+    def with_serial_port(
+        self,
+        name: str,
+        device: str,
+        baudrate: int = 9600,
+        parity: str = "N",
+        write_slot_capacity: str = "one",
+        feeds: Optional[Sequence[str]] = None,
+    ) -> "ConfigBuilder":
+        """Add one Serial port backed by ``device``, which may be a path no host has.
+
+        Args:
+            name: Port name.
+            device: Device path. A path that does not exist starts the port offline instead of failing the reload.
+            baudrate: Line speed.
+            parity: One of the letters the schema accepts: ``N``, ``E``, ``O``, ``M``, or ``S``.
+            write_slot_capacity: ``one``, ``multiple``, or ``none`` (Write slot capacity).
+            feeds: Outlet refs for the ``power:`` key.
+        """
+        port: Dict[str, Any] = {
+            "name": name,
+            "description": f"e2e serial {name}",
+            "device": device,
+            "baudrate": baudrate,
+            "bytesize": 8,
+            "parity": parity,
+            "stopbits": 1,
+            "max_read_write_users": write_slot_capacity,
+        }
+        if feeds:
+            port["power"] = list(feeds)
+        self._serial.append(port)
         return self
 
     def with_command_port(
@@ -429,6 +464,8 @@ class ConfigBuilder:
         }
         if self._loopback:
             config["loopback_ports"] = self._loopback
+        if self._serial:
+            config["serial_ports"] = self._serial
         if self._command:
             config["command_ports"] = self._command
         if self._tcp:
