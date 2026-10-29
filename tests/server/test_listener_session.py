@@ -10,7 +10,7 @@ does not cover (auth/menu phase, wire protocol, reconcile).
 import asyncio
 import logging
 import types
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import pytest
 

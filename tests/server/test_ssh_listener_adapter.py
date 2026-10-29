@@ -1,7 +1,6 @@
 """Tests for the SSH listener's auth/menu-mode/login-shortcut/session features."""
 
 import asyncio
-import types
 from typing import Any, Dict, List, Optional
 
 import asyncssh
@@ -9,10 +8,9 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from openmux.server.access_decision import Code, Holder, Mode, decide, notice
+from openmux.server.access_decision import Code, Mode, decide, notice
 from openmux.server.adapters import ssh_listener as ssh_listener_module
 from openmux.server.adapters.ssh_listener import (
-    ListenerConfig,
     SshListenerAdapter,
     _match_ssh_pubkey,
     _OpenMuxSshServer,

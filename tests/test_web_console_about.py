@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp import ClientSession, TCPConnector
+from jinja2 import Environment
 
 from openmux import __version__
 from openmux.server.auth_manager import AuthManager
@@ -16,13 +17,13 @@ _USER_HASH = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918" 
 _AUTH = {"Authorization": f"Basic {base64.b64encode(b'u:admin').decode()}"}
 
 
-def _env_with_page_helpers(tdir) -> "Environment":
+def _env_with_page_helpers(tdir) -> Environment:
     """One Jinja env over the shipped templates, with the helpers they call.
 
     The adapter registers these itself; a test that swaps in its own env must register
     them too, or a page fails on a helper instead of on the thing under test.
     """
-    from jinja2 import Environment, FileSystemLoader
+    from jinja2 import FileSystemLoader
 
     import openmux.server.web_console as wc
 
