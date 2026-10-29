@@ -36,6 +36,25 @@ class _GapAdapter:
         return dict(self._reconcile)
 
 
+class _FailedStartAdapter:
+    """Adapter stub the full reload can create and wire, but cannot start.
+
+    ``start()`` raises, which is the case the reload records as ``start_error``: the adapter exists,
+    its port does not, and only the summary carries why.
+    """
+
+    def __init__(self, name: str, atype: str) -> None:
+        self.name = name
+        self._atype = atype
+        self.main_port_manager = None
+
+    def get_adapter_type(self) -> str:
+        return self._atype
+
+    async def start(self) -> bool:
+        raise RuntimeError("listener port in use")
+
+
 def _cfg_path(tmp_path):
     (tmp_path / "authentication.yaml").write_text(
         "users:\n"
@@ -174,3 +193,28 @@ async def test_a_clean_soft_reload_adds_no_keys_and_logs_no_block(tmp_path, monk
     assert summary["adapters"]["serial"] == {"added": [], "removed": [], "updated": [], "unchanged": ["ser0"]}
     assert "config_violations" not in summary
     assert GAP_MARKER not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_full_reload_that_could_not_start_an_adapter_names_it_and_its_reason(tmp_path, monkeypatch, caplog):
+    """The block reads the summary a real full reload built, not a shape a test invented (issue #105).
+
+    The reload records one dict per failure, so this asserts that dict as the producer writes it and
+    then asserts what the operator reads. A failed adapter is the gap a status page never shows: the
+    adapter object exists, no port of it runs, and a listener that lost its port says nothing.
+    """
+    server = _server(tmp_path)
+    created = _FailedStartAdapter("telnet_listener", "telnet_listener")
+
+    def _create(_config):
+        return [created]
+
+    monkeypatch.setattr(server.unified_adapter_factory, "create_adapters_from_config", _create)
+    with caplog.at_level(logging.WARNING):
+        summary = await server.reload_adapters_full(context={"origin": "test"})
+
+    assert summary["errors"] == [{"adapter": "telnet_listener", "start_error": "listener port in use"}]
+    assert "telnet_listener: listener port in use" in caplog.text, caplog.text
+    assert GAP_MARKER in caplog.text
+    # The reason is a sentence naming the adapter, never the dict the summary holds.
+    assert "{'adapter'" not in caplog.text, caplog.text

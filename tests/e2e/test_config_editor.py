@@ -1,4 +1,4 @@
-"""CFG: what the Config Editor changes, when it changes it, and who may ask (CFG-01 to CFG-19).
+"""CFG: what the Config Editor changes, when it changes it, and who may ask (CFG-01 to CFG-20).
 
 The editor is one page over four owners, and each layer can be right while the page is wrong, so every scenario here
 states the pair a person would otherwise reconcile by hand:
@@ -15,7 +15,8 @@ Two facts about these worlds are simulations that matter. The ``dummy`` PDU driv
 device, so a PDU that appears in the file always starts. And the two adapter failures this tier can produce on demand
 are a Serial port whose device path no host has, which the server starts offline rather than refusing, and a port
 entry holding a value its own port rejects, which the server reports instead of starting: for one Serial entry at
-reload (CFG-18), and for one entry of any port section at boot (CFG-19).
+soft reload (CFG-18), for one entry of any port section at boot (CFG-19), and for that same entry when a full reload
+rebuilds every adapter from the file (CFG-20).
 
 Unlike the plan for this suite, no scenario depends on another: each builds its server, makes its edit, and proves
 its own save-then-reload-then-see order in one run. That order is a product rule, so it belongs inside the scenario
@@ -1048,3 +1049,48 @@ def test_cfg19_one_unusable_port_entry_at_boot_costs_one_port_and_names_it(serve
     gap_line = world.wait_for_log(f"{GAP_ITEM}command/badcap1:")
     assert BAD_CAPACITY_REASON in gap_line, gap_line
     assert GAP_MARKER in gap_line, gap_line
+
+
+# ===============================================================================
+# A full reload of a file holding one entry the server cannot build
+# ===============================================================================
+
+
+@surfaces("http", "server log")
+def test_cfg20_a_full_reload_reports_the_port_it_could_not_build_and_keeps_the_others(servers, api_for_server):
+    """A full reload answers ok, keeps every port the file can build, and names the entry it refused (issue #105).
+
+    A full reload rebuilds every adapter from the file, and an operator reaches for it when a soft reload did not fix
+    what the file says. It is therefore the second path where one bad entry can cost the ports beside it, and the path
+    whose answer matters most: the reload that reports a gap must still answer ``ok``, because the warning is what the
+    operator asked for and must not read as a second failure. CFG-18 covers the soft half of this file, CFG-19 the
+    boot half, and this scenario the half a person runs to recover from the first two.
+    """
+    unusable = {"name": "typo1", "description": "hand-edited", "device": ABSENT_TTY_2, "baudrate": 9600, "parity": "Q"}
+    world = servers(
+        name="gapfull",
+        loopback=("keep",),
+        telnet_kwargs={"require_auth": True},
+        configure=lambda builder: _with_absent_serial(builder, "live1"),
+        start=True,
+    )
+    api = api_for_server(world)
+    step("the hand edit lands in the file beside two ports that work")
+    _edit_serial_ports_in_file(world, lambda ports: ports.append(dict(unusable)))
+    assert "typo1" in world.config_text(), "the edit never reached the file"
+    step("the full reload answers ok and records no adapter error: a reported gap is not a failed reload")
+    mark = len(world.log_lines())
+    summary = _summary(_reload(api, "full"))
+    assert summary["errors"] == [], summary
+    step("the web console the reload replaced answers again")
+    world.wait_for_log("[deferred] Started WebConsole", timeout=20.0)
+    world.wait_ready(timeout=20.0)
+    step("every port the file can build is running, and the refused entry is not one of them")
+    names = _running(api)
+    assert {"keep", "live1"} <= names, f"a full reload lost a port the file can build: {names}\n{world.tail(60)}"
+    assert "typo1" not in names, f"the unusable entry took a port slot: {names}"
+    step("the block names the reload that left the gap, the port, and the reason its own port gave")
+    header = world.wait_for_log("WARNING: full reload left part of the config", since=mark, timeout=20.0)
+    assert GAP_MARKER in header, header
+    gap_line = world.wait_for_log(f"{GAP_ITEM}serial/typo1:", since=mark, timeout=20.0)
+    assert BAD_PARITY_REASON in gap_line, gap_line

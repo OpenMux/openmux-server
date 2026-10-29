@@ -32,8 +32,9 @@ class ConfigGap:
     """One config entry that is present in a file but not applied to the running server.
 
     Attributes:
-        section: Where the entry lives: an adapter kind such as ``serial``, or ``schema`` for a
-            schema violation whose path already names its section.
+        section: Where the entry lives: an adapter kind such as ``serial``, an adapter or phase name
+            such as ``serial_ports`` for a reload failure, or ``schema`` for a schema violation whose
+            path already names its section.
         port: Port name, or None when the gap is not tied to one port.
         error: Why the entry did not apply, in the words of the code that refused it.
         kept_previous: True when the previously running port was kept, so the live console is
@@ -58,11 +59,11 @@ class ConfigGap:
 
 
 def _extract_adapter_gaps(section: str, result: Any, gaps: List[ConfigGap]) -> None:
-    """Collect gaps from one adapter's reconcile result, in either summary shape.
+    """Collect gaps from one adapter's reconcile result, as a soft reload stores it.
 
     Soft reload stores the result a reconcile call returned, keyed by adapter kind. Full reload
-    stores one result per port under the adapter kind. Both shapes are read here so one reporter
-    covers both reload paths.
+    reports what failed under ``"errors"`` of its own summary, which
+    :func:`violations_from_summary` reads through :func:`_gap_from_reload_error`.
     """
     if not isinstance(result, dict):
         return
@@ -89,11 +90,6 @@ def _extract_adapter_gaps(section: str, result: Any, gaps: List[ConfigGap]) -> N
     error = result.get("error")
     if error:
         gaps.append(ConfigGap(section=section, error=_text(error)))
-    # Full reload shape: {port_name: {"status": "failed", "error": ...}}.
-    if not any(key in result for key in ("failed", "refused", "kept_previous", "violations", "error", "added", "updated")):
-        for port_name, info in result.items():
-            if isinstance(info, dict) and str(info.get("status", "")).lower() in ("failed", "error"):
-                gaps.append(ConfigGap(section=section, port=_text(port_name), error=_text(info.get("error"))))
 
 
 def unique_gaps(gaps: Sequence[ConfigGap]) -> List[ConfigGap]:
@@ -135,9 +131,9 @@ def violations_from_summary(summary: Any) -> List[ConfigGap]:
     gaps: List[ConfigGap] = []
     for violation in _as_list(summary.get("config_violations")) + _as_list(summary.get("violations")):
         gaps.append(ConfigGap(section="schema", error=_text(violation)))
-    # A full reload summary lists what failed to start as plain text under "errors".
+    # A full reload summary records one entry per adapter or phase that failed.
     for problem in _as_list(summary.get("errors")):
-        gaps.append(ConfigGap(section="adapter", error=_text(problem)))
+        gaps.append(_gap_from_reload_error(problem))
     adapters = summary.get("adapters")
     if isinstance(adapters, dict):
         for section, result in adapters.items():
@@ -209,6 +205,35 @@ def _text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+# The keys ``reload_adapters_full()`` writes into one "errors" entry. The first three carry a reason
+# in the words of the code that failed; a timeout entry carries only a number, so it gets a sentence.
+_ERROR_REASON_KEYS = ("error", "start_error", "stop_error", "wire_error")
+_ERROR_TIMEOUT_KEYS = (("start_timeout", "start timed out after"), ("stop_timeout", "stop timed out after"))
+
+
+def _gap_from_reload_error(problem: Any) -> ConfigGap:
+    """Return the gap for one entry of a full reload summary's ``"errors"`` list.
+
+    ``reload_adapters_full()`` appends one dict per failure, named by the adapter it was stopping,
+    wiring, or starting, or by the phase that failed: ``{"adapter": "serial_ports", "start_error":
+    "start returned False"}`` or ``{"phase": "create_adapters", "error": "..."}``. The gap is named
+    after that adapter or phase, so the block says which part of the file did not apply.
+
+    A plain string is kept as its own reason. A dict this function does not recognise is reported
+    verbatim rather than dropped, so an unexpected shape still reaches the operator.
+    """
+    if not isinstance(problem, dict):
+        return ConfigGap(section="adapter", error=_text(problem))
+    where = _text(problem.get("adapter")) or _text(problem.get("phase")) or "adapter"
+    for key in _ERROR_REASON_KEYS:
+        if key in problem:
+            return ConfigGap(section=where, error=_text(problem.get(key)))
+    for key, sentence in _ERROR_TIMEOUT_KEYS:
+        if key in problem:
+            return ConfigGap(section=where, error=f"{sentence} {_text(problem.get(key))}s")
+    return ConfigGap(section="adapter", error=_text(problem))
 
 
 __all__ = [

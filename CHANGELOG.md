@@ -128,7 +128,10 @@ Changes since v1.0.4 (2026-10-19).
   reports `failed`, with `failed_detail` holding `error` and `kept_previous` for each name, and the answer carries
   `config_violations` — the schema problems the server logs and still runs. Those keys appear only when something
   failed, so an answer that means "everything applied" reads as it did before. A reload that applied most of a file
-  still answers `ok: true`: a bad entry never turns the whole answer into a failed one.
+  still answers `ok: true`: a bad entry never turns the whole answer into a failed one. A full reload that could not
+  start an adapter now names that adapter and the reason its own start gave, for example
+  `CONFIG_GAP   telnet_listener: listener port in use`; the line used to print the reload's own summary entry, which
+  named no adapter.
 - **Web console pages ask for their assets by version.** Each page now requests its scripts and stylesheets as
   `/static/<path>?v=<version>`, for example `/static/js/console.js?v=1.0.5`. A browser keeps an asset until its URL
   changes, so an upgrade used to leave an open or reloadable page running the previous release's script. Nothing to clear

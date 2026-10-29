@@ -78,13 +78,50 @@ def test_each_port_is_reported_once_even_when_listed_twice():
     assert sum(1 for g in gaps if g.port == "ser3") == 1
 
 
-def test_the_full_reload_shape_reports_a_port_that_failed_to_reload():
-    """reload_adapters_full() nests one result per port under the adapter kind."""
-    summary = {"adapters": {"serial": {"ser2": {"status": "failed", "error": "Device not specified"}}}}
+def test_a_full_reload_failure_names_the_adapter_and_the_reason_it_gave():
+    """The four dict shapes ``reload_adapters_full()`` appends, each read as its own gap."""
+    summary = {
+        "stopped": 3,
+        "started": 2,
+        "errors": [
+            {"adapter": "serial_ports", "start_error": "start returned False"},
+            {"adapter": "telnet_listener", "stop_error": "listener busy"},
+            {"adapter": "web_console", "wire_error": "'NoneType' object has no attribute 'x'"},
+            {"phase": "create_adapters", "error": "Invalid configuration for Serial Ports"},
+        ],
+    }
 
     gaps = violations_from_summary(summary)
 
-    assert [(g.section, g.port, g.error) for g in gaps] == [("serial", "ser2", "Device not specified")]
+    assert [(g.section, g.port, g.error) for g in gaps] == [
+        ("serial_ports", None, "start returned False"),
+        ("telnet_listener", None, "listener busy"),
+        ("web_console", None, "'NoneType' object has no attribute 'x'"),
+        ("create_adapters", None, "Invalid configuration for Serial Ports"),
+    ]
+
+
+def test_a_full_reload_timeout_gets_a_sentence_because_the_entry_holds_only_a_number():
+    summary = {"errors": [{"adapter": "serial_ports", "start_timeout": 10.0}, {"adapter": "muxcon", "stop_timeout": 5}]}
+
+    gaps = violations_from_summary(summary)
+
+    assert [(g.section, g.error) for g in gaps] == [
+        ("serial_ports", "start timed out after 10.0s"),
+        ("muxcon", "stop timed out after 5s"),
+    ]
+
+
+def test_an_error_the_reporter_does_not_recognise_is_still_reported():
+    """A failure must never be dropped because its shape is unexpected."""
+    summary = {"errors": ["Serial adapter ser failed to start", {"adapter": "serial_ports", "other": 1}]}
+
+    gaps = violations_from_summary(summary)
+
+    assert [(g.section, g.error) for g in gaps] == [
+        ("adapter", "Serial adapter ser failed to start"),
+        ("adapter", "{'adapter': 'serial_ports', 'other': 1}"),
+    ]
 
 
 def test_per_port_schema_lines_are_reported_as_gaps():
@@ -95,13 +132,11 @@ def test_per_port_schema_lines_are_reported_as_gaps():
     assert [(g.section, g.error) for g in gaps] == [("serial", "baudrate: 99 is not one of [9600]")]
 
 
-def test_a_full_reload_error_list_is_reported_as_gaps():
-    """reload_adapters_full() reports a failed adapter start as plain text under 'errors'."""
-    summary = {"stopped": 3, "started": 2, "errors": ["Serial adapter ser failed to start"]}
+def test_a_summary_that_names_no_adapter_yields_only_the_schema_gaps():
+    """A summary holding nothing the reporter reads yields no gaps, so a clean reload logs nothing."""
+    summary = {"adapters": {"serial": {"added": [], "removed": [], "updated": [], "unchanged": ["ser0"]}}}
 
-    gaps = violations_from_summary(summary)
-
-    assert [(g.section, g.error) for g in gaps] == [("adapter", "Serial adapter ser failed to start")]
+    assert violations_from_summary(summary) == []
 
 
 # --- rendering ---

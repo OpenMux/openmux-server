@@ -56,8 +56,11 @@ Note:
 | `OpenMuxServer` | Orchestration & lifecycle | `start()`, `_initialize_unified_adapters()`, `_summary_adapter_count()`, `shutdown()` |
 | `ConfigManager` | Load & expose YAML config | `load_config()`, getters (server host/port, auth, web) |
 | `AuthManager` | User/API key auth state | `update_config()` (on reload) |
-Note on configuration reloads: Hot-reload of port configuration is supported via a SIGHUP signal handler only; there is no HTTP
-reload endpoint. The server validates the on-disk config and reconciles affected adapters incrementally.
+Note on configuration reloads: The server reloads ports on SIGHUP (soft reload) and SIGUSR1 (full reload), and from the
+Config Editor (its Reload view posts to `/config-editor/reload/soft` and `/config-editor/reload/full`, and
+`POST /api/reload` re-applies the sections a payload names). The server validates the on-disk config, reconciles
+affected adapters incrementally, and logs one `CONFIG_GAP` block naming every item the files asked for that did not
+apply, with the reason the code that refused it gave (issue #105).
 | `PortManager` | Aggregation of active ports | `set_unified_adapters()`, client lookup helpers, wrapper exposure |
 | `ConsoleManager` | Interactive / mgmt console | Injected into connection adapters & adapters when supported |
 | `GenericAdapterFactory` | Creates modern adapters from config | `create_adapters_from_config()` |
