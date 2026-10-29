@@ -26,12 +26,15 @@ Changes since v1.0.4 (2026-10-19).
   ACL can then browse and attach to any port (issue #100).
 
 ### Behavior changes (no config change required)
-- **One unusable port entry no longer costs every port of its kind.** A `serial_ports` entry in `server.yaml` holding a
-  value the port rejects — a `parity` letter outside `N`, `E`, `O`, `M`, `S` is one — used to abort the whole Serial
-  adapter at startup. The server started no Serial port at all, and only fixing that entry and restarting brought the
-  others back. It now starts the ports it can build and reports the one it cannot (issue #105). The same rule covers a
-  reload: the server builds each new or changed port before it touches a running one, so a config it refuses leaves the
-  running port serving its previous config with its consoles attached, instead of destroying it and then failing.
+- **One unusable port entry no longer costs every port of its section.** One entry in `serial_ports`,
+  `command_ports`, `loopback_ports`, or `tcp_initiator_ports` in `server.yaml` that its own port rejects — a `parity`
+  letter outside `N`, `E`, `O`, `M`, `S`, or an entry with no `command`, is one — used to cost every port of that
+  section at startup. The server created no port of that kind at all, and only fixing that entry and restarting brought
+  the others back. It now creates the ports it can build and reports each one it cannot with the reason its own port
+  gave (issue #105). An entry with no `name` is reported by its position in the file, counted from 1. The same rule
+  covers a reload: the server builds each new or changed port before it touches a running one, so a config it refuses
+  leaves the running port serving its previous config with its consoles attached, instead of destroying it and then
+  failing.
 - **A full reload no longer leaves the web console down while a browser page is open.** A full reload restarts the web
   console, and that restart waited for every request the old console had started. A page holds two of them open: its
   console stream and `/ws/events`. The wait therefore never ended, so the old console kept the port and the new one

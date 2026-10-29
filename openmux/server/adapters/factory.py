@@ -424,11 +424,13 @@ class GenericAdapterFactory:
             try:
                 plugin_config = config[plugin.config_section]
                 adapter_class = plugin.adapter_class  # This is a BaseGenericAdapter subclass
-                if not self._legacy_section_ok(plugin, adapter_class, plugin_config, policy):
+                if not self._legacy_plugin_allowed(plugin, adapter_class, policy):
                     continue
 
                 # Create adapter instance(s) - all inherit from BaseGenericAdapter
-                created_adapters = self._create_adapter_instances(plugin, plugin_config)
+                created_adapters = self._create_legacy_adapter(plugin, adapter_class, plugin_config)
+                if created_adapters is None:
+                    continue
                 adapters.extend(created_adapters)
 
                 logger.info("Created %s adapter instance(s) for %s", len(created_adapters), plugin.name)
@@ -437,17 +439,96 @@ class GenericAdapterFactory:
                 logger.error("Failed to create adapter for plugin %s: %s", plugin.name, e, exc_info=True)
                 # Continue with other plugins rather than failing completely
 
-    def _legacy_section_ok(
+    def _legacy_plugin_allowed(
+        self,
+        plugin: AdapterPlugin,
+        adapter_class: Type[BaseGenericAdapter],
+        policy: Optional[SecurityPolicy],
+    ) -> bool:
+        """Return False when the security policy blocks one legacy adapter section."""
+        atype = self._detect_adapter_type(adapter_class)
+        if policy and not self._is_adapter_allowed(policy, plugin, atype):
+            logger.error(
+                "Adapter section '%s' blocked by security policy",
+                plugin.config_section,
+            )
+            return False
+        return True
+
+    def _create_legacy_adapter(
         self,
         plugin: AdapterPlugin,
         adapter_class: Type[BaseGenericAdapter],
         plugin_config: Any,
-        policy: Optional[SecurityPolicy],
-    ) -> bool:
-        """Validate and policy-check one legacy adapter section.
+    ) -> Optional[List[BaseGenericAdapter]]:
+        """Build the adapter of one legacy section, keeping the ports a bad entry does not spoil.
+
+        ``validate_config`` judges the whole section, so it raises on one unusable entry and the
+        caller used to lose every port of that section while a good entry beside it costs one port
+        on the serial path (issue #105). Adapters answer per entry, so a list section is built
+        anyway with the refused entries removed.
+
+        Returns:
+            The adapter instances, or None when the section is unusable in a way no entry explains,
+            which skips the plugin as it did before.
+
+        Raises:
+            ValueError: The section config is invalid and no single entry accounts for it.
+        """
+        try:
+            self._validate_legacy_config(plugin, adapter_class, plugin_config)
+        except ValueError:
+            rescued = self._create_adapter_without_unusable_entries(plugin, adapter_class, plugin_config)
+            if rescued is None:
+                raise
+            return rescued
+        return self._create_adapter_instances(plugin, plugin_config)
+
+    def _create_adapter_without_unusable_entries(
+        self,
+        plugin: AdapterPlugin,
+        adapter_class: Type[BaseGenericAdapter],
+        plugin_config: Any,
+    ) -> Optional[List[BaseGenericAdapter]]:
+        """Build one adapter with the port entries it refuses removed, or None when none was refused.
+
+        The caller keeps the old all-or-nothing skip for anything an adapter cannot explain: a
+        section that is not a list of port entries, an adapter without port pre-validation, or a
+        refusal no entry caused. That keeps a real config error from being swallowed.
+        """
+        if not isinstance(plugin_config, list):
+            return None
+        try:
+            instances = self._create_adapter_instances(plugin, plugin_config)
+            if len(instances) != 1:
+                return None
+            dropped = instances[0].reject_unusable_entries(plugin.config_section)
+        except Exception:
+            # justification: this is a second attempt at a section that is already invalid. Any
+            # failure here must return to the caller's existing skip, which logs the section
+            # failure with its traceback; swallowing it here only keeps that one report.
+            logger.debug("Adapter %s cannot drop unusable port entries", plugin.name, exc_info=True)
+            return None
+        if not dropped:
+            return None
+        logger.error(
+            "Created adapter for %s without %s unusable port entry(ies): %s",
+            plugin.name,
+            len(dropped),
+            ", ".join(dropped),
+        )
+        return instances
+
+    def _validate_legacy_config(
+        self,
+        plugin: AdapterPlugin,
+        adapter_class: Type[BaseGenericAdapter],
+        plugin_config: Any,
+    ) -> None:
+        """Validate one legacy adapter section.
 
         Raises ValueError when validation fails (the caller logs and skips the
-        plugin). Returns False when the security policy blocks the section.
+        plugin).
         """
         # Validate plugin-specific configuration
         validate_fn = getattr(adapter_class, "validate_config", None)
@@ -459,16 +540,6 @@ class GenericAdapterFactory:
                 # caller logs this failure, so no line here (it printed the same
                 # text twice per rejected section).
                 raise ValueError(f"Invalid configuration for {plugin.name}")
-
-        # Security policy enforcement (legacy sections)
-        atype = self._detect_adapter_type(adapter_class)
-        if policy and not self._is_adapter_allowed(policy, plugin, atype):
-            logger.error(
-                "Adapter section '%s' blocked by security policy",
-                plugin.config_section,
-            )
-            return False
-        return True
 
     def _detect_adapter_type(self, adapter_class: Type[BaseGenericAdapter]) -> Optional[str]:
         """Best-effort adapter-type id for a class; None when undetectable."""

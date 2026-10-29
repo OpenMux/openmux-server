@@ -307,7 +307,7 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 99 scenarios in 8 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 18, the
+The suite today runs 100 scenarios in 8 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 19, the
 index checks 2, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
 runs, and its count is checked by `IDX-02`. Three further groups below are the plan of record: they have ids,
 boundaries, and assertions written down, and they have no test file yet. Full wording for every built id lives in that
@@ -487,8 +487,10 @@ recreates every adapter and restarts the web console after the reply), and what 
 comes from `layout.js` (`pdus_changed`) and `console.js` (`reload_applied`) over the socket that page already holds.
 
 Two parts of these worlds are simulations. The `dummy` PDU driver answers at once and needs no device, so a PDU that
-appears in the file always starts. The one adapter failure this tier can produce on demand is a Serial port whose
-device path no host has: the reload starts it and the port reports itself down.
+appears in the file always starts. The two adapter failures this tier can produce on demand are a Serial port whose
+device path no host has, which the reload starts offline and the port reports itself down, and one port entry holding a
+value its own port refuses, which the server reports instead of starting: for one Serial entry at reload (`CFG-18`) and
+for one entry of any port section at boot (`CFG-19`).
 
 | Id | What one scenario proves |
 | --- | --- |
@@ -510,6 +512,7 @@ device path no host has: the reload starts it and the port reports itself down.
 | `CFG-16` | A full reload ends an attached console with no message, and the next client that signs in is served. |
 | `CFG-17` | A Serial port whose device is missing is listed, named once in the log, and still takes a console — read-only. |
 | `CFG-18` | A Serial entry the server cannot build is named in the log block, reported as `failed`, and never as `added`. |
+| `CFG-19` | One unusable port entry at boot costs that port alone: the port beside it runs and the block names both. |
 
 Unlike the plan for this suite, **no scenario depends on another**. Each builds its server and makes its own edit, so
 a failure names the rule it broke instead of the scenario that ran before it. The save-then-reload order is a product
@@ -595,7 +598,19 @@ Three defects in the product came out of measuring, and each is fixed with the s
   of it against a running server, and `tests/test_config_gaps.py` plus `tests/server/test_serial_config_gaps.py`,
   `tests/server/test_tcp_config_gaps.py`, `tests/server/test_command_loopback_config_gaps.py` and
   `tests/server/test_main_config_gaps.py` hold the unit half.
-  [Issue #105](https://github.com/OpenMux/openmux-server/issues/105).
+  Boot kept the same gap for the other three port sections, and was measured after that fix: one entry the adapter's
+  whole-section `validate_config()` refused made the factory's section gate raise, so no adapter was created and no
+  object existed to record a reason. Measured then, for `command_ports` with one entry missing `command` and
+  `loopback_ports` with one entry holding `max_read_write_users: two`: `Failed to create adapter for plugin Command Ports:
+  Invalid configuration for Command Ports` with its traceback, and no port of that section at all. The factory now builds
+  that adapter anyway when the section is a list and drops only the entries the adapter's own `prepare_port()` refuses
+  (`reject_unusable_entries()` on the base adapter); it re-raises the old skip when no entry explains the refusal, so a
+  section error no entry caused still skips whole. Measured after that fix, same file: `command adapter command_ports
+  rejects port badcap1 in the config file: Invalid max_read_write_users for port badcap1: 'two'`, `Created adapter for
+  Command Ports without 1 unusable port entry(ies): badcap1`, `Command adapter command_ports started with 1 ports`, and
+  one `CONFIG_GAP command/badcap1:` line inside the boot block beside the schema violation. `CFG-19` asserts that pair
+  against a running server, and `tests/server/test_factory_config_gaps.py` holds the unit half, including the shapes that
+  must keep skipping whole. [Issue #105](https://github.com/OpenMux/openmux-server/issues/105).
 
 ### ACT — Port Actions (`test_actions.py`, planned: 9)
 
@@ -660,7 +675,7 @@ Named now so release 1 fixtures stay sufficient.
 | 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` waits on a helper-based account, see the note below. |
 | 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
 | 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
-| 6 — Config Editor | Done | `CFG-01` to `CFG-18` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, and a Serial entry the adapter refuses to build. Three product defects came out of building this group, listed under `CFG` above. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it. |
+| 6 — Config Editor | Done | `CFG-01` to `CFG-19` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at reload, and one entry of any port section the adapter refuses at boot. Three product defects came out of building this group, listed under `CFG` above, and the third one turned out to have a second half found after it was fixed. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it, while `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`. |
 | 7-9 | Not started | ACT, ST, and the story scenarios. |
 
 - `AUTH-11` (an external helper that grants no permission): outstanding. The `command` authentication backend runs in

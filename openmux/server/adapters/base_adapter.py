@@ -7,6 +7,7 @@ support multiplexed streams and federation. This base class standardizes
 capability discovery, lifecycle management, and dynamic port operations.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
@@ -114,6 +115,69 @@ class BaseGenericAdapter(ABC):
             ValueError: The config holds a value the port rejects.
         """
         raise NotImplementedError(f"{self.__class__.__name__} does not support port pre-validation")
+
+    def reject_unusable_entries(self, config_section: str) -> List[str]:
+        """Drop the port entries this adapter cannot build, and record why each one goes (issue #105).
+
+        The factory calls this when ``validate_config`` rejects the section. That check covers the
+        whole section, so one unusable entry would otherwise cost every port of it: an adapter
+        answers per entry, and only the refused ones are dropped. The kept entries replace the
+        refused list under ``config_section``, which is how ``get_port_configurations`` and the
+        startup port load see the trimmed section. Nothing is touched when this adapter cannot
+        pre-validate, so a config the adapter cannot explain behaves exactly as it did before.
+
+        Args:
+            config_section: Config key holding this adapter's list of port entries.
+
+        Returns:
+            Names of the dropped entries, each labelled by position when the entry has no name.
+            Empty when nothing was dropped, the section is not a list, or the adapter cannot
+            pre-validate. Each dropped entry is also recorded as a config gap, so the load-time
+            warning block names the reason and no port of the kept entries is lost.
+        """
+        entries = self.config.get(config_section) if isinstance(self.config, dict) else None
+        if not isinstance(entries, list):
+            return []
+        logger = getattr(self, "logger", None) or logging.getLogger(__name__)
+        kept: List[Any] = []
+        dropped: List[str] = []
+        for index, entry in enumerate(entries):
+            # No name means no port name to report, so the position in the file names it: #1 is the
+            # first entry the reader sees under the section.
+            where = f"#{index + 1}"
+            if not isinstance(entry, dict):
+                label, reason = f"<entry {where}>", "the entry is not a mapping of port options"
+            elif not entry.get("name"):
+                label, reason = f"<unnamed {where}>", "the entry has no 'name', so no port can be built from it"
+            else:
+                label = str(entry["name"])
+                try:
+                    self.prepare_port(label, entry)
+                    kept.append(entry)
+                    continue
+                except NotImplementedError:
+                    logger.debug(
+                        "%s adapter %s cannot pre-validate entries, keeping the section as it is",
+                        self.get_adapter_type(),
+                        self.name,
+                    )
+                    return []
+                except Exception as e:
+                    reason = str(e).strip() or "the port rejected its own configuration"
+            if label not in self.config_gaps:
+                # An adapter that reports a bad entry while it parses its own section (the serial
+                # adapter does) already logged this reason and recorded it; repeating it here would
+                # print the same line twice for one entry.
+                logger.error(
+                    "%s adapter %s rejects port %s in the config file: %s", self.get_adapter_type(), self.name, label, reason
+                )
+            dropped.append(label)
+            self.record_config_gap(label, reason)
+        if dropped and isinstance(self.config, dict):
+            # Rebind instead of writing into the caller's list: the config dict it came from may be
+            # the server's live config, and the refused entry must not survive in it.
+            self.config[config_section] = kept
+        return dropped
 
     def prepare_reconcile_candidates(
         self, names: List[str], new_by_name: Dict[str, Dict[str, Any]], running: Any

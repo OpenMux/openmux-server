@@ -1,4 +1,4 @@
-"""CFG: what the Config Editor changes, when it changes it, and who may ask (CFG-01 to CFG-18).
+"""CFG: what the Config Editor changes, when it changes it, and who may ask (CFG-01 to CFG-19).
 
 The editor is one page over four owners, and each layer can be right while the page is wrong, so every scenario here
 states the pair a person would otherwise reconcile by hand:
@@ -13,8 +13,9 @@ states the pair a person would otherwise reconcile by hand:
 
 Two facts about these worlds are simulations that matter. The ``dummy`` PDU driver answers instantly and needs no
 device, so a PDU that appears in the file always starts. And the two adapter failures this tier can produce on demand
-are a Serial port whose device path no host has, which the server starts offline rather than refusing, and a Serial
-entry holding a value the port rejects, which the server reports instead of starting (CFG-18).
+are a Serial port whose device path no host has, which the server starts offline rather than refusing, and a port
+entry holding a value its own port rejects, which the server reports instead of starting: for one Serial entry at
+reload (CFG-18), and for one entry of any port section at boot (CFG-19).
 
 Unlike the plan for this suite, no scenario depends on another: each builds its server, makes its edit, and proves
 its own save-then-reload-then-see order in one run. That order is a product rule, so it belongs inside the scenario
@@ -60,6 +61,8 @@ GAP_MARKER = "CONFIG_GAP"
 GAP_ITEM = f"{GAP_MARKER}   "
 #: The reason a Serial port gives for a parity letter it does not accept.
 BAD_PARITY_REASON = "Parity must be N, E, O, M, or S"
+#: The reason a port of any section gives for a write-slot capacity it does not accept.
+BAD_CAPACITY_REASON = "Invalid max_read_write_users"
 
 
 # --- editor requests -----------------------------------------------------------
@@ -1011,3 +1014,37 @@ def test_cfg18_a_port_the_server_cannot_build_is_named_in_the_log_and_never_repo
     assert "typo1" in api.port_names(), api.status()
     later = _reconciled(_summary(_reload(api, "soft")), "serial")
     assert "failed" not in later and "typo1" in later["unchanged"], later
+
+
+# ===============================================================================
+# One unusable port entry at boot, which must cost one port and not its whole section
+# ===============================================================================
+
+
+@surfaces("http")
+def test_cfg19_one_unusable_port_entry_at_boot_costs_one_port_and_names_it(servers, api_for_server):
+    """A command entry its port refuses at startup costs that port alone, and boot names the reason (issue #105).
+
+    A person hand-edits server.yaml and one entry holds a write-slot capacity its port refuses. Startup judged the
+    whole section as one, so the good port beside it never started either: nothing in the running server came from
+    that file, and the only trace was one error naming the plugin and a traceback. Boot now builds the ports it can
+    and reports each entry it cannot, which is the pair a person needs to fix the file: the port that is missing and
+    the reason it is missing. This is the boot half of CFG-18, and it holds for every port section.
+    """
+    world = servers(
+        name="gapboot",
+        loopback=(),
+        command_ports=("keep1",),
+        telnet_kwargs={"require_auth": True},
+        configure=lambda builder: builder.with_command_port("badcap1", write_slot_capacity="two"),
+        start=True,
+    )
+    api = api_for_server(world)
+    step("the good port of that section runs even though its neighbour is refused")
+    names = api.port_names()
+    assert "keep1" in names, f"one bad entry cost the whole section: {api.status()}\nserver said: {world.tail(60)}"
+    assert "badcap1" not in names, f"the unusable entry took a port slot: {names}"
+    step("the boot warning block names the section, the port, and the reason its own port gave")
+    gap_line = world.wait_for_log(f"{GAP_ITEM}command/badcap1:")
+    assert BAD_CAPACITY_REASON in gap_line, gap_line
+    assert GAP_MARKER in gap_line, gap_line

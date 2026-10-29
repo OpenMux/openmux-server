@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-99 scenarios across 8 suites.
+100 scenarios across 8 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -45,6 +45,7 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | CFG-16 | A full reload ends every session, on purpose, and a client that comes back afterwards is served. | telnet:rw, telnet:fresh, http | `tests/e2e/test_config_editor.py::test_cfg16_a_full_reload_drops_an_attached_console_and_a_new_one_gets_in` |
 | CFG-17 | A Serial port with no device behind it is listed, reported in the log, and still takes a console. | http, web:ro, web:admin | `tests/e2e/test_config_editor.py::test_cfg17_a_port_whose_device_is_missing_is_listed_as_offline_with_the_reason` |
 | CFG-18 | One unusable Serial entry costs that one port, and the server says so out loud (issue #105). | http | `tests/e2e/test_config_editor.py::test_cfg18_a_port_the_server_cannot_build_is_named_in_the_log_and_never_reported_as_added` |
+| CFG-19 | A command entry its port refuses at startup costs that port alone, and boot names the reason (issue #105). | http | `tests/e2e/test_config_editor.py::test_cfg19_one_unusable_port_entry_at_boot_costs_one_port_and_names_it` |
 | **CON** | | | |
 | CON-01 | A read-write user opens the console on a Loopback port and sees their own text come back. | web:rw | `tests/e2e/test_console.py::test_con01_a_signed_in_user_opens_the_console_and_gets_their_text_back` |
 | CON-02 | The page exports its test hook only when the URL carries ``?e2e=1``. | web:admin | `tests/e2e/test_console.py::test_con02_the_test_hook_stays_off_unless_the_url_asks_for_it` |
