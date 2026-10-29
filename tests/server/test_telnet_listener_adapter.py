@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
 from openmux.server.adapters.protocols.plain import TelnetIacStripper
-from openmux.server.adapters.telnet_listener import ListenerConfig, TelnetListenerAdapter
+from openmux.server.adapters.telnet_listener import ListenerConfig, TelnetListenerAdapter, _StreamSessionTransport
 
 
-class FakeReader:
+class _QueuedStream:
     """Yields one queued byte chunk per read() call, regardless of n."""
 
     def __init__(self, chunks: Optional[List[bytes]] = None):
@@ -44,6 +44,24 @@ class FakeWriter:
 
     async def wait_closed(self) -> None:
         await asyncio.sleep(0)
+
+
+class FakeReader(_StreamSessionTransport):
+    """The read half of a connection, built over a queued stream.
+
+    This is the transport the listener really uses, so a test reads what the listener reads: the line a
+    prompt asked for, and whatever the client typed past it. `FakeWriter` absorbs the prompts.
+    """
+
+    def __init__(self, chunks: Optional[List[bytes]] = None):
+        super().__init__(_QueuedStream(list(chunks or [])), FakeWriter())
+
+    async def take(self) -> bytes:
+        """What the next reader of this connection gets, reported as nothing when none is waiting."""
+        try:
+            return await asyncio.wait_for(self.read(4096), timeout=0.2)
+        except asyncio.TimeoutError:
+            return b""
 
 
 class FakePort:
@@ -325,3 +343,69 @@ def test_telnet_iac_stripper_basic():
     stripper = TelnetIacStripper()
     data = bytes([255, 251, 1]) + b"hello" + bytes([255, 255]) + b"world"
     assert stripper.strip(data) == b"hello" + bytes([255]) + b"world"
+
+
+# ---------------------------------------------------------------------------
+# One answer per prompt: what arrives with the line just read belongs to the next reader (issue #103)
+#
+# One socket carries the login, the password and the Port choice. A client that types the next line
+# while the server still writes its prompt sends both lines in one segment, and the line the phase has
+# not asked for must still reach the next prompt, or the session after the attach.
+
+
+async def _answers(reader: FakeReader, count: int, *, keep_line_feed: bool = False) -> List[Optional[str]]:
+    """Answer ``count`` prompts in order on one connection, sharing one stripper as `_run_login` does."""
+    adapter = make_adapter(["loopback1", "loopback2"])
+    stripper = TelnetIacStripper()
+    return [await adapter._read_auth_line(reader, stripper, timeout=0.2, keep_line_feed=keep_line_feed) for _ in range(count)]
+
+
+@pytest.mark.asyncio
+async def test_three_answers_sent_in_one_segment_reach_their_own_prompts():
+    """A login, a password and a Port choice typed together are three answers, not one."""
+    reader = FakeReader([b"alice\nsecret\nloopback1\n"])
+
+    assert await _answers(reader, 3) == ["alice", "secret", "loopback1"]
+
+
+@pytest.mark.asyncio
+async def test_the_answer_after_the_line_just_read_reaches_the_next_reader():
+    """What the operator typed past the prompt is still on the socket when the next reader starts."""
+    adapter = make_adapter(["loopback1"])
+    reader = FakeReader([b"alice\nloopback1\n"])
+
+    line = await adapter._read_auth_line(reader, TelnetIacStripper(), timeout=0.2)
+
+    assert line == "alice"
+    assert await reader.take() == b"loopback1\n", "the Port choice typed after the login never reached the session"
+
+
+@pytest.mark.asyncio
+async def test_negotiation_bytes_do_not_shift_the_next_line():
+    """A client's option reply in front of the login leaves both lines whole."""
+    reader = FakeReader([bytes([255, 251, 1]) + b"alice\r\nloopback1\r\n"])
+
+    assert await _answers(reader, 2) == ["alice", "loopback1"]
+
+
+@pytest.mark.asyncio
+async def test_a_port_choice_ended_at_carriage_return_keeps_the_next_keystroke():
+    """The Port choice ends the phase, so what follows it belongs to the Port and not to a prompt.
+
+    A client that ends its lines at CR alone is read by nothing after the choice, so a keystroke sent
+    with that choice has to reach the Port. The LF that a CR-then-LF client sends with the choice is
+    part of that line, which is why the phase reports the boundary to the transport.
+    """
+    reader = FakeReader([b"loopback1\rls\r\n"])
+
+    assert await _answers(reader, 1, keep_line_feed=True) == ["loopback1"]
+    assert await reader.take() == b"ls\r\n"
+
+
+@pytest.mark.asyncio
+async def test_a_part_line_waits_for_the_rest_and_a_closed_socket_ends_the_phase():
+    """A keystroke with no terminator yet waits for the rest, and EOF ends the reader instead of spinning."""
+    reader = FakeReader([b"al", b"ice\nloopback1\n"])
+
+    assert await _answers(reader, 2) == ["alice", "loopback1"]
+    assert await _answers(reader, 1) == [None]

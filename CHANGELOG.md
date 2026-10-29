@@ -104,6 +104,12 @@ Changes since v1.0.4 (2026-10-19).
   menu therefore closed itself one turn after the switch you made, and the keystroke you typed next went to the Port
   instead of the menu. A prompt now marks that boundary and the Telnet transport drops the LF that follows a CR it
   already answered. A client that sends CR alone is unaffected, and SSH ends lines with LF, so it changed nothing.
+- **A Telnet login uses every line it receives.** A client that answered a prompt while the server still wrote it sent
+  the next line in the same segment, and the login, password, and Port-choice reader kept only the text up to the first
+  newline of that read and dropped the rest. The Port choice typed with the password was lost, or the first keystroke
+  typed with the Port choice was lost, and the session waited in silence for an answer it had already thrown away. That
+  reader now keeps what it was not asked for and hands it to the next reader, and after the last prompt it hands it to
+  the Port. No config key changed.
 
 ### Web console and observability
 - **Web console pages ask for their assets by version.** Each page now requests its scripts and stylesheets as

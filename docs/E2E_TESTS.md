@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-97 scenarios across 8 suites.
+98 scenarios across 8 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -73,6 +73,7 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | LIF-08 | SIGUSR1 stops and starts every adapter: the client drops, then a new one works. | signal, CLI, server log | `tests/e2e/test_lifecycle.py::test_lif08_a_full_reload_stops_and_restores_the_adapters` |
 | LIF-09 | The local control socket answers a status request, and only its owner may use it. | control socket | `tests/e2e/test_lifecycle.py::test_lif09_the_control_socket_answers_status_locally` |
 | LIF-10 | A client that leaves, by exit or by force, must not leave an ERROR or a traceback behind. | CLI, loopback port, server log | `tests/e2e/test_lifecycle.py::test_lif10_a_session_that_ends_is_closed_without_an_error_in_the_log` |
+| LIF-11 | Every line one write carries takes effect: the login, the Port choice, and the Port's own data. | Telnet, loopback port | `tests/e2e/test_lifecycle.py::test_lif11_input_that_arrives_with_the_login_still_reaches_the_port` |
 | **PWR** | | | |
 | PWR-01 | ``/api/power`` reports the configured PDU, and one switch moves only the fields it should. | http | `tests/e2e/test_power.py::test_pwr01_the_power_api_mirrors_the_pdu_and_moves_with_one_switch` |
 | PWR-02 | A console that declares a feed no PDU outlet provides is reported everywhere it appears. | http, web:rw | `tests/e2e/test_power.py::test_pwr02_a_feed_no_outlet_provides_is_named_by_the_api_the_page_and_the_badge` |

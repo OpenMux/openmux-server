@@ -105,8 +105,10 @@ produce on demand.
 
 A Telnet session speaks the port menu the way an operator does: `open_control_menu()` sends the
 escape prefix and waits for the prompt, `press("f")` answers one key, and `answer("c2")` answers one
-line. `pause_reader()` stops the byte pump, which is the only honest way to model a client that stalls;
-clear `reader_paused` to let it drain again. Both text sessions carry
+line. `kill_reader()` stops the byte pump, which is the only honest way to model a client that stalls;
+clear `reader_paused` to let it drain again. `send_lines_at_once("rw", "passwd", "loop1", "ls")` puts
+several lines in one write, which is what typing during a prompt does: the server takes them in one
+segment, and `LIF-11` proves it uses every one (issue #103). Both text sessions carry
 `expect_no_text(needle, for_seconds=...)`, because "this prompt must not appear" is a guarantee. A CLI
 holders request is `query_holders()`, whose `holders` list carries the holder labels the server built.
 Attach a Telnet session with `choose_port("slot1")`. Do not wait for the Port name: the Port list printed at

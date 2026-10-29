@@ -286,9 +286,10 @@ Three traps in this tier cost a debugging session each, so they are rules now.
 - **A Port name proves nothing.** The Port list printed at connect contains every Port name, so waiting for the name you
   typed returns before the listener has attached anything, and the next keystroke is taken for a Port choice.
   `choose_port` proves the attach with session info, which prints `Port: <name>` only for a session that drives a Port.
-- **A Telnet line you type right after a choice can vanish.** `_read_auth_line` reads 256 bytes and keeps only the text
-  before the first LF, so a second line in the same read is discarded. Type one line, prove the server consumed it, then
-  type the next. That reader is the reason `choose_port` exists, and the defect itself is recorded under `PWR` below.
+- **One typed line does not mean one read.** A client that answers a prompt while the server still writes it sends the
+  next line in the same segment. The auth/menu phase keeps what it does not ask for and hands it to the next reader
+  (`LIF-11`, issue #103), which is what lets `send_lines_at_once` ask for that shape. `choose_port` still proves the
+  attach with session info, because a Port name in the received text proves nothing, as the note above says.
 
 ### How to fix a failure that touches shared world state
 
@@ -306,18 +307,18 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 97 scenarios in 8 files: `LIFECYCLE` 10, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 17, the
+The suite today runs 98 scenarios in 8 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 17, the
 index checks 2, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
 runs, and its count is checked by `IDX-02`. Three further groups below are the plan of record: they have ids,
 boundaries, and assertions written down, and they have no test file yet. Full wording for every built id lives in that
 index.
 
-### LIFECYCLE — process and listeners (`tests/e2e/test_lifecycle.py`, 10)
+### LIFECYCLE — process and listeners (`tests/e2e/test_lifecycle.py`, 11)
 
 Boots, `/healthz` public plus `/api/ports` 401, Loopback and command round trip over the client listener, bad config
 exits non-zero naming the key, SIGINT exits clean, SIGHUP soft reload keeps an attached client, SIGUSR1 full reload
-drops then restores it, a reload with an attached client leaves no cleanup error in the log, and control socket status
-with mode 0600.
+drops then restores it, a reload with an attached client leaves no cleanup error in the log, control socket status with
+mode 0600, and a Telnet login whose four lines arrive in one write reaches the Port those lines name.
 
 ### AUTH — login and permission matrix (`test_auth.py`, 10 of 11)
 
@@ -464,11 +465,11 @@ Three defects in the product came out of measuring, and each is fixed with the s
 - A Telnet session ended a menu line at the CR and read the paired LF as the next line, so the `p` menu closed itself
   one line early and the keystroke after it landed on the Port. `read_prompt_line` now tells the transport about a CR,
   and the Telnet transport drops the LF that follows it. `PWR-16` types a line after the menu and asserts the Port
-  echoes it whole. A related defect is **not** fixed and is recorded instead: `_read_auth_line`, which reads the login
-  and the Port choice, discards every byte after the first LF in the same 256-byte read, so a line typed immediately
-  after a Port choice is lost. [Issue #103](https://github.com/OpenMux/openmux-server/issues/103) tracks it.
-  A test must therefore prove the attach before it types the next line, which the harness
-  does with session info (`i` prints `Port: <name>` only for a session that attached).
+  echoes it whole. The reader in front of that pair, `_read_auth_line`, which reads the login, the password and the Port
+  choice, kept only the text before the first LF of its 256-byte read and discarded the rest, so a line typed while a
+  prompt was still written never reached anything. It now hands the rest to the next reader, and after the last prompt
+  that reader is the session on the same transport (issue #103). `LIF-11` sends the login, the password, the Port choice
+  and one Port line in one write, and asserts the Port echoes that last line.
 
 
 ### CFG — configure, then reload (`test_config_editor.py`, 17 scenarios)
@@ -629,7 +630,7 @@ Named now so release 1 fixtures stay sufficient.
 | Phase | State | What exists |
 | --- | --- | --- |
 | 0 — harness | Done | `harness.py`, `story.py`, `textclients.py`, `console.py`, `index.py`, `conftest.py`; markers and `--run-e2e`; `make test-e2e`, `test-e2e-live`, `test-e2e-debug`, `e2e-install`, `e2e-doc`. |
-| 1 — lifecycle | Done | `LIF-01` to `LIF-10`, plus `IDX-01` and `IDX-02`. |
+| 1 — lifecycle | Done | `LIF-01` to `LIF-11`, plus `IDX-01` and `IDX-02`. |
 | 2 — browser proof | Done | `login()`, `ConsoleSession`, the page hook under `?e2e=1`, with Chromium installed by `make e2e-install`. |
 | 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` waits on a helper-based account, see the note below. |
 | 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |

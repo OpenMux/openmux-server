@@ -1,9 +1,9 @@
-"""LIFECYCLE: the server process, its listeners, and its signals (LIF-01 to LIF-10).
+"""LIFECYCLE: the server process, its listeners, and its signals (LIF-01 to LIF-11).
 
 No browser here. This suite is the first thing to run on a new machine, because it proves the
 harness and the product agree about the process contract: what boots, what answers without a login,
-what a round trip looks like on the wire, what a clean stop looks like, and what a client leaving
-should and should not write to the log.
+what a round trip looks like on the wire, what a listener does with keystrokes that arrive together,
+what a clean stop looks like, and what a client leaving should and should not write to the log.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from .harness import Api
+from .harness import TEST_PASSWORD, Api
 from .story import step, surfaces
 
 pytestmark = [pytest.mark.e2e]
@@ -278,3 +278,27 @@ def test_lif10_a_session_that_ends_is_closed_without_an_error_in_the_log(server,
         assert "lif10-after" in cli_next.wait_for("lif10-after", timeout=15), cli_next.read_text()
     with step("and the server still stops cleanly"):
         assert server.stop_clean() == 0, server.tail(40)
+
+
+@surfaces("Telnet", "loopback port")
+def test_lif11_input_that_arrives_with_the_login_still_reaches_the_port(servers, clients, story):
+    """Every line one write carries takes effect: the login, the Port choice, and the Port's own data.
+
+    One socket carries the login, the password, the Port choice, and after them the Port's data. A client
+    that types while the server still writes a prompt sends the next line in the same segment, so the
+    listener may read one line but must keep what came with it: the rest belongs to the next prompt, and
+    after the last prompt to the Port (issue #103). A Loopback port echoes, so an echoed marker proves the
+    Port received the line that travelled with the login.
+    """
+    world = servers(name="ahead", telnet_kwargs={"require_auth": True}, start=True)
+    early = clients.telnet(user="rw", surface="telnet:ahead", server=world, require_auth=False)
+    with step("login, password, Port choice and one Port line arrive in one write"):
+        early.send_lines_at_once("rw", TEST_PASSWORD, "loop1", "lif11-typed-ahead")
+    with step("the Port echoes the line that shared that write, so nothing before it was thrown away"):
+        assert "lif11-typed-ahead" in early.wait_for("lif11-typed-ahead", timeout=15), early.text()
+    with step("and the session drives the Port that the same write chose"):
+        # The echo shows the bytes reached the Port; session info names the state, which is what a person
+        # reads when they wonder which Port a fast login landed on.
+        early.open_control_menu()
+        early.press("i")
+        early.wait_for("Port: loop1", timeout=10)

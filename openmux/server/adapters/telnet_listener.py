@@ -35,19 +35,21 @@ _IAC_WONT_ECHO = bytes([255, 252, 1])  # IAC WONT ECHO
 class _StreamSessionTransport:
     """The SessionTransport seam over an asyncio reader/writer pair (issue #100).
 
-    The streams deliver raw wire bytes to the session module. IAC stripping
-    happens only in the auth/menu phase (`_read_auth_line` builds a
-    `TelnetIacStripper` there); the data pump has always seen raw bytes, and
-    moving the pump preserved that exactly.
+    One instance serves a whole connection, and both phases read through it. The auth/menu phase
+    (`_read_auth_line`) strips telnet IAC negotiation bytes as it reads and hands back whatever
+    arrived past the line it took, so the session resumes at the client's next keystroke instead of
+    losing it (issue #103). Every byte after that comes from the stream as it arrives, unread by the
+    phase, which is what the data pump has always been given.
     """
 
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self._reader = reader
         self._writer = writer
-        # Set by `drop_line_feed` when a menu prompt ended a line at a CR: the LF that a Telnet client
+        # Set by `drop_line_feed` when a reader ended a line at a CR: the LF that a Telnet client
         # sends with that CR is part of the line already read, not the next one.
         self._skip_line_feed = False
-        # Bytes read while dropping that LF, handed back before the stream is read again.
+        # Bytes the transport holds for the next reader: the tail a reader kept (issue #103) and any
+        # byte that arrived together with an LF it was told to drop. Returned before the stream is read.
         self._pushback = b""
 
     async def read(self, n: int) -> bytes:
@@ -55,19 +57,35 @@ class _StreamSessionTransport:
 
         The flag is cleared by the first byte returned, whatever that byte is: a client that sends CR
         alone keeps working, because its next keystroke then starts the next line as ordinary data.
-        Anything read along with the dropped LF is kept and returned next, so no byte is lost.
+        Anything read along with the dropped LF is kept and returned next, so no byte is lost. Bytes
+        handed to `unread` are returned first, and the flag applies to them too, so a reader that ends a
+        line at a CR and holds the rest loses neither the LF rule nor the rest.
         """
-        if self._pushback:
-            take, self._pushback = self._pushback[:n], self._pushback[n:]
-            return take
         while True:
-            chunk = await self._reader.read(n)
+            chunk = await self._take(n)
             if not (self._skip_line_feed and chunk[:1] == b"\n"):
                 self._skip_line_feed = False
                 return chunk
             self._skip_line_feed = False
-            if len(chunk) > 1:
-                self._pushback = chunk[1:]
+            if chunk[1:]:
+                self._pushback = chunk[1:] + self._pushback
+
+    async def _take(self, n: int) -> bytes:
+        """Return the next ``n`` bytes: what a previous read held back first, else the stream."""
+        if self._pushback:
+            take, self._pushback = self._pushback[:n], self._pushback[n:]
+            return take
+        return await self._reader.read(n)
+
+    def unread(self, data: bytes) -> None:
+        """Put bytes back so the next reader gets them before the stream is read again.
+
+        The auth/menu phase reads a block and returns the first line in it, so a keystroke the
+        operator typed while that prompt was still written arrives in the same read (issue #103). It
+        belongs to the next prompt, or to the session after the attach, and is never discarded here.
+        """
+        if data:
+            self._pushback = data + self._pushback
 
     async def readexactly(self, n: int) -> bytes:
         """Read exactly ``n`` bytes, serving any byte that `read` held back first."""
@@ -381,13 +399,17 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         if not self.main_port_manager:
             await self._send_and_close(writer, b"Server unavailable\r\n")
             return
-        resolved = await self._resolve_session_target(listener, reader, writer, peer_ip)
+        # One transport for the whole connection, built before the first prompt: the auth/menu phase
+        # leaves any keystroke that arrived with the line it read on it, and the session reads that
+        # after the attach (issue #103).
+        stream = _StreamSessionTransport(reader, writer)
+        resolved = await self._resolve_session_target(listener, stream, writer, peer_ip)
         if resolved is None:
             return  # Auth/menu phase already sent an error and closed the connection.
         username, port_name = resolved
         session = self._sessions.create_session(
             listener,
-            _StreamSessionTransport(reader, writer),
+            stream,
             port_name=port_name,
             peer_ip=peer_ip,
             username=username,
@@ -419,7 +441,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
     async def _resolve_session_target(
         self,
         listener: ListenerConfig,
-        reader: asyncio.StreamReader,
+        stream: "_StreamSessionTransport",
         writer: asyncio.StreamWriter,
         peer_ip: str,
     ) -> Optional[Tuple[str, str]]:
@@ -432,7 +454,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         embedded_descriptor: Optional[str] = None
 
         if listener.require_auth:
-            auth_result = await self._run_login(listener, reader, writer, peer_ip)
+            auth_result = await self._run_login(listener, stream, writer, peer_ip)
             if auth_result is None:
                 return None
             username, embedded_descriptor = auth_result
@@ -445,7 +467,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
             return username, port_name
 
         if listener.target == _MENU_TARGET:
-            port_name = await self._run_port_menu(writer, reader)
+            port_name = await self._run_port_menu(writer, stream)
             if not port_name:
                 return None
             return username, port_name
@@ -468,36 +490,75 @@ class TelnetListenerAdapter(BaseGenericAdapter):
 
     async def _read_auth_line(
         self,
-        reader: asyncio.StreamReader,
+        stream: "_StreamSessionTransport",
         stripper: TelnetIacStripper,
         max_len: int = _AUTH_LINE_MAX_LEN,
         timeout: float = _AUTH_IDLE_TIMEOUT,
+        *,
+        keep_line_feed: bool = False,
     ) -> Optional[str]:
         """Read one line from the client during the auth/menu phase.
 
         Strips telnet IAC negotiation bytes so a real telnet client's
         automatic option replies don't corrupt the buffered line.
+
+        Whatever the client typed past that line stays on ``stream`` and is read next, so a second
+        line sent while this prompt was still being written reaches the next prompt, or the session
+        that takes the socket after the attach (issue #103).
+
+        Args:
+            keep_line_feed: End the line at a lone CR as well, and keep the rest of the read. The Port
+                choice needs this because that choice also starts the session: this phase reads nothing
+                after it, so a client that ends its lines at CR would otherwise have its next keystroke
+                read here and dropped. Off for login and password, where
+                `listener_common.read_prompt_line` owns the socket after this phase and already ends a
+                line at a CR (issue #100).
         """
         buf = bytearray()
         while True:
             try:
-                chunk = await asyncio.wait_for(reader.read(256), timeout=timeout)
+                chunk = await asyncio.wait_for(stream.read(256), timeout=timeout)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 return None
             if not chunk:
                 return None
             buf.extend(stripper.strip(chunk))
-            nl = buf.find(b"\n")
-            if nl != -1:
-                line = bytes(buf[:nl]).decode("utf-8", errors="ignore").rstrip("\r")
-                return line
-            if len(buf) > max_len:
-                return None
+            end, rest, paired_line_feed = self._find_line_end(buf, keep_line_feed)
+            if end < 0:
+                if len(buf) > max_len:
+                    return None
+                continue
+            stream.unread(bytes(buf[rest:]))
+            if paired_line_feed:
+                stream.drop_line_feed()
+            return bytes(buf[:end]).decode("utf-8", errors="ignore").rstrip("\r")
+
+    @staticmethod
+    def _find_line_end(buf: bytearray, keep_line_feed: bool) -> Tuple[int, int, bool]:
+        """Where the first line in ``buf`` ends, as ``(end, rest, paired_line_feed)``.
+
+        The earliest terminator in hand ends the line: LF for any client, and CR too when
+        ``keep_line_feed`` is set. Returns ``(-1, 0, False)`` while no line is complete, which is the
+        case on every keystroke that has no answer yet.
+
+        `paired_line_feed` is True only when a CR ended the line with nothing known after it, so the LF
+        of a CR LF may still arrive. A CR with a known byte after it needs nothing: that byte is data,
+        and an LF straight after a CR is taken as part of the line here.
+        """
+        lf = buf.find(b"\n")
+        cr = buf.find(b"\r") if keep_line_feed else -1
+        if 0 <= cr and (lf < 0 or cr < lf):
+            if buf[cr + 1 : cr + 2] == b"\n":
+                return cr, cr + 2, False
+            return cr, cr + 1, cr + 1 == len(buf)
+        if lf >= 0:
+            return lf, lf + 1, False
+        return -1, 0, False
 
     async def _run_login(
         self,
         listener: ListenerConfig,
-        reader: asyncio.StreamReader,
+        stream: "_StreamSessionTransport",
         writer: asyncio.StreamWriter,
         peer_ip: str,
     ) -> Optional[Tuple[str, Optional[str]]]:
@@ -511,7 +572,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         for _ in range(_AUTH_LOGIN_MAX_ATTEMPTS):
             writer.write(b"login: ")
             await writer.drain()
-            login_line = await self._read_auth_line(reader, stripper)
+            login_line = await self._read_auth_line(stream, stripper)
             if login_line is None:
                 await self._close_quiet(writer)
                 return None
@@ -525,7 +586,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
 
             writer.write(_IAC_WILL_ECHO + b"Password: ")
             await writer.drain()
-            password = await self._read_auth_line(reader, stripper)
+            password = await self._read_auth_line(stream, stripper)
             writer.write(_IAC_WONT_ECHO + b"\r\n")
             await writer.drain()
             if password is None:
@@ -545,7 +606,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         await self._close_quiet(writer)
         return None
 
-    async def _run_port_menu(self, writer: asyncio.StreamWriter, reader: asyncio.StreamReader) -> Optional[str]:
+    async def _run_port_menu(self, writer: asyncio.StreamWriter, stream: "_StreamSessionTransport") -> Optional[str]:
         """Print the port list, prompt for a selection, and resolve it.
 
         Returns the resolved port name, or None if the client quit, gave up
@@ -556,7 +617,7 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         for _ in range(_AUTH_PORT_MAX_ATTEMPTS):
             writer.write(b"Port: ")
             await writer.drain()
-            choice = await self._read_auth_line(reader, stripper)
+            choice = await self._read_auth_line(stream, stripper, keep_line_feed=True)
             if choice is None:
                 await self._close_quiet(writer)
                 return None

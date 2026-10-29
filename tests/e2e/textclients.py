@@ -665,6 +665,16 @@ class TelnetSession:
         """Send one CRLF-terminated line, which is what a Telnet client sends."""
         self.send_raw(text.encode("utf-8") + b"\r\n", note=f"line {text!r}")
 
+    def send_lines_at_once(self, *lines: str) -> None:
+        """Send several lines in one write, which is what typing ahead during a prompt does.
+
+        A client that answers a prompt while the server is still writing it sends the next line in the
+        same segment, so the server receives every line at once. One write is the only way to ask for
+        that: `send_line` writes one line and a later call cannot join it afterwards.
+        """
+        payload = b"".join(line.encode("utf-8") + b"\r\n" for line in lines)
+        self.send_raw(payload, note=f"{len(lines)} lines in one write: {' + '.join(lines)!r}")
+
     def press(self, key: str) -> str:
         """Send the escape prefix and one Control menu key, and return the text received so far.
 
