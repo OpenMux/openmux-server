@@ -462,14 +462,19 @@ Three defects in the product came out of measuring, and each is fixed with the s
   `power_monitor` now nudges `power_changed` after a successful switch. `PWR-04` repaints both rows, and fails against
   the previous file. A change a poller detects on an unmapped outlet is still not nudged, because that is the poller's
   own path and no scenario drives a poller.
-- A Telnet session ended a menu line at the CR and read the paired LF as the next line, so the `p` menu closed itself
-  one line early and the keystroke after it landed on the Port. `read_prompt_line` now tells the transport about a CR,
-  and the Telnet transport drops the LF that follows it. `PWR-16` types a line after the menu and asserts the Port
-  echoes it whole. The reader in front of that pair, `_read_auth_line`, which reads the login, the password and the Port
-  choice, kept only the text before the first LF of its 256-byte read and discarded the rest, so a line typed while a
-  prompt was still written never reached anything. It now hands the rest to the next reader, and after the last prompt
-  that reader is the session on the same transport (issue #103). `LIF-11` sends the login, the password, the Port choice
-  and one Port line in one write, and asserts the Port echoes that last line.
+- A Telnet session ended a menu line at the CR and read the paired LF as the next line. That phantom
+  line closed the `p` menu by itself and ate the keystroke after it. `read_prompt_line` now tells the
+  transport about a CR, and the Telnet transport drops the LF that follows it. `PWR-16` exits the menu,
+  waits for the next echo, and asserts no phantom line sits between the two (issue #100). The reader in
+  front of that pair, `_read_auth_line`, which reads the login, the password and the Port choice, kept
+  only the text before the first LF of its 256-byte read and discarded the rest, so a line typed while a
+  prompt was still written never reached anything. It now hands the rest to the next reader, and after
+  the last prompt that reader is the session on the same transport (issue #103). `LIF-11` sends the
+  login, the password, the Port choice and one Port line in one write, and asserts the Port echoes that
+  last line. A Port choice that ends at CR LF is the one case where the phase, not the session, decides
+  where that LF goes, so
+  `tests/server/test_telnet_listener_adapter.py` covers it: the LF ends the choice and never reaches the
+  Port as an empty line.
 
 
 ### CFG — configure, then reload (`test_config_editor.py`, 17 scenarios)

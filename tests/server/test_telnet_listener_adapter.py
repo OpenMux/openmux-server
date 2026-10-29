@@ -1,7 +1,6 @@
 """Tests for the telnet listener's auth/menu-mode/login-shortcut features."""
 
 import asyncio
-import types
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -397,6 +396,20 @@ async def test_a_port_choice_ended_at_carriage_return_keeps_the_next_keystroke()
     part of that line, which is why the phase reports the boundary to the transport.
     """
     reader = FakeReader([b"loopback1\rls\r\n"])
+
+    assert await _answers(reader, 1, keep_line_feed=True) == ["loopback1"]
+    assert await reader.take() == b"ls\r\n"
+
+
+@pytest.mark.asyncio
+async def test_a_port_choice_ended_at_carriage_return_and_line_feed_leaves_no_line_for_the_port():
+    """The line feed a CR-then-LF client sends with its choice belongs to that choice.
+
+    A client that ends its lines with CR LF sends both bytes with the choice. Only the choice is a
+    prompt answer, so the line feed must not reach the Port as an empty first line: the phase reads it
+    as part of the same Enter key.
+    """
+    reader = FakeReader([b"loopback1\r\nls\r\n"])
 
     assert await _answers(reader, 1, keep_line_feed=True) == ["loopback1"]
     assert await reader.take() == b"ls\r\n"
