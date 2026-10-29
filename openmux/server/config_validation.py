@@ -218,7 +218,7 @@ def check_config_files(
     return violations, problems
 
 
-def check_mapping(logger: Any, instance: Any, schema_name: str, label: str) -> int:
+def check_mapping(logger: Any, instance: Any, schema_name: str, label: str, sink: Optional[Any] = None) -> int:
     """Lenient live-server pass: log each violation as ERROR, never raise.
 
     Args:
@@ -226,6 +226,9 @@ def check_mapping(logger: Any, instance: Any, schema_name: str, label: str) -> i
         instance: The parsed config mapping.
         schema_name: One of the ``*_SCHEMA`` constants.
         label: Short human label for the log lines (e.g. ``server.yaml``).
+        sink: Optional callable that receives each violation as one text line, so the caller can
+            report it again in the config gap warning (issue #105). Logging and the return value
+            stay the same whether a sink is given or not.
 
     Returns:
         The number of violations logged (also 0 when logging is skipped
@@ -237,7 +240,10 @@ def check_mapping(logger: Any, instance: Any, schema_name: str, label: str) -> i
         logger.warning("Skipping JSON schema check for %s: %s", label, exc)
         return 0
     for rendered, message in pairs:
-        logger.error("Config validation %s%s: %s", label, f" @ {rendered}" if rendered else "", message)
+        loc = f" @ {rendered}" if rendered else ""
+        logger.error("Config validation %s%s: %s", label, loc, message)
+        if sink is not None:
+            sink(f"{label}{loc}: {message}")
     if pairs:
         logger.error("Config validation: %d schema violation(s) in %s", len(pairs), label)
     return len(pairs)

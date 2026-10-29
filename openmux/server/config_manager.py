@@ -39,7 +39,7 @@ Compatibility notes
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -67,6 +67,27 @@ class ConfigManager:
         self.config: Optional[Dict[str, Any]] = None
         self._authentication_config: Optional[Dict[str, Any]] = None
         self._security_policy: Optional[SecurityPolicy] = None
+        # Schema violations the loader logged and tolerated (issue #105). The server lists these in
+        # the config gap warning, because a tolerated typo is still a difference between the file
+        # and the running server. Keyed by rendered line to keep order and drop repeats.
+        self._schema_violations: Dict[str, None] = {}
+
+    def record_schema_violation(self, line: str) -> None:
+        """Remember one tolerated schema violation for the config gap warning (issue #105).
+
+        Args:
+            line: The violation, already rendered as ``<file> @ <path>: <message>``.
+        """
+        if line:
+            self._schema_violations[line] = None
+
+    def schema_violation_report(self) -> List[str]:
+        """Return the schema violations the last load tolerated, oldest first."""
+        return list(self._schema_violations)
+
+    def clear_schema_violations(self) -> None:
+        """Forget the recorded violations, called before a config file is read again."""
+        self._schema_violations = {}
 
     def _derive_sidecar_path(self, filename: str) -> str:
         base_dir = os.path.dirname(os.path.abspath(self.config_path)) or os.getcwd()
@@ -121,9 +142,11 @@ class ConfigManager:
 
             # Full JSON Schema pass (log-only): each violation is logged as
             # ERROR and load continues, so a currently-working deployment
-            # never breaks on a newly caught typo.
+            # never breaks on a newly caught typo. The lines are also kept for
+            # the config gap warning (issue #105).
+            self.clear_schema_violations()
             if isinstance(self.config, dict):
-                check_mapping(self.logger, self.config, SERVER_SCHEMA, self.config_path)
+                check_mapping(self.logger, self.config, SERVER_SCHEMA, self.config_path, sink=self.record_schema_violation)
 
             # Validate configuration
             self._validate_config()
@@ -475,7 +498,7 @@ class ConfigManager:
         if not isinstance(data, dict):
             raise ValueError("Authentication configuration must be a mapping")
         # Log-only schema pass (see the server-config pass in load_config).
-        check_mapping(self.logger, data, AUTH_SCHEMA, path)
+        check_mapping(self.logger, data, AUTH_SCHEMA, path, sink=self.record_schema_violation)
         self._authentication_config = data
         return data
 
@@ -496,6 +519,6 @@ class ConfigManager:
             # Log-only schema pass; SecurityPolicy.from_mapping below remains
             # the hard structural gate (it refuses to start on a bad file).
             if isinstance(policy_data, dict):
-                check_mapping(self.logger, policy_data, SECURITY_SCHEMA, path)
+                check_mapping(self.logger, policy_data, SECURITY_SCHEMA, path, sink=self.record_schema_violation)
             self._security_policy = SecurityPolicy.from_mapping(policy_data)
         return self._security_policy

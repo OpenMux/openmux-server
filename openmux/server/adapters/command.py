@@ -16,7 +16,7 @@ import termios
 from typing import Any, Dict, List, Optional, Set
 
 from ...common.identity import get_server_id
-from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
+from ..access_control import InvalidWriteMode, compare_write_mode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
 
@@ -1620,6 +1620,24 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             self.logger.error("Error starting command adapter %s: %s", self.name, e, exc_info=True)
             return False
 
+    def prepare_port(self, port_name: str, config: Dict[str, Any]) -> CommandPort:
+        """Build a command port without spawning or registering it.
+
+        Reconcile calls this for every candidate before it destroys anything (issue #105), so an
+        entry with no ``command`` is caught while the running process port is still in place.
+
+        Args:
+            port_name: Name the port is created under.
+            config: Raw per-port configuration.
+
+        Returns:
+            CommandPort: An unstarted port object the caller may keep or discard.
+
+        Raises:
+            ValueError: The entry has no command, or a value the port rejects.
+        """
+        return CommandPort(port_name, dict(config), self)
+
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
         """Create and start a single command port instance.
 
@@ -1631,7 +1649,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             CommandPort | None: Created port on success; None on failure.
         """
         try:
-            command_port = CommandPort(port_name, config, self)
+            command_port = self.prepare_port(port_name, config)
             # Start immediately unless configured for on-demand spawn
             if getattr(command_port, "spawn_on_demand", False):
                 # Do not spawn the process yet; mark as configured
@@ -1643,6 +1661,7 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                 except Exception:
                     self.logger.warning("Failed to register unified command port %s", port_name)
                 self.logger.info("Created command port (on-demand): %s (will spawn on first client attach)", port_name)
+                self.clear_config_gap(port_name)
                 return command_port
             else:
                 if await command_port.start():
@@ -1654,11 +1673,15 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                     except Exception:
                         self.logger.warning("Failed to register unified command port %s", port_name)
                     self.logger.info("Created command port: %s", port_name)
+                    self.clear_config_gap(port_name)
                     return command_port
                 self.logger.error("Failed to start command port: %s", port_name)
+                self.record_config_gap(port_name, "the process could not be started from this entry")
                 return None
         except Exception as e:
             self.logger.error("Error creating command port %s: %s", port_name, e, exc_info=True)
+            # Boot and reload gap (issue #105): the entry is in the file, the port is not running.
+            self.record_config_gap(port_name, e)
             return None
 
     async def destroy_port(self, port_name: str) -> None:
@@ -1710,10 +1733,11 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
     @staticmethod
     def _reconcile_material_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         # Materialize the config using the same defaults as CommandPort.__init__
-        # so comparison is apples-to-apples.  Silent normalization (wire_to_mode)
-        # on both sides: the load path already logged legacy ints (issue #59).
+        # so comparison is apples-to-apples. compare_write_mode normalizes legacy ints
+        # silently (the load path already logged them, issue #59) and keeps an unusable
+        # value visible, so reconcile reports the refusal instead of hiding the typo (#105).
         _interactive = bool(cfg.get("interactive", False))
-        mru = wire_to_mode(cfg.get("max_read_write_users", 1))
+        mru = compare_write_mode(cfg.get("max_read_write_users", 1))
         return {
             "command": cfg.get("command", ""),
             "shell": bool(cfg.get("shell", False)),
@@ -1812,10 +1836,14 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             except Exception as e:
                 self.logger.error("Failed to %s command port %s: %s", what, n, e, exc_info=True)
 
-    async def _create_ports(self, names: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> None:
-        # Shared by the add and update passes: each entry is an
-        # independent best-effort create, and one failure must not stop
-        # the rest of the reconcile.
+    async def _create_ports(self, names: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+        """Create each requested port, best effort.
+
+        Returns:
+            Dict of port name -> reason for each port that is not running afterwards (issue
+            #105). One failure must not stop the rest of the reconcile.
+        """
+        refused: Dict[str, str] = {}
         for n in names:
             cfg = new_by_name.get(n)
             if not cfg:
@@ -1823,9 +1851,16 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
                 # the guard is structural, left in to pin the invariant.
                 continue
             try:
-                await self.create_port(n, cfg)
+                port = await self.create_port(n, cfg)
             except Exception as e:
                 self.logger.error("Failed to create command port %s: %s", n, e, exc_info=True)
+                refused[n] = str(e).strip() or "port could not be created or started from this entry"
+                self.record_config_gap(n, refused[n])
+                continue
+            if port is None:
+                refused[n] = "port could not be created or started from this entry"
+                self.record_config_gap(n, refused[n])
+        return refused
 
     async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
         """Incrementally reconcile command ports.
@@ -1834,7 +1869,8 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             new_config: Dict with key 'command_ports' as list, or direct list.
 
         Returns:
-            Summary dict: {added, removed, updated, unchanged}.
+            Summary dict: {added, removed, updated, unchanged}. When an entry did not apply, the
+            dict also carries ``failed``, ``failed_detail`` and ``kept_previous``.
         """
         # Normalize
         items: List[Dict[str, Any]] = []  # type: ignore[name-defined]
@@ -1878,27 +1914,35 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
             else:
                 updated.append(n)
 
+        # Issue #105: build every candidate first, before anything is destroyed, so an entry that
+        # cannot become a port costs only its own change instead of a live session.
+        refused = self.prepare_reconcile_candidates(added + updated, new_by_name, self.ports)
+        kept_previous = sorted(name for name in refused if name in set(updated))
+        added = [name for name in added if name not in refused]
+        updated = [name for name in updated if name not in refused]
+
         # Remove updated/removed
         await self._destroy_ports(removed + updated, "destroy")
 
         # Create added/updated
-        await self._create_ports(added + updated, new_by_name)
+        refused.update(await self._create_ports(added + updated, new_by_name))
 
-        # Update adapter config snapshot
+        # Update adapter config snapshot (refused entries stay out, issue #105)
         try:
-            self.config["command_ports"] = [new_by_name[k] for k in sorted(new_by_name.keys())]
+            self.config["command_ports"] = [new_by_name[k] for k in sorted(set(new_by_name) - set(refused))]
         except Exception:
             # justification: optional snapshot; the authoritative config is on disk
             pass
 
-        summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
+        summary = self.reconcile_summary(added, removed, updated, unchanged, refused, kept_previous)
         self.logger.info(
-            "Command adapter %s reconcile: +%s ~%s -%s unchanged=%s",
+            "Command adapter %s reconcile: +%s ~%s -%s unchanged=%s refused %s",
             self.name,
             len(added),
             len(updated),
             len(removed),
             len(unchanged),
+            len(refused),
         )
         return summary
 

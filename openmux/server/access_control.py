@@ -139,6 +139,26 @@ def wire_to_mode(value: Any, *, port_name: Optional[str] = None) -> str:
     return "one"
 
 
+def compare_write_mode(value: Any) -> Any:
+    """Resolve a config ``max_read_write_users`` value for the reconcile comparison.
+
+    ``wire_to_mode`` maps any unknown value to ``one``. That is correct for peer traffic and wrong
+    for a config comparison: it hides a typo, so reconcile sees no change, keeps the running port,
+    and reports nothing (issue #105). This helper keeps an unusable value visible instead, so
+    reconcile treats it as a change, the port refuses it, and the reload reports the entry.
+
+    Args:
+        value: Raw config value: a mode string, a legacy integer, or anything the file holds.
+
+    Returns:
+        Any: The mode for a mode name or a legacy integer; ``value`` unchanged when it is neither.
+    """
+    try:
+        return parse_write_mode(value)
+    except InvalidWriteMode:
+        return value
+
+
 def write_capacity(mode: Any) -> float:
     """Return the maximum concurrent writers for a write-capacity mode.
 

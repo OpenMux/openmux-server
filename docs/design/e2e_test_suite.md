@@ -307,7 +307,7 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 98 scenarios in 8 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 17, the
+The suite today runs 99 scenarios in 8 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 18, the
 index checks 2, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
 runs, and its count is checked by `IDX-02`. Three further groups below are the plan of record: they have ids,
 boundaries, and assertions written down, and they have no test file yet. Full wording for every built id lives in that
@@ -509,6 +509,7 @@ device path no host has: the reload starts it and the port reports itself down.
 | `CFG-15` | A full reload recreates every adapter, restarts the web console, and keeps an open browser page signed in. |
 | `CFG-16` | A full reload ends an attached console with no message, and the next client that signs in is served. |
 | `CFG-17` | A Serial port whose device is missing is listed, named once in the log, and still takes a console — read-only. |
+| `CFG-18` | A Serial entry the server cannot build is named in the log block, reported as `failed`, and never as `added`. |
 
 Unlike the plan for this suite, **no scenario depends on another**. Each builds its server and makes its own edit, so
 a failure names the rule it broke instead of the scenario that ran before it. The save-then-reload order is a product
@@ -518,7 +519,7 @@ Six measured behaviours are recorded here, because a reader would otherwise assu
 
 - A save alone starts nothing, and the soft reconcile reports what it started under the **adapter kind**: `loopback`,
   `serial`, `telnet_listener`, `client_listener`, `web_console`. A soft answer carries no `errors` key at all; only a
-  full answer does. `CFG-05` and `CFG-17` read those keys.
+  full answer does. `CFG-05`, `CFG-17` and `CFG-18` read those keys.
 - A feeds-only edit is reported as `unchanged` for that port, not `updated`: the reconcile diffs adapters, and a console's
   `power:` feeds are rewired outside that diff. `CFG-12` therefore pins the measured verdict and proves the feed through
   `/api/power` (`outlets[].mapped_ports`) and the live badge, which is what a person sees.
@@ -539,17 +540,21 @@ Six measured behaviours are recorded here, because a reader would otherwise assu
   A Serial port whose device is missing keeps its console page in `read-only` and reports `port_up: false` on the page's
   own state; no page banner calls it offline. `CFG-17` asserts the state it can see.
 
-One measured behaviour is recorded but **not** asserted, because it is an open product question. A Serial entry the
-operator wrote by hand with a `parity` the schema rejects leaves the port uncreated. The server says so in its own
-log — `Failed to create serial port ser1: Parity must be N, E, O, M, or S`, next to `No ports configured for serial
-adapter serial_ports` — yet the soft reload answers `200` and reports that name under `added`, with no `errors` key
-at all, and `GET /api/status` lists no such port. A reload answer therefore claimed a Port that does not exist.
-`security.yaml` keeps `serial_ports` writable, so hand editing reaches that state without the page doing anything
-wrong: `POST /config-editor/apply` runs the same schema and refuses the entry with `400` (`CFG-06`). Whether the
-reconcile should report a Port whose adapter refused to create it is
-[Issue #105](https://github.com/OpenMux/openmux-server/issues/105), and no scenario depends on how it is answered.
+One product question recorded here has since been answered, and `CFG-18` asserts the answer (issue #105). A Serial entry
+the operator wrote by hand with a `parity` the schema rejects leaves no port object at all: plugging a device in cannot
+bring that port up, so a status page slot for it would only offer a console that cannot open. The soft reload answers
+`200` and names that port under `failed`, with the adapter's own sentence in `failed_detail` and `kept_previous: false`
+to say no older config stands in its place. The name never appears under `added`, on that reload or on the next one, and
+`GET /api/status` lists no such port: earlier builds claimed the add on every reload and never created the port. The
+refused name is dropped from every list that would claim it, and the adapter snapshots what is running, so the next
+reload compares against the running config and repeats the same verdict. The server prints one warning block naming the
+file and each unapplied item with its reason, and every line of that block starts with `CONFIG_GAP`, so a person who
+greps the log gets the whole block. The tolerated schema problem reaches the caller as well: the answer carries
+`config_violations`. `security.yaml` keeps `serial_ports` writable, so hand editing still reaches that state without the
+page doing anything wrong: `POST /config-editor/apply` runs the same schema and refuses the entry with `400`
+(`CFG-06`).
 
-Two defects in the product came out of measuring, and each is fixed with the scenario that proves it.
+Three defects in the product came out of measuring, and each is fixed with the scenario that proves it.
 
 - A full reload while any browser page was connected left the web console down for good. `WebConsoleAdapter.stop()`
   asked each runner to `cleanup()`, which waits for the handlers that runner started, and the console and `/ws/events`
@@ -576,6 +581,21 @@ Two defects in the product came out of measuring, and each is fixed with the sce
   the reload`, the page's own request answers 200, and the badge stays `● Live data`. `CFG-15` asserts the carry and the
   refusal of a sessionless visitor; `tests/test_session_carry_on_full_reload.py` holds the unit half, including the
   removed account and a reload that follows a reload. [Issue #104](https://github.com/OpenMux/openmux-server/issues/104).
+- A port entry the adapter refused was claimed as started, and one such entry disabled every port of its kind. Measured
+  before the fix: `GET /config-editor/reload/soft` answered `200` with that port under `serial.added` and no `errors`
+  key while `GET /api/status` listed no such port, the same claim repeated on every later reload, and at startup one bad
+  entry ended `SerialAdapter.__init__`, so the log said `No ports configured for serial adapter serial_ports` and the
+  ports that were valid in the same file never started. The reconcile now builds each candidate before it destroys
+  anything (`prepare_reconcile_candidates()` on the base adapter), records the refusal (`record_config_gap()`), and
+  leaves the refused name out of `added` and `updated` and out of the config snapshot (`reconcile_summary()`). Measured
+  after the fix: `Serial adapter serial_ports rejects port typo1: Parity must be N, E, O, M, or S`, then
+  `reconcile summary: +0 ~0 -0 =unchanged 1 refused 1`, and the answer carries
+  `failed: ['typo1']` with `failed_detail` naming the error and `kept_previous: false`. `OpenMuxServer.report_config_gaps()`
+  turns the same facts into one `CONFIG_GAP` block in the log at boot, soft reload, and full reload. `CFG-18` asserts all
+  of it against a running server, and `tests/test_config_gaps.py` plus `tests/server/test_serial_config_gaps.py`,
+  `tests/server/test_tcp_config_gaps.py`, `tests/server/test_command_loopback_config_gaps.py` and
+  `tests/server/test_main_config_gaps.py` hold the unit half.
+  [Issue #105](https://github.com/OpenMux/openmux-server/issues/105).
 
 ### ACT — Port Actions (`test_actions.py`, planned: 9)
 
@@ -640,7 +660,7 @@ Named now so release 1 fixtures stay sufficient.
 | 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` waits on a helper-based account, see the note below. |
 | 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
 | 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
-| 6 — Config Editor | Done | `CFG-01` to `CFG-17` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, and a Serial port with no device behind it. One product defect came out of it, listed under `CFG` above. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`. |
+| 6 — Config Editor | Done | `CFG-01` to `CFG-18` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, and a Serial entry the adapter refuses to build. Three product defects came out of building this group, listed under `CFG` above. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it. |
 | 7-9 | Not started | ACT, ST, and the story scenarios. |
 
 - `AUTH-11` (an external helper that grants no permission): outstanding. The `command` authentication backend runs in

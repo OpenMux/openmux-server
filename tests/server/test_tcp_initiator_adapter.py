@@ -392,6 +392,9 @@ async def test_adapter_reconcile_ports(monkeypatch):
 
     async def fake_create(name, cfg):
         created.append(name)
+        # create_port reports success by returning the port. Reconcile lists a port only when it
+        # exists afterwards (issue #105), so the fake has to hand one back.
+        return _tcip_port_obj(host=cfg.get("host", "h1"), port=cfg.get("port", 1))
 
     monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
     monkeypatch.setattr(adapter, "create_port", fake_create)
@@ -725,6 +728,9 @@ async def test_reconcile_list_input_added_and_snapshot(monkeypatch):
 
     async def fake_create(name, cfg):
         created.append(name)
+        # create_port reports success by returning the port. Reconcile lists a port only when it
+        # exists afterwards (issue #105), so the fake has to hand one back.
+        return _tcip_port_obj(host=cfg.get("host", "h1"), port=cfg.get("port", 1))
 
     monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
     monkeypatch.setattr(adapter, "create_port", fake_create)
@@ -757,6 +763,9 @@ async def test_reconcile_material_change_destroy_and_create(monkeypatch):
 
     async def fake_create(name, cfg):
         created.append(name)
+        # create_port reports success by returning the port. Reconcile lists a port only when it
+        # exists afterwards (issue #105), so the fake has to hand one back.
+        return _tcip_port_obj(host=cfg.get("host", "h1"), port=cfg.get("port", 1))
 
     monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
     monkeypatch.setattr(adapter, "create_port", fake_create)

@@ -19,6 +19,7 @@ import yaml
 
 from ..common.fsutil import ensure_directory
 from .auth_manager import AuthManager
+from .config_gaps import ConfigGap, log_gap_warning, unique_gaps, violations_from_summary
 from .config_manager import ConfigManager
 from .console_manager import ConsoleManager
 from .data_logger import DataLogger
@@ -661,6 +662,69 @@ class OpenMuxServer:
         self.logger.info("Started %s/%s unified adapters", running, total)
         return running
 
+    def collect_config_gaps(self, summary: Optional[Dict[str, Any]] = None) -> List[ConfigGap]:
+        """Collect every difference between the config files and the running server.
+
+        Three sources, merged without repeats: schema violations the config loader logged and
+        tolerated, ports an adapter refused to apply (an adapter keeps those until the entry
+        applies), and any failure a reload summary reported.
+
+        Args:
+            summary: A reload summary to read in addition to the live adapter state.
+
+        Returns:
+            List[ConfigGap]: Empty when the running server matches the files.
+        """
+        gaps: List[ConfigGap] = [
+            ConfigGap(section="schema", error=line)
+            for line in getattr(self.config_manager, "schema_violation_report", lambda: [])()
+        ]
+        for adapter in getattr(self, "unified_adapters", None) or []:
+            gaps.extend(self._adapter_config_gaps(adapter))
+        if summary:
+            gaps.extend(violations_from_summary(summary))
+        return unique_gaps(gaps)
+
+    def _adapter_config_gaps(self, adapter: Any) -> List[ConfigGap]:
+        """Return the config gaps one adapter recorded (issue #105).
+
+        Args:
+            adapter: A running adapter instance, or a test stand-in for one.
+
+        Returns:
+            List[ConfigGap]: The adapter's refusals, or an empty list when the adapter exposes no
+            gap state or cannot answer what type it is.
+        """
+        try:
+            # Lower-cased to match the reload summary keys ("serial", "loopback"), so one adapter
+            # is never named two different ways inside the same warning block.
+            section = str(adapter.get_adapter_type()).lower()
+            kept = set(getattr(adapter, "config_gaps_kept", None) or [])
+            entries = dict(getattr(adapter, "config_gaps", None) or {})
+        except Exception:
+            # justification: the gap report must never break a reload; an adapter that cannot
+            # report its own type keeps its own error log and is skipped in the report.
+            return []
+        return [
+            ConfigGap(section=section, port=name, error=reason, kept_previous=name in kept) for name, reason in entries.items()
+        ]
+
+    def report_config_gaps(self, where: str, summary: Optional[Dict[str, Any]] = None) -> bool:
+        """Print the config gap warning block when a config file and the server disagree.
+
+        A port a file asks for and the server does not run has no console, so a user cannot tell
+        it exists by trying it (issue #105). Logging the block is what makes it visible.
+
+        Args:
+            where: What produced the gaps, for example ``"boot"`` or ``"soft reload"``.
+            summary: A reload summary to read, when this follows a reload.
+
+        Returns:
+            bool: True when a warning block was printed.
+        """
+        source = getattr(self.config_manager, "config_path", None)
+        return log_gap_warning(self.logger, where, self.collect_config_gaps(summary), source=source)
+
     async def _run_server_loop(self):
         """Run the main server loop until shutdown."""
         try:
@@ -696,6 +760,10 @@ class OpenMuxServer:
                 return False
 
             self.is_running = True
+
+            # Anything the files ask for that is not running must not be a silent state, so the
+            # block is printed before the status banner (issue #105).
+            self.report_config_gaps("boot")
 
             # Display server information
             self._log_server_status()
@@ -983,6 +1051,14 @@ class OpenMuxServer:
         # fields (description, access groups, `power` feeds) change what those views
         # would render while publishing no port event of their own.
         self._notify_reload_applied(req_id)
+
+        # Tolerated schema violations belong in the summary the caller reads, and every gap gets
+        # its warning block (issue #105). Both are added only when something is wrong, so a clean
+        # reload returns exactly the summary shape it always did.
+        schema_lines = getattr(self.config_manager, "schema_violation_report", lambda: [])()
+        if schema_lines:
+            summary["config_violations"] = list(schema_lines)
+        self.report_config_gaps("soft reload", summary)
 
         self.logger.info("[reload-soft:%s] Completed with summary: %s", req_id, summary)
         return summary
@@ -1603,6 +1679,8 @@ class OpenMuxServer:
                 summary["started"],
                 len(summary["errors"]),
             )
+            # Adapters built by this reload report their own refusals (issue #105).
+            self.report_config_gaps("full reload", summary)
 
             self._reload_full_schedule_deferred(req_id, summary, deferred_old_wc, deferred_new_wc)
             return summary

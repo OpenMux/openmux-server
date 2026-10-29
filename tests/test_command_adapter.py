@@ -580,8 +580,11 @@ async def test_adapter_reconcile_ports_add_remove_update(monkeypatch):
         destroyed.append(name)
         adapter.ports.pop(name, None)
 
-    async def fake_create(name: str, cfg: dict) -> None:
+    async def fake_create(name: str, cfg: dict) -> CommandPort:
         created.append(name)
+        # create_port reports success by returning the port (issue #105: reconcile lists a port
+        # only when it exists afterwards, so a fake that returns None means a failed create).
+        return CommandPort(name, dict(cfg), adapter)
 
     monkeypatch.setattr(adapter, "destroy_port", fake_destroy)
     monkeypatch.setattr(adapter, "create_port", fake_create)

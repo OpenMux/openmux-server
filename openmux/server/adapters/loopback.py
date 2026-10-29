@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
+from ..access_control import InvalidWriteMode, compare_write_mode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
 
@@ -465,10 +465,29 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         self.logger.debug("Final port configurations: %s", port_configs)
         return port_configs
 
+    def prepare_port(self, port_name: str, config: Dict[str, Any]) -> LoopbackPort:
+        """Build a loopback port without starting or registering it.
+
+        Reconcile calls this for every candidate before it destroys anything (issue #105), so an
+        entry the port rejects, such as an unusable ``max_read_write_users``, is caught while the
+        running port is still in place.
+
+        Args:
+            port_name: Name the port is created under.
+            config: Raw per-port configuration.
+
+        Returns:
+            LoopbackPort: An unstarted port object the caller may keep or discard.
+
+        Raises:
+            ValueError: The entry holds a value the port rejects.
+        """
+        return LoopbackPort(port_name, dict(config), self)
+
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[LoopbackPort]:
         """Create and start a loopback port instance."""
         try:
-            port = LoopbackPort(port_name, config, self)
+            port = self.prepare_port(port_name, config)
             if await port.start():
                 self.ports[port_name] = port
                 self.logger.info("Created loopback port: %s", port_name)
@@ -481,6 +500,8 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                         self.logger.info("Registered loopback port %s with port manager", port_name)
                 except Exception:
                     self.logger.warning("Failed to register loopback port %s with port manager", port_name, exc_info=True)
+                # The entry applies now, so it is no longer a gap (issue #105).
+                self.clear_config_gap(port_name)
                 return port
             else:
                 self.logger.error("Failed to start loopback port: %s", port_name)
@@ -534,6 +555,9 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
                 port = await self.create_port(port_name, port_config)
                 if port:
                     success_count += 1
+                else:
+                    # Boot gap (issue #105): the entry is in the file, the port is not running.
+                    self.record_config_gap(port_name, "the port could not be created or started")
 
             self.logger.info("Created %s/%s loopback ports", success_count, len(port_configs))
             return success_count > 0 or len(port_configs) == 0
@@ -603,7 +627,8 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             new_config: Dict with key 'loopback_ports' as list, or direct list.
 
         Returns:
-            Summary dict: {added, removed, updated, unchanged}.
+            Summary dict: {added, removed, updated, unchanged}. When an entry did not apply, the
+            dict also carries ``failed``, ``failed_detail`` and ``kept_previous``.
         """
         items = self._reconcile_items(new_config)
         new_by_name: Dict[str, Dict[str, Any]] = {}
@@ -619,10 +644,17 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
 
         updated, unchanged = self._reconcile_common(common, new_by_name)
 
-        await self._reconcile_destroy_create(removed, added, updated, new_by_name)
-        self._reconcile_update_snapshot(new_by_name)
+        # Issue #105: build every candidate first, before anything is destroyed, so an entry that
+        # cannot become a port costs only its own change.
+        refused = self.prepare_reconcile_candidates(added + updated, new_by_name, self.ports)
+        kept_previous = sorted(name for name in refused if name in set(updated))
+        added = [name for name in added if name not in refused]
+        updated = [name for name in updated if name not in refused]
 
-        summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
+        refused.update(await self._reconcile_destroy_create(removed, added, updated, new_by_name))
+        self._reconcile_update_snapshot(new_by_name, refused)
+
+        summary = self.reconcile_summary(added, removed, updated, unchanged, refused, kept_previous)
         self.logger.info(
             "Loopback adapter %s reconcile: +%s ~%s -%s unchanged=%s",
             self.name,
@@ -650,12 +682,13 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
         """The material (port-recreating) view of one port config.
 
         Applies the same defaults as LoopbackPort.__init__ so old vs new
-        comparison is apples-to-apples. Silent normalization (wire_to_mode)
-        on both sides: the load path already logged legacy ints (issue #59).
+        comparison is apples-to-apples. compare_write_mode normalizes legacy ints
+        silently (the load path already logged them, issue #59) and keeps an unusable value
+        visible, so reconcile reports the refusal instead of hiding the typo (issue #105).
         Deliberately excludes description/access groups/power: those are
         applied in-place without a port recreate.
         """
-        mru = wire_to_mode(cfg.get("max_read_write_users", "one"))
+        mru = compare_write_mode(cfg.get("max_read_write_users", "one"))
         return {
             "echo_delay": cfg.get("echo_delay", 0.0),
             "buffer_size": cfg.get("buffer_size", 1024),
@@ -730,26 +763,46 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
 
     async def _reconcile_destroy_create(
         self, removed: List[str], added: List[str], updated: List[str], new_by_name: Dict[str, Dict[str, Any]]
-    ) -> None:
-        """Destroy removed/updated ports, then create added/updated ones."""
+    ) -> Dict[str, str]:
+        """Destroy removed/updated ports, then create added/updated ones.
+
+        Returns:
+            Dict of port name -> reason for each port that is not running afterwards (issue #105).
+        """
         for n in removed + updated:
             try:
                 await self.destroy_port(n)
             except Exception as e:
                 self.logger.error("Failed to destroy loopback port %s: %s", n, e, exc_info=True)
+        refused: Dict[str, str] = {}
         for n in added + updated:
             cfg = new_by_name.get(n)
             if not cfg:
                 continue
             try:
-                await self.create_port(n, cfg)
+                port = await self.create_port(n, cfg)
             except Exception as e:
                 self.logger.error("Failed to create loopback port %s: %s", n, e, exc_info=True)
+                refused[n] = str(e).strip() or "port could not be created or started from this entry"
+                self.record_config_gap(n, refused[n])
+                continue
+            if port is None:
+                refused[n] = "port could not be created or started from this entry"
+                self.record_config_gap(n, refused[n])
+        return refused
 
-    def _reconcile_update_snapshot(self, new_by_name: Dict[str, Dict[str, Any]]) -> None:
-        """Replace the in-memory loopback_ports config snapshot."""
+    def _reconcile_update_snapshot(
+        self, new_by_name: Dict[str, Dict[str, Any]], refused: Optional[Dict[str, str]] = None
+    ) -> None:
+        """Replace the in-memory loopback_ports config snapshot.
+
+        Refused entries (issue #105) are left out: the snapshot is what the next reload compares
+        against, and keeping an entry that never became a port made every later reload report it
+        as a new port again.
+        """
+        skipped = set(refused or {})
         try:
-            self.config["loopback_ports"] = [new_by_name[k] for k in sorted(new_by_name.keys())]
+            self.config["loopback_ports"] = [new_by_name[k] for k in sorted(set(new_by_name) - skipped)]
         except Exception:
             # justification: optional snapshot; the authoritative config is on disk
             pass

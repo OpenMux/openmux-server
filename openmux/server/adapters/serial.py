@@ -14,7 +14,7 @@ import os
 import stat
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
-from ..access_control import WRITE_MODES, InvalidWriteMode, parse_write_mode, wire_to_mode
+from ..access_control import WRITE_MODES, InvalidWriteMode, compare_write_mode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
 
@@ -877,6 +877,11 @@ class SerialAdapter(BaseGenericAdapter):
         An empty or missing port list is legitimate (bootstrap path, test
         setup) and is left for ``start()`` to warn about; ports are created
         dynamically afterward via ``reconcile_ports``.
+
+        One unusable entry does not stop the others (issue #105): the port is
+        recorded in ``config_gaps`` and the server lists it at boot. Before
+        this, the exception reached the factory, which dropped the whole serial
+        section, so one bad ``parity`` disabled every console on the box.
         """
         # Canonical shape: a list of port entries. The factory wraps the bare
         # section list under 'serial_ports'; a bare list reaches this point in
@@ -906,17 +911,20 @@ class SerialAdapter(BaseGenericAdapter):
                 continue
 
             try:
-                # Build the flat per-port config + wrapper (validates; raises
-                # on a bad value, which the except below reports and re-raises).
+                # Build the flat per-port config + wrapper. Construction validates every field
+                # and raises on a bad value; the except below reports it and moves on.
                 port_wrapper = self._build_port(port_config)
                 self.serial_ports[port_wrapper.name] = port_wrapper
 
                 self.logger.info("Configured serial port %s -> %s", port_wrapper.name, port_wrapper.device)
 
             except Exception as e:
-                port_name = port_config.get("name", "unknown") if isinstance(port_config, dict) else "unknown"
+                # justification (issue #105): a port that cannot be built is recorded as a config
+                # gap and reported in the boot warning block; aborting here used to disable every
+                # other port of this adapter, which is the worse outcome for a running box.
+                port_name = str(port_config.get("name", "unknown"))
                 self.logger.error("Failed to configure serial port %s: %s", port_name, e, exc_info=True)
-                raise
+                self.record_config_gap(port_name, e)
 
         # One port per unix device (issue #57): flag ports that share a device
         # with an earlier port, before ``start()`` opens anything.
@@ -1012,6 +1020,27 @@ class SerialAdapter(BaseGenericAdapter):
         pass
 
     # Required abstract methods from BaseGenericAdapter
+    def prepare_port(self, port_name: str, config: Dict[str, Any]) -> SerialPortWrapper:
+        """Build a port from a config dict without starting or registering it.
+
+        Reconcile calls this for every candidate before it destroys anything (issue #105). A
+        config that the port constructor rejects is caught here, while the running port is still
+        in place, so a typo costs nothing but the change it asked for.
+
+        Args:
+            port_name: Name the port is created under; a ``name`` key inside ``config`` is replaced.
+            config: Raw per-port configuration.
+
+        Returns:
+            SerialPortWrapper: An unstarted port object the caller may discard.
+
+        Raises:
+            ValueError: The config holds a field value the port rejects.
+        """
+        cfg = dict(config)
+        cfg["name"] = port_name
+        return self._build_port(cfg)
+
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
         """Create and start a serial port from a config dict.
 
@@ -1019,11 +1048,9 @@ class SerialAdapter(BaseGenericAdapter):
             SerialPortWrapper on success, None on failure.
         """
         try:
-            # The port is created under `port_name` regardless of any `name`
-            # key inside the dict (matches the old create_port behavior).
-            cfg = dict(config)
-            cfg["name"] = port_name
-            wrapper = self._build_port(cfg)
+            # The port is created under `port_name` regardless of any `name` key inside the
+            # dict, which is also how reconcile pre-validates an entry (issue #105).
+            wrapper = self.prepare_port(port_name, config)
             self.serial_ports[wrapper.name] = wrapper
             # One port per unix device (issue #57): recompute after the new port
             # joins the set so a duplicate is flagged before ``start()`` below
@@ -1033,6 +1060,8 @@ class SerialAdapter(BaseGenericAdapter):
             await wrapper.start()
             if self.main_port_manager:
                 await self.main_port_manager.register_unified_port(wrapper.name, wrapper, self)
+            # The entry applies now, so it is no longer a gap (issue #105).
+            self.clear_config_gap(port_name)
             return wrapper
         except Exception as e:
             self.logger.error("Failed to create serial port %s: %s", port_name, e, exc_info=True)
@@ -1133,7 +1162,10 @@ class SerialAdapter(BaseGenericAdapter):
                         {'serial_ports': [...]}.
 
         Returns:
-            Summary dict with counts and details: {added, removed, updated, unchanged}.
+            Summary dict with the port names in each class: {added, removed, updated, unchanged}.
+            When an entry did not apply, the dict also carries ``failed`` (names),
+            ``failed_detail`` (name -> reason and whether the old port was kept) and
+            ``kept_previous`` (names). A clean reload reports exactly the four lists.
         """
         new_ports_list = self._reconcile_normalize(new_config)
 
@@ -1151,25 +1183,30 @@ class SerialAdapter(BaseGenericAdapter):
         common = sorted(old_names & new_names)
 
         updated, unchanged = self._reconcile_common(common, new_by_name)
+
+        # Issue #105: build every candidate first, before anything is destroyed. An entry the
+        # port constructor rejects then costs only its own change; the running port keeps
+        # serving the config it already has and its clients keep their session.
+        refused = self.prepare_reconcile_candidates(added + updated, new_by_name, self.serial_ports)
+        kept_previous = sorted(name for name in refused if name in set(updated))
+        added = [name for name in added if name not in refused]
+        updated = [name for name in updated if name not in refused]
+
         # Apply removals and updates (stop/unregister existing), then
         # apply additions and re-creations.
         await self._reconcile_destroy(removed + updated)
-        await self._reconcile_rebuild(added + updated, new_by_name)
-        self._reconcile_snapshot(new_by_name)
+        refused.update(await self._reconcile_rebuild(added + updated, new_by_name))
+        self._reconcile_snapshot(new_by_name, refused)
 
-        summary = {
-            "added": added,
-            "removed": removed,
-            "updated": updated,
-            "unchanged": unchanged,
-        }
+        summary = self.reconcile_summary(added, removed, updated, unchanged, refused, kept_previous)
         self.logger.info(
-            "Serial adapter %s reconcile summary: +%s ~%s -%s =unchanged %s",
+            "Serial adapter %s reconcile summary: +%s ~%s -%s =unchanged %s refused %s",
             self.name,
             len(added),
             len(updated),
             len(removed),
             len(unchanged),
+            len(refused),
         )
         return summary
 
@@ -1220,9 +1257,10 @@ class SerialAdapter(BaseGenericAdapter):
         # fills absent keys from SERIAL_PORT_DEFAULTS) so the comparison
         # is apples-to-apples when the port was built from a full dict.
         mru = port_cfg.get("max_read_write_users")
-        # Normalize to the stored mode (issue #59) silently on both sides:
-        # the load path already emitted the deprecation line for legacy ints.
-        mru = wire_to_mode(mru)
+        # Normalize to the stored mode (issue #59) silently: the load path already emitted the
+        # deprecation line for legacy ints. compare_write_mode keeps an unusable value visible, so
+        # reconcile reports the refusal instead of hiding the typo (issue #105).
+        mru = compare_write_mode(mru)
         return {
             "device": port_cfg.get("device"),
             "baudrate": port_cfg.get("baudrate", 9600),
@@ -1312,24 +1350,47 @@ class SerialAdapter(BaseGenericAdapter):
             except Exception as e:
                 self.logger.error("Failed to destroy serial port %s: %s", name, e, exc_info=True)
 
-    async def _reconcile_rebuild(self, names: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> None:
-        """Create the added + re-created ports from the new config."""
+    async def _reconcile_rebuild(self, names: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+        """Create the added + re-created ports from the new config.
+
+        Args:
+            names: Ports to create.
+            new_by_name: New port configs indexed by name.
+
+        Returns:
+            Dict of port name -> reason for each port that is not running afterwards (issue
+            #105). ``create_port`` already logs the failure; this reports it upward so the reload
+            summary and the warning block name the port instead of hiding it.
+        """
+        refused: Dict[str, str] = {}
         for name in names:
             cfg = new_by_name.get(name)
             if not cfg:
                 continue
             try:
-                await self.create_port(name, cfg)
+                port = await self.create_port(name, cfg)
             except Exception as e:
                 self.logger.error("Failed to create serial port %s: %s", name, e, exc_info=True)
+                refused[name] = str(e).strip() or "port could not be created or started from this entry"
+                self.record_config_gap(name, refused[name])
+                continue
+            if port is None:
+                refused[name] = "port could not be created or started from this entry"
+                self.record_config_gap(name, refused[name])
+        return refused
 
-    def _reconcile_snapshot(self, new_by_name: Dict[str, Dict[str, Any]]) -> None:
+    def _reconcile_snapshot(self, new_by_name: Dict[str, Dict[str, Any]], refused: Optional[Dict[str, str]] = None) -> None:
         """Update the adapter config snapshot to the new state
         (canonical 'serial_ports' key, the same shape __init__ consumed).
+
+        Entries that were refused (issue #105) are left out. The snapshot is what the next reload
+        compares against, and keeping an entry that never became a port made every later reload
+        report it as a new port again.
         """
+        skipped = set(refused or {})
         try:
             if isinstance(self.config, dict):
-                self.config["serial_ports"] = [new_by_name[n] for n in sorted(new_by_name.keys())]
+                self.config["serial_ports"] = [new_by_name[n] for n in sorted(set(new_by_name) - skipped)]
         except Exception:
             # justification: optional snapshot; the authoritative config is on disk
             pass

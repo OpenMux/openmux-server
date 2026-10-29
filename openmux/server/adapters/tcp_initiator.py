@@ -24,7 +24,7 @@ import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from ..access_control import InvalidWriteMode, parse_write_mode, wire_to_mode
+from ..access_control import InvalidWriteMode, compare_write_mode, parse_write_mode, wire_to_mode
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .lifecycle import PortState
 from .protocols import get_handler
@@ -582,15 +582,35 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             return False
         return True
 
+    def prepare_port(self, port_name: str, config: Dict[str, Any]) -> TcpInitiatorPort:
+        """Build a TCP initiator port without connecting or registering it.
+
+        Reconcile calls this for every candidate before it destroys anything (issue #105), so an
+        entry with no ``host`` or no ``port`` is caught while the running port is still in place.
+
+        Args:
+            port_name: Name the port is created under.
+            config: Raw per-port configuration.
+
+        Returns:
+            TcpInitiatorPort: An unconnected port object the caller may keep or discard.
+
+        Raises:
+            ValueError: The entry has no host, no port, or a value the port rejects.
+        """
+        return TcpInitiatorPort(port_name, dict(config), self, meta_notify=self._make_notifier())
+
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
         try:
-            tcp_port = TcpInitiatorPort(port_name, config, self, meta_notify=self._make_notifier())
+            tcp_port = self.prepare_port(port_name, config)
             self.wire_port_data_callback(tcp_port, self._handle_port_data)
             if await tcp_port.start():
                 self.ports[port_name] = tcp_port
                 self.logger.info("TCP initiator port %s created successfully", port_name)
                 if hasattr(self, "main_port_manager") and self.main_port_manager:
                     await self.main_port_manager.register_unified_port(port_name, tcp_port, self)
+                # The entry applies now, so it is no longer a gap (issue #105).
+                self.clear_config_gap(port_name)
                 return tcp_port
             else:
                 self.logger.error("Failed to start TCP initiator port %s", port_name)
@@ -645,8 +665,11 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                     self.logger.info("TCP initiator port %s started (connecting in background)", port_name)
                 else:
                     self.logger.error("Failed to start TCP initiator port %s", port_name)
+                    # Boot gap (issue #105): the entry is in the file, the port is not running.
+                    self.record_config_gap(port_name, "the port could not be started")
             except Exception as e:
                 self.logger.error("Error creating TCP initiator port %s: %s", port_name, e, exc_info=True)
+                self.record_config_gap(port_name, e)
         self.logger.info(
             "TCP initiator adapter %s started with %s/%s ports (connections in progress)",
             self.name,
@@ -703,7 +726,8 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
                         or a direct list of port dicts.
 
         Returns:
-            Summary: {added, removed, updated, unchanged}.
+            Summary: {added, removed, updated, unchanged}. When an entry did not apply, the dict
+            also carries ``failed``, ``failed_detail`` and ``kept_previous``.
         """
         items = self._reconcile_normalize(new_config)
 
@@ -719,12 +743,20 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         common = sorted(old_names & new_names)
 
         updated, unchanged = self._reconcile_common(common, new_by_name)
+
+        # Issue #105: build every candidate first, before anything is destroyed. An entry that
+        # cannot become a port then costs only its own change instead of a live console.
+        refused = self.prepare_reconcile_candidates(added + updated, new_by_name, self.ports)
+        kept_previous = sorted(name for name in refused if name in set(updated))
+        added = [name for name in added if name not in refused]
+        updated = [name for name in updated if name not in refused]
+
         # Remove then recreate updated; remove deleted
         await self._reconcile_destroy(removed + updated)
-        await self._reconcile_rebuild(added + updated, new_by_name)
-        self._reconcile_snapshot(new_by_name)
+        refused.update(await self._reconcile_rebuild(added + updated, new_by_name))
+        self._reconcile_snapshot(new_by_name, refused)
 
-        return {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
+        return self.reconcile_summary(added, removed, updated, unchanged, refused, kept_previous)
 
     def _reconcile_normalize(self, new_config: Any) -> List[Any]:
         """Normalize incoming configuration to a list of port dicts.
@@ -749,9 +781,9 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
         protocol_cfg = cfg.get("protocol", {})
         protocol_type = (protocol_cfg.get("type", "") or "plain").lower()
         _default_batching = protocol_type == "plain"
-        # Silent normalization (wire_to_mode) so a raw legacy int compares equal
-        # to its migrated mode string (issue #59/#60).
-        mru = wire_to_mode(cfg.get("max_read_write_users", 1))
+        # compare_write_mode normalizes a legacy int silently (issue #59/#60) and keeps an
+        # unusable value visible, so reconcile reports the refusal instead of hiding it (#105).
+        mru = compare_write_mode(cfg.get("max_read_write_users", 1))
         return {
             "host": cfg.get("host", ""),
             "port": cfg.get("port", 0),
@@ -860,21 +892,41 @@ class TcpInitiatorAdapter(BaseGenericAdapter):
             except Exception as e:
                 self.logger.error("Failed to destroy TCP initiator port %s: %s", n, e, exc_info=True)
 
-    async def _reconcile_rebuild(self, names: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> None:
-        """Create the added + re-created ports from the new config."""
+    async def _reconcile_rebuild(self, names: List[str], new_by_name: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+        """Create the added + re-created ports from the new config.
+
+        Returns:
+            Dict of port name -> reason for each port that is not running afterwards (issue
+            #105). ``create_port`` logs the failure; this reports it upward so the reload summary
+            and the warning block name the port instead of hiding it.
+        """
+        refused: Dict[str, str] = {}
         for n in names:
             cfg = new_by_name.get(n)
             if not cfg:
                 continue
             try:
-                await self.create_port(n, cfg)
+                port = await self.create_port(n, cfg)
             except Exception as e:
                 self.logger.error("Failed to create TCP initiator port %s: %s", n, e, exc_info=True)
+                refused[n] = str(e).strip() or "port could not be created or started from this entry"
+                self.record_config_gap(n, refused[n])
+                continue
+            if port is None:
+                refused[n] = "port could not be created or started from this entry"
+                self.record_config_gap(n, refused[n])
+        return refused
 
-    def _reconcile_snapshot(self, new_by_name: Dict[str, Dict[str, Any]]) -> None:
-        """Update the config snapshot to the new state (canonical key)."""
+    def _reconcile_snapshot(self, new_by_name: Dict[str, Dict[str, Any]], refused: Optional[Dict[str, str]] = None) -> None:
+        """Update the config snapshot to the new state (canonical key).
+
+        Refused entries (issue #105) are left out: the snapshot is what the next reload compares
+        against, and keeping an entry that never became a port made every later reload report it
+        as a new port again.
+        """
+        skipped = set(refused or {})
         try:
-            self.config["tcp_initiator_ports"] = [new_by_name[k] for k in sorted(new_by_name.keys())]
+            self.config["tcp_initiator_ports"] = [new_by_name[k] for k in sorted(set(new_by_name) - skipped)]
         except Exception:
             # justification: optional snapshot; the authoritative config is on disk
             pass

@@ -30,6 +30,18 @@ from openmux.server.adapters.command import CommandAdapter
 _NEW = {"name": "a", "command": "echo hi"}
 
 
+class _CreatedPort:
+    """Stand-in for the port object a successful ``create_port`` returns.
+
+    Reconcile treats a returned port as a port that exists, and ``None`` as a failed create
+    (issue #105). These tests pin other branches, so they only need the return value.
+    """
+
+    def __init__(self, name: str, cfg: dict):
+        self.name = name
+        self.config = cfg
+
+
 class _BaseMatch:
     """Material-cfg-matching port for {"command":"echo hi"} (see test names)."""
 
@@ -111,6 +123,9 @@ def _fakes(cap):
 
     async def create(name, cfg, **_):
         cap["created"].append((name, cfg))
+        # create_port reports success by returning the port (issue #105: reconcile lists a port
+        # only when it exists afterwards, so a fake that returns None means a failed create).
+        return _CreatedPort(name, cfg)
 
     return destroy, create
 
@@ -230,7 +245,11 @@ async def test_reconcile_create_raises_on_added():
     adapter.destroy_port = destroy
     adapter.create_port = bad_create
     summary = await adapter.reconcile_ports([_NEW])
-    assert summary["added"] == ["a"]
+    # Issue #105: a port that is not running afterwards is not listed as added. It is reported as
+    # failed, so the reload warning names it instead of hiding a port nobody can reach.
+    assert summary["added"] == []
+    assert summary["failed"] == ["a"]
+    assert summary["failed_detail"]["a"]["error"] == "create blocked for test"
     assert destroyed == []
 
 

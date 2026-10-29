@@ -9,7 +9,7 @@ capability discovery, lifecycle management, and dynamic port operations.
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 if TYPE_CHECKING:
     from .lifecycle import DynamicPortManager, PortLifecycleEvent
@@ -64,6 +64,130 @@ class BaseGenericAdapter(ABC):
         self.port_manager: Optional["DynamicPortManager"] = None
         # Reference to the unified/global port manager; provided after construction.
         self.main_port_manager: Optional[Any] = None
+        # Config entries this adapter refused to apply (issue #105): port name -> the reason the
+        # adapter gave. A refused port does not exist, so it has no console and a reboot does not
+        # create it. ``config_gaps_kept`` lists the refused updates whose running port was kept,
+        # so those users still have their session. The server prints both at boot and on reload.
+        self.config_gaps: Dict[str, str] = {}
+        self.config_gaps_kept: List[str] = []
+
+    def record_config_gap(self, port_name: str, error: Any, kept_previous: bool = False) -> None:
+        """Record one config entry that did not become a running port.
+
+        Args:
+            port_name: Name the config file gave the port.
+            error: Reason the adapter refused it; an exception is rendered as its message.
+            kept_previous: True when the previously running port was kept instead.
+        """
+        reason = str(error).strip() if error is not None else ""
+        self.config_gaps[port_name] = reason or "no reason recorded"
+        if kept_previous and port_name not in self.config_gaps_kept:
+            self.config_gaps_kept.append(port_name)
+
+    def clear_config_gap(self, port_name: str) -> None:
+        """Drop recorded gaps for a port that now exists (issue #105).
+
+        Args:
+            port_name: Port name that applied successfully.
+        """
+        self.config_gaps.pop(port_name, None)
+        if port_name in self.config_gaps_kept:
+            self.config_gaps_kept.remove(port_name)
+
+    def prepare_port(self, port_name: str, config: Dict[str, Any]) -> Any:
+        """Build a port object from a config entry without starting or registering it.
+
+        Reconcile calls this before it destroys anything, so a config the port rejects is caught
+        while the running port is still in place (issue #105). Adapters whose port constructor can
+        reject a config override this. The default says the adapter cannot pre-validate, which
+        leaves reconcile behaving as it did before.
+
+        Args:
+            port_name: Name the port is created under.
+            config: Raw per-port configuration.
+
+        Returns:
+            An unstarted port object, or None when this adapter has nothing to pre-validate.
+
+        Raises:
+            NotImplementedError: The adapter does not support pre-validation.
+            ValueError: The config holds a value the port rejects.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support port pre-validation")
+
+    def prepare_reconcile_candidates(
+        self, names: List[str], new_by_name: Dict[str, Dict[str, Any]], running: Any
+    ) -> Dict[str, str]:
+        """Pre-validate the ports a reload wants to create (issue #105).
+
+        Args:
+            names: Port names the reload wants to create (added plus re-created).
+            new_by_name: New port configs indexed by name.
+            running: Current port registry (used to say whether a running port is kept).
+
+        Returns:
+            Dict of port name -> reason, for each entry the adapter refuses. Empty when every
+            entry is buildable or the adapter cannot pre-validate. Each refusal is also recorded
+            as a config gap, so the boot or reload warning block can name it.
+        """
+        refused: Dict[str, str] = {}
+        running_names = set(running.keys()) if isinstance(running, dict) else set(running or [])
+        for name in names:
+            cfg = new_by_name.get(name)
+            if not cfg:
+                continue
+            try:
+                self.prepare_port(name, cfg)
+            except NotImplementedError:
+                return {}
+            except Exception as e:
+                reason = str(e).strip() or "the port rejected its own configuration"
+                self.logger.error("%s adapter %s rejects port %s: %s", self.get_adapter_type(), self.name, name, reason)
+                refused[name] = reason
+                self.record_config_gap(name, reason, kept_previous=name in running_names)
+        return refused
+
+    def reconcile_summary(
+        self,
+        added: List[str],
+        removed: List[str],
+        updated: List[str],
+        unchanged: List[str],
+        refused: Optional[Dict[str, str]] = None,
+        kept_previous: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Build a reconcile summary that lists only ports the reload applied (issue #105).
+
+        Args:
+            added: Names the reload created.
+            removed: Names the reload deleted.
+            updated: Names the reload re-created.
+            unchanged: Names the reload left alone.
+            refused: Name -> reason for entries that did not apply.
+            kept_previous: Refused names whose running port was kept.
+
+        Returns:
+            The four name lists, plus ``failed``, ``failed_detail`` and ``kept_previous`` only when
+            something refused. A refused name never appears in ``added`` or ``updated``: reporting
+            an unusable entry as new is what made it reappear on every later reload.
+        """
+        summary: Dict[str, Any] = {
+            "added": list(added),
+            "removed": list(removed),
+            "updated": list(updated),
+            "unchanged": list(unchanged),
+        }
+        refused = refused or {}
+        if not refused:
+            return summary
+        kept = set(kept_previous or [])
+        summary["added"] = [name for name in summary["added"] if name not in refused]
+        summary["updated"] = [name for name in summary["updated"] if name not in refused]
+        summary["failed"] = sorted(refused)
+        summary["failed_detail"] = {name: {"error": refused[name], "kept_previous": name in kept} for name in sorted(refused)}
+        if kept:
+            summary["kept_previous"] = [name for name in (kept_previous or []) if name in refused]
+        return summary
 
     def _set_running(self, running: bool) -> None:
         """Record a start result in ``is_running``.

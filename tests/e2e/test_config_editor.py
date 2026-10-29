@@ -1,4 +1,4 @@
-"""CFG: what the Config Editor changes, when it changes it, and who may ask (CFG-01 to CFG-17).
+"""CFG: what the Config Editor changes, when it changes it, and who may ask (CFG-01 to CFG-18).
 
 The editor is one page over four owners, and each layer can be right while the page is wrong, so every scenario here
 states the pair a person would otherwise reconcile by hand:
@@ -12,8 +12,9 @@ states the pair a person would otherwise reconcile by hand:
   (``reload_applied``), both fed by the socket that page already holds open.
 
 Two facts about these worlds are simulations that matter. The ``dummy`` PDU driver answers instantly and needs no
-device, so a PDU that appears in the file always starts. And the one adapter failure this tier can produce on demand
-is a Serial port whose device path no host has, which the server starts offline rather than refusing.
+device, so a PDU that appears in the file always starts. And the two adapter failures this tier can produce on demand
+are a Serial port whose device path no host has, which the server starts offline rather than refusing, and a Serial
+entry holding a value the port rejects, which the server reports instead of starting (CFG-18).
 
 Unlike the plan for this suite, no scenario depends on another: each builds its server, makes its edit, and proves
 its own save-then-reload-then-see order in one run. That order is a product rule, so it belongs inside the scenario
@@ -49,8 +50,16 @@ MISSING_DEVICE = "Missing required: device"
 FULL_RELOAD_CONFIRM = "Full reload will stop and recreate adapters, briefly interrupting connections. Continue?"
 #: A device path no host has, for the one adapter this tier can force to come up with nothing behind it.
 ABSENT_TTY = "/dev/openmux-e2e-absent-serial"
+#: A second absent path, so two ports in one world never share a device (one port per device, issue #57).
+ABSENT_TTY_2 = "/dev/openmux-e2e-absent-serial-2"
 #: The reason the status gives for that port, and the line the server logs once for it.
 NO_SUCH_DEVICE = "does not exist"
+#: The token every line of the config gap warning block carries (``config_gaps.GAP_MARKER``).
+GAP_MARKER = "CONFIG_GAP"
+#: How ``config_gaps.format_warning`` prefixes one listed gap, so a test can wait for that one line.
+GAP_ITEM = f"{GAP_MARKER}   "
+#: The reason a Serial port gives for a parity letter it does not accept.
+BAD_PARITY_REASON = "Parity must be N, E, O, M, or S"
 
 
 # --- editor requests -----------------------------------------------------------
@@ -344,6 +353,26 @@ def _add_telnet_listener(config: Dict[str, Any], name: str, port: int) -> Dict[s
 def _with_absent_serial(builder: Any, name: str) -> Any:
     """Configure a Serial port whose device no host has, which is what forces an adapter to start offline."""
     return builder.with_serial_port(name, ABSENT_TTY)
+
+
+def _edit_serial_ports_in_file(world: Any, edit: Any) -> None:
+    """Rewrite ``serial_ports`` in server.yaml, the way a person with a text editor would.
+
+    The Config Editor validates a payload before it writes, so it cannot be the way in: what issue
+    #105 is about is a file that already holds an entry the server cannot build. ``edit`` receives
+    the current ``serial_ports`` list and changes it in place; the server reads the file on the
+    next reload.
+
+    Args:
+        world: The running world whose ``server.yaml`` is rewritten.
+        edit: Callable handed the list of Serial port entries.
+    """
+    path = world.config_dir / "server.yaml"
+    config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    ports = list(config.get("serial_ports") or [])
+    edit(ports)
+    config["serial_ports"] = ports
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
 
 # ===============================================================================
@@ -919,3 +948,66 @@ def test_cfg17_a_port_whose_device_is_missing_is_listed_as_offline_with_the_reas
     assert viewer.mode() == "read-only", view
     editor = _open_editor(console.user("web:admin", world, user="admin"))
     assert "dead1" in _ports_view_text(editor), _ports_view_text(editor)[:400]
+
+
+# ===============================================================================
+# A config entry the server cannot build, which must never be a silent state
+# ===============================================================================
+
+
+@surfaces("http")
+def test_cfg18_a_port_the_server_cannot_build_is_named_in_the_log_and_never_reported_as_added(servers, api_for_server):
+    """One unusable Serial entry costs that one port, and the server says so out loud (issue #105).
+
+    A person edits server.yaml by hand and one entry holds a parity the port rejects, so no port
+    object exists for it: plugging a device in cannot bring it up, and a status page slot would only
+    offer a console that cannot open. Before this, a reload answered ``added: [typo1]`` for it on
+    every later reload, the boot dropped every Serial port of that adapter for one bad letter, and
+    the one log line naming it sat unread between the banner and the next message.
+    """
+    unusable = {"name": "typo1", "description": "hand-edited", "device": ABSENT_TTY_2, "baudrate": 9600, "parity": "Q"}
+    world = servers(
+        name="gap",
+        loopback=("keep",),
+        telnet_kwargs={"require_auth": True},
+        configure=lambda builder: _with_absent_serial(builder, "live1"),
+        start=True,
+    )
+    api = api_for_server(world)
+    step("the hand edit lands in the file, next to a port that does work")
+    _edit_serial_ports_in_file(world, lambda ports: ports.append(dict(unusable)))
+    assert "typo1" in world.config_text(), "the edit never reached the file"
+    step("the soft reload keeps the good port and reports the unusable one as failed, never as added")
+    mark = len(world.log_lines())
+    summary = _summary(_reload(api, "soft"))
+    serial = _reconciled(summary, "serial")
+    assert serial["failed"] == ["typo1"], serial
+    assert BAD_PARITY_REASON in serial["failed_detail"]["typo1"]["error"], serial
+    assert serial["failed_detail"]["typo1"]["kept_previous"] is False, serial
+    assert "typo1" not in serial["added"], serial
+    assert "live1" in serial["unchanged"], serial
+    assert "typo1" not in api.port_names(), f"the unusable entry took a port slot: {api.status()}"
+    step("the tolerated schema violation reaches the caller too")
+    assert any("parity" in str(line).lower() for line in summary.get("config_violations") or []), summary
+    step("one warning block in the log names the port, the reason, and the schema violation")
+    # The whole block is one log call, and the thread that fills log_lines() runs behind the reply, so wait for the
+    # line under test instead of reading the lines back straight away, which sees the first line only.
+    gap_line = world.wait_for_log(f"{GAP_ITEM}serial/typo1:", since=mark)
+    assert BAD_PARITY_REASON in gap_line, gap_line
+    schema_line = world.wait_for_log(f"{GAP_ITEM}schema", since=mark)
+    assert "serial_ports[1].parity" in schema_line, schema_line
+    written = world.log_lines()[mark:]
+    marked = [index for index, line in enumerate(written) if GAP_MARKER in line]
+    assert all(GAP_MARKER in line for line in written[marked[0] : marked[-1] + 1]), "a block line lost the marker"
+    step("the same file on the next reload is still a failure, and still never an add")
+    again = _reconciled(_summary(_reload(api, "soft")), "serial")
+    assert again["failed"] == ["typo1"], again
+    assert "typo1" not in again.get("added", []), again
+    step("fixing the file brings the port up and clears it from the reports")
+    _edit_serial_ports_in_file(world, lambda ports: [p.update(parity="N") for p in ports if p.get("name") == "typo1"])
+    fixed = _reconciled(_summary(_reload(api, "soft")), "serial")
+    assert "typo1" in fixed["added"], fixed
+    assert "failed" not in fixed, fixed
+    assert "typo1" in api.port_names(), api.status()
+    later = _reconciled(_summary(_reload(api, "soft")), "serial")
+    assert "failed" not in later and "typo1" in later["unchanged"], later

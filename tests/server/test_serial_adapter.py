@@ -161,6 +161,9 @@ async def test_reconcile_ports_uses_overridable_destroy_and_create(monkeypatch):
 
     async def fake_create_port(self, port_name, cfg):
         created.append((port_name, cfg))
+        # create_port reports success by returning the port (issue #105: reconcile lists a port
+        # only when it exists afterwards, so a fake that returns None means a failed create).
+        return _make_spw(device=cfg["device"], name=port_name)
 
     monkeypatch.setattr(SerialAdapter, "destroy_port", fake_destroy_port)
     monkeypatch.setattr(SerialAdapter, "create_port", fake_create_port)
@@ -177,6 +180,8 @@ async def test_reconcile_ports_uses_overridable_destroy_and_create(monkeypatch):
     assert summary["updated"] == ["a"]
     assert summary["removed"] == ["b"]
     assert summary["added"] == ["c"]
+    # Nothing was refused, so the summary keeps exactly its four lists (issue #105).
+    assert set(summary) == {"added", "removed", "updated", "unchanged"}
     assert set(destroyed) == {"a", "b"}
     assert {name for name, _ in created} == {"a", "c"}
 

@@ -26,6 +26,12 @@ Changes since v1.0.4 (2026-10-19).
   ACL can then browse and attach to any port (issue #100).
 
 ### Behavior changes (no config change required)
+- **One unusable port entry no longer costs every port of its kind.** A `serial_ports` entry in `server.yaml` holding a
+  value the port rejects — a `parity` letter outside `N`, `E`, `O`, `M`, `S` is one — used to abort the whole Serial
+  adapter at startup. The server started no Serial port at all, and only fixing that entry and restarting brought the
+  others back. It now starts the ports it can build and reports the one it cannot (issue #105). The same rule covers a
+  reload: the server builds each new or changed port before it touches a running one, so a config it refuses leaves the
+  running port serving its previous config with its consoles attached, instead of destroying it and then failing.
 - **A full reload no longer leaves the web console down while a browser page is open.** A full reload restarts the web
   console, and that restart waited for every request the old console had started. A page holds two of them open: its
   console stream and `/ws/events`. The wait therefore never ended, so the old console kept the port and the new one
@@ -112,6 +118,14 @@ Changes since v1.0.4 (2026-10-19).
   the Port. No config key changed.
 
 ### Web console and observability
+- **A reload now names what it could not apply** (issue #105). When part of the config on disk did not reach the running
+  server, the server prints one warning block to its log, and every line of that block starts with `CONFIG_GAP`: the
+  file, each entry that stayed unapplied with the server's own reason, and a note naming a port that kept its previous
+  config. A soft or full reload answer from the Config Editor carries the same facts. An adapter that refused something
+  reports `failed`, with `failed_detail` holding `error` and `kept_previous` for each name, and the answer carries
+  `config_violations` — the schema problems the server logs and still runs. Those keys appear only when something
+  failed, so an answer that means "everything applied" reads as it did before. A reload that applied most of a file
+  still answers `ok: true`: a bad entry never turns the whole answer into a failed one.
 - **Web console pages ask for their assets by version.** Each page now requests its scripts and stylesheets as
   `/static/<path>?v=<version>`, for example `/static/js/console.js?v=1.0.5`. A browser keeps an asset until its URL
   changes, so an upgrade used to leave an open or reloadable page running the previous release's script. Nothing to clear

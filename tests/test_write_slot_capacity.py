@@ -18,6 +18,7 @@ from openmux.server.access_control import (
     InvalidWriteMode,
     capacity_from_wire,
     capacity_to_wire,
+    compare_write_mode,
     holder_id_short,
     parse_write_mode,
     wire_to_mode,
@@ -139,6 +140,18 @@ class TestCapacityMapping:
         # Missing/broken metadata falls back to one (never unlimited).
         assert wire_to_mode(None) == "one"
         assert wire_to_mode("garbage") == "one"
+
+    def test_compare_write_mode_keeps_an_unusable_config_value(self):
+        """Issue #105: a config typo must stay visible to the reconcile comparison.
+
+        wire_to_mode maps anything unknown to "one", which makes a bad value look unchanged, so
+        reconcile keeps the running port and reports nothing. The comparison helper must not.
+        """
+        assert compare_write_mode("multiple") == "multiple"
+        assert compare_write_mode(2) == "multiple"  # legacy int still migrates silently
+        assert compare_write_mode(None) == "one"  # absent key keeps the default
+        assert compare_write_mode("two") == "two"
+        assert compare_write_mode(True) is True
 
     def test_capacity_from_wire(self):
         assert capacity_from_wire(0) == 0.0
