@@ -1,10 +1,12 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 6. The harness, the `LIFECYCLE` suite, the scenario index, the browser proof,
-the `AUTH` suite driven over HTTP, the fourteen `CON` console scenarios driven in Chromium, the twenty `RW`
-write-slot scenarios, the nineteen `PWR` power scenarios, and the seventeen `CFG` Config Editor scenarios run green.
-Phases 7-9 are not written; see **Build status** near the end.
-**Date:** 2026-10-28
+**Status:** Implemented through Phase 6: 101 scenarios in eight suites, listed in
+[`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the two `IDX` index
+scenarios, the browser proof, the ten `AUTH` scenarios driven over HTTP, the fourteen `CON` console scenarios driven
+in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the twenty `CFG` Config Editor
+scenarios, and the five `TIM` story-recorder scenarios run green. Phases 7-9 are not written; see
+**Build status** near the end.
+**Date:** 2026-10-30
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
 and Telnet at the same time.
 
@@ -32,19 +34,29 @@ The suite targets the parts a unit test cannot reach:
 
 ---
 
-## Current state
+## Starting state
 
-| What exists | Coverage | Gap |
+What existed before Phase 0, and the gap each part left. For the scenarios that exist today, read
+[`docs/E2E_TESTS.md`](../E2E_TESTS.md): `make e2e-doc` rewrites that file, and `IDX-02` fails when the committed copy
+is older than the tests.
+
+| What existed then | Coverage | Gap then open |
 |---|---|---|
 | `tests/` unit and component tests (about 3000 items) | Adapters, managers, ACL, power drivers, protocol edge cases | No test starts the server process. No browser. |
 | `scripts/smoke_workflow.py` + `config/integration_test.yaml` | Starts the server, one CLI session, Loopback round trip | Manual only. No `make` target, no assertion depth. |
 | `docs/SMOKE_TEST.md` | How to run that script by hand | Documents the manual path, not a pytest tier. |
 | `tests/README.md` | Run `pytest`, pick a marker, add a docstring | Points at bare `pytest`, not the `make test-*` targets, and advertises `integration`, which no test uses. |
 
-No test uses the registered `integration` marker. No file under `tests/` matches `*e2e*`, `*smoke*`, or
-`*integration*`, so the `e2e` name and the `tests/e2e/` path are free.
+The `e2e` name and the `tests/e2e/` path were free: no file under `tests/` matched `*e2e*`, `*smoke*`, or
+`*integration*`, and no test carried the registered `integration` marker. `playwright` was not a dependency, and no
+browser binary was installed.
 
-`playwright` is not a dependency, and no browser binary is installed.
+Three claims above are history: this tier exists, `playwright` is a dev dependency (`requirements-dev.txt`) with the
+Chromium binary installed by `make e2e-install`, and `tests/README.md` names the `make test` and `make test-e2e`
+targets. Two stay open on purpose: `scripts/smoke_workflow.py` keeps its manual path with no `make` target, recorded
+under item 3 of [Open decisions](#open-decisions), and its optional serial peer through `socat` waits as item 4 of
+[Release 2](#release-2). No test carries the `integration` marker, and `tests/README.md` now says it is declared but
+unused.
 
 ---
 
