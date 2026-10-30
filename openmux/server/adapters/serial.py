@@ -1168,6 +1168,8 @@ class SerialAdapter(BaseGenericAdapter):
             ``kept_previous`` (names). A clean reload reports exactly the four lists.
         """
         new_ports_list = self._reconcile_normalize(new_config)
+        # Entries the file deleted stop being a gap (issue #105).
+        self.prune_config_gaps(new_ports_list)
 
         # Build index of new configs by name
         new_by_name: Dict[str, Dict[str, Any]] = {}

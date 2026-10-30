@@ -11,9 +11,12 @@ a minimal tmp config with no adapter sections, so no real adapter or socket is c
 from __future__ import annotations
 
 import logging
+import pathlib
+from typing import Dict, List
 
 import pytest
 
+from openmux.server.adapters.loopback import LoopbackAdapter, LoopbackPort
 from openmux.server.adapters.serial import SerialAdapter
 from openmux.server.config_gaps import GAP_MARKER
 from openmux.server.main import OpenMuxServer
@@ -53,6 +56,30 @@ class _FailedStartAdapter:
 
     async def start(self) -> bool:
         raise RuntimeError("listener port in use")
+
+
+class _RefusingAdapter:
+    """Adapter stub that starts and holds one entry it refused to build.
+
+    This is the CFG-19 case as the running server sees it: the adapter works, one port of its section
+    is missing, and the refusal sits in ``config_gaps`` because no reconcile call reported it.
+    """
+
+    def __init__(self, name: str, atype: str, gaps: Dict[str, str]) -> None:
+        self.name = name
+        self._atype = atype
+        self.config_gaps = dict(gaps)
+        self.config_gaps_kept: List[str] = []
+        self.main_port_manager = None
+
+    def get_adapter_type(self) -> str:
+        return self._atype
+
+    async def stop(self) -> bool:
+        return True
+
+    async def start(self) -> bool:
+        return True
 
 
 def _cfg_path(tmp_path):
@@ -218,3 +245,86 @@ async def test_a_full_reload_that_could_not_start_an_adapter_names_it_and_its_re
     assert GAP_MARKER in caplog.text
     # The reason is a sentence naming the adapter, never the dict the summary holds.
     assert "{'adapter'" not in caplog.text, caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_full_reload_that_refused_a_port_names_that_port_in_its_answer(tmp_path, monkeypatch, caplog):
+    """A caller that reads the full reload answer learns what a reader of the log learns (issue #105).
+
+    A full reload reconciles nothing, so a refused entry can reach the summary only through the adapter
+    that refused it. Without those keys the answer says ``errors: []`` - true, and useless - while the
+    log names the port. The pair a person needs is the answer that says the reload finished and the
+    name that says the file still needs a fix.
+    """
+    server = _server(tmp_path)
+    created = _RefusingAdapter("loopback_ports", "loopback", {"lb9": "Invalid max_read_write_users for lb9: 'two'"})
+    monkeypatch.setattr(server.unified_adapter_factory, "create_adapters_from_config", lambda _config: [created])
+
+    with caplog.at_level(logging.WARNING):
+        summary = await server.reload_adapters_full(context={"origin": "test"})
+
+    assert summary["errors"] == [], summary
+    assert summary["adapters"]["loopback"]["failed"] == ["lb9"], summary
+    detail = summary["adapters"]["loopback"]["failed_detail"]["lb9"]
+    assert detail["error"] == "Invalid max_read_write_users for lb9: 'two'", detail
+    assert detail["kept_previous"] is False, detail
+    # One refusal, seen twice (adapter state and the summary), is still one line in the block.
+    block = [line for line in caplog.text.splitlines() if "loopback/lb9:" in line]
+    assert len(block) == 1, caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_full_reload_that_applied_everything_adds_no_gap_keys(tmp_path, monkeypatch, caplog):
+    """The keys appear only when something stayed unapplied, so a clean answer keeps its own shape."""
+    server = _server(tmp_path)
+    created = _RefusingAdapter("loopback_ports", "loopback", {})
+    monkeypatch.setattr(server.unified_adapter_factory, "create_adapters_from_config", lambda _config: [created])
+
+    with caplog.at_level(logging.WARNING):
+        summary = await server.reload_adapters_full(context={"origin": "test"})
+
+    assert "adapters" not in summary, summary
+    assert "config_violations" not in summary, summary
+    assert GAP_MARKER not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_reload_stops_naming_a_port_the_operator_deleted(tmp_path, caplog):
+    """A gap whose entry the file no longer lists must leave both the answer and the log."""
+    adapter = LoopbackAdapter("loopback", {"loopback_ports": [{"name": "lb0"}]})
+    adapter.main_port_manager = None
+    adapter.ports["lb0"] = LoopbackPort("lb0", {"name": "lb0"}, adapter)
+    server = _server(tmp_path)
+    server.unified_adapters = [adapter]
+    path = pathlib.Path(server.config_manager.config_path)
+
+    _write_loopback(path, [{"name": "lb0"}, {"name": "lb1", "max_read_write_users": "two"}])
+    with caplog.at_level(logging.INFO, logger="openmux"):
+        refused = await server.reload_adapters_soft({})
+    assert refused["adapters"]["loopback"]["failed"] == ["lb1"]
+    assert "loopback/lb1:" in caplog.text
+
+    # Deleting the entry fixes the file too. Nothing is missing after that, so the next reload
+    # reports no gap and prints no block (issue #105).
+    _write_loopback(path, [{"name": "lb0"}])
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="openmux"):
+        deleted = await server.reload_adapters_soft({})
+
+    # The soft answer always carries the per-adapter reconcile results, so the gap keys are what
+    # has to be gone here.
+    assert "failed" not in deleted["adapters"]["loopback"]
+    assert "failed_detail" not in deleted["adapters"]["loopback"]
+    assert "config_violations" not in deleted
+    assert GAP_MARKER not in caplog.text
+    assert "lb1" not in adapter.ports
+    if "lb0" in adapter.ports:
+        await adapter.ports["lb0"].stop()
+
+
+def _write_loopback(path, entries):
+    """Rewrite the config file so its loopback_ports section lists ``entries``."""
+    import yaml
+
+    document = {"server": {"id": "test"}, "loopback_ports": entries, "logging": {"level": "WARNING"}}
+    path.write_text(yaml.safe_dump(document, sort_keys=False))

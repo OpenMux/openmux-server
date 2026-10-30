@@ -60,7 +60,11 @@ Note on configuration reloads: The server reloads ports on SIGHUP (soft reload) 
 Config Editor (its Reload view posts to `/config-editor/reload/soft` and `/config-editor/reload/full`, and
 `POST /api/reload` re-applies the sections a payload names). The server validates the on-disk config, reconciles
 affected adapters incrementally, and logs one `CONFIG_GAP` block naming every item the files asked for that did not
-apply, with the reason the code that refused it gave (issue #105).
+apply, with the reason the code that refused it gave (issue #105). Both reload answers carry the same facts as keys, so a
+caller that reads the answer and not the log sees the same list: `adapters.<kind>.failed` names the refused ports,
+`adapters.<kind>.failed_detail` gives each reason and whether the running port was kept, and `config_violations` holds
+the schema violations the loader tolerated. The server adds those keys only when something stayed unapplied. A gap ends
+when the entry that caused it ends: an entry the new file no longer lists is not reported again.
 | `PortManager` | Aggregation of active ports | `set_unified_adapters()`, client lookup helpers, wrapper exposure |
 | `ConsoleManager` | Interactive / mgmt console | Injected into connection adapters & adapters when supported |
 | `GenericAdapterFactory` | Creates modern adapters from config | `create_adapters_from_config()` |

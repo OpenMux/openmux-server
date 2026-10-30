@@ -95,6 +95,37 @@ class BaseGenericAdapter(ABC):
         if port_name in self.config_gaps_kept:
             self.config_gaps_kept.remove(port_name)
 
+    def prune_config_gaps(self, entries: Optional[List[Any]]) -> List[str]:
+        """Drop gaps for entries the new config no longer lists (issue #105).
+
+        A refused entry that the operator deleted leaves no gap behind. The file no
+        longer asks for that port, so naming it again on the next reload reports a
+        problem that no longer exists. An entry the new file still lists keeps its
+        gap, because the refused verdict must repeat until the file is fixed.
+
+        Args:
+            entries: The raw port entries the new config lists for this adapter.
+
+        Returns:
+            The gap labels that were dropped, sorted. Empty when nothing changed or
+            the caller passed no list at all.
+        """
+        if not isinstance(entries, list):
+            return []
+        listed: Set[str] = set()
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            label = entry.get("name") or entry.get("port")
+            listed.add(str(label) if label else f"<unnamed #{index + 1}>")
+        dropped: List[str] = []
+        for label in list(self.config_gaps):
+            if label in listed:
+                continue
+            self.clear_config_gap(label)
+            dropped.append(label)
+        return sorted(dropped)
+
     def prepare_port(self, port_name: str, config: Dict[str, Any]) -> Any:
         """Build a port object from a config entry without starting or registering it.
 

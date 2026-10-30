@@ -131,7 +131,8 @@ Changes since v1.0.4 (2026-10-19).
   still answers `ok: true`: a bad entry never turns the whole answer into a failed one. A full reload that could not
   start an adapter now names that adapter and the reason its own start gave, for example
   `CONFIG_GAP   telnet_listener: listener port in use`; the line used to print the reload's own summary entry, which
-  named no adapter.
+  named no adapter. A gap ends with the entry that caused it: once the file no longer lists that entry, the next reload
+  drops it from that block and from the answer, because nothing in the file is unapplied any more.
 - **Web console pages ask for their assets by version.** Each page now requests its scripts and stylesheets as
   `/static/<path>?v=<version>`, for example `/static/js/console.js?v=1.0.5`. A browser keeps an asset until its URL
   changes, so an upgrade used to leave an open or reloadable page running the previous release's script. Nothing to clear

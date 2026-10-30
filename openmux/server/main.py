@@ -725,6 +725,66 @@ class OpenMuxServer:
         source = getattr(self.config_manager, "config_path", None)
         return log_gap_warning(self.logger, where, self.collect_config_gaps(summary), source=source)
 
+    def add_gap_keys_to_summary(self, summary: Dict[str, Any]) -> None:
+        """Add the keys naming what the files asked for that is not running (issue #105).
+
+        A caller that reads the reload answer, and not the server log, must learn the same facts from
+        it. Both keys are written only when there is something to say, so a reload that applied the
+        whole file returns the summary shape it always had.
+
+        * ``config_violations``: the schema violations the config loader logged and tolerated.
+        * ``adapters``: per adapter kind, ``failed`` with the refused port names and ``failed_detail``
+          with each reason and whether the running port was kept, matching the shape that
+          ``BaseGenericAdapter.reconcile_summary()`` writes so one reader covers both reload paths.
+
+        A soft reload stores its reconcile results under ``adapters``, and a refused port is already
+        listed there by the adapter that refused it, so this merges instead of overwriting and never
+        repeats a name. A full reload reconciles nothing: the refusals it knows are the ones the
+        adapters it just created recorded while building the ports.
+
+        Args:
+            summary: The reload summary to extend, in place.
+        """
+        schema_lines = list(getattr(self.config_manager, "schema_violation_report", lambda: [])() or [])
+        if schema_lines:
+            summary["config_violations"] = schema_lines
+        port_gaps = self._port_gaps_by_section()
+        if not port_gaps:
+            return
+        adapters = summary.get("adapters")
+        if not isinstance(adapters, dict):
+            adapters = {}
+            summary["adapters"] = adapters
+        for section, refused in port_gaps.items():
+            result = adapters.setdefault(section, {})
+            detail = result.setdefault("failed_detail", {})
+            failed = result.setdefault("failed", [])
+            if not isinstance(detail, dict) or not isinstance(failed, list):
+                continue
+            for name in sorted(refused):
+                if name in failed:
+                    continue
+                failed.append(name)
+                detail[name] = refused[name]
+
+    def _port_gaps_by_section(self) -> Dict[str, Dict[str, Any]]:
+        """Return every port an adapter refused, grouped by adapter kind.
+
+        Returns:
+            ``{section: {port: {"error": ..., "kept_previous": ...}}}``, empty when every adapter
+            built every port its files asked for.
+        """
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for adapter in getattr(self, "unified_adapters", None) or []:
+            for gap in self._adapter_config_gaps(adapter):
+                if not gap.port:
+                    continue
+                grouped.setdefault(gap.section, {})[gap.port] = {
+                    "error": gap.error,
+                    "kept_previous": gap.kept_previous,
+                }
+        return grouped
+
     async def _run_server_loop(self):
         """Run the main server loop until shutdown."""
         try:
@@ -1055,9 +1115,7 @@ class OpenMuxServer:
         # Tolerated schema violations belong in the summary the caller reads, and every gap gets
         # its warning block (issue #105). Both are added only when something is wrong, so a clean
         # reload returns exactly the summary shape it always did.
-        schema_lines = getattr(self.config_manager, "schema_violation_report", lambda: [])()
-        if schema_lines:
-            summary["config_violations"] = list(schema_lines)
+        self.add_gap_keys_to_summary(summary)
         self.report_config_gaps("soft reload", summary)
 
         self.logger.info("[reload-soft:%s] Completed with summary: %s", req_id, summary)
@@ -1679,7 +1737,10 @@ class OpenMuxServer:
                 summary["started"],
                 len(summary["errors"]),
             )
-            # Adapters built by this reload report their own refusals (issue #105).
+            # Adapters built by this reload report their own refusals (issue #105). The answer carries
+            # the same keys a soft reload answer carries, so a caller that reads the answer instead of
+            # the log still learns which port of the file did not apply.
+            self.add_gap_keys_to_summary(summary)
             self.report_config_gaps("full reload", summary)
 
             self._reload_full_schedule_deferred(req_id, summary, deferred_old_wc, deferred_new_wc)

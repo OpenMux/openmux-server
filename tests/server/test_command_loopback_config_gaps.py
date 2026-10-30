@@ -152,3 +152,55 @@ async def test_a_loopback_port_that_cannot_be_created_is_reported_as_failed(monk
 
     assert summary["failed"] == ["lb9"]
     assert summary.get("added", []) == []
+
+
+# --- gaps the operator removed from the file ---
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_loopback_entry_stops_being_a_gap_on_the_next_reload():
+    adapter = _loopback_adapter(LB)
+
+    first = await adapter.reconcile_ports([LB, LB_BAD_MODE])
+    assert first["failed"] == ["lb1"]
+    assert sorted(adapter.config_gaps) == ["lb1"]
+
+    # The operator fixes the file by deleting the entry, so the reload must stop
+    # claiming it: the file no longer asks for lb1 at all.
+    second = await adapter.reconcile_ports([LB])
+
+    assert sorted(adapter.config_gaps) == []
+    assert adapter.config_gaps_kept == []
+    assert "failed" not in second
+    assert "lb1" not in adapter.ports
+
+
+@pytest.mark.asyncio
+async def test_a_kept_previous_loopback_entry_that_the_file_deletes_stops_being_a_gap():
+    adapter = _loopback_adapter(LB)
+
+    refused = await adapter.reconcile_ports([dict(LB, max_read_write_users="two")])
+    assert refused["kept_previous"] == ["lb0"]
+    assert sorted(adapter.config_gaps) == ["lb0"]
+
+    deleted = await adapter.reconcile_ports([])
+
+    assert sorted(adapter.config_gaps) == []
+    assert adapter.config_gaps_kept == []
+    assert deleted["removed"] == ["lb0"]
+    assert "lb0" not in adapter.ports
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_command_entry_stops_being_a_gap_on_the_next_reload():
+    adapter = _command_adapter(CMD)
+
+    first = await adapter.reconcile_ports([CMD, CMD_NO_COMMAND])
+    assert first["failed"] == ["c1"]
+    assert sorted(adapter.config_gaps) == ["c1"]
+
+    second = await adapter.reconcile_ports([CMD])
+
+    assert sorted(adapter.config_gaps) == []
+    assert "failed" not in second
+    assert "c1" not in adapter.ports

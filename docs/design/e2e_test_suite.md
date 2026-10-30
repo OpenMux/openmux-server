@@ -512,9 +512,9 @@ every adapter from the file (`CFG-20`).
 | `CFG-15` | A full reload recreates every adapter, restarts the web console, and keeps an open browser page signed in. |
 | `CFG-16` | A full reload ends an attached console with no message, and the next client that signs in is served. |
 | `CFG-17` | A Serial port whose device is missing is listed, named once in the log, and still takes a console — read-only. |
-| `CFG-18` | A Serial entry the server cannot build is named in the log block, reported as `failed`, and never as `added`. |
+| `CFG-18` | A Serial entry the server cannot build is named in the log block, reported as `failed`, never as `added`, and forgotten once the file drops it. |
 | `CFG-19` | One unusable port entry at boot costs that port alone: the port beside it runs and the block names both. |
-| `CFG-20` | A full reload answers ok, keeps every port the file can build, and names the entry it refused. |
+| `CFG-20` | A full reload answers ok, keeps every port the file can build, and names the entry it refused in its answer and its log. |
 
 Unlike the plan for this suite, **no scenario depends on another**. Each builds its server and makes its own edit, so
 a failure names the rule it broke instead of the scenario that ran before it. The save-then-reload order is a product
@@ -557,9 +557,10 @@ file and each unapplied item with its reason, and every line of that block start
 greps the log gets the whole block. The tolerated schema problem reaches the caller as well: the answer carries
 `config_violations`. `security.yaml` keeps `serial_ports` writable, so hand editing still reaches that state without the
 page doing anything wrong: `POST /config-editor/apply` runs the same schema and refuses the entry with `400`
-(`CFG-06`).
+(`CFG-06`). While the file keeps that entry listed, the verdict repeats on every reload. Once the file drops that entry,
+the next reload reports nothing, because nothing in the file is then unapplied.
 
-Four defects in the product came out of measuring, and each is fixed with the scenario that proves it.
+Five defects in the product came out of measuring, and each is fixed with the scenario that proves it.
 
 - A full reload while any browser page was connected left the web console down for good. `WebConsoleAdapter.stop()`
   asked each runner to `cleanup()`, which waits for the handlers that runner started, and the console and `/ws/events`
@@ -622,6 +623,23 @@ Four defects in the product came out of measuring, and each is fixed with the sc
   beside `CONFIG_GAP   serial/typo1: Parity must be N, E, O, M, or S`. That scenario guards the fix rather than describing
   it: run against the `serial.py` from before the fix above, it fails with `assert {'keep', 'live1'} <= {'keep'}`, because
   one entry with `parity: Q` took the good Serial port `live1` with it.
+  Measured while that was written, the answer of the same reload carried no gap: it held no `adapters` key and no
+  `config_violations` key, so a caller that reads the answer and not the log learned nothing about `typo1`. The soft answer
+  already carried both. `OpenMuxServer.add_gap_keys_to_summary()` now writes them on both paths, merging into what the
+  reconcile stored rather than overwriting it, and only when something stayed unapplied. Measured after that change:
+  `CFG-20` reads `failed: ['typo1']` and the parity reason out of the answer of the full reload.
+  [Issue #105](https://github.com/OpenMux/openmux-server/issues/105).
+- A gap stayed reported after the operator deleted the entry that caused it. Measured with `parity: Q` in hand: with
+  `typo1` removed from `serial_ports`, the next soft reload still logged
+  `CONFIG_GAP   serial/typo1: Parity must be N, E, O, M, or S`, and the same name stayed in the adapter's `config_gaps`,
+  because only a port that applied cleared a gap and nothing cleared a name the new section no longer listed. The block
+  claims to list config file entries that did not fully apply, so a deleted entry made that claim wrong, and the answer keys
+  above would have repeated the mistake to a caller. `prune_config_gaps()` on the base adapter drops each gap whose label
+  the new section no longer lists, and every port adapter calls it with the entries it is about to reconcile. An entry the
+  file keeps listing keeps its gap, because the refused verdict must repeat until the file is fixed. Measured after that
+  change: the reload that follows the deletion answers with no `failed` key and logs no `CONFIG_GAP` line at all, and
+  without those `prune_config_gaps()` calls `CFG-18` fails on that step. The unit half sits in
+  `tests/server/test_command_loopback_config_gaps.py` and `tests/server/test_main_config_gaps.py`.
   [Issue #105](https://github.com/OpenMux/openmux-server/issues/105).
 - A full reload that could not start an adapter printed its own bookkeeping instead of the failure. The reporter read
   every entry of a full reload summary's `errors` list as plain text, while `reload_adapters_full()` appends one dict per
@@ -702,7 +720,7 @@ Named now so release 1 fixtures stay sufficient.
 | 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` waits on a helper-based account, see the note below. |
 | 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
 | 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
-| 6 — Config Editor | Done | `CFG-01` to `CFG-20` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at soft reload, one entry of any port section the adapter refuses at boot, and that entry again under a full reload. Four product defects came out of building this group, listed under `CFG` above; the third turned out to have a second half found after it was fixed, and the fourth was found while measuring that half. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it; `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`, and `CFG-20` reuses the hand-edit helper `CFG-18` added. |
+| 6 — Config Editor | Done | `CFG-01` to `CFG-20` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at soft reload, one entry of any port section the adapter refuses at boot, and that entry again under a full reload. Five product defects came out of building this group, listed under `CFG` above; the third turned out to have a second half found after it was fixed, the fourth was found while measuring that half, and the fifth came from making a full reload answer carry the keys a soft reload answer already carried. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it; `CFG-18` then deletes that entry with `_drop_port_named()` and counts the block lines after `_wait_for_log_count()`, because a plain log wait is satisfied by an earlier reload; `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`, and `CFG-20` reuses the hand-edit helper `CFG-18` added. |
 | 7-9 | Not started | ACT, ST, and the story scenarios. |
 
 - `AUTH-11` (an external helper that grants no permission): outstanding. The `command` authentication backend runs in

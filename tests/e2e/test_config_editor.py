@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 from typing import Any, Dict, List, Sequence, Set
 
 import pytest
@@ -64,6 +65,8 @@ GAP_ITEM = f"{GAP_MARKER}   "
 BAD_PARITY_REASON = "Parity must be N, E, O, M, or S"
 #: The reason a port of any section gives for a write-slot capacity it does not accept.
 BAD_CAPACITY_REASON = "Invalid max_read_write_users"
+#: The last line one reload logs, so counting it proves every line of that reload reached the log.
+RELOAD_DONE = "Completed with summary"
 
 
 # --- editor requests -----------------------------------------------------------
@@ -125,11 +128,11 @@ def _summary(answer: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _reconciled(summary: Dict[str, Any], kind: str) -> Dict[str, Any]:
-    """What a soft reload did to one adapter kind: which names it added, updated, removed, or left alone."""
+    """What a reload did to one adapter kind: which names it added, updated, removed, or refused."""
     adapters = summary.get("adapters")
-    assert isinstance(adapters, dict), f"soft summary has no adapters: {json.dumps(summary)[:400]}"
+    assert isinstance(adapters, dict), f"the reload summary has no adapters: {json.dumps(summary)[:400]}"
     result = adapters.get(kind)
-    assert isinstance(result, dict), f"soft summary has no {kind}: {json.dumps(adapters)[:400]}"
+    assert isinstance(result, dict), f"the reload summary has no {kind}: {json.dumps(adapters)[:400]}"
     return result
 
 
@@ -377,6 +380,46 @@ def _edit_serial_ports_in_file(world: Any, edit: Any) -> None:
     edit(ports)
     config["serial_ports"] = ports
     path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+
+def _drop_port_named(ports: List[Dict[str, Any]], name: str) -> None:
+    """Delete every entry with this name from the list, in place.
+
+    Args:
+        ports: The ``serial_ports`` list a caller handed over.
+        name: Entry name to delete.
+    """
+    ports[:] = [p for p in ports if p.get("name") != name]
+
+
+def _log_count(world: Any, needle: str) -> int:
+    """How many log lines so far contain ``needle``."""
+    return sum(1 for line in world.log_lines() if needle in line)
+
+
+def _marked_lines(world: Any) -> List[str]:
+    """Every gap block line the log holds, for a failure message."""
+    return [line for line in world.log_lines() if GAP_MARKER in line]
+
+
+def _wait_for_log_count(world: Any, needle: str, count: int, timeout: float = 20.0) -> None:
+    """Wait until the log holds at least ``count`` lines containing ``needle``.
+
+    ``world.wait_for_log`` returns on the first match, which an earlier reload already wrote. Counting
+    is what proves the reload under test finished logging, and lines arrive in order, so every
+    earlier line is present too.
+
+    Args:
+        world: The running world to read.
+        needle: Text each wanted line contains.
+        count: How many such lines to wait for.
+        timeout: Seconds to wait before failing.
+    """
+    deadline = time.monotonic() + timeout
+    while _log_count(world, needle) < count:
+        if time.monotonic() > deadline:
+            pytest.fail(f"the log never held {count} lines with {needle!r}\nlast output:\n{world.tail(40)}")
+        time.sleep(0.05)
 
 
 # ===============================================================================
@@ -1007,8 +1050,24 @@ def test_cfg18_a_port_the_server_cannot_build_is_named_in_the_log_and_never_repo
     again = _reconciled(_summary(_reload(api, "soft")), "serial")
     assert again["failed"] == ["typo1"], again
     assert "typo1" not in again.get("added", []), again
-    step("fixing the file brings the port up and clears it from the reports")
-    _edit_serial_ports_in_file(world, lambda ports: [p.update(parity="N") for p in ports if p.get("name") == "typo1"])
+    step("deleting the entry is a fix too: the file then asks for nothing that is missing")
+    # Each reload logs its summary line last, after any gap block. Waiting for that line by count
+    # proves the two blocks above reached the log, so the count below measures what the server
+    # logged and not how far the reader thread has caught up.
+    _wait_for_log_count(world, RELOAD_DONE, 2)
+    gaps_logged = _log_count(world, GAP_MARKER)
+    _edit_serial_ports_in_file(world, lambda ports: _drop_port_named(ports, "typo1"))
+    deleted = _summary(_reload(api, "soft"))
+    after_delete = _reconciled(deleted, "serial")
+    assert "failed" not in after_delete, after_delete
+    assert "typo1" not in json.dumps(after_delete), after_delete
+    assert "config_violations" not in deleted, deleted
+    assert "typo1" not in api.port_names(), api.status()
+    step("and the log prints no block at all, because no entry of the file is unapplied")
+    _wait_for_log_count(world, RELOAD_DONE, 3)
+    assert _log_count(world, GAP_MARKER) == gaps_logged, "\n".join(_marked_lines(world))
+    step("a fixed entry written back brings the port up and clears it from the reports")
+    _edit_serial_ports_in_file(world, lambda ports: ports.append(dict(unusable, parity="N")))
     fixed = _reconciled(_summary(_reload(api, "soft")), "serial")
     assert "typo1" in fixed["added"], fixed
     assert "failed" not in fixed, fixed
@@ -1082,6 +1141,13 @@ def test_cfg20_a_full_reload_reports_the_port_it_could_not_build_and_keeps_the_o
     mark = len(world.log_lines())
     summary = _summary(_reload(api, "full"))
     assert summary["errors"] == [], summary
+    step("the answer names the refused port and its reason, the way a soft reload answer does")
+    serial = _reconciled(summary, "serial")
+    assert serial["failed"] == ["typo1"], serial
+    assert BAD_PARITY_REASON in serial["failed_detail"]["typo1"]["error"], serial
+    assert serial["failed_detail"]["typo1"]["kept_previous"] is False, serial
+    assert "typo1" not in serial.get("added", []), serial
+    assert any("parity" in str(line).lower() for line in summary.get("config_violations") or []), summary
     step("the web console the reload replaced answers again")
     world.wait_for_log("[deferred] Started WebConsole", timeout=20.0)
     world.wait_ready(timeout=20.0)

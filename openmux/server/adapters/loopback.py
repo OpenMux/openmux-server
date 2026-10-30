@@ -631,6 +631,8 @@ class LoopbackAdapter(BaseGenericAdapter):  # noqa: Vulture
             dict also carries ``failed``, ``failed_detail`` and ``kept_previous``.
         """
         items = self._reconcile_items(new_config)
+        # Entries the file deleted stop being a gap (issue #105).
+        self.prune_config_gaps(items)
         new_by_name: Dict[str, Dict[str, Any]] = {}
         for p in items:
             if isinstance(p, dict) and p.get("name"):

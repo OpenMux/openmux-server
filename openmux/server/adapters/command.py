@@ -1881,6 +1881,8 @@ class CommandAdapter(BaseGenericAdapter):  # noqa: Vulture
         else:
             items = []
 
+        # Entries the file deleted stop being a gap (issue #105).
+        self.prune_config_gaps(items)
         new_by_name: Dict[str, Dict[str, Any]] = {}
         for p in items:
             if isinstance(p, dict) and p.get("name"):
