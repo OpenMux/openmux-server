@@ -1,7 +1,7 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 6: 101 scenarios in eight suites, listed in
-[`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the two `IDX` index
+**Status:** Implemented through Phase 6: 102 scenarios in eight suites, listed in
+[`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the three `IDX` self-check
 scenarios, the browser proof, the ten `AUTH` scenarios driven over HTTP, the fourteen `CON` console scenarios driven
 in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the twenty `CFG` Config Editor
 scenarios, and the five `TIM` story-recorder scenarios run green. Phases 7-9 are not written; see
@@ -319,8 +319,8 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 101 scenarios in 8 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, the
-index checks 2, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
+The suite today runs 102 scenarios in 8 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, the
+index checks 3, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
 runs, and its count is checked by `IDX-02`. Three further groups below are the plan of record: they have ids,
 boundaries, and assertions written down, and they have no test file yet. Full wording for every built id lives in that
 index.
@@ -733,7 +733,13 @@ Named now so release 1 fixtures stay sufficient.
 | 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
 | 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
 | 6 — Config Editor | Done | `CFG-01` to `CFG-20` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at soft reload, one entry of any port section the adapter refuses at boot, and that entry again under a full reload. Five product defects came out of building this group, listed under `CFG` above; the third turned out to have a second half found after it was fixed, the fourth was found while measuring that half, and the fifth came from making a full reload answer carry the keys a soft reload answer already carried. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it; `CFG-18` then deletes that entry with `_drop_port_named()` and counts the block lines after `_wait_for_log_count()`, because a plain log wait is satisfied by an earlier reload; `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`, and `CFG-20` reuses the hand-edit helper `CFG-18` added. |
+| 6a — uncovered-run notice | Done | A run that cannot start a browser skips every page scenario and, under the heading `E2E browser coverage`, prints how many scenarios asserted nothing, one line per reason, and the fix command. `IDX-03` drives the notice with a fake reason and a fake skip list; whether this machine has a browser is not what it checks. |
 | 7-9 | Not started | ACT, ST, and the story scenarios. |
+
+- `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
+  `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`
+  runs with `-q`. The pass count alone read like a covered run. See [`tests/e2e/README.md`](../../tests/e2e/README.md)
+  for the block it now prints.
 
 - `AUTH-11` (an external helper that grants no permission): outstanding. The `command` authentication backend runs in
   every e2e server, so only the *no-permission* case differs from `AUTH-10`, and the helper would have to be a fixture

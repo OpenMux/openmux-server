@@ -35,6 +35,55 @@ except ImportError as exc:  # pragma: no cover
 
 _BROWSER_PROBE: Optional[str] = None
 
+#: Scenarios this run skipped because no browser is usable, node id -> the reason it could not start.
+_BROWSER_SKIPPED: Dict[str, str] = {}
+
+
+def note_browser_skip(node_id: str, reason: str) -> None:
+    """Record that one scenario cannot run, from the place that is about to skip it.
+
+    Two places record here: the collection rule that marks a scenario carrying ``e2e_browser``, and the page
+    registry that opens a signed-in page. The session ``browser`` fixture skips as well, and a scenario that
+    asks for it carries the marker, because a session-scoped skip cannot name one scenario.
+
+    Args:
+        node_id: The test that will not run.
+        reason: What ``browser_available()`` answered for this machine.
+    """
+    _BROWSER_SKIPPED.setdefault(node_id, reason)
+
+
+def browser_skip_notice() -> List[str]:
+    """Return the lines naming what this run left uncovered, or an empty list when every scenario ran.
+
+    A machine without the browser answers ``60 passed, 41 skipped, 3106 deselected in 143.92s``. That line
+    counts the skips, and the reason behind each one stays hidden unless the caller passes ``-rs``, so an
+    operator who reads the pass count cannot tell a covered run from an uncovered one. These lines make
+    the two read differently and name what to install.
+
+    Returns:
+        List[str]: One line per reason, wrapped by a count line and the install command, or ``[]``. Each
+        reason is its first line only: Chromium answers with a banner of a dozen lines, and the full text
+        stays in the skip report for ``-rs``.
+    """
+    if not _BROWSER_SKIPPED:
+        return []
+    counted: Dict[str, List[str]] = {}
+    for node_id, reason in _BROWSER_SKIPPED.items():
+        counted.setdefault(_reason_headline(reason), []).append(node_id)
+    total = sum(len(ids) for ids in counted.values())
+    lines: List[str] = [f"{total} end-to-end scenario(s) asserted nothing: no browser was usable"]
+    for reason, ids in counted.items():
+        noun = "scenario" if len(ids) == 1 else "scenarios"
+        lines.append(f"  {len(ids)} {noun}: {reason}")
+    lines.append("Install the browser, then run this tier again: make e2e-install")
+    return lines
+
+
+def _reason_headline(reason: str) -> str:
+    """Return the first non-empty line of a browser failure, stripped of surrounding space."""
+    return next((line.strip() for line in reason.splitlines() if line.strip()), "") or reason
+
 
 def browser_available() -> Optional[str]:
     """None when a browser can run, else the reason it cannot. Used to skip, never to pass silently.

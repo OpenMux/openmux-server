@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-101 scenarios across 8 suites.
+102 scenarios across 8 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -65,6 +65,7 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | **IDX** | | | |
 | IDX-01 | Every end-to-end test carries a scenario id, a one-line title, and a surface list. | collection | `tests/e2e/test_index.py::test_idx01_every_scenario_states_its_id_title_and_surfaces` |
 | IDX-02 | docs/E2E_TESTS.md is current with the scenarios that exist. | collection | `tests/e2e/test_index.py::test_idx02_the_committed_index_matches_the_scenarios_that_exist` |
+| IDX-03 | A run that could not start a browser says how many scenarios it covered, not only how many passed. | collection | `tests/e2e/test_index.py::test_idx03_a_run_without_a_browser_names_the_scenarios_that_asserted_nothing` |
 | **LIF** | | | |
 | LIF-01 | The server boots, answers /healthz with no login, and challenges everything else. | http, server log | `tests/e2e/test_lifecycle.py::test_lif01_the_server_boots_and_its_probe_answers_publicly` |
 | LIF-02 | An admin sees each configured port through the API. | http | `tests/e2e/test_lifecycle.py::test_lif02_an_admin_sees_the_configured_ports` |

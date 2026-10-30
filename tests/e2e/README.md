@@ -48,6 +48,20 @@ A browser scenario skips, with the install command in the reason, when Playwrigh
 missing. It never fails for that reason, so a machine without a browser still runs the rest of the
 tier.
 
+A skip inside a pass count is its own trap: `make test-e2e` runs with `-q`, which counts the skips and
+hides the reason behind them. A run that could not start a browser therefore ends with a block naming what
+it left uncovered.
+
+```
+============================= E2E browser coverage =============================
+20 end-to-end scenario(s) asserted nothing: no browser was usable
+  20 scenarios: Chromium cannot start: BrowserType.launch: Executable doesn't exist at ...
+Install the browser, then run this tier again: make e2e-install
+```
+
+The block prints once, gives each distinct reason its own line, and ends with the command that fixes it.
+`IDX-03` guards it. A run whose browser works prints nothing at all.
+
 ## What is in this directory
 
 | File | Job |

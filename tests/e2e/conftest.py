@@ -17,7 +17,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import pytest
 
-from .console import Browser, ConsoleSession, browser_available, login
+from .console import (
+    Browser,
+    ConsoleSession,
+    browser_available,
+    browser_skip_notice,
+    login,
+    note_browser_skip,
+)
 from .harness import (
     TEST_PASSWORD,
     Api,
@@ -426,7 +433,12 @@ def web(web_for: Callable[..., HttpSession], server: E2EServer) -> HttpSession:
 
 @pytest.fixture(scope="session")
 def browser(e2e_options: Dict[str, Any]) -> Any:
-    """One Chromium instance for the session. Skips the test when no browser is usable."""
+    """One Chromium instance for the session. Skips the test when no browser is usable.
+
+    A scenario that asks for this fixture must carry ``e2e_browser``: this fixture is scoped to the
+    session, so its own skip cannot name the scenario, and the collection rule below is what counts
+    the scenario in the run summary.
+    """
     reason = browser_available()
     if reason:
         pytest.skip(reason)
@@ -469,6 +481,7 @@ class _PageRegistry:
         if self._browser is None:
             reason = browser_available()
             if reason:
+                note_browser_skip(self.request.node.nodeid, reason)
                 pytest.skip(reason)
             self._browser = Browser(headless=not self.options["headed"], slow_mo_ms=self.options["slow_mo"])
         return self._browser
@@ -679,7 +692,22 @@ def pytest_collection_modifyitems(config: Any, items: List[Any]) -> None:
         return
     for item in items:
         if item.get_closest_marker("e2e_browser"):
+            note_browser_skip(item.nodeid, reason)
             item.add_marker(pytest.mark.skip(reason=reason))
+
+
+def pytest_terminal_summary(terminalreporter: Any) -> None:
+    """Print what this run could not cover because no browser would start.
+
+    The skip itself stays a skip, so a machine without a browser still passes the rest of the tier. This
+    only says out loud how many scenarios asserted nothing, because a pass count alone hides it.
+    """
+    lines = browser_skip_notice()
+    if not lines:
+        return
+    terminalreporter.write_sep("=", "E2E browser coverage")
+    for line in lines:
+        terminalreporter.write_line(line)
 
 
 def _copy_tree(source: Path, target: Path) -> None:
