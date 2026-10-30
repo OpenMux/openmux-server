@@ -2,7 +2,7 @@
 
 ``SerialAdapter`` parses its own entries and skips the one it cannot build, so a bad ``parity``
 costs one port. The other three port adapters answer the same question inside ``validate_config``,
-which covers the whole section, and ``_legacy_section_ok`` turns a False there into
+which covers the whole section, and ``_validate_legacy_config`` turns a False there into
 ``Invalid configuration for <plugin>``: the factory creates no adapter, so every port of that
 section is lost and no object exists to record a config gap. These tests boot through the real
 factory, because that gate is only on this path.
