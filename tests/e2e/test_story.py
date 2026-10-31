@@ -20,9 +20,9 @@ made from a console session adds ``; client <id>`` to the audit line, and that h
 
 Two measured boundaries worth knowing before reading the steps. A refusal to promote names its reason on
 the reply frame (``rw_holders``) and only its own sentence on the terminal, so the scenario asserts the
-holder from the frame and the sentence from the module. And the editor's page-level Save writes nothing
-when pressed in the same tick as accepting a row -- the page then reports "Loaded current config" -- so
-the scenario lets the row land in the page's own table first, which is what an operator does.
+holder from the frame and the sentence from the module. And ``Save item`` changes only the page: the draft
+stays in the browser until the page's own Save button posts it, which is why the scenario presses both and
+waits for the page's report in between.
 """
 
 from __future__ import annotations

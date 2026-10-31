@@ -489,6 +489,11 @@ Three defects in the product came out of measuring, and each is fixed with the s
   `tests/server/test_telnet_listener_adapter.py` covers it: the LF ends the choice and never reaches the
   Port as an empty line.
 
+One notice defect came out of the story run and stays open. The page writes its own all-power-lost line again on every
+status frame while power stays lost, so a Port with traffic repeats that warning in each open page of that Port. In one
+run a second console joining wrote two more copies, a grant one more, and a leave one more, while the restore line
+stayed at one copy. [Issue #112](https://github.com/OpenMux/openmux-server/issues/112) carries it.
+
 
 ### CFG — configure, then reload (`test_config_editor.py`, 20 scenarios)
 
@@ -748,15 +753,20 @@ exists for, and the only scenario in this file that carries `e2e_browser`.
 
 Measured boundaries of `TIM-06`:
 
-- The page's Save button is pressed only after the new row appears in the page's own table. Pressed in the same tick
-  as `Save item`, the page reports `Loaded current config` and writes nothing.
+- `Save item` changes the editor's own page only: the PDU reaches the server when the page's Save button posts the
+  draft. Step 3 asserts that a draft is page state and not server state. Pressed straight after `Save item`, that
+  button still posts the draft: the page sent `POST /config-editor/apply` and reported
+  `Saved; Soft reload completed` inside 6 s.
 - The PDU is switched through REST, because the same switch made from a console session adds `; client <id>` to the
   audit line, and `PWR-19` covers that half.
 - A refusal to promote names its holder on the reply frame (`rw_holders`) and only its own sentence on the terminal, so
   the scenario reads the holder from the frame and quotes the sentence from `access_decision`.
 - One switch writes two sentences in the web terminal: the server's notice, which every attached surface reads alike,
   and the page's own all-power-lost line. The page re-writes that second line on every status frame while power stays
-  lost.
+  lost -- a second console joining the same Port wrote two more copies of it, a grant one more, and a leave one more,
+  in one run. The restore line stays at one copy. [Issue #112](https://github.com/OpenMux/openmux-server/issues/112)
+  carries that defect. The scenario reads each sentence once, and `RW-04` records this refusal wording as intended
+  until [Issue #113](https://github.com/OpenMux/openmux-server/issues/113) settles it.
 - The holders are labelled `user@peer`, so two sessions of one account from one address cannot be told apart there.
   `RW-17` reports that label.
 
