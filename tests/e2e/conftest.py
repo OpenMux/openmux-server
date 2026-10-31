@@ -36,7 +36,7 @@ from .harness import (
     free_ports,
 )
 from .story import Story, Timeline, artifact_dir_for, environment_flags
-from .textclients import CliSession, TelnetSession, open_cli_client, open_telnet_client
+from .textclients import CliSession, SshSession, TelnetSession, open_cli_client, open_ssh_client, open_telnet_client
 
 #: Where a failure bundle is written, relative to the repository root.
 ARTIFACTS_RELATIVE = Path("artifacts") / "e2e"
@@ -239,6 +239,8 @@ class ServerRegistry:
         raw_server_yaml: Optional[str] = None,
         telnet: bool = True,
         telnet_kwargs: Optional[Dict[str, Any]] = None,
+        ssh: bool = False,
+        ssh_kwargs: Optional[Dict[str, Any]] = None,
         web: bool = True,
         timeline: Optional[Timeline] = None,
         timeout: float = 45.0,
@@ -248,7 +250,7 @@ class ServerRegistry:
         Args:
             name: Label used in log lines and failure messages.
             users: ``(username, permissions)`` pairs to create.
-            ports: Which listeners to bind: keys ``web``, ``cli``, ``telnet``. Defaults follow
+            ports: Which listeners to bind: keys ``web``, ``cli``, ``telnet``, ``ssh``. Defaults follow
                 ``web`` and ``telnet``.
             configure: Hook that receives the builder and returns it, for a scenario's own world.
             start: Start the process now and wait until every listener answers.
@@ -260,12 +262,15 @@ class ServerRegistry:
             telnet_kwargs: Extra keys for that listener, for example ``{"require_auth": True}`` so a
                 scenario can sign in as a named user, or ``{"read_only": True}`` for a listener that
                 never grants a Write slot. The allocated port stays the factory's to choose.
+            ssh: Bind an SSH listener (port menu, and auth required, which is that adapter's own default).
+            ssh_kwargs: Same shape as ``telnet_kwargs``, for example ``{"require_auth": False}`` for a
+                listener that accepts any client, or ``{"acl": ["192.0.2.0/24"]}``.
             web: Bind the web console.
             timeline: Attach the timeline so server output lands on it.
             timeout: Seconds to wait for the server to be ready.
         """
-        want = {"cli": True, "web": web, "telnet": telnet}
-        names = [key for key in ("web", "cli", "telnet") if want.get(key)]
+        want = {"cli": True, "web": web, "telnet": telnet, "ssh": ssh}
+        names = [key for key in ("web", "cli", "telnet", "ssh") if want.get(key)]
         allocated: Dict[str, int] = {key: int(value) for key, value in (ports or {}).items()}
         missing = [key for key in names if key not in allocated]
         for key, port in zip(missing, free_ports(len(missing))):
@@ -286,6 +291,8 @@ class ServerRegistry:
         builder.with_client_listener(int(allocated["cli"]))
         if want["telnet"]:
             builder.with_telnet_listener(int(allocated["telnet"]), **(telnet_kwargs or {}))
+        if want["ssh"]:
+            builder.with_ssh_listener(int(allocated["ssh"]), **(ssh_kwargs or {}))
         if configure is not None:
             builder = configure(builder) or builder
         builder.with_log_dir(workdir / "logs")
@@ -554,7 +561,7 @@ def console(console_pages: Any) -> Any:
 
 @pytest.fixture
 def clients(request: pytest.FixtureRequest, server: E2EServer, story: Story) -> Any:
-    """Open and track CLI and Telnet sessions for this test, closing every one on teardown."""
+    """Open and track CLI, Telnet, and SSH sessions for this test, closing every one on teardown."""
     registry = _ClientRegistry(server, story)
     try:
         yield registry
@@ -665,6 +672,41 @@ class _ClientRegistry:
             port=port,
         )
         self.story.cast(f"{surface:<11} user {user!r}  Telnet listener")
+        self.sessions.append(session)
+        return session
+
+    def ssh(
+        self,
+        *,
+        user: str = "admin",
+        surface: str = "ssh:viewer",
+        password: Optional[str] = TEST_PASSWORD,
+        client_keys: Optional[List[Any]] = None,
+        known_hosts: Optional[str] = None,
+        server: Optional[E2EServer] = None,
+        port: Optional[int] = None,
+    ) -> SshSession:
+        """Open an SSH session on one server's SSH listener, and connect its shell channel.
+
+        ``server`` names the world to dial when the test started its own, as with ``cli`` and ``telnet``.
+        Pass ``password=None`` with ``client_keys`` for a key-only session, which is how a scenario proves
+        a registered key is what opened the door. ``known_hosts`` names a file, for a session that must see
+        the host key the server persisted.
+
+        Raises:
+            AssertionError: when the listener refuses the handshake, with the refusal kept verbatim.
+        """
+        session = open_ssh_client(
+            server or self.server,
+            user=user,
+            password=password,
+            surface=surface,
+            client_keys=client_keys,
+            known_hosts=known_hosts,
+            timeline=self.timeline,
+            port=port,
+        ).connect()
+        self.story.cast(f"{surface:<11} user {user!r}  SSH listener")
         self.sessions.append(session)
         return session
 

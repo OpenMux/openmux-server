@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
+import re
 import socket
 import struct
 import threading
@@ -25,6 +26,11 @@ from openmux.client.adapters.tcp_adapter import TcpClientAdapter
 
 from .harness import TEST_PASSWORD, E2EServer
 from .story import READER_QUEUE_CAP, Timeline
+
+try:  # the SSH listener's dependency: soft, so a run without it fails as itself rather than at import
+    import asyncssh
+except ImportError:  # pragma: no cover - only on an install without asyncssh
+    asyncssh = None
 
 #: Bytes the client listener sends before a session may issue a command.
 AUTH_BANNER = b"Authentication required"
@@ -932,4 +938,365 @@ def open_telnet_client(
         surface=surface,
         timeline=timeline,
         require_auth=require_auth,
+    )
+
+
+class SshSession:
+    """A session on the SSH listener: the real ``asyncssh`` client, on a private loop, with a sync face.
+
+    ``asyncssh`` speaks asyncio only, so the connection lives on a ``_SessionLoop`` thread the way
+    ``CliSession``'s adapter does, and one reader coroutine keeps the channel drained for the whole life of
+    the session -- the rule every attached surface follows, because a session nobody reads stalls the
+    server's fan-out.
+
+    The transport is the third-party library's, not a re-implementation of it: a product change to the
+    listener fails this session instead of being hidden by a second SSH stack in the harness.
+
+    Args:
+        host: Address to dial, normally ``127.0.0.1``.
+        port: The listener's bound port.
+        username: The SSH username, which the listener parses for an embedded ``user+port`` descriptor.
+        password: Password credential, or ``None`` for a key-only session.
+        client_keys: ``asyncssh`` key objects to offer, for a public-key session.
+        known_hosts: ``None`` to skip host verification, or a file path to require the key it names.
+        surface: Timeline surface key, for example ``ssh:holder``.
+    """
+
+    #: Line terminator sent with ``send_line``. The listener reads both, and a scenario that needs the
+    #: other one sets this attribute before it answers a prompt.
+    line_ending = b"\r"
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        username: str = "admin",
+        password: Optional[str] = TEST_PASSWORD,
+        client_keys: Optional[List[Any]] = None,
+        known_hosts: Optional[str] = None,
+        surface: str = "ssh",
+        timeline: Optional[Timeline] = None,
+    ):
+        if asyncssh is None:
+            raise RuntimeError(f"{surface}: asyncssh is not installed, so the SSH listener cannot be driven")
+        self.host = host
+        self.port = int(port)
+        self.username = username
+        self.password = password
+        self.client_keys = client_keys
+        self.known_hosts = known_hosts
+        self.surface = surface
+        self.timeline = timeline
+        self.asyncssh = asyncssh
+        self.port_name: Optional[str] = None
+        self.closed = False
+        self.reader_overflow: Optional[str] = None
+        #: The failure the listener gave on the handshake, kept so a refused session can be read in full.
+        self.error: Optional[BaseException] = None
+        self.escape_sequence = DEFAULT_ESCAPE_SEQUENCE
+        self._loop = _SessionLoop(f"{surface}-loop")
+        self._conn: Optional[Any] = None
+        self._process: Optional[Any] = None
+        self._chunks: "queue.Queue[Optional[bytes]]" = queue.Queue()
+        self._seen = bytearray()
+        self._eof_seen = False
+
+    # --- connect ------------------------------------------------------------------------
+
+    def connect(self, timeout: float = 20.0) -> "SshSession":
+        """Complete the SSH handshake, open one shell channel, and start the reader.
+
+        Raises:
+            AssertionError: when the listener refuses the session. The refusal keeps its own type and text,
+                because *why* an SSH login was refused (bad password, unregistered key, ACL, lockout) is
+                the fact a scenario asserts on.
+        """
+
+        async def _open() -> None:
+            self._conn = await self.asyncssh.connect(
+                self.host,
+                port=self.port,
+                username=self.username,
+                password=self.password,
+                client_keys=self.client_keys,
+                known_hosts=self.known_hosts,
+                tunnel=None,
+                login_timeout=timeout,
+            )
+            self._process = await self._conn.create_process(term_type=None, encoding=None)
+
+        self._run(_open(), timeout=timeout, stage="handshake")
+        self._loop.submit(lambda: self._pump())
+        return self
+
+    def _run(self, coro: Any, timeout: float, stage: str) -> Any:
+        """Run one coroutine on the session loop, turning an SSH refusal into a readable failure."""
+        try:
+            return self._loop.call(coro, timeout=timeout)
+        except Exception as exc:
+            self.error = exc
+            raise AssertionError(
+                f"{self.surface}: {stage} to {self.host}:{self.port} as {self.username!r} failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+    async def _pump(self) -> None:
+        """Copy every byte the channel delivers into the queue, until the channel ends."""
+        try:
+            while True:
+                # Read a bounded chunk on purpose: SSHReader.read() with no size waits for EOF, which
+                # would hold the whole transcript back until the session ends.
+                chunk = await self._process.stdout.read(4096)
+                if not chunk:
+                    break
+                self._record_chunk(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
+        except Exception as exc:  # justification: the reader ends when the session dies; the byte it did read stays readable
+            self._record_chunk(f"\n[{self.surface}: reader stopped: {type(exc).__name__}: {exc}]\n".encode())
+        finally:
+            # The end of the channel is one event: mark it here so a caller that reads the queue first
+            # cannot take the marker away from a caller that asks about the end later.
+            self._eof_seen = True
+            self._chunks.put(None)
+
+    def _record_chunk(self, chunk: bytes) -> None:
+        """Queue one chunk, and fail loudly if nobody is reading: backpressure here would hide a stall."""
+        if self._chunks.qsize() >= READER_QUEUE_CAP and self.reader_overflow is None:
+            self.reader_overflow = (
+                f"{self.surface}: reader queue passed {READER_QUEUE_CAP} chunks with no reader; "
+                "the newest bytes here are not the newest bytes the Port sent"
+            )
+        self._chunks.put(chunk)
+
+    # --- auth-phase and menu helpers -------------------------------------------------------
+
+    def wait_for_prompt(self, *needles: str, timeout: float = 10.0) -> str:
+        """Wait until what arrived contains any of ``needles`` (case-insensitive)."""
+        lowered = [needle.lower() for needle in needles]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            text = self.text().lower()
+            if any(needle in text for needle in lowered):
+                return self.text()
+            time.sleep(0.05)
+        raise AssertionError(f"{self.surface}: none of {needles} appeared\nreceived: {self.text()[-800:]!r}")
+
+    def _wait_for_another(self, marker: str, seen: int, timeout: float = 10.0) -> str:
+        """Wait until ``marker`` has arrived ``seen + 1`` times, and return the whole transcript.
+
+        Every Control menu answer repeats a block the session already printed, so counting the copies is the
+        only way to tell the answer this keypress caused from the one the last keypress caused.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            text = self.text()
+            if text.count(marker) > seen:
+                return text
+            time.sleep(0.05)
+        raise AssertionError(
+            f"{self.surface}: a second {marker!r} never arrived ({seen} on screen)\nreceived: {self.text()[-800:]!r}"
+        )
+
+    def open_control_menu(self) -> str:
+        """Open the Control menu with the escape prefix and the help key.
+
+        Same two-step command as every other transport: prefix bytes first, then the mnemonic, so ``?``
+        asks for the menu and the listener does not see it as Port data.
+        """
+        seen = self.text().count(CONTROL_MENU_HELP_MARKER)
+        self.send_raw(self.escape_sequence + b"?", note="control menu")
+        return self._wait_for_another(CONTROL_MENU_HELP_MARKER, seen, timeout=10.0)
+
+    def choose_port(self, port_name: str, timeout: float = 10.0) -> str:
+        """Answer the ``Port: `` prompt of a menu listener with one Port name."""
+        self.wait_for_prompt("port:", timeout=timeout)
+        self.port_name = port_name
+        self.send_line(port_name)
+        return self.text()
+
+    # --- bytes ----------------------------------------------------------------------------
+
+    def send_raw(self, data: bytes, note: str = "") -> None:
+        """Send bytes verbatim on the channel."""
+        self._note("->", data if not note else note)
+
+        async def _write() -> None:
+            self._process.stdin.write(data)
+            await self._process.stdin.drain()
+
+        self._loop.call(_write(), timeout=20.0)
+
+    def send_line(self, text: str) -> None:
+        """Send one line, terminated the way ``line_ending`` says."""
+        self.send_raw(text.encode("utf-8") + self.line_ending, note=f"line {text!r}")
+
+    def press(self, key: str) -> str:
+        """Send the escape prefix and one Control menu key, and return the text received so far."""
+        self.send_raw(self.escape_sequence + key.encode("utf-8"), note=f"menu key {key!r}")
+        return self.text()
+
+    def answer(self, text: str) -> str:
+        """Answer a Control menu prompt, such as the holder id a Takeover asks for."""
+        self.send_line(text)
+        return self.text()
+
+    def text(self) -> str:
+        """Everything received so far, as text. Reading does not consume.
+
+        The queue is always drained, even once the end marker is in hand: a listener that
+        answers and hangs up queues its answer first, and a transcript that stopped at the
+        marker would hide the refusal the person on the keyboard read.
+        """
+        while True:
+            try:
+                chunk = self._chunks.get_nowait()
+            except queue.Empty:
+                break
+            if chunk is None:
+                self._eof_seen = True
+                continue
+            self._seen.extend(chunk)
+        if self.reader_overflow is not None:
+            raise AssertionError(self.reader_overflow)
+        return self._seen.decode("utf-8", errors="replace")
+
+    def wait_for(self, needle: str, timeout: float = 10.0) -> str:
+        """Wait until what arrived contains ``needle``, exactly as the other sessions do."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            text = self.text()
+            if needle in text:
+                return text
+            time.sleep(0.05)
+        raise AssertionError(f"{self.surface}: {needle!r} never arrived\nreceived: {self.text()[-800:]!r}")
+
+    def text_since(self, mark: str) -> str:
+        """The text after the last occurrence of ``mark``, for a reply that repeats earlier output."""
+        return self.text().rsplit(mark, 1)[-1]
+
+    def is_eof(self, timeout: float = 0.5) -> bool:
+        """Whether the channel ended, which is how a refused listener reads.
+
+        The answer sticks: the end marker is one event, and a second caller must not miss it because the
+        first one read the queue first.
+        """
+        deadline = time.monotonic() + timeout
+        while not self._eof_seen and time.monotonic() < deadline:
+            self.text()
+            time.sleep(0.05)
+        return self._eof_seen
+
+    def exit_status(self, timeout: float = 10.0) -> Optional[int]:
+        """The exit status the listener gave this channel, once it arrives.
+
+        A listener that answers and hangs up reports a status instead of closing the reader quietly, so this
+        is how a scenario tells "refused" from "still waiting".
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = getattr(self._process, "exit_status", None)
+            if status is not None:
+                return int(status)
+            time.sleep(0.05)
+        raise AssertionError(f"{self.surface}: the channel reported no exit status within {timeout}s")
+
+    # --- what the listener says about the session ---------------------------------------------
+
+    def session_info(self, timeout: float = 10.0) -> str:
+        """Ask the Control menu's session key for one attached session and return the block it prints.
+
+        A scenario reads ``Mode``, ``Port``, and the escape sequence from that block instead of restating
+        them. The listener reports the escape sequence as ``b'\\x05'+b'c'``: two bytes, because an SSH
+        channel carries every other key a person types.
+        """
+        marker = "--- Session Info ---"
+        seen = self.text().count(marker)
+        self.open_control_menu()
+        self.press("i")
+        self._wait_for_another(marker, seen, timeout=timeout)
+        return self.text_since(marker)
+
+    def mode(self, timeout: float = 10.0) -> str:
+        """The mode the listener reports for this session, for example ``read-write``."""
+        block = self.session_info(timeout=timeout)
+        match = re.search(r"^Mode:\s*(\S+)\s*$", block, re.MULTILINE)
+        if match is None:
+            raise AssertionError(f"{self.surface}: the session info block carried no Mode line:\n{block!r}")
+        return match.group(1)
+
+    def server_host_key(self) -> str:
+        """The host key the listener offered in the handshake, as an OpenSSH public line.
+
+        ``get_server_host_key`` only reads state the handshake already collected, so asking from this
+        thread is safe even though the connection belongs to the session loop.
+        """
+        key = self._conn.get_server_host_key()
+        return key.export_public_key().decode("utf-8", errors="replace").strip()
+
+    def request_command(self, command: str, timeout: float = 10.0) -> Tuple[int, str, str]:
+        """Ask for one non-interactive command and return ``(exit_status, stdout, stderr)``.
+
+        The listener serves an interactive shell only, so this is how a scenario reads the refusal the
+        listener writes itself instead of guessing at it.
+        """
+
+        async def _request() -> Tuple[int, str, str]:
+            result = await self._conn.run(command, encoding="utf-8", timeout=timeout)
+            return int(result.exit_status or 0), result.stdout or "", result.stderr or ""
+
+        return self._run(_request(), timeout=timeout + 5.0, stage="command request")
+
+    def close(self) -> None:
+        """Close the channel and the connection, and stop the loop thread."""
+        if self.closed:
+            return
+        self.closed = True
+
+        async def _close() -> None:
+            for target in (self._process, self._conn):
+                if target is None:
+                    continue
+                try:
+                    target.close()
+                    await target.wait_closed()
+                except Exception:  # justification: teardown of a session a scenario already judged
+                    pass
+
+        try:
+            if self._conn is not None:
+                self._loop.call(_close(), timeout=10.0)
+        finally:
+            self._loop.close()
+
+    def _note(self, direction: str, payload: Any) -> None:
+        """Record one action on the timeline, when this session has one."""
+        if self.timeline is not None:
+            self.timeline.record(self.surface, direction, payload)
+
+
+def open_ssh_client(
+    server: E2EServer,
+    *,
+    user: str = "admin",
+    password: Optional[str] = TEST_PASSWORD,
+    surface: str = "ssh",
+    port: Optional[int] = None,
+    client_keys: Optional[List[Any]] = None,
+    known_hosts: Optional[str] = None,
+    timeline: Optional[Timeline] = None,
+) -> SshSession:
+    """Open one SSH session on the server's SSH listener, or on ``port`` when one is named.
+
+    ``password`` defaults to the harness password; pass ``None`` for a key-only session. ``port`` dials a
+    listener the harness did not allocate, the same way ``open_telnet_client`` does.
+    """
+    return SshSession(
+        "127.0.0.1",
+        int(port) if port else server.port_of("ssh"),
+        username=user,
+        password=password,
+        client_keys=client_keys,
+        known_hosts=known_hosts,
+        surface=surface,
+        timeline=timeline,
     )

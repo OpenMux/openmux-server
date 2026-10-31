@@ -68,6 +68,23 @@ def password_hash(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def ssh_ed25519_keypair(comment: str = "openmux-e2e") -> Tuple[str, Any]:
+    """Generate one Ed25519 SSH key pair: the OpenSSH public line, and the private key object.
+
+    The SSH listener stores public keys as OpenSSH text in ``authentication.yaml`` and compares the first
+    two fields of a presented key, so both halves come from the library the client uses and a scenario
+    registers the line it was handed. ``asyncssh`` is a product dependency, but the import stays inside
+    this function so importing the harness costs nothing.
+    """
+    import asyncssh
+
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    public = key.export_public_key("openssh").decode("ascii").strip()
+    if comment and public.count(" ") == 1:
+        public = f"{public} {comment}"
+    return public, key
+
+
 def sso_v1_header(
     secret: str,
     user: str = "sso-user",
@@ -132,12 +149,14 @@ class ConfigBuilder:
         self.server_id = server_id
         self.log_dir: Optional[Path] = None
         self._users: List[Dict[str, Any]] = []
+        self._public_keys: List[Dict[str, Any]] = []
         self._external_auth: Dict[str, Any] = {"enabled": False, "allow_root": False}
         self._loopback: List[Dict[str, Any]] = []
         self._command: List[Dict[str, Any]] = []
         self._tcp: List[Dict[str, Any]] = []
         self._serial: List[Dict[str, Any]] = []
         self._telnet: List[Dict[str, Any]] = []
+        self._ssh: List[Dict[str, Any]] = []
         self._pdus: List[Dict[str, Any]] = []
         self._web: Optional[Dict[str, Any]] = None
         self._client_listener: Optional[Dict[str, Any]] = None
@@ -197,6 +216,25 @@ class ConfigBuilder:
         """Add the three users almost every scenario needs: ``admin``, ``rw``, and ``ro``."""
         for name, permission in (("admin", "admin"), ("rw", "read-write"), ("ro", "read-only")):
             self.with_user(name, permission)
+        return self
+
+    def with_public_key(
+        self, key_id: str, public_key: str, username: str, allowed_uses: Sequence[str] = ("ssh",)
+    ) -> "ConfigBuilder":
+        """Register one Ed25519 public key, in the OpenSSH text form the server parses.
+
+        ``allowed_uses`` must contain ``ssh`` or the SSH listener never offers this key: a key registered
+        for ``client`` or ``muxcon`` only is refused for a session, which is the state a scenario proves.
+        The record names its user, because SSH public-key auth claims the username before the key.
+        """
+        self._public_keys.append(
+            {
+                "key_id": key_id,
+                "public_key": public_key,
+                "username": username,
+                "allowed_uses": list(allowed_uses),
+            }
+        )
         return self
 
     # --- ports ---------------------------------------------------------------------------
@@ -338,6 +376,34 @@ class ConfigBuilder:
                 "read_only": read_only,
             }
         )
+        return self
+
+    def with_ssh_listener(
+        self,
+        port: int,
+        name: str = "ssh1",
+        target: str = "*",
+        require_auth: bool = True,
+        read_only: bool = False,
+        acl: Optional[Sequence[str]] = None,
+    ) -> "ConfigBuilder":
+        """Add one SSH listener, and state ``require_auth`` the way the adapter reads it.
+
+        ``target`` is ``*`` for the port menu or ``<port>`` for one Port. Unlike Telnet, this adapter
+        defaults ``require_auth`` to true, so a scenario that wants an anonymous listener says so here.
+        ``acl`` holds host or subnet strings the listener accepts before the SSH handshake finishes.
+        """
+        entry: Dict[str, Any] = {
+            "name": name,
+            "bind_host": "127.0.0.1",
+            "bind_port": int(port),
+            "target": target,
+            "require_auth": require_auth,
+            "read_only": read_only,
+        }
+        if acl is not None:
+            entry["acl"] = list(acl)
+        self._ssh.append(entry)
         return self
 
     # --- listeners and adapters ----------------------------------------------------------
@@ -510,6 +576,8 @@ class ConfigBuilder:
             config["client_listener"] = self._client_listener
         if self._telnet:
             config["telnet_listener"] = self._telnet
+        if self._ssh:
+            config["ssh_listener"] = self._ssh
         if self._web:
             config["web_console"] = self._web
         if self._pdus:
@@ -519,17 +587,20 @@ class ConfigBuilder:
         return config
 
     def authentication_config(self) -> Dict[str, Any]:
-        """The ``authentication.yaml`` mapping: synthetic users and the external-auth block.
+        """The ``authentication.yaml`` mapping: synthetic users, registered keys, and the external-auth block.
 
         ``external_auth`` is always written, disabled unless ``with_external_auth`` was called, because a
         missing block and a disabled block are the same state to the server and a scenario should not have
-        to know which one it is looking at.
+        to know which one it is looking at. ``public_keys`` is written only when a scenario registered one.
         """
-        return {
+        config: Dict[str, Any] = {
             "users": self._users
             or [{"username": "admin", "password_hash": password_hash(TEST_PASSWORD), "permissions": "admin"}],
             "external_auth": dict(self._external_auth),
         }
+        if self._public_keys:
+            config["public_keys"] = list(self._public_keys)
+        return config
 
     def security_config(self) -> Dict[str, Any]:
         """The ``security.yaml`` mapping: every adapter allowed, writable sections as configured."""
@@ -668,10 +739,15 @@ class E2EServer:
         self._start_reader()
         try:
             self.wait_ready(timeout=timeout)
-        except Exception:
+        except Exception as exc:
             output = self.output()
             self.stop(kill=True)
-            raise RuntimeError(f"{self.name} failed to start: {output[-4000:]}") from None
+            # Both ends of the output, because the reason is usually early ("address already in use", a config
+            # refusal) while a web console that is already ready fills the tail with request lines. `wait_ready`
+            # names the ports that stayed shut, which is the first fact a reader needs.
+            raise RuntimeError(
+                f"{self.name} failed to start: {exc}\nfirst output:\n{output[:2000]}\nlast output:\n{output[-4000:]}"
+            ) from None
         return self
 
     def _start_reader(self) -> None:
@@ -794,6 +870,61 @@ class E2EServer:
             except (OSError, ValueError):  # justification: the reader thread may already have closed it
                 pass
         return self.exit_code
+
+    def restart(self, timeout: float = 45.0) -> "E2EServer":
+        """Stop cleanly and start again with the same config dir and the same state dir.
+
+        This is how a scenario proves material that must survive a process. The SSH host key and the web
+        console's auto-generated certificate live under ``OPENMUX_STATE_DIR``, which a reload never touches.
+        Nothing is rewritten here, so the second process reads exactly what the first one left, on the
+        ports this world was allocated.
+
+        Captured log lines are kept across the restart, so a scenario that wants only the second run's
+        output searches with ``wait_for_log(needle, since=len(before))`` -- the offset trick a second
+        reload already needs.
+
+        The ports are waited for, not assumed. A listening socket whose last connection the *server* closed
+        ends in TIME_WAIT, and macOS then refuses a rebind of that port: one SSH session this harness closed
+        politely is enough to leave one behind. A restart that starts half a second after a stop loses that
+        race, and the listener that cannot bind is logged as failed and left stopped while the rest of the
+        server runs on (issue #115). Waiting for the port costs a fraction of a second in the common case.
+        """
+        self.stop()
+        self.proc = None
+        self.exit_code = None
+        self._wait_rebindable()
+        return self.start(timeout=timeout)
+
+    @staticmethod
+    def _port_bindable(port: int) -> bool:
+        """True when a server could bind ``port`` right now, checked the way a server binds it."""
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+        finally:
+            probe.close()
+        return True
+
+    def _wait_rebindable(self, timeout: float = 30.0) -> None:
+        """Wait until every address of this world can be bound again, and name them when it cannot.
+
+        A blocked port is a fact about the previous process, not about the scenario, so a timeout says so
+        rather than letting the next start fail with an adapter that never came back.
+        """
+        ports = [address.port for address in self.addresses]
+        deadline = time.monotonic() + timeout
+        blocked = [port for port in ports if not self._port_bindable(port)]
+        while blocked and time.monotonic() < deadline:
+            time.sleep(0.25)
+            blocked = [port for port in ports if not self._port_bindable(port)]
+        if blocked:
+            raise AssertionError(
+                f"{self.name} could not rebind {blocked} within {timeout}s; the previous process still "
+                "holds those ports (TIME_WAIT), so a listener started here would be logged dead"
+            )
 
     def stop_clean(self, timeout: float = 20.0) -> int:
         """Stop the process and fail when it did not exit as expected or left a child behind.

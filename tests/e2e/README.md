@@ -1,9 +1,9 @@
 # End-to-end tests
 
 This tier runs the real server as a child process and drives it the way an operator does: with the
-CLI protocol, a Telnet client, the HTTP API, and a Chromium tab. A test here never imports
-`OpenMuxServer` and never patches a product object. It starts a server, watches what a surface shows,
-and stops the server.
+CLI protocol, a Telnet client, an SSH client, the HTTP API, and a Chromium tab. A test here never
+imports `OpenMuxServer` and never patches a product object. It starts a server, watches what a surface
+shows, and stops the server.
 
 Read [`docs/design/e2e_test_suite.md`](../../docs/design/e2e_test_suite.md) for why each scenario
 exists and what it must prove. Read [`docs/E2E_TESTS.md`](../../docs/E2E_TESTS.md) for the list of
@@ -67,7 +67,7 @@ The block prints once, gives each distinct reason its own line, and ends with th
 | File | Job |
 | --- | --- |
 | `harness.py` | `ConfigBuilder` writes an isolated config, `E2EServer` starts and stops one server process, `DeviceStation` is a fake device a scenario can unplug, `Api` calls the HTTP API with Basic auth, `HttpSession` keeps a session cookie and never follows a redirect, `BasicSession` adds credentials to that session, `sso_v1_header` signs a trust header, `free_ports` reserves ports. |
-| `textclients.py` | `CliSession` speaks the CLI protocol through the product's own `TcpClientAdapter`. `TelnetSession` drives the port menu over a raw socket. |
+| `textclients.py` | `CliSession` speaks the CLI protocol through the product's own `TcpClientAdapter`. `TelnetSession` drives the port menu over a raw socket. `SshSession` drives the same menu over SSH with `asyncssh`, and reads a command request, an exit status, and the host key the handshake offered. |
 | `console.py` | `ConsoleSession` and `login()` drive a Chromium page and read it through the page hook. Playwright is imported lazily. |
 | `story.py` | `Timeline` merges every surface into one log, `Story` numbers the steps of a scenario, `step()` marks a block, `surfaces()` names what a test observes, `concurrently()` runs two clients at once. |
 | `index.py` | Builds the scenario table from the test files themselves, for [`docs/E2E_TESTS.md`](../../docs/E2E_TESTS.md). |
@@ -119,6 +119,24 @@ refusal that a browser would hide. `devices.tcp()` starts one fake device: it an
 `plug_back_in()`. `with_serial_port(name, device)` adds a Serial port; pass a device path no host has
 and the reload starts that port with nothing behind it, which is the only adapter failure this tier can
 produce on demand.
+
+The same hook registers an SSH key with `with_public_key(key_id, public_key, username, allowed_uses=("ssh",))`: the
+key material, the account it opens, and the use it is granted all land in `authentication.yaml`, which is what a key
+scenario reads back. `ssh_ed25519_keypair(comment)` builds such a pair and returns the OpenSSH public line with the
+private key a client offers. `with_ssh_listener(port, name=..., target=..., require_auth=..., read_only=..., acl=...)`
+writes an `ssh_listener` section for a second listener; `servers(ssh=True)` binds one on a free port without naming an
+address anywhere, and `ssh_kwargs={...}` carries its keys the way `telnet_kwargs` carries Telnet's. Pass
+`telnet=False` with it when a scenario reads a log line, so only one listener answers a menu. `restart()` stops and
+starts the same world on the same ports and directories, which is how a scenario proves state outlived the process.
+
+An SSH session is driven by `asyncssh`, the library an operator uses, so a scenario reads what a person reads:
+`clients.ssh(user=..., password=..., client_keys=..., known_hosts=..., port=...)`. It connects as it builds, so a
+refused login arrives as a failure carrying the listener's own words, and `pytest.raises` reads them (see
+`_refusal()` in `test_ssh_listener.py`). Once attached, `mode()` answers from the session-info block the Control menu
+prints, `exit_status()` and `is_eof()` tell a refused attach from a session that still waits, and
+`request_command("echo hi")` returns the `(status, stdout, stderr)` triple a command request gets.
+`server_host_key()` returns the key the handshake offered. Nothing here trusts that key: `known_hosts=None` is the
+default, because the server generates its own key per run.
 
 A Telnet session speaks the port menu the way an operator does: `open_control_menu()` sends the
 escape prefix and waits for the prompt, `press("f")` answers one key, and `answer("c2")` answers one

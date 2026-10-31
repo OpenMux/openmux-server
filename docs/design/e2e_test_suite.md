@@ -1,14 +1,14 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 9 and `AUTH-11`: 121 scenarios in ten suites, listed in
+**Status:** Implemented through Phase 9, `AUTH-11`, and the SSH listener: 131 scenarios in eleven suites, listed in
 [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the three `IDX` self-check
 scenarios, the browser proof, the eleven `AUTH` scenarios driven over HTTP, the fourteen `CON` console scenarios driven
 in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the twenty `CFG` Config Editor
-scenarios, the eleven `ACT` Port Action scenarios, the six `TIM` story scenarios, and the six `ST` status page
-scenarios run green. See **Build status** near the end.
+scenarios, the eleven `ACT` Port Action scenarios, the six `TIM` story scenarios, the six `ST` status page scenarios,
+and the ten `SSH` listener scenarios run green. See **Build status** near the end.
 **Date:** 2026-10-31
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
-and Telnet at the same time.
+Telnet, and SSH at the same time.
 
 Related: [ADR-0001 Access wording belongs to the server](../adr/0001-access-wording-belongs-to-the-server.md),
 [ADR-0002 Listener session module sits above a byte transport seam](../adr/0002-listener-session-module-sits-above-a-byte-transport-seam.md),
@@ -750,6 +750,65 @@ read-only operator's page, and that the port row labels it the same way. The tem
 never given: a client whose transport the server could not name reads `unknown`. Each half carries a unit guard in
 `tests/server/test_web_console_gather_clients.py` that fails without the fix.
 
+### SSH — encrypted console (`test_ssh_listener.py`, 10)
+
+`asyncssh` terminates this surface, and `openmux/server/adapters/ssh_listener.py` decides who gets in, which Port a
+session lands on, and what that session may type. The unit tests for that adapter pass a fake console manager and a
+fake process object, so no unit test completes a handshake, offers a host key, or answers a `Port: ` prompt. Every
+scenario here dials a running server with the library a person uses, and reads the bytes back.
+
+Five measured facts shape these bodies, and each is used where it applies:
+
+- The adapter generates one Ed25519 host key per state directory, logs `Generated new SSH host key at <path>` once,
+  and reuses that file on a restart of the same state directory.
+- A refused **login** shows up on the wire only: the client reads `Permission denied for user <name>`, and a wrong
+  password or an unknown account added no product log line of its own.
+- A refused **attach** is the opposite: the listener writes the line `access_decision` renders onto the channel,
+  closes it with status 1, and leaves two warnings naming the code it used.
+- A command request is answered with `Only interactive sessions are supported.` on stderr and status 1, and the shell
+  on the same connection keeps working.
+- The escape prefix here is two bytes, which the session-info block reports as `Escape sequence: b'\x05'+b'c'`.
+
+| Id | What it proves |
+| --- | --- |
+| `SSH-01` | The host key is generated inside the state dir with mode 0600, the handshake offers exactly that key, and the home directory's own key file is untouched. A restart of the same state dir offers the same bytes with no second generation line, and the client still gets in. |
+| `SSH-02` | A password the config accepts opens a shell, and the account behind it decides the seat: `rw` comes up read-write, `ro` comes up read-only and reads what the writer types on the same Port. A wrong password and an unknown account are both refused before a prompt. |
+| `SSH-03` | A key registered with `allowed_uses: [ssh]` opens a session for its own account. A key the config never names, a key registered for `client` use only, and a valid key offered for another account are each refused. |
+| `SSH-04` | With `require_auth: false` the listener asks for no credential and prints the start-up warning that promises an attach. Every attach is refused, on the channel and in the log, for `rw` and for a made-up name alike. |
+| `SSH-05` | A `acl` that omits the client's address closes the socket before any prompt, and the log names the listener, the address, and `(ACL)`. The listener on the next port, which lists no `acl`, admits the same client to a read-write seat. |
+| `SSH-06` | The shell is the only thing this listener serves. `echo hi` on the same connection comes back with status 1, no stdout, and `Only interactive sessions are supported.`, and the shell still takes what the session types next. |
+| `SSH-07` | A CLI Takeover takes a seat an SSH session holds. The holder is told in band, in the sentence the shared module owns, drops to read-only, and both logs carry the event: `WRITE-SLOT TAKEOVER port=slot1 taker=admin: ... victim=rw: ...` and the Port's `write_slot_takeover` record. |
+| `SSH-08` | The Control menu's `p` key lists this console's two feeds over SSH, one answer switches one outlet and says the Port stays up via the other, the attached session reads `[POWER] feed rack1.1 is now off`, and the audit line names `user admin`, `staying up: feed1`, and `client ssh:ssh1:`. |
+| `SSH-09` | `user+port` and `user:port` land on that Port with no `Port: ` prompt in between, an unknown Port is named back as `Port nosuch unavailable` and the channel closes with status 1, and a plain username still gets the Port menu. |
+| `SSH-10` | A Port whose own group lists exclude the account is still listed in the Port menu, then answers the name on the channel with the refusal `access_decision` renders, closes with status 1, and logs `denied_by_group_acl` twice: once from the ladder, once from the listener. |
+
+Three boundaries keep this group from wider claims. The harness dials with `known_hosts=None`, because the server's key
+is generated per run: `SSH-01` therefore reads the offered key out of the handshake instead of proving that a client
+rejects a key it has not seen. A subsystem request shares one branch with a command request in
+`ssh_listener.py:534`, and `asyncssh` offers no call for a subsystem shell on this path, so `SSH-06` proves the exec
+half only. And no scenario here proves a serial or `tcp_initiator` Port over SSH, because the Port behind the session
+is the same object every transport reaches.
+
+Issue [#110](https://github.com/OpenMux/openmux-server/issues/110) came out of `SSH-04` and is open: a listener that
+offers the Port menu with `require_auth: false` warns that any client can attach, then refuses every attach. With no
+login the adapter has
+no account to carry the session, so it names the client after the listener (`ssh_<name>`), and the access ladder grants
+that identity nothing. The username a client offers is never consulted. `SSH-04` asserts that measured behaviour, so
+the scenario fails when the fix lands and the claim can be rewritten.
+
+The harness gained the SSH half of itself for this group: `ConfigBuilder.with_ssh_listener` and
+`ConfigBuilder.with_public_key`, the module function `ssh_ed25519_keypair`, `E2EServer.restart`, the `ssh` and
+`ssh_kwargs` knobs on `servers()` with `telnet=False` to leave one listener answering, and `clients.ssh()` over the new
+`SshSession` in `textclients.py`. `SshSession` runs its own event loop on a daemon thread, like the other text
+sessions, and pumps the channel into a queue. One harness defect surfaced while building `SSH-10`: `text()` returned a
+cached transcript once the channel end arrived, so the refusal the listener had already sent stayed in the queue and the
+scenario read a transcript that ended at `Port: `. That read looked exactly like a listener that refuses in silence,
+and one wrong claim reached a scenario body before the queue was drained by hand. `text()` now always drains.
+`E2EServer.restart()` waits for the world's ports to become bindable before it starts the second process: a politely
+closed SSH connection leaves a socket in TIME_WAIT, macOS then refuses the rebind, and a listener that cannot bind is
+logged dead and left stopped while the rest of the server keeps answering `/healthz` with 200 — issue
+[#115](https://github.com/OpenMux/openmux-server/issues/115) carries that, and no scenario asserts it yet.
+
 ### Story and timeline recorder (`test_story.py`, 6 built)
 
 Built: `TIM-01` to `TIM-05` prove what one timeline line looks like: caret notation for control bytes, `IAC WILL ECHO`
@@ -786,8 +845,9 @@ Measured boundaries of `TIM-06`:
 
 Named now so release 1 fixtures stay sufficient.
 
-1. SSH listener: host key inside `OPENMUX_STATE_DIR`, one Takeover, one `p` menu run. The control menu is shared with
-   Telnet and already covered by `RW-10`.
+1. SSH listener: **built** as `SSH-01` to `SSH-10`, ahead of the rest of this list. The host key inside
+   `OPENMUX_STATE_DIR`, one Takeover, and one `p` menu run are each proven there, beside the login forms, the `acl`
+   fence, and the command request. The control menu is shared with Telnet and already covered by `RW-10`.
 2. MuxCon with two live nodes: first attach read-only, `FEDRW` Takeover, `CONNECT:{server}::{port}`,
    `POWER:SWITCH` relay, federation area, multipath panel. See [muxcon.md](muxcon.md) §4.5 and 4.6.
 3. Power `driver: command` driven by a checked-in fake device script. Only monkeypatched subprocesses are covered
@@ -827,6 +887,7 @@ Named now so release 1 fixtures stay sufficient.
 | 8 — Status pages | Done | Six scenarios (`ST-01` to `ST-06`) in `tests/e2e/test_status_pages.py`: the cards and the sort links against `/api/status`, a detail row that survives the swap that rebuilt it, one Clients table naming each transport across three surfaces, the federation empty state, one port's power dot following an outlet on two open pages, and the shape of `/api/status/fragments`. One product defect came out of them: the Clients table called every Telnet console a websocket. See the ST section above. The harness gained `ConsoleSession.is_visible()` and `ConsoleSession.live_badge()`; `set_offline()` is documented for what it really does. |
 | 9 — Story | Done | Six scenarios in `tests/e2e/test_story.py`: the five recorder scenarios and `TIM-06`, one operator's shift in one process. It adds no harness method: the editor steps run through `ConsoleSession` helpers other suites already added, and the file gained four local helpers of its own for the inline editor row. `TIM-06` marks `e2e_browser` inside a file whose other scenarios need no browser; `AUTH-11` is the other scenario that does. |
 | 9a — AUTH-11 | Done | `AUTH-11` in `tests/e2e/test_auth.py`: an `external_auth` helper decides who may sign in, and only `authentication.yaml` hands out the role. The harness gained `ConfigBuilder.with_external_auth`, and `tests/e2e/auth_fixtures/helper_stub.py` is the fixture — one script, four names, in the protocol `auth_manager.py` speaks. One product defect came out of building it: a helper that answers slowly stops the server for every other visitor, which issue #114 carries. The scenario asserts nothing about time, because a timing claim would read as flaky while that defect is open. |
+| 10 — SSH listener | Done | Ten scenarios (`SSH-01` to `SSH-10`) in `tests/e2e/test_ssh_listener.py`, each dialing a running server with `asyncssh`: the host key generated in the state dir and reused across a restart, the account behind a password, the `ssh` use of a registered key, the listener that offers the Port menu without a login, the `acl` fence beside a listener without one, the command request that never reaches a Port, one Takeover taken from an SSH holder, the Control menu's `p` key over SSH, a username that carries a Port name, and a Port that excludes the account. Two product defects came out of this group: issue #110 from `SSH-04`, and issue #115 from the restart in `SSH-01`, where a listener refused a bind is left stopped while the server goes on answering `/healthz` with 200. The harness gained the SSH half of itself: `with_ssh_listener`, `with_public_key`, `ssh_ed25519_keypair`, `E2EServer.restart` (which waits for the ports to be bindable again), the `ssh` knobs on `servers()`, and `clients.ssh()` over the new `SshSession`. See the SSH section above. |
 
 - `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
   `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`
@@ -870,6 +931,7 @@ carries a unit guard that fails without the fix, and `CHANGELOG.md` carries an e
    two risky pieces.
 4. Phases 3-6 — AUTH and CON, then RW, then PWR, then CFG.
 5. Phases 7-9 — ACT, ST, story.
+6. **Phase 10 — `test_ssh_listener.py`.** Release 2 item 1, built early: no browser, one more listener per world.
 
 ---
 

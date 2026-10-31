@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-121 scenarios across 10 suites.
+131 scenarios across 11 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -132,6 +132,17 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | RW-18 | The page's Take control item is the same Takeover: it grants the page and displaces the holder. | cli:rw, web:rw | `tests/e2e/test_write_slot.py::test_rw18_a_web_page_can_take_the_seat_from_a_cli_holder` |
 | RW-19 | A page demoted by another client changes its mode, its pill, and its body class at once. | web:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw19_a_page_that_loses_the_seat_stops_claiming_it` |
 | RW-20 | Three viewers on one port, one stalled on purpose: a control frame still reaches the others. | cli:ro, cli:rw | `tests/e2e/test_write_slot.py::test_rw20_one_client_that_stops_reading_does_not_hold_up_the_others` |
+| **SSH** | | | |
+| SSH-01 | The server generates its host key inside the state dir, offers that key, and reuses it after a restart. | ssh:viewer, state dir, server log | `tests/e2e/test_ssh_listener.py::test_ssh01_the_host_key_is_born_in_the_state_dir_and_outlives_the_process` |
+| SSH-02 | A password the config accepts opens a shell, and the account's permission decides what that shell may do. | ssh:rw, ssh:viewer, authentication.yaml | `tests/e2e/test_ssh_listener.py::test_ssh02_the_account_behind_the_password_decides_the_seat` |
+| SSH-03 | A registered key opens an SSH session only when allowed_uses names ssh, and only for its own account. | ssh:key, authentication.yaml | `tests/e2e/test_ssh_listener.py::test_ssh03_a_key_opens_this_door_only_for_the_use_and_the_account_it_names` |
+| SSH-04 | With require_auth off the listener asks for no credential, then refuses the attach its own warning promises. | ssh:anon, ssh:stranger, server log | `tests/e2e/test_ssh_listener.py::test_ssh04_a_listener_without_a_login_refuses_every_attach_it_offers` |
+| SSH-05 | A listener whose acl omits the client's address closes the socket before a prompt, while its neighbour works. | ssh:fenced, ssh:open, server log | `tests/e2e/test_ssh_listener.py::test_ssh05_an_address_list_refuses_before_a_login_and_only_that_listener` |
+| SSH-06 | A shell is the only thing this listener serves, and a command request is answered with its own refusal. | ssh:rw | `tests/e2e/test_ssh_listener.py::test_ssh06_a_command_request_never_reaches_a_port` |
+| SSH-07 | A CLI Takeover displaces an SSH holder, tells it in band, and writes the audit line every surface writes. | ssh:victim, cli:taker, server log, port data log | `tests/e2e/test_ssh_listener.py::test_ssh07_a_takeover_from_the_cli_takes_a_seat_held_over_ssh` |
+| SSH-08 | The Control menu's power key lists the console's feeds over SSH, toggles one, and is audited to that client. | ssh:admin, server log | `tests/e2e/test_ssh_listener.py::test_ssh08_the_power_menu_key_drives_this_consoles_feeds_over_ssh` |
+| SSH-09 | A username that carries a Port name lands on it directly, and an unknown name is answered then closed. | ssh:embedded, ssh:menu | `tests/e2e/test_ssh_listener.py::test_ssh09_the_username_can_name_the_port_and_skip_the_port_menu` |
+| SSH-10 | A Port whose own list excludes the account still appears in the Port menu, then refuses the name on the channel. | ssh:rw, server log | `tests/e2e/test_ssh_listener.py::test_ssh10_a_port_that_excludes_the_account_answers_on_screen_and_in_the_log` |
 | **ST** | | | |
 | ST-01 | The cards and the sortable columns of the status page agree with the server | web:rw, cli:rw, http | `tests/e2e/test_status_pages.py::test_st01_status_cards_and_sort_links_say_what_the_server_says` |
 | ST-02 | A Details row an operator opened stays open across a swap that rebuilds the table | web:rw, web:viewer, cli:rw | `tests/e2e/test_status_pages.py::test_st02_an_open_port_detail_survives_a_live_swap` |
