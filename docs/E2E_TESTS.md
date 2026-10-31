@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-113 scenarios across 9 suites.
+119 scenarios across 10 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -131,6 +131,13 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | RW-18 | The page's Take control item is the same Takeover: it grants the page and displaces the holder. | cli:rw, web:rw | `tests/e2e/test_write_slot.py::test_rw18_a_web_page_can_take_the_seat_from_a_cli_holder` |
 | RW-19 | A page demoted by another client changes its mode, its pill, and its body class at once. | web:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw19_a_page_that_loses_the_seat_stops_claiming_it` |
 | RW-20 | Three viewers on one port, one stalled on purpose: a control frame still reaches the others. | cli:ro, cli:rw | `tests/e2e/test_write_slot.py::test_rw20_one_client_that_stops_reading_does_not_hold_up_the_others` |
+| **ST** | | | |
+| ST-01 | The cards and the sortable columns of the status page agree with the server | web:rw, cli:rw, http | `tests/e2e/test_status_pages.py::test_st01_status_cards_and_sort_links_say_what_the_server_says` |
+| ST-02 | A Details row an operator opened stays open across a swap that rebuilds the table | web:rw, web:viewer, cli:rw | `tests/e2e/test_status_pages.py::test_st02_an_open_port_detail_survives_a_live_swap` |
+| ST-03 | One Clients table says which transport, user, and port each console arrived on | http, cli:rw, telnet:ro, web:admin, web:holder, web:viewer | `tests/e2e/test_status_pages.py::test_st03_the_clients_table_names_each_transport` |
+| ST-04 | With no multipath peer, the federation region stays empty and the page says so | http, web:rw, cli:rw | `tests/e2e/test_status_pages.py::test_st04_the_federation_region_has_no_peers_and_says_so` |
+| ST-05 | When a feed falls, every open status page tints that port's power cell the same way | web:admin, web:rw, http | `tests/e2e/test_status_pages.py::test_st05_a_power_cell_follows_an_outlet_on_every_open_page` |
+| ST-06 | /api/status/fragments returns the four regions, in the shape the page swaps them with | http, web:rw, cli:rw | `tests/e2e/test_status_pages.py::test_st06_the_status_fragments_are_regions_the_page_swaps` |
 | **TIM** | | | |
 | TIM-01 | A timeline line shows control bytes as caret notation and omits the line ending that closes it. | recorder | `tests/e2e/test_story.py::test_tim01_control_bytes_use_caret_notation_and_a_trailing_line_ending_is_dropped` |
 | TIM-02 | The listener's ``IAC WILL ECHO`` reaches the timeline by name, with its option named. | recorder | `tests/e2e/test_story.py::test_tim02_telnet_negotiation_is_named_by_the_rfc854_values` |

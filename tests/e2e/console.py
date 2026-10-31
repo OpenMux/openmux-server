@@ -295,7 +295,16 @@ class ConsoleSession:
         self.click("#connect")
 
     def set_offline(self, offline: bool) -> None:
-        """Cut or restore this page's network, to drive the live-data badge."""
+        """Cut or restore this page's network, to drive anything that fetches.
+
+        Playwright blocks the requests a page makes, so a refresh, a fragment
+        fetch, or a form submit fails while it is offline. It does not drop a
+        WebSocket that is already open: measured, the site event socket of a
+        status page stayed connected through three seconds offline, so this
+        cannot turn a **Live-data badge** red.
+        `tests/test_web_console_live_badge.py` drives that state by closing the
+        socket instead.
+        """
         self.action(f"set_offline {offline}")
         self.page.context.set_offline(offline)
 
@@ -529,6 +538,14 @@ class ConsoleSession:
         self.action(f"wait_for_selector {selector} state={state}")
         self.page.wait_for_selector(selector, state=state, timeout=timeout)
 
+    def is_visible(self, selector: str) -> bool:
+        """Whether one element shows on screen, which is not the same question as whether it exists.
+
+        The status page hides a closed detail row with ``display: none`` and keeps it in the document, so
+        counting the node proves nothing about what an operator sees. This asks the browser.
+        """
+        return bool(self.page.locator(selector).first.is_visible())
+
     def wait_for_page_text_to_clear(self, needle: str, selector: str = "body", timeout: float = 10.0) -> None:
         """Wait until one element no longer shows ``needle``, on a page with no test hook."""
         self.action(f"wait_for_page_text_to_clear {needle!r}")
@@ -720,6 +737,37 @@ class ConsoleSession:
             {"label": str(entry.get("label") or "").strip(), "value": str(entry.get("value") or "").strip()}
             for entry in raw or []
         ]
+
+    def live_badge(self) -> Dict[str, Any]:
+        """The header's ``Live data`` badge: whether it shows, its tint, and the sentence it carries.
+
+        The badge belongs to the shared layout, so every server-rendered page carries one, and
+        ``layout.js`` tints it from the state of that page's own site event socket. A page whose script never
+        calls ``omxSetLive`` therefore leaves it hidden, which is why ``state`` reports ``none`` rather
+        than guessing. The tooltip is part of the claim: it is the sentence that tells an operator whether
+        the numbers on screen are current.
+        """
+        badge = self.page.evaluate(
+            """() => {
+                 const el = document.getElementById('liveDataBadge');
+                 if (!el) return null;
+                 const state = el.classList.contains('ok') ? 'live' : (el.classList.contains('bad') ? 'stale' : 'none');
+                 return {
+                   shown: getComputedStyle(el).display !== 'none',
+                   state: state,
+                   title: el.title || '',
+                   text: (el.textContent || '').replace(/\\s+/g, ' ').trim(),
+                 };
+               }"""
+        )
+        if not isinstance(badge, dict):
+            raise AssertionError(f"{self.surface}: the page carries no #liveDataBadge element")
+        return {
+            "shown": bool(badge.get("shown")),
+            "state": str(badge.get("state") or "none"),
+            "title": str(badge.get("title") or ""),
+            "text": str(badge.get("text") or ""),
+        }
 
     def banner(self) -> Dict[str, Any]:
         """The banner region: its text and its class, or an empty dict when hidden."""

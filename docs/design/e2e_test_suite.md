@@ -1,11 +1,11 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 7: 113 scenarios in nine suites, listed in
+**Status:** Implemented through Phase 8: 119 scenarios in ten suites, listed in
 [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the three `IDX` self-check
 scenarios, the browser proof, the ten `AUTH` scenarios driven over HTTP, the fourteen `CON` console scenarios driven
 in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the twenty `CFG` Config Editor
-scenarios, the eleven `ACT` Port Action scenarios, and the five `TIM` story-recorder scenarios run green. Phases 8-9
-are not written; see
+scenarios, the eleven `ACT` Port Action scenarios, the five `TIM` story-recorder scenarios, and the six `ST` status page
+scenarios run green. Phase 9, the one story sequence in one process, is not written; see
 **Build status** near the end.
 **Date:** 2026-10-30
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
@@ -321,8 +321,8 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 113 scenarios in 9 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, `ACT` 11,
-the index checks 3, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
+The suite today runs 119 scenarios in 10 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, `ACT` 11,
+`ST` 6, the index checks 3, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
 runs, and its count is checked by `IDX-02`. Two further groups below still hold planned ids: they have boundaries and
 assertions written down, and no test for each of them yet. Full wording for every built id lives in that
 index.
@@ -703,10 +703,38 @@ read-write seat from that page, so the launch was refused with "read-write slot 
 the same overlay open starts rebuilt the run form a moment after the link filled it, so the run started on the parameter
 defaults instead of the values the link carried.
 
-### ST — status pages (`test_status_pages.py`, planned: 6)
+### ST — status pages (`test_status_pages.py`, 6 built)
 
-Sort links and summary counts, detail row that stays open across a refresh, `#clientsTbody` across all surfaces,
-federation empty state, power page driven by site events, `/api/status/fragments`.
+The status page renders once and then keeps itself current. Four **Status fragments** (`summary`, `ports`, `federation`,
+`clients`) are swapped in place from `GET /api/status/fragments` when the **Site event hub** carries a **Status poke**.
+`status.js` owns the swap and which detail rows stay open, `web_console.py` owns the sort links, the fragment markers,
+and the client list, and `layout.js` owns the socket and the **Live-data badge**. Each scenario moves real state — a
+console attaches, an outlet falls — and reads the page after the swap, so one read proves the state and the swap
+together. Where two pages watch one change, both are read, and what belongs to one page stays with that page.
+
+| Id | What it proves |
+| --- | --- |
+| `ST-01` | The four cards carry the counts `/api/status` reports. Six headers are sort links whose link names the next direction and whose arrow names the current one. Following one reorders the table by the Clients count. The chosen order survives a swap that replaces the whole table. A column name the server does not know is answered as `name` ascending. |
+| `ST-02` | A detail row one operator opened is still open afterwards, and its control still reads `-`, after a swap that rebuilt the table under them. A second page keeps its own row open instead of borrowing the first page's. A row an operator closed stays closed across the next swap. |
+| `ST-03` | Three consoles on one port over three transports appear as three rows, each with the user, the port, the peer address, and the transport that console really used, agreeing with the port's own holders list and with `/api/status`. Each signed-in page adds its own session row with no port. A read-only operator reads the same rows. The port row labels each console with its transport. |
+| `ST-04` | With no multipath peer, `/api/status` reports no group and no connection, the region says `No federation connections` and shows no peer card, and both federation cards read 0. The `federation` fragment carries the same sentence, and still says it after a console joins a port. |
+| `ST-05` | Both pages start with a green **Live-data badge** carrying its exact sentence. The fed port's **Power dot** reads healthy and its tooltip names the feed; the unfed port shows `—`. One outlet switched through REST tints that dot on both pages to `0/1 - ALL POWER LOST` while both sockets stay live, and switching back restores it. |
+| `ST-06` | The endpoint answers with exactly the four regions under one `fragments` key. No fragment carries its own container id, and the `ports` fragment carries no sort header. The sort query is honoured in both directions. A signed-in cookie answers for the fetch the page itself makes, while an anonymous caller gets `401` with a challenge and no port name. After a swap the open page shows the rows and the clients the endpoint serves for the same query. |
+
+Three boundaries keep this group from wider claims. `ConfigBuilder` has no muxcon knob, so federation is proven only as
+the empty state — the same kind of limit `AUTH-11` records for a helper account. `ConsoleSession.set_offline()` blocks
+fetches but leaves an open WebSocket running, so the stale red badge is out of reach for a page scenario and stays with
+`tests/test_web_console_live_badge.py`; `ST-05` proves the green half instead, and a full reload cannot catch the red
+either because the one-second debounce races the first reconnect. And `AUTH-01` owns the anonymous refusal of
+`/status`, so `ST-06` covers only the fragment endpoint the page calls.
+
+One product defect came out of building this group. The Clients table named every Telnet console a websocket and left
+its address blank, because `web_console.py` matched a client id against its own rules instead of asking the adapter that
+accepted the connection, and `TelnetListenerAdapter._resolve_client_meta()` already answered with the transport and the
+peer address. `ST-03` proves a Telnet console is now listed as `telnet` with its address on an administrator's page and a
+read-only operator's page, and that the port row labels it the same way. The template no longer writes a transport it was
+never given: a client whose transport the server could not name reads `unknown`. Each half carries a unit guard in
+`tests/server/test_web_console_gather_clients.py` that fails without the fix.
 
 ### Story and timeline recorder (`test_story.py`, 5 built, 1 planned)
 
@@ -763,7 +791,8 @@ Named now so release 1 fixtures stay sufficient.
 | 6 — Config Editor | Done | `CFG-01` to `CFG-20` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at soft reload, one entry of any port section the adapter refuses at boot, and that entry again under a full reload. Five product defects came out of building this group, listed under `CFG` above; the third turned out to have a second half found after it was fixed, the fourth was found while measuring that half, and the fifth came from making a full reload answer carry the keys a soft reload answer already carried. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it; `CFG-18` then deletes that entry with `_drop_port_named()` and counts the block lines after `_wait_for_log_count()`, because a plain log wait is satisfied by an earlier reload; `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`, and `CFG-20` reuses the hand-edit helper `CFG-18` added. |
 | 6a — uncovered-run notice | Done | A run that cannot start a browser skips every page scenario and, under the heading `E2E browser coverage`, prints how many scenarios asserted nothing, one line per reason, and the fix command. `IDX-03` drives the notice with a fake reason and a fake skip list; whether this machine has a browser is not what it checks. |
 | 7 — Port Actions | Done | Eleven scenarios (`ACT-01` to `ACT-11`) in `tests/e2e/test_actions.py`, with three fixture scripts under `tests/e2e/action_fixtures` and an `action` block on the page hook. Two page defects came out of them: see the ACT section above. |
-| 8-9 | Not started | ST and the story scenarios. |
+| 8 — Status pages | Done | Six scenarios (`ST-01` to `ST-06`) in `tests/e2e/test_status_pages.py`: the cards and the sort links against `/api/status`, a detail row that survives the swap that rebuilt it, one Clients table naming each transport across three surfaces, the federation empty state, one port's power dot following an outlet on two open pages, and the shape of `/api/status/fragments`. One product defect came out of them: the Clients table called every Telnet console a websocket. See the ST section above. The harness gained `ConsoleSession.is_visible()` and `ConsoleSession.live_badge()`; `set_offline()` is documented for what it really does. |
+| 9 — Story | Not started | The one sequence in one process listed under **Story and timeline recorder**. |
 
 - `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
   `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`

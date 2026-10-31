@@ -143,6 +143,18 @@ on from the heading in `.page` — the browser tab title never changes. That pag
 the document and hides the others, so wait for the region the query asked for, not for any of them.
 One page belongs to one surface: ask `console.user(surface, ...)` once per surface, because a second
 call signs that page in again and the form is gone.
+A status page carries no hook either, and it rebuilds itself while you watch: `status.js` swaps whole
+regions when the **Site event hub** carries a **Status poke**. Read it with `goto()`, `page_text(...)`,
+and a `page.evaluate(...)` that walks `#portsTbody tr[data-port]`, and rebuild that read every time —
+a row handle or a locator held across a swap points at a node the page dropped. Do not call `reload()`
+to see a change, because it waits for the hook this page never has; move the state and read again.
+Two pages watching one change need two surface names (`web:admin`, `web:rw`): the browser fixture keeps
+one context per name, so a second page under the same name is already signed in and never meets the
+login form. `live_badge()` reads the **Live-data badge** that page owns, and `is_visible(selector)`
+answers for a node with no hook, such as a port detail row. Neither needs the server: the badge reflects
+this page's own socket. `set_offline()` blocks fetches but cannot drop an open WebSocket, so it does not
+turn that badge red — `tests/test_web_console_live_badge.py` covers the red state. Over REST, note that
+`GET /api/status/fragments` answers with its regions under one `fragments` key.
 Never edit `config/` to make a test pass. It holds the shipped defaults. A test that needs a config
 file writes it through `ConfigBuilder`, or replaces the generated `server.yaml` with
 `servers(raw_server_yaml=...)`.
