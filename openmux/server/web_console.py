@@ -4275,9 +4275,10 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
         Resolution order:
           - self._client_meta (websocket manager)
+          - the adapter that owns the client, which names the transport it accepted and the peer address
           - console_manager.client_to_manager mapping: if manager is
             TcpServerAdapter, try to find the client session and its address
-          - Fallback to websocket if client_id looks like 'ws:'
+          - Fallback to websocket if client_id looks like 'ws:', otherwise no type at all
         """
         meta: Dict[str, Any] = {}
         if not client_id:
@@ -4308,11 +4309,12 @@ class WebConsoleAdapter(BaseGenericAdapter):
     def _meta_from_manager(self, client_id: str, meta: Dict[str, Any]) -> bool:
         """Resolve meta from the console manager owning *client_id*.
 
-        For a TCP-flavored manager (client_listener/tcp/tcp_server), reads the
-        session address into ``meta`` (type ``tcp`` + ip) and returns True so
-        the caller stops resolving. Otherwise sets a fallback ``type`` (the
-        websocket/None default) and returns False. A missing manager or a
-        session lookup error leaves ``meta`` for the caller's fallback.
+        The owning adapter is asked first, because it accepted the connection and knows what arrived: the
+        Telnet and SSH listeners answer with ``type`` and the peer address. For a TCP-flavored manager
+        (client_listener/tcp/tcp_server), which has no such resolver, the session address is read instead
+        (type ``tcp`` + ip) and True is returned so the caller stops resolving. Otherwise a fallback
+        ``type`` is set (the websocket/None default) and False is returned. A missing manager or a session
+        lookup error leaves ``meta`` for the caller's fallback.
         """
         cm = self.console_manager
         if not cm or not hasattr(cm, "client_to_manager"):
@@ -4320,6 +4322,8 @@ class WebConsoleAdapter(BaseGenericAdapter):
         mgr = cm.client_to_manager.get(client_id)
         if mgr is None:
             return False
+        if self._meta_from_owning_adapter(mgr, client_id, meta):
+            return True
         # If it looks like the TCP server adapter, try to get address
         atype_fn = getattr(mgr, "get_adapter_type", None)
         atype = atype_fn() if callable(atype_fn) else None
@@ -4342,6 +4346,37 @@ class WebConsoleAdapter(BaseGenericAdapter):
             meta["ip"] = addr
         meta["type"] = "tcp"
         return True
+
+    def _meta_from_owning_adapter(self, mgr: Any, client_id: str, meta: Dict[str, Any]) -> bool:
+        """Ask the adapter that owns *client_id* how that console arrived, and record what it says.
+
+        ``ConsoleManager._client_meta_for`` makes the same call when it names who took a Write slot. The
+        Telnet and SSH listeners answer with their own transport and the peer address, which no other
+        source can tell: their client id is minted inside the listener, and the web console's own registry
+        never saw the connection. An adapter with no resolver, or one that answers with nothing, leaves
+        ``meta`` untouched and returns False so the caller keeps trying.
+        """
+        if mgr is self:
+            # This adapter's own clients are websockets, and its registry was already consulted by
+            # _resolve_client_meta. Asking it again would call straight back into that method.
+            return False
+        resolver = getattr(mgr, "_resolve_client_meta", None)
+        if not callable(resolver):
+            return False
+        try:
+            answer = resolver(client_id) or {}
+        except Exception:
+            # justification: optional metadata; the caller falls back to the next source
+            return False
+        if not isinstance(answer, dict):
+            return False
+        found = False
+        for key in ("type", "ip"):
+            value = answer.get(key)
+            if value:
+                meta[key] = str(value)
+                found = True
+        return found
 
     def _render_login(
         self,

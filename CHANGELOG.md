@@ -196,6 +196,12 @@ Changes since v1.0.4 (2026-10-19).
   once from `stop()` and once from that connection's own handler, and the second one raised `KeyError` that nobody awaited:
   it showed as `ERROR: Task exception was never retrieved` with a traceback, and the socket was closed twice. The first
   caller now claims the session and the second returns. No config change.
+- **The status page names the transport each client really used.** A Telnet console was listed as `websocket` with an
+  empty Address, in the Clients table and in the port row that lists who holds that Port. The server asked its own web
+  console about every client id and then guessed from the `ws:` prefix, so it never asked the adapter that accepted the
+  connection. It now asks that adapter first, and the Telnet and SSH listeners answer with the transport and the peer address
+  they already hold. A client whose transport no source names reads `unknown` rather than `websocket`. Only the labels
+  change: the entries, the sort orders, and `/api/status` count what they counted before. No config key changed.
 
 ## [1.0.4]
 

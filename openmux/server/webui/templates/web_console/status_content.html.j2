@@ -213,7 +213,7 @@
             {% set preview = p.client_details[:5] %}
             <span class="muted">—
               {% for cd in preview %}
-                {{ cd.username }}{% if cd.type or cd.ip %} ({{ (cd.type or 'ws') }}{% if cd.ip %}@{{ cd.ip }}{% endif %}){% endif %}{% if not loop.last %}, {% endif %}
+                {{ cd.username }}{% if cd.type %} ({{ cd.type }}{% if cd.ip %}@{{ cd.ip }}{% endif %}){% elif cd.ip %} ({{ cd.ip }}){% endif %}{% if not loop.last %}, {% endif %}
               {% endfor %}
               {% if (p.client_details|length) > 5 %}, …{% endif %}
             </span>
@@ -384,7 +384,7 @@
             <td>{{ cl.client_id }}</td>
             <td>{{ cl.username or '' }}</td>
             <td>{{ cl.ip or '' }}</td>
-            <td>{{ cl.type or 'websocket' }}</td>
+            <td>{{ cl.type or 'unknown' }}</td>
             <td>{{ cl.port or '' }}</td>
             <td>{% if cl.created %}{{ cl.created | fmt_ts }}{% endif %}</td>
             <td>{% if cl.last_seen %}{{ cl.last_seen | fmt_ts }}{% endif %}</td>
