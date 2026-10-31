@@ -22,6 +22,7 @@ concept". Use the term in the **Use** column. Do not use the words in the
 | Console Manager | The component that connects the interactive console protocol to `PortManager` (`ConsoleManager`). | management console (use "console" alone) |
 | Server identity | The value that identifies this node: the `server.id` config key, else the system hostname. One shared resolver feeds every surface (federation handshake, cert CN, SSO node claim, banners). | node_name, server.name (removed), server.server_id (removed), muxcon.server_id (removed) |
 | Dynamic Port Manager | The per-adapter helper that creates and destroys ports at runtime (`DynamicPortManager`). | — |
+| External-auth helper | The command named by `external_auth.helper` in `authentication.yaml`. It answers for a user name that file does not hold, and reports group names only. `authentication.yaml` turns those groups into a permission. | external authenticator, PAM helper (PAM is one helper implementation) |
 
 ## Port Lifecycle
 

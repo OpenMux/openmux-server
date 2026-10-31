@@ -100,7 +100,10 @@ The `configure` hook also sets the policy a scenario needs: `with_login_lockout`
 `security.yaml` `rate_limits.authentication`, `with_sso` for the `web_console` trust header,
 `with_dummy_pdu` for a power outlet, `with_actions` for Port Actions, `with_tcp_initiator_port` for a
 port that dials a device of ours, and `scrollback_size=` on `with_command_port` when a scenario needs
-a port that remembers. A Port takes its Write slot shape on the same call: `write_slot_capacity=`
+a port that remembers. `with_external_auth([sys.executable, script], groups=..., default_permission=...)`
+turns on the `external_auth` helper in `authentication.yaml`; `AUTH-11` signs in through
+`tests/e2e/auth_fixtures/helper_stub.py`, one script that answers four names in the protocol
+`auth_manager.py` speaks. A Port takes its Write slot shape on the same call: `write_slot_capacity=`
 (`one`, `multiple`, or `none`), `read_write_groups=`, and `read_only_groups=` on a Loopback port, and
 `access_default=` for the `security.yaml` fallback. `with_user(name, permission, groups=...)` adds an
 account with a console group membership. A scenario that needs a listener the default world does not

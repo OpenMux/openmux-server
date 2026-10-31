@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-120 scenarios across 10 suites.
+121 scenarios across 10 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -38,6 +38,7 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | AUTH-08 | A cookie alone cannot write config: the token check answers first and the config files stay as they were. | http, config files | `tests/e2e/test_auth.py::test_auth08_a_session_post_without_the_csrf_token_is_refused_before_it_writes` |
 | AUTH-09 | Scripting with credentials skips the token check, and still stops at the caller's permission level. | http, config files | `tests/e2e/test_auth.py::test_auth09_the_basic_path_needs_no_token_and_never_rises_above_its_permission` |
 | AUTH-10 | A trust header signed with ``sso_secret`` is believed, its permission included, and every forgery is refused. | http, server config | `tests/e2e/test_auth.py::test_auth10_only_the_holder_of_the_sso_secret_may_speak_for_a_user` |
+| AUTH-11 | A helper that vouches for a person grants nothing: the ``groups`` mapping in the config hands out the role. | http, web:ext, cli:ext, server log, authentication.yaml | `tests/e2e/test_auth.py::test_auth11_an_external_helper_opens_the_door_and_only_the_config_hands_out_a_role` |
 | **CFG** | | | |
 | CFG-01 | Every editor route is for an administrator, and the entry is not in anyone else's menu. | http, web:admin, web:rw, web:ro | `tests/e2e/test_config_editor.py::test_cfg01_only_an_administrator_may_open_the_editor` |
 | CFG-02 | Each Config Editor sub-page is a view of one page, and anything unrecognised shows the Server page. | web:admin | `tests/e2e/test_config_editor.py::test_cfg02_every_sub_page_opens_and_an_unknown_one_shows_the_server_page` |

@@ -132,6 +132,7 @@ class ConfigBuilder:
         self.server_id = server_id
         self.log_dir: Optional[Path] = None
         self._users: List[Dict[str, Any]] = []
+        self._external_auth: Dict[str, Any] = {"enabled": False, "allow_root": False}
         self._loopback: List[Dict[str, Any]] = []
         self._command: List[Dict[str, Any]] = []
         self._tcp: List[Dict[str, Any]] = []
@@ -445,6 +446,41 @@ class ConfigBuilder:
             self._web["sso_secret"] = secret
         return self
 
+    def with_external_auth(
+        self,
+        helper: Sequence[str],
+        *,
+        groups: Optional[Dict[str, str]] = None,
+        default_permission: Optional[str] = None,
+        allowed_users: Optional[Sequence[str]] = None,
+        timeout: float = 5,
+        service: str = "openmux",
+    ) -> "ConfigBuilder":
+        """Turn on ``external_auth`` in ``authentication.yaml`` and point it at ``helper``.
+
+        The helper speaks the server's own protocol: it reads the user name and the password on stdin,
+        answers exit ``0`` plus one JSON object on stdout, and that object's ``groups`` list decides the
+        role through the ``groups`` mapping here. A scenario passes a command list, so a fixture script
+        runs under the interpreter the server itself runs on and needs no executable bit.
+
+        ``default_permission`` is the fallback for a person the helper authenticates whose groups map to
+        nothing. Left unset -- what a deployment ships -- that person is signed in with no permission at
+        all, which is the state ``AUTH-11`` proves every surface refuses on its own words.
+
+        ``allowed_users`` is the server's own allow-list, checked before the helper runs.
+        """
+        if not helper:
+            raise ValueError("with_external_auth needs a helper command")
+        config: Dict[str, Any] = {"enabled": True, "helper": list(helper), "service": service, "timeout": timeout}
+        if groups:
+            config["groups"] = dict(groups)
+        if default_permission is not None:
+            config["default_permission"] = default_permission
+        if allowed_users is not None:
+            config["allowed_users"] = list(allowed_users)
+        self._external_auth = config
+        return self
+
     def with_log_dir(self, log_dir: Path) -> "ConfigBuilder":
         """Put the server's own log file under ``log_dir`` instead of the working directory."""
         self.log_dir = Path(log_dir)
@@ -483,11 +519,16 @@ class ConfigBuilder:
         return config
 
     def authentication_config(self) -> Dict[str, Any]:
-        """The ``authentication.yaml`` mapping: synthetic users only."""
+        """The ``authentication.yaml`` mapping: synthetic users and the external-auth block.
+
+        ``external_auth`` is always written, disabled unless ``with_external_auth`` was called, because a
+        missing block and a disabled block are the same state to the server and a scenario should not have
+        to know which one it is looking at.
+        """
         return {
             "users": self._users
             or [{"username": "admin", "password_hash": password_hash(TEST_PASSWORD), "permissions": "admin"}],
-            "external_auth": {"enabled": False, "allow_root": False},
+            "external_auth": dict(self._external_auth),
         }
 
     def security_config(self) -> Dict[str, Any]:

@@ -1,8 +1,8 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 9: 120 scenarios in ten suites, listed in
+**Status:** Implemented through Phase 9 and `AUTH-11`: 121 scenarios in ten suites, listed in
 [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the three `IDX` self-check
-scenarios, the browser proof, the ten `AUTH` scenarios driven over HTTP, the fourteen `CON` console scenarios driven
+scenarios, the browser proof, the eleven `AUTH` scenarios driven over HTTP, the fourteen `CON` console scenarios driven
 in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the twenty `CFG` Config Editor
 scenarios, the eleven `ACT` Port Action scenarios, the six `TIM` story scenarios, and the six `ST` status page
 scenarios run green. See **Build status** near the end.
@@ -288,8 +288,9 @@ Write down what the scenario claims, then give each part the strongest proof tha
    selected menu-item elements only, so the read was wrong and the page was right. A scenario that asserted on the read
    alone would have reported a product defect that never existed.
 4. **Anything the suite cannot prove**: an honest skip or a named outstanding id. A skip names what it proves and what
-   it does not. `AUTH-11` is named outstanding rather than skipped, because writing it needs an external helper script
-   nobody would follow by accident.
+   it does not. Release 1 has no outstanding id left. What stays planned in Release 2 stays planned because the builder
+   has no knob for it: `ConfigBuilder` writes no muxcon section, which is why `ST-04` proves only the federation empty
+   state.
 
 Three traps in this tier cost a debugging session each, so they are rules now.
 
@@ -320,7 +321,7 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 120 scenarios in 10 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, `ACT` 11,
+The suite today runs 121 scenarios in 10 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, `ACT` 11,
 `ST` 6, the index checks 3, and the story recorder 6. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
 runs, and its count is checked by `IDX-02`. Two further groups below still hold planned ids: they have boundaries and
 assertions written down, and no test for each of them yet. Full wording for every built id lives in that
@@ -333,13 +334,22 @@ exits non-zero naming the key, SIGINT exits clean, SIGHUP soft reload keeps an a
 drops then restores it, a reload with an attached client leaves no cleanup error in the log, control socket status with
 mode 0600, and a Telnet login whose four lines arrive in one write reaches the Port those lines name.
 
-### AUTH — login and permission matrix (`test_auth.py`, 10 of 11)
+### AUTH — login and permission matrix (`test_auth.py`, 11)
 
 Built: the login form and the cookie attributes it hands out, the wrong-password sentence, lockout after failed
 attempts and its release, `?next` round trip, logout and the cookie taken back, a wrong Basic header not falling
 through to a valid cookie, `403` per permission level on the Config Editor, the CSRF token required for a session POST
-and exempt for Basic, and the SSO trust header with every forgery refused. Open: a user who authenticates through an
-external helper and is refused because that helper granted no permission.
+and exempt for Basic, the SSO trust header with every forgery refused, and the external helper.
+
+`AUTH-11` drives the second credential authority, `external_auth` in `authentication.yaml`. A helper script answers for
+a name this file does not hold. Its answer opens a session, and grants no role. The `groups` mapping decides the level.
+The same helper answer is read-only once the group is mapped, and refused once it is not. `default_permission` is the
+only key that turns that refusal into a session, and it grants the level its own value names. The page answers the
+permissionless case with the sentence `AUTH-02` owns for a wrong password, so the page cannot say which half failed.
+Only the server log names group membership and `external_auth.default_permission`, so the log is the oracle for that
+step. A static entry answers for its own name: the helper's password is refused for it. The client listener refuses the
+same identity outright with `AUTH:FAILED:Authentication failed`, because its password HMAC needs a stored hash that no
+helper name has.
 
 ### CON — console page (`test_console.py`, 14)
 
@@ -726,7 +736,7 @@ together. Where two pages watch one change, both are read, and what belongs to o
 | `ST-06` | The endpoint answers with exactly the four regions under one `fragments` key. No fragment carries its own container id, and the `ports` fragment carries no sort header. The sort query is honoured in both directions. A signed-in cookie answers for the fetch the page itself makes, while an anonymous caller gets `401` with a challenge and no port name. After a swap the open page shows the rows and the clients the endpoint serves for the same query. |
 
 Three boundaries keep this group from wider claims. `ConfigBuilder` has no muxcon knob, so federation is proven only as
-the empty state — the same kind of limit `AUTH-11` records for a helper account. `ConsoleSession.set_offline()` blocks
+the empty state, which is a builder gap rather than a product answer. `ConsoleSession.set_offline()` blocks
 fetches but leaves an open WebSocket running, so the stale red badge is out of reach for a page scenario and stays with
 `tests/test_web_console_live_badge.py`; `ST-05` proves the green half instead, and a full reload cannot catch the red
 either because the one-second debounce races the first reconnect. And `AUTH-01` owns the anonymous refusal of
@@ -808,24 +818,26 @@ Named now so release 1 fixtures stay sufficient.
 | 0 — harness | Done | `harness.py`, `story.py`, `textclients.py`, `console.py`, `index.py`, `conftest.py`; markers and `--run-e2e`; `make test-e2e`, `test-e2e-live`, `test-e2e-debug`, `e2e-install`, `e2e-doc`. |
 | 1 — lifecycle | Done | `LIF-01` to `LIF-11`, plus `IDX-01` and `IDX-02`. |
 | 2 — browser proof | Done | `login()`, `ConsoleSession`, the page hook under `?e2e=1`, with Chromium installed by `make e2e-install`. |
-| 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` waits on a helper-based account, see the note below. |
+| 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` came after Phase 9, once a helper fixture existed; see row 9a. |
 | 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
 | 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
 | 6 — Config Editor | Done | `CFG-01` to `CFG-20` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at soft reload, one entry of any port section the adapter refuses at boot, and that entry again under a full reload. Five product defects came out of building this group, listed under `CFG` above; the third turned out to have a second half found after it was fixed, the fourth was found while measuring that half, and the fifth came from making a full reload answer carry the keys a soft reload answer already carried. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it; `CFG-18` then deletes that entry with `_drop_port_named()` and counts the block lines after `_wait_for_log_count()`, because a plain log wait is satisfied by an earlier reload; `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`, and `CFG-20` reuses the hand-edit helper `CFG-18` added. |
 | 6a — uncovered-run notice | Done | A run that cannot start a browser skips every page scenario and, under the heading `E2E browser coverage`, prints how many scenarios asserted nothing, one line per reason, and the fix command. `IDX-03` drives the notice with a fake reason and a fake skip list; whether this machine has a browser is not what it checks. |
 | 7 — Port Actions | Done | Eleven scenarios (`ACT-01` to `ACT-11`) in `tests/e2e/test_actions.py`, with three fixture scripts under `tests/e2e/action_fixtures` and an `action` block on the page hook. Two page defects came out of them: see the ACT section above. |
 | 8 — Status pages | Done | Six scenarios (`ST-01` to `ST-06`) in `tests/e2e/test_status_pages.py`: the cards and the sort links against `/api/status`, a detail row that survives the swap that rebuilt it, one Clients table naming each transport across three surfaces, the federation empty state, one port's power dot following an outlet on two open pages, and the shape of `/api/status/fragments`. One product defect came out of them: the Clients table called every Telnet console a websocket. See the ST section above. The harness gained `ConsoleSession.is_visible()` and `ConsoleSession.live_badge()`; `set_offline()` is documented for what it really does. |
-| 9 — Story | Done | Six scenarios in `tests/e2e/test_story.py`: the five recorder scenarios and `TIM-06`, one operator's shift in one process. It adds no harness method: the editor steps run through `ConsoleSession` helpers other suites already added, and the file gained four local helpers of its own for the inline editor row. `TIM-06` is the tier's only scenario that marks `e2e_browser` inside a file whose other scenarios need no browser. |
+| 9 — Story | Done | Six scenarios in `tests/e2e/test_story.py`: the five recorder scenarios and `TIM-06`, one operator's shift in one process. It adds no harness method: the editor steps run through `ConsoleSession` helpers other suites already added, and the file gained four local helpers of its own for the inline editor row. `TIM-06` marks `e2e_browser` inside a file whose other scenarios need no browser; `AUTH-11` is the other scenario that does. |
+| 9a — AUTH-11 | Done | `AUTH-11` in `tests/e2e/test_auth.py`: an `external_auth` helper decides who may sign in, and only `authentication.yaml` hands out the role. The harness gained `ConfigBuilder.with_external_auth`, and `tests/e2e/auth_fixtures/helper_stub.py` is the fixture — one script, four names, in the protocol `auth_manager.py` speaks. One product defect came out of building it: a helper that answers slowly stops the server for every other visitor, which issue #114 carries. The scenario asserts nothing about time, because a timing claim would read as flaky while that defect is open. |
 
 - `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
   `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`
   runs with `-q`. The pass count alone read like a covered run. See [`tests/e2e/README.md`](../../tests/e2e/README.md)
   for the block it now prints.
 
-- `AUTH-11` (an external helper that grants no permission): outstanding. The `command` authentication backend runs in
-  every e2e server, so only the *no-permission* case differs from `AUTH-10`, and the helper would have to be a fixture
-  script that the packaged `openmux` process can execute — an external path nobody would follow by accident.
-  `CFG-01` covers who may open the Editor; the no-permission helper case stays open.
+- `AUTH-11` (an external helper that grants no permission): built, and it is why the tier now ships a helper fixture.
+  `ConfigBuilder.with_external_auth` writes the `external_auth` block into `authentication.yaml`, and
+  `tests/e2e/auth_fixtures/helper_stub.py` answers one protocol on stdin and stdout. It holds four names, so one script
+  covers the states a helper can leave a person in, and `ext_slow` exists only so a probe can time a slow answer.
+  `AUTH-11` asserts nothing about a duration; issue #114 carries the stall it measures.
 - The page hook (`console.js`), `ConsoleSession` state, and `ConsoleSession.menu_text()` (the page's own menu wording,
   read from the `ro` and `ctrl` menus, which is how `CON-05` avoids a typed-in string): built.
 - `CON-11` to `CON-14`: built. A `DeviceStation` (a fake device behind a `tcp_initiator` port) is unplugged and plugged

@@ -14,17 +14,25 @@ Three facts drive most of the file, and each is verified against the server's ow
   path an operator scripts with needs no token, and the cookie path a browser uses does.
 - A session POST that lacks that token is refused before the handler runs, and the refusal is worded
   by the endpoint that owns it.
+
+AUTH-11 adds a second credential authority: the ``external_auth`` helper in ``authentication.yaml``. That
+helper answers for names with no entry in this file, and its answer carries group names, never a permission.
+The scenarios here therefore assert on what the mapping hands out, and on what each surface says when the
+mapping hands out nothing.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import sys
 import time
+from pathlib import Path
 from typing import Any, Dict
 
 import pytest
 
+from .auth_fixtures.helper_stub import HELPER_PASSWORD
 from .harness import TEST_PASSWORD, BasicSession, HttpSession, sso_v1_header
 from .story import step, surfaces
 
@@ -52,6 +60,10 @@ NO_SECTION_PAYLOAD: Dict[str, Any] = {"files": {}}
 
 #: The Config Editor route, which needs the ``admin`` permission and checks the CSRF token first.
 APPLY_ROUTE = "/config-editor/apply"
+
+#: The external-auth helper fixture: one script, four names, in the protocol ``auth_manager.py`` speaks.
+#: It runs under the interpreter the test suite runs on, so the packaged server process needs nothing extra.
+HELPER_FIXTURE = str(Path(__file__).parent / "auth_fixtures" / "helper_stub.py")
 
 
 def _config_fingerprint(config_dir: Any) -> Dict[str, str]:
@@ -375,3 +387,123 @@ def test_auth10_only_the_holder_of_the_sso_secret_may_speak_for_a_user(servers, 
         unlisted = sso_v1_header(secret, user="no-such-user", perm="read-only")
         status, _, body = visitor.get("/api/ports", headers={"X-OMX-SSO": unlisted}, expect=(200,))
         assert status == 200, (status, body[:120])
+
+
+@pytest.mark.e2e_browser
+@surfaces("http", "web:ext", "cli:ext", "server log", "authentication.yaml")
+def test_auth11_an_external_helper_opens_the_door_and_only_the_config_hands_out_a_role(
+    servers: Any, web_for: Any, console: Any, clients: Any
+) -> None:
+    """A helper that vouches for a person grants nothing: the ``groups`` mapping in the config hands out the role.
+
+    ``external_auth`` in ``authentication.yaml`` runs a command that reads a user name and a password on
+    stdin and answers with exit ``0`` plus one JSON object naming *groups*, never a permission. Two things
+    follow, and both are measured below rather than read off the code:
+
+    - A name with no static entry belongs to the helper, and a static entry answers for its own name.
+    - The helper's yes is not a grant. When its groups map to nothing and no ``default_permission`` is set,
+      the person holds no permission at all, and every surface refuses that state in its own words.
+
+    Boundaries worth repeating, because each is easy to mistake for a different fault:
+
+    - The login page tells a permissionless person the same sentence a wrong password gets, and issues no
+      cookie, so the page cannot say which half failed. The server log does name the cause, and nothing a
+      user reads repeats it.
+    - The client listener refuses such an identity before any of this. It authenticates a password with an
+      HMAC, and ``AuthManager.start_password_hmac_challenge`` answers ``None`` for a name with no stored
+      hash, which every helper name is. The scenario asserts the listener's own wire refusal; the
+      ``None`` is quoted from the code, because the listener says nothing more on the wire.
+    - ``tests/e2e/auth_fixtures/helper_stub.py`` also answers one name slowly. One slow helper call stops
+      the request handler for every other visitor, which issue #114 carries. No assertion here depends on
+      a duration, since a duration is what would make that defect flaky.
+    """
+
+    def helper_world(name: str, **external: Any) -> Any:
+        """Start one server per config shape, so one helper reply meets each mapping in turn."""
+
+        def configure(builder: Any) -> Any:
+            builder.with_loopback("solo", write_slot_capacity="multiple")
+            return builder.with_external_auth([sys.executable, HELPER_FIXTURE], **external)
+
+        return servers(
+            name=name,
+            users=(("admin", "admin"), ("rw", "read-write")),
+            loopback=("solo",),
+            configure=configure,
+            start=True,
+        )
+
+    # The first world maps the group the helper names; the second maps nothing and falls back instead.
+    mapped = helper_world("extMapped", groups={"read_group": "openmux_read"})
+    fallback = helper_world("extFallback", default_permission="read-only")
+
+    holder = web_for(mapped, "http:ext")
+    with step("a name this server has no entry for is answered by the helper"):
+        status, headers, _ = holder.login("ext_ro", password=HELPER_PASSWORD, expect=(302,))
+        assert status == 302, (status, headers)
+        assert headers.get("Location") == "/", headers
+        assert holder.cookie, "the helper's yes issued no session cookie"
+
+    with step("and the role it hands out is the one the groups mapping names"):
+        status, _, body = holder.get("/api/ports", expect=(200,))
+        assert status == 200, (status, body[:120])
+        # AUTH-07 shows ``403`` here means signed in and below administrator, so this pair of numbers
+        # places the identity at read-only without reading a permission from a private attribute.
+        status, _, _ = holder.get("/config-editor", expect=(403,))
+        assert status == 403, "a mapped read group reached the Config Editor"
+
+    with step("the page that identity is handed believes it holds read-only"):
+        page = console.user("web:ext", mapped, user="ext_ro", password=HELPER_PASSWORD).open()
+        assert page.mode() == "read-only", page.view()
+
+    with step("a person the helper vouches for whose groups map to nothing is kept out"):
+        ungrouped = web_for(mapped, "http:ungrouped")
+        status, _, body = ungrouped.login("ext_nogroup", password=HELPER_PASSWORD, expect=(200,))
+        assert INVALID_CREDENTIALS in body, body[:120]
+        assert not ungrouped.cookie, "no permission still became a session"
+
+    with step("the page answers that three different failures alike"):
+        # Only the log separates them, which is why the two sentences below are the real oracle here.
+        for surface, name, password in (
+            ("http:named-nothing", "ext_nogroup", HELPER_PASSWORD),
+            ("http:helper-refused", "ext_ro", "not-the-helper-password"),
+            ("http:helper-stranger", "nosuch", HELPER_PASSWORD),
+        ):
+            visitor = web_for(mapped, surface)
+            status, _, body = visitor.login(name, password=password, expect=(200,))
+            assert (status, bool(visitor.cookie), INVALID_CREDENTIALS in body) == (200, False, True), (
+                surface,
+                status,
+                body[:120],
+            )
+
+    with step("and the log names each cause, the permission one pointing at the config key"):
+        cause = mapped.wait_for_log("Login denied for 'ext_nogroup'")
+        assert "no permissions assigned" in cause, cause
+        assert "external_auth.default_permission" in cause, cause
+        assert "External auth failed for user 'ext_ro'" in mapped.wait_for_log("External auth failed for user")
+
+    with step("a static entry answers for its own name, so the helper never speaks for it"):
+        rival = web_for(mapped, "http:static-name")
+        status, _, _ = rival.login("rw", password=HELPER_PASSWORD, expect=(200,))
+        assert not rival.cookie, "the helper signed in as a name this file owns"
+        owner = web_for(mapped, "http:static-owner")
+        status, _, body = owner.login("rw", expect=(302,))
+        assert status == 302, (status, body[:120])
+        assert owner.cookie, "the static entry's own password stopped working"
+
+    with step("default_permission turns that one refusal into a session at the level it names"):
+        rescued = web_for(fallback, "http:fallback")
+        status, _, body = rescued.login("ext_nogroup", password=HELPER_PASSWORD, expect=(302,))
+        assert status == 302, (status, body[:120])
+        assert rescued.cookie, "the fallback granted no session"
+        status, _, _ = rescued.get("/api/ports", expect=(200,))
+        assert status == 200
+        status, _, _ = rescued.get("/config-editor", expect=(403,))
+        assert status == 403, "the fallback handed out more than read-only"
+
+    with step("the client listener has no answer at all for a helper identity"):
+        with pytest.raises(AssertionError) as refused:
+            clients.cli(user="ext_ro", password=HELPER_PASSWORD, surface="cli:ext", server=mapped)
+        # The listener's own wire sentence, not the harness's summary of it.
+        assert "AUTH:FAILED:Authentication failed" in str(refused.value), str(refused.value)
