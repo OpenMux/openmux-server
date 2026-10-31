@@ -1180,6 +1180,40 @@ function renderActionParamField(p) {
     `style="display:block; width:100%; box-sizing:border-box; margin-top:2px;" /></label>`;
 }
 
+// The run form is rebuilt from the action metadata every time the catalog is read (`openActionRunPanel`
+// below, and `refreshActionsCatalog` after a list refresh), and a rebuild drops every value the form
+// held. That includes the answers a deep link carried: opening the overlay starts a catalog read, and its
+// response lands after the link prefilled the form. So the link's values are kept here and re-applied
+// after every rebuild until the operator edits the form, because
+// docs/design/port_actions.md "Deep-linking an action" promises the link's parameters reach the run.
+// Tagged with the action it was read for, so another script's form is never filled with them.
+let deepLinkParams = null;
+// The non-sensitive parameters of `action` that the address bar carries, by parameter name.
+function actionParamsFromUrl(action) {
+  const values = {};
+  (action.params || []).forEach((p) => {
+    if (p.sensitive) return; // never pre-fill sensitive params from the URL
+    const raw = qs.get(p.name);
+    if (raw !== null) values[p.name] = raw;
+  });
+  return values;
+}
+// Put the values this page load was handed back into the run form, matching a radio group by value the
+// same way the field was built.
+function prefillActionForm(action) {
+  if (!deepLinkParams || deepLinkParams.id !== action.id) return;
+  Object.keys(deepLinkParams.values).forEach((name) => {
+    const raw = deepLinkParams.values[name];
+    const field = actionsRunForm.elements.namedItem(name);
+    if (!field) return;
+    if (typeof RadioNodeList !== 'undefined' && field instanceof RadioNodeList) {
+      for (const el of field) { if (el.value === raw) { el.checked = true; break; } }
+    } else {
+      field.value = raw;
+    }
+  });
+}
+
 function openActionRunPanel(action) {
   // Only swaps the overlay's content to this action's run form. The action
   // pane, its terminal, and any running run's stream are left untouched - the
@@ -1193,6 +1227,7 @@ function openActionRunPanel(action) {
   showActionsRunView();
   setActionsRunStatus('', false);
   actionsRunForm.innerHTML = (action.params || []).map(renderActionParamField).join('') || '<div class="muted">No parameters</div>';
+  prefillActionForm(action);
   loadRunHistory();
   updateActionsRunButton();
   // Focus the first input-like field so Enter submits straight away (the form
@@ -1669,6 +1704,9 @@ async function launchCurrentAction() {
 // applies: submit does not fire while a required field is empty.
 actionsRunForm.addEventListener('submit', (e) => { e.preventDefault(); launchCurrentAction(); });
 actionsRunSubmit.addEventListener('click', () => launchCurrentAction());
+// An answer typed by hand outranks one a link carried: from the first edit on, a catalog rebuild keeps
+// whatever the form holds instead of restoring the link's values.
+actionsRunForm.addEventListener('input', () => { deepLinkParams = null; });
 
 async function loadRunHistory() {
   if (!currentAction) return;
@@ -1756,6 +1794,7 @@ async function refreshActionsCatalog() {
       actionsRunTitle.textContent = updated.name || updated.id;
       actionsRunDesc.textContent = updated.description || '';
       actionsRunForm.innerHTML = (updated.params || []).map(renderActionParamField).join('') || '<div class="muted">No parameters</div>';
+      prefillActionForm(updated);
     }
   } else {
     renderActionsList();
@@ -1781,8 +1820,8 @@ actionsListRefresh.addEventListener('click', () => refreshActionsCatalog());
 
 // Deep-linking (docs/design/port_actions.md "Deep-linking an action"): `?action=<id>`
 // opens that action pre-selected, `&<param_name>=<value>` (bare declared param names)
-// pre-fills its run form, `&autorun=1` launches it immediately - through the exact same
-// `launchCurrentAction()`/API call a manual "Run" click uses, so auth/permission/param
+// pre-fills its run form, `&autorun=1` launches it without a click - through the exact
+// same `launchCurrentAction()`/API call a manual "Run" click uses, so auth/permission/param
 // validation are never bypassed. Sensitive params are never read from the URL.
 const actionToast = document.getElementById('actionToast');
 function showActionToast(text) {
@@ -1797,23 +1836,32 @@ function applyActionDeepLink() {
   const action = actionsCatalog.find((a) => a.id === actionId);
   if (!action) return;
   openActionsOverlay();
+  // Recorded before the panel is built, so both that build and the catalog read the overlay just started
+  // re-apply these values instead of leaving the form at its defaults.
+  const fromUrl = actionParamsFromUrl(action);
+  if (Object.keys(fromUrl).length) deepLinkParams = { id: action.id, values: fromUrl };
   openActionRunPanel(action);
-  (action.params || []).forEach((p) => {
-    if (p.sensitive) return; // never pre-fill sensitive params from the URL
-    const raw = qs.get(p.name);
-    if (raw === null) return;
-    const field = actionsRunForm.elements.namedItem(p.name);
-    if (!field) return;
-    if (typeof RadioNodeList !== 'undefined' && field instanceof RadioNodeList) {
-      for (const el of field) { if (el.value === raw) { el.checked = true; break; } }
-    } else {
-      field.value = raw;
-    }
-  });
   if (qs.get('autorun') === '1' && actionsRunForm.reportValidity()) {
     showActionToast(`Auto-starting action: ${action.name || action.id}\u2026`);
-    launchCurrentAction();
+    launchCurrentActionWhenIdentified();
   }
+}
+
+// Start the run the deep link asked for once this page knows its own console `client_id`, for the
+// same reason an auto-join waits for it (see `joinActiveRunWhenIdentified`): the run request carries
+// that id so the runner can take the read-write seat off this page. Sent before the first
+// `client_mode` frame, the request names no client, the runner cannot self-demote the seat this very
+// page holds, and the operator gets "port ... read-write slot is unavailable" a second after opening
+// a link that promised to run the script - which
+// docs/design/port_actions.md "Deep-linking an action" rules out ("port-busy/self-demote handling
+// exactly as a manually-triggered run would"). On a page load the two action fetches usually beat the
+// console WS handshake, so this is the common case, not the rare one. The confirmation toast is
+// already up while waiting, so the operator still sees why a script starts on its own. The 2500 ms
+// `clientIdReady` fallback launches without an id, which is the old behavior, for a console whose WS
+// cannot attach at all.
+function launchCurrentActionWhenIdentified() {
+  if (myClientId) { launchCurrentAction(); return; }
+  clientIdReady.then(() => launchCurrentAction());
 }
 
 

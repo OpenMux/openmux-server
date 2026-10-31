@@ -443,6 +443,9 @@ specific action with its parameters pre-filled, instead of an operator navigatin
 - The console URL accepts optional query params: `?action=<action_id>` opens the actions panel with that action pre-selected,
   and `&<param_name>=<value>` (one per declared `ACTION` parameter) pre-fills the run form (including `select`/`radio` widget
   fields, matched by value).
+- The page re-applies those values every time it rebuilds the run form (`prefillActionForm()`): opening the overlay starts a
+  catalog read, and that read rebuilds the form from the action metadata a moment after the link filled it. It stops
+  re-applying them once the operator edits the form, so a typed answer always outranks a value that came in the address bar.
 - The user still sees the filled-in form and clicks "Run" themselves by default — an optional `&autorun=1` skips that click,
   but still requires the normal auth/permission checks (existing login-gated console session, read-write eligibility,
   port-busy/self- demote handling) exactly as a manually-triggered run would, since it calls the exact same
@@ -452,6 +455,10 @@ specific action with its parameters pre-filled, instead of an operator navigatin
 - `&autorun=1` only fires if `actionsRunForm.reportValidity()` passes first (all `required` fields filled) — a required param
   that couldn't be pre-filled (e.g. a sensitive one, see below) silently falls back to leaving the pre-filled form open for the
   operator to finish and submit by hand, rather than submitting an incomplete run.
+- `&autorun=1` waits for this page's own console `client_id` (the first `client_mode` frame, capped at 2500 ms) before it calls
+  the run API (`launchCurrentActionWhenIdentified()`). The run request carries that id, so the runner takes the read-write seat
+  from the page that opened the link. A request sent before the console WebSocket handshake names no client, the runner cannot
+  self-demote that seat, and the launch fails with "read-write slot is unavailable" seconds after the operator opened the link.
 - Params arriving via the URL still go through the same `ACTION` metadata validation as manually-typed ones (server-side, on
   the run API call) before a run is allowed to start; invalid/missing values surface the same `actionsRunStatus` error text a
   manual run would, rather than failing silently.

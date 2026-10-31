@@ -121,6 +121,17 @@ Changes since v1.0.4 (2026-10-19).
   the Port. No config key changed.
 
 ### Web console and observability
+- **A deep link keeps the parameters it carried.** Opening the actions overlay starts a catalog read, and that read rebuilt the
+  run form from the action's own metadata a moment after a `?action=…&<param>=<value>` link had filled it. The field was
+  therefore usually back at its default by the time the run started, and with `&autorun=1` the script ran on those defaults
+  instead of the values the link carried. The page now re-applies a link's values after every rebuild, and stops once the
+  operator edits the form, so a typed answer always wins. No config key changed.
+- **A deep link with `&autorun=1` waits for its own console session.** The page used to send the run request as soon as its two
+  action requests came back, which is often before its console WebSocket reports the page's own `client_id`. The run request
+  carries that id so the server can hand the port's read-write seat from the page to the run, so a request without it was
+  refused: the operator opened a link that promised to run a script and read `port … read-write slot is unavailable` a second
+  later. The page now waits for that id, capped at 2500 ms, then starts the run through the same call the Run button uses. No
+  config key changed.
 - **A reload now names what it could not apply** (issue #105). When part of the config on disk did not reach the running
   server, the server prints one warning block to its log, and every line of that block starts with `CONFIG_GAP`: the
   file, each entry that stayed unapplied with the server's own reason, and a note naming a port that kept its previous
