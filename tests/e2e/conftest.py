@@ -501,10 +501,12 @@ class _PageRegistry:
         self.pages.append(session)
         return session
 
-    def console(self, surface: str, server: E2EServer, port: str, *, user: str = "rw") -> ConsoleSession:
+    def console(
+        self, surface: str, server: E2EServer, port: str, *, user: str = "rw", params: Optional[Dict[str, str]] = None
+    ) -> ConsoleSession:
         """Sign one user in and open the console page for one port, with the test hook on."""
         session = self.user(surface, server, user=user)
-        session.open(port=port, e2e=True)
+        session.open(port=port, e2e=True, params=params)
         return session
 
     def teardown(self, failed: bool, keep: bool) -> None:

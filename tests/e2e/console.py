@@ -39,6 +39,22 @@ _BROWSER_PROBE: Optional[str] = None
 _BROWSER_SKIPPED: Dict[str, str] = {}
 
 
+def _brief(payload: Any, limit: int = 90) -> str:
+    """Render ``payload`` on one short line, for a failure message a reader can act on.
+
+    A page state carries a transcript of dozens of lines and several long sentences. This keeps every key
+    visible, cuts each string, and shows the head of each list, so the line stays readable in a pytest
+    report.
+    """
+    if isinstance(payload, dict):
+        return "{" + ", ".join(f"{key}: {_brief(value, 60)}" for key, value in payload.items()) + "}"
+    if isinstance(payload, (list, tuple)):
+        head = ", ".join(_brief(item, 40) for item in list(payload)[:4])
+        return "[" + head + (", …]" if len(payload) > 4 else "]")
+    text = str(payload)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def note_browser_skip(node_id: str, reason: str) -> None:
     """Record that one scenario cannot run, from the place that is about to skip it.
 
@@ -196,8 +212,12 @@ class ConsoleSession:
 
     # --- navigation ---------------------------------------------------------------------
 
-    def open(self, port: Optional[str] = None, e2e: bool = True) -> "ConsoleSession":
+    def open(self, port: Optional[str] = None, e2e: bool = True, params: Optional[Dict[str, str]] = None) -> "ConsoleSession":
         """Open the console page, with the test hook on, and wait for the hook to answer.
+
+        ``params`` appends query parameters the page itself reads, such as ``action`` and ``autorun``: a
+        Port Action deep link is one of those, and it has to be in the URL when the page first runs, because
+        the page applies it once at load and never re-reads the address bar.
 
         Raises:
             AssertionError: when the hook is missing, which means either the URL lost ``e2e=1`` or
@@ -209,6 +229,8 @@ class ConsoleSession:
             query.append(f"port={port}")
         if e2e:
             query.append("e2e=1")
+        for name, value in (params or {}).items():
+            query.append(f"{name}={quote(str(value), safe='')}")
         url = f"{self.base_url}/console" + ("?" + "&".join(query) if query else "")
         self.action(f"goto {url}")
         self.page.goto(url, wait_until="domcontentloaded")
@@ -283,23 +305,33 @@ class ConsoleSession:
         self.page.reload(wait_until="domcontentloaded")
         self.page.wait_for_function("() => !!(window.__omxE2E && window.__omxE2E.view)", timeout=10000)
 
-    def accept_dialogs(self, accept: bool = True) -> List[str]:
-        """Answer every confirm dialog, and keep each message the page showed.
+    def answer_dialogs(self, decide: Callable[[str], bool]) -> List[str]:
+        """Answer every dialog this page raises from one handler, and keep each message it showed.
 
-        The power page asks a pre-flight question per switch, and the wording names the consoles that
-        lose power, which is worth asserting on.
+        ``decide`` turns the message the page asked with into whether to accept it. One handler per page
+        matters: Playwright delivers each dialog to every registered listener, and a second listener
+        answering an already-answered dialog fails the page. A scenario that declines a question and then
+        accepts the next one therefore flips a flag this closure reads, rather than registering twice.
         """
         seen: List[str] = []
 
         def handler(dialog: Any) -> None:
             seen.append(dialog.message)
-            if accept:
+            if decide(dialog.message):
                 dialog.accept()
             else:
                 dialog.dismiss()
 
         self.page.on("dialog", handler)
         return seen
+
+    def accept_dialogs(self, accept: bool = True) -> List[str]:
+        """Answer every confirm dialog, and keep each message the page showed.
+
+        The power page asks a pre-flight question per switch, and the wording names the consoles that
+        lose power, which is worth asserting on.
+        """
+        return self.answer_dialogs(lambda message: accept)
 
     def wait_for_dialogs(self, seen: List[str], count: int, timeout: float = 10.0) -> List[str]:
         """Wait until ``count`` dialogs have been answered, and return every message shown.
@@ -349,6 +381,109 @@ class ConsoleSession:
                 summary = f"({reason}) " + summary
             self.story.snapshot(self.surface, summary, payload)
         return payload
+
+    def action_state(self) -> Dict[str, Any]:
+        """The Port Actions picture of this page, from the same hook as ``view()``.
+
+        Not named ``action()``: that method already records one timeline line, and every helper here
+        calls it before it touches the page.
+
+        One Port Action spreads its state over eight regions (tag, outcome banner, progress bar, strip,
+        toast, operator box, and the run panel's status line), each hidden by an inline ``display`` and
+        keeping its last text while hidden. ``power_menu_items()`` and friends read the DOM of regions
+        the page rebuilds; none of them reaches the action pane or its xterm transcript, which lives in
+        a second Terminal instance.
+        """
+        payload = self.view().get("action")
+        if not isinstance(payload, dict):
+            raise AssertionError(f"{self.surface}: the page hook returned no 'action' block — is '?e2e=1' in the URL?")
+        return payload
+
+    def wait_for_action_state(
+        self, predicate: Callable[[Dict[str, Any]], bool], timeout: float = 10.0, what: str = "the action panel to report it"
+    ) -> Dict[str, Any]:
+        """Poll ``action_state()`` until ``predicate`` holds, and return the picture that satisfied it.
+
+        A timeout names the state the page had when the wait gave up: "the panel never said so" is only
+        useful once a reader sees what it did say, and re-running a browser scenario to ask that costs a
+        minute.
+        """
+        latest: Dict[str, Any] = {}
+
+        def check() -> bool:
+            latest.clear()
+            latest.update(self.action_state())
+            return bool(predicate(latest))
+
+        try:
+            self.wait_until(check, timeout=timeout, what=what)
+        except AssertionError as exc:
+            raise AssertionError(f"{exc}; it last showed {_brief(latest)}") from None
+        # A copy, not the polled dict itself: two reads kept by a scenario would otherwise be one object,
+        # and comparing a run's state before and after would compare it with itself.
+        return dict(latest)
+
+    def show_action_list(self) -> Dict[str, Any]:
+        """Make the choose-script list visible, and return the picture.
+
+        Three states matter and only the page knows which one it is in. The list is visible in the DOM
+        from page load, hidden behind a closed overlay, so the overlay has to be tested first.
+        ``#actionsToggle`` toggles the whole overlay, and the overlay shows either the list or one
+        action's run panel, so one click with the run panel open closes the overlay instead of returning
+        to the list: the panel's own Back button is what a person presses for that, so this presses it.
+        """
+        state = self.action_state()
+        if not state["overlay"]:
+            self.click("#actionsToggle")
+            return self.wait_for_action_state(lambda a: a["overlay"] and a["list"], what="the action list to open")
+        if state["list"]:
+            return state
+        self.click("#actionsRunBack")
+        return self.wait_for_action_state(lambda a: a["list"], what="the action list to reopen")
+
+    def pick_action(self, action_id: str) -> Dict[str, Any]:
+        """Open one action's run panel from the choose-script list, and return the panel's picture."""
+        state = self.show_action_list()
+        if not any(str(item["id"]) == action_id for item in state["items"]):
+            raise AssertionError(f"{self.surface}: no action {action_id!r} in {state['items']}")
+        self.click(f'#actionsList .actions-item[data-action-id="{action_id}"]')
+        return self.wait_for_action_state(lambda a: a["run_panel"], what="the run panel of that action")
+
+    def answer_prompt(self, answer: str) -> Dict[str, Any]:
+        """Answer the operator prompt this page shows, and return the picture afterwards.
+
+        The four kinds share one box and differ only in the control it builds: a choice set arrives as
+        buttons that carry the answer themselves, a dropdown and a radio group need the shared Send button
+        below them, and a prompt with no choices is typed. The hook names the kind, so a scenario says
+        what it answers and not how the box was built. A button answers by the label the script gave it,
+        the other three by the value the script gave them.
+        """
+        state = self.action_state()
+        prompt = state["prompt"]
+        if not prompt["shown"]:
+            raise AssertionError(f"{self.surface}: no operator prompt is open to answer")
+        kind = str(prompt["kind"])
+        self.action(f"answer_prompt {kind}={answer!r}")
+        if kind == "buttons":
+            labels = [str(label) for label in prompt["buttons"]]
+            if answer not in labels:
+                raise AssertionError(f"{self.surface}: no choice {answer!r} among {labels}")
+            self.page.click(f"#actionsOperatorButtons button:nth-of-type({labels.index(answer) + 1})")
+            return self.action_state()
+        if kind == "select":
+            values = [str(value) for value in prompt["options"]]
+            if answer not in values:
+                raise AssertionError(f"{self.surface}: no option {answer!r} among {values}")
+            self.page.select_option("#actionsOperatorSelectEl", answer)
+        elif kind == "radio":
+            values = [str(value) for value in prompt["radios"]]
+            if answer not in values:
+                raise AssertionError(f"{self.surface}: no choice {answer!r} among {values}")
+            self.page.click(f"#actionsOperatorRadioEl label:nth-of-type({values.index(answer) + 1}) input")
+        else:
+            self.page.fill("#actionsOperatorInput", answer)
+        self.page.click("#actionsOperatorSend")
+        return self.action_state()
 
     def text(self) -> str:
         """Everything in the terminal's scrollback, newest line last."""

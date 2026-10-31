@@ -2325,6 +2325,127 @@ function e2eViewerRows() {
     .map((row) => e2eText(row))
     .filter((text) => text);
 }
+function e2eActionTermLines() {
+  // The run transcript lives in its own xterm instance, created lazily, so a page that never opened
+  // the pane has no buffer to read. Same whole-buffer rule as e2eScreenLines().
+  if (!actionTerm) return [];
+  const buffer = actionTerm.buffer.active;
+  const out = [];
+  for (let i = 0; i < buffer.length; i += 1) {
+    const line = buffer.getLine(i);
+    out.push(line ? line.translateToString(true) : '');
+  }
+  while (out.length && out[out.length - 1] === '') out.pop();
+  return out;
+}
+function e2eStatusClass(el) {
+  const found = ['warn', 'ok', 'bad', 'muted'].filter((name) => el && el.classList.contains(name));
+  return found.length ? found[0] : null;
+}
+function e2ePromptKind() {
+  // One of the four kinds the operator box can show, or null while it is hidden. The kind is which
+  // row is visible, because the box swaps rows rather than rebuilding itself.
+  if (e2eShown(actionsOperatorButtons)) return 'buttons';
+  if (e2eShown(actionsOperatorSelect)) return 'select';
+  if (e2eShown(actionsOperatorRadio)) return 'radio';
+  return e2eShown(actionsOperatorText) ? 'text' : null;
+}
+function e2ePromptChoice() {
+  // The answer the box would send now. The rows are swapped by visibility and keep their last value, so
+  // the visible row decides which control is read -- the same rule sendOperatorInput() follows.
+  const kind = e2ePromptKind();
+  if (kind === 'select') return actionsOperatorSelectEl ? String(actionsOperatorSelectEl.value || '') : '';
+  if (kind === 'radio') {
+    const hit = actionsOperatorRadioEl ? actionsOperatorRadioEl.querySelector('input[type="radio"]:checked') : null;
+    return hit ? String(hit.value) : '';
+  }
+  if (kind === 'text') return actionsOperatorInput ? String(actionsOperatorInput.value || '') : '';
+  return '';
+}
+function e2eRunFormFields() {
+  if (!actionsRunForm) return [];
+  return Array.from(actionsRunForm.elements)
+    .filter((el) => el.name)
+    .map((el) => ({
+      name: el.name,
+      type: el.type || el.tagName.toLowerCase(),
+      value: el.value == null ? '' : String(el.value),
+      required: !!el.required,
+    }));
+}
+function e2eActionState() {
+  // One read-only picture of the Port Actions regions. A Port Action shows its state through eight
+  // separate elements (tag, banner, bar, strip, toast, prompt box, three pane buttons), and each one
+  // is hidden by an inline 'display' rather than removed, so a scenario needs visibility and text
+  // together. Nothing here writes: 'checkValidity()' and 'reportValidity()' are avoided on purpose,
+  // since both fire 'invalid' events at the fields.
+  const fields = e2eRunFormFields();
+  return {
+    button: e2eShown(actionsToggle),
+    overlay: e2eShown(actionsOverlay),
+    list: e2eShown(actionsListEl),
+    list_text: e2eText(actionsListEl),
+    items: actionsListEl
+      ? Array.from(actionsListEl.querySelectorAll('.actions-item')).map((el) => ({
+          id: el.getAttribute('data-action-id') || '',
+          text: e2eText(el),
+        }))
+      : [],
+    run_panel: e2eShown(actionsRunPanel),
+    run_title: e2eText(actionsRunTitle),
+    run_status: e2eText(actionsRunStatus),
+    run_submit_enabled: !!actionsRunSubmit && !actionsRunSubmit.disabled,
+    run_submit_title: actionsRunSubmit ? String(actionsRunSubmit.title || '') : '',
+    form_fields: fields,
+    form_missing_required: fields.filter((f) => f.required && !f.value).map((f) => f.name),
+    history_text: e2eText(actionsHistoryEl),
+    pane: e2eShown(actionTermPane),
+    lines: e2eActionTermLines(),
+    tag: e2eText(actionTermStatus),
+    tag_class: e2eStatusClass(actionTermStatus),
+    outcome: {
+      text: e2eShown(actionResultBanner) ? e2eText(actionResultBanner) : null,
+      class: e2eStatusClass(actionResultBanner),
+    },
+    progress: {
+      shown: e2eShown(actionProgressBar),
+      label: e2eText(actionProgressLabel),
+      width: actionProgressFill ? String(actionProgressFill.style.width || '') : '',
+      indeterminate: !!actionProgressBar && actionProgressBar.classList.contains('indeterminate'),
+      waiting: e2eShown(actionProgressWaiting),
+    },
+    prompt: {
+      shown: e2eShown(actionsOperatorPrompt),
+      text: e2eText(actionsOperatorPromptText),
+      color: actionsOperatorPrompt ? String(actionsOperatorPrompt.dataset.color || 'none') : 'none',
+      kind: e2ePromptKind(),
+      attention: !!actionsOperatorPrompt && actionsOperatorPrompt.classList.contains('action-needs-attention'),
+      send_enabled: !!actionsOperatorSend && !actionsOperatorSend.disabled,
+      readonly_note: e2eShown(actionsOperatorReadonlyNote),
+      buttons:
+        e2ePromptKind() === 'buttons' && actionsOperatorButtons
+          ? Array.from(actionsOperatorButtons.querySelectorAll('button')).map((el) => e2eText(el))
+          : [],
+      options:
+        e2ePromptKind() === 'select' && actionsOperatorSelectEl
+          ? Array.from(actionsOperatorSelectEl.options).map((el) => el.value)
+          : [],
+      choice: e2ePromptChoice(),
+      radios:
+        e2ePromptKind() === 'radio' && actionsOperatorRadioEl
+          ? Array.from(actionsOperatorRadioEl.querySelectorAll('input[type="radio"]')).map((el) => String(el.value))
+          : [],
+    },
+    strip: { shown: e2eShown(actionRunStrip), text: e2eText(actionRunStripText) },
+    toast: { shown: e2eShown(actionToast), text: e2eText(actionToast) },
+    operator: isCurrentOperator(),
+    take_over: e2eShown(actionTermTakeOver),
+    stop: e2eShown(actionTermStop),
+    close_run: e2eShown(actionTermCloseRun),
+    streaming: !!currentActionsWs,
+    run_id: currentRunId || null,
+  };
+}
 if (e2eEnabled) {
   window.__omxE2E = {
     view: function () {
@@ -2343,6 +2464,7 @@ if (e2eEnabled) {
         frames: e2eFrames.slice(),
         body_class: String(document.body.className),
         menus: { ro: e2eMenuItems(roMenu), ctrl: e2eMenuItems(ctrlMenu), viewers: e2eViewerRows() },
+        action: e2eActionState(),
       };
     },
   };

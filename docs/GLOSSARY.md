@@ -140,6 +140,7 @@ thing.
 | World | The users, ports, and listeners one scenario starts with. The default world is `admin`/`rw`/`ro`, ports `loop1` and `cat1`, and the web, client, and Telnet listeners. | fixture, sandbox, baseline, environment |
 | Reveal mode | `--e2e-reveal`: on a failure, print the bundle path and each live page URL, keep the artifacts, and wait for Enter when a terminal is attached. | debug mode, pause mode |
 | Page hook | `window.__omxE2E.view()`, the read-only picture of the console page that [`console.js`](../openmux/server/webui/static/js/console.js) exports only when the URL carries `?e2e=1`. `tests/e2e/console.py` is its only reader. | debug hook, test API, `__omxE2E` (in prose) |
+| Action state | The `action` block the **Page hook** returns: every Port Actions region of one console page, each one's text paired with whether it shows. `tests/e2e/console.py` reads it with `action_state()` and `wait_for_action_state()`, because a region hidden by `display` keeps its last text. | action picture, pane state, action dump |
 | Uncovered-run notice | The block a run prints under the heading `E2E browser coverage` when a browser scenario did not run: how many scenarios asserted nothing, one line per reason, and the `make e2e-install` command that fixes it. `IDX-03` guards it. | skip summary, coverage warning, browser warning |
 
 ## Notes for Writers

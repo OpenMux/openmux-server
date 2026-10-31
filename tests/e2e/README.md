@@ -264,6 +264,25 @@ function and nothing else.
 | `frames` | Every control frame this page received, as `{type, code, ok, dir}`. |
 | `body_class` | `document.body` classes, which carry `mode-readonly`, `ws-down`, and `port-down`. |
 | `menus` | `ro` and `ctrl` as the visible items `{label, disabled}`; `viewers` as the text of each viewer row the page holds, shown or not, because that list carries no menu markup. |
+| `action` | The Port Actions picture, itemised below. `ConsoleSession` reads it with `action_state()` and `wait_for_action_state()`, and drives it with `show_action_list()`, `pick_action()`, `answer_prompt()`, and `answer_dialogs()`. |
+
+### What the `action` block reports
+
+A Port Action shows itself through nine regions. Each one is hidden with an inline `display` instead of being
+removed, so a hidden region keeps its last text: every key pairs a value with whether it shows, and a
+scenario never asserts that a node exists.
+
+| Key | Value |
+| --- | --- |
+| `button`, `overlay`, `list`, `list_text`, `items` | The header button, the overlay, its choose-script list, and one `{id, text}` per row. The list is visible in the DOM from page load and hidden behind a closed overlay, so `overlay` has to be tested first. |
+| `run_panel`, `run_title`, `run_status`, `run_submit_enabled`, `run_submit_title` | One action's run form, the status line under it, and the Run button's state in the words a person reads. |
+| `form_fields`, `form_missing_required` | The form's fields as `{name, type, value, required}`, and the required names still empty. `reportValidity()` is never called from the hook: it fires `invalid` events at the fields. |
+| `history_text` | The run-history list of the action the panel shows. |
+| `pane`, `lines`, `tag`, `tag_class` | The run pane, its transcript (a second xterm, so this is not the port's `lines`), and the state tag with its tint `ok`, `bad`, or `muted`. |
+| `outcome`, `progress` | The outcome banner `{text, class}`, with `text` null while hidden, and the bar `{shown, label, width, indeterminate, waiting}`. `width` is `""` for a step with no percent, and `waiting` is the badge shown while a prompt waits. |
+| `prompt` | The box that shows the run's operator prompt: `{shown, text, color, kind, attention, send_enabled, readonly_note, choice}`, plus `buttons`, `options`, or `radios` for the visible `kind` only. The four kinds are swapped by visibility and keep their last value, so `choice` reads the visible control, as `sendOperatorInput()` does. |
+| `strip`, `toast` | The bottom chip and the brief notice. The page hides the chip while the run pane is open, so `strip.shown` is what a page with a shut pane shows: `ACT-09` reads it that way. |
+| `operator`, `take_over`, `stop`, `close_run`, `streaming`, `run_id` | Whether this page may answer the run, which of the pane's three buttons it may press, whether the run's own stream is open here, and which run this pane shows. |
 
 Two rules keep that hook small enough to trust:
 

@@ -1,10 +1,11 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 6: 102 scenarios in eight suites, listed in
+**Status:** Implemented through Phase 7: 113 scenarios in nine suites, listed in
 [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the three `IDX` self-check
 scenarios, the browser proof, the ten `AUTH` scenarios driven over HTTP, the fourteen `CON` console scenarios driven
 in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the twenty `CFG` Config Editor
-scenarios, and the five `TIM` story-recorder scenarios run green. Phases 7-9 are not written; see
+scenarios, the eleven `ACT` Port Action scenarios, and the five `TIM` story-recorder scenarios run green. Phases 8-9
+are not written; see
 **Build status** near the end.
 **Date:** 2026-10-30
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
@@ -141,10 +142,11 @@ process, so the page keeps receiving frames while Python waits on a socket.
 
 Most scenarios that read as simultaneous are propagation, not concurrency: one surface acts, then the test waits for a
 predicate on another surface. Sequential code does that. Only a few need real simultaneity — two Takeover requests on
-one freed seat, and one Port Action race (`ACT-06`). `concurrently([...])` runs actions in threads behind one
-`threading.Barrier`, joins with a deadline, and returns every result or raises once with all of them. The freed-seat
-race is not built: `RW-13` covers the seat-frees-then-requested sequence in order, and the simultaneous form is
-available in the `RW` file when it is wanted.
+one freed seat. `concurrently([...])` runs actions in threads behind one `threading.Barrier`, joins with a deadline, and
+returns every result or raises once with all of them. The freed-seat race is not built: `RW-13` covers the
+seat-frees-then-requested sequence in order, and the simultaneous form is available in the `RW` file when it is wanted.
+No Port Action scenario needs it: the server refuses a second run on a port that holds one (`ACT-04`), so the outcome
+does not depend on which of two requests landed first.
 
 ### Every attached surface keeps a reader
 
@@ -319,10 +321,10 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 102 scenarios in 8 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, the
-index checks 3, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
-runs, and its count is checked by `IDX-02`. Three further groups below are the plan of record: they have ids,
-boundaries, and assertions written down, and they have no test file yet. Full wording for every built id lives in that
+The suite today runs 113 scenarios in 9 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, `ACT` 11,
+the index checks 3, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
+runs, and its count is checked by `IDX-02`. Two further groups below still hold planned ids: they have boundaries and
+assertions written down, and no test for each of them yet. Full wording for every built id lives in that
 index.
 
 ### LIFECYCLE — process and listeners (`tests/e2e/test_lifecycle.py`, 11)
@@ -669,11 +671,37 @@ Five defects in the product came out of measuring, and each is fixed with the sc
   producer writes it and the block line as the operator reads it. All three tests fail against the previous reporter —
   `('adapter', "{'adapter': 'serial_ports', 'start_timeout': 10.0}") != ('serial_ports', 'start timed out after 10.0s')`.
 
-### ACT — Port Actions (`test_actions.py`, planned: 9)
+### ACT — Port Actions (`test_actions.py`, built: 11)
 
-Button visibility per port and permission, granted list, run output and status classes, progress bar, operator prompt
-kinds, `operator_prompt_closed` reaching a second viewer, `?action=…&autorun=1` toast, stop and takeover and close
-rules, both viewers see the finish.
+One world: the Loopback port `loop1` holds every grant and the command port `cat1` holds none, so a scenario can compare a
+granted Port with an un-granted one in the same page. Each scenario grants the scripts it needs, read from the shipped examples
+(`echo_probe`, `slow_noop`) and from fixtures under `tests/e2e/action_fixtures` — percent progress (`meter_probe`), one
+operator prompt of each kind (`ask_probe`), and one prompt that expires unanswered (`ask_timeout`).
+A Port Action spreads one run over nine regions of the page, and each region is hidden with an inline `display` instead of
+being removed, so every scenario reads `page.action_state()`, which pairs a region's text with whether it shows, and never
+asserts that a node exists. Where two pages watch one run, each rule is asserted on both sides of it: an answer, an expiry,
+or a Close run reaches every page, and a ✕ dismissal reaches one page only.
+
+| Id | Proof |
+| --- | --- |
+| `ACT-01` | The Actions button shows on a granted port and hides on an un-granted one, a read-only account is answered 403 and gets no button, and the roster matches the API in the declared order and wording. |
+| `ACT-02` | The run panel's own form, the answer typed into it, the finished tag, the outcome banner, the transcript lines, and the history row a finished run leaves: one run, its username, `success`. |
+| `ACT-03` | A run a page launches takes the port's read-write seat from that page, names itself as the holder in the holders list, and gives the seat back in the server's own sentence when it ends. |
+| `ACT-04` | A run launched against a port a human holds fails instead of displacing them, a second launch while one runs is refused by run id, a second page shows the `(running)` marker, and the refusal clears when the first run retires. |
+| `ACT-05` | The bar shows each step the script reports, with its percent and its width, and one step whose label stands alone with no width. The bar is gone once the outcome banner arrives. |
+| `ACT-06` | One run moves the operator box through text, buttons, dropdown, and radio, and each answer reaches the port and the run's transcript. |
+| `ACT-07` | A second viewer takes over as operator and the launcher is told in the page's own words; each answer closes the box on the page that did not answer it, and both pages end with four closings and one finish. |
+| `ACT-08` | `?action=…&autorun=1` names what it starts and starts it, and the parameters the link carries are the values the run uses. |
+| `ACT-09` | An `autorun` link whose required answer is missing opens the prefilled form, says nothing, starts nothing, and starts the run once the operator types that answer. |
+| `ACT-10` | Stop asks first and then records `cancelled`; the ✕ retires the pane on its own page and its own strip brings the run back; Close run drops the run on every page and in the catalog. |
+| `ACT-11` | An operator prompt its own timeout closes leaves no box on any open page and none for a viewer that arrives after it, and the run nobody answered still finishes by itself. |
+
+Two page defects came out of these ids and are fixed in `console.js`, each with the entry `CHANGELOG.md` carries. An
+`autorun` deep link sent its run request as soon as its two action requests came back, which is often before the page's
+console WebSocket reports the page's own `client_id`; the run request carries that id so the server can take the
+read-write seat from that page, so the launch was refused with "read-write slot is unavailable". And the catalog read that
+the same overlay open starts rebuilt the run form a moment after the link filled it, so the run started on the parameter
+defaults instead of the values the link carried.
 
 ### ST — status pages (`test_status_pages.py`, planned: 6)
 
@@ -734,7 +762,8 @@ Named now so release 1 fixtures stay sufficient.
 | 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
 | 6 — Config Editor | Done | `CFG-01` to `CFG-20` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at soft reload, one entry of any port section the adapter refuses at boot, and that entry again under a full reload. Five product defects came out of building this group, listed under `CFG` above; the third turned out to have a second half found after it was fixed, the fourth was found while measuring that half, and the fifth came from making a full reload answer carry the keys a soft reload answer already carried. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it; `CFG-18` then deletes that entry with `_drop_port_named()` and counts the block lines after `_wait_for_log_count()`, because a plain log wait is satisfied by an earlier reload; `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`, and `CFG-20` reuses the hand-edit helper `CFG-18` added. |
 | 6a — uncovered-run notice | Done | A run that cannot start a browser skips every page scenario and, under the heading `E2E browser coverage`, prints how many scenarios asserted nothing, one line per reason, and the fix command. `IDX-03` drives the notice with a fake reason and a fake skip list; whether this machine has a browser is not what it checks. |
-| 7-9 | Not started | ACT, ST, and the story scenarios. |
+| 7 — Port Actions | Done | Eleven scenarios (`ACT-01` to `ACT-11`) in `tests/e2e/test_actions.py`, with three fixture scripts under `tests/e2e/action_fixtures` and an `action` block on the page hook. Two page defects came out of them: see the ACT section above. |
+| 8-9 | Not started | ST and the story scenarios. |
 
 - `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
   `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`

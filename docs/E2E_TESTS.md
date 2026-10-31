@@ -11,10 +11,22 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-102 scenarios across 8 suites.
+113 scenarios across 9 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
+| **ACT** | | | |
+| ACT-01 | The Actions button appears for a write-entitled visitor on a granted Port, and lists the scripts that Port was granted. | web:rw, web:ro | `tests/e2e/test_actions.py::test_act01_the_actions_button_follows_the_grant_and_the_permission` |
+| ACT-02 | A run started with the panel's Run button ends in the panel with the script's own lines and the server's own outcome. | web:rw | `tests/e2e/test_actions.py::test_act02_the_page_shows_the_run_output_and_the_outcome_the_server_reported` |
+| ACT-03 | A page that launches a run on the Port it drives loses the Write slot for the run, is told so, and gets it back when the run ends. | web:rw, cli:rw | `tests/e2e/test_actions.py::test_act03_a_run_borrows_the_write_slot_from_the_page_that_launched_it` |
+| ACT-04 | A launch that would displace the page's Write slot fails, one run per Port holds, and a finished run stops holding it. | web:rw, web:rw2 | `tests/e2e/test_actions.py::test_act04_a_run_never_displaces_a_human_and_never_runs_two_at_once` |
+| ACT-05 | A progress event reaches the bar, a step without a percent shows as indeterminate, and the run end hides the bar. | web:rw | `tests/e2e/test_actions.py::test_act05_the_bar_shows_every_step_the_script_reports_and_the_last_one_without_a_percent` |
+| ACT-06 | One run asks four prompts, and the page answers each with the control that kind of prompt builds. | web:rw | `tests/e2e/test_actions.py::test_act06_the_operator_prompt_shows_the_control_each_kind_needs` |
+| ACT-07 | A viewer that did not launch the run answers its prompts after a Take over, and the launcher sees every step. | web:rw, web:rw2 | `tests/e2e/test_actions.py::test_act07_a_second_viewer_takes_over_and_both_pages_see_the_answer_and_the_finish` |
+| ACT-08 | ``?action=…&autorun=1`` launches through the page's own call, and a missing required answer launches nothing. | web:dl | `tests/e2e/test_actions.py::test_act08_a_deep_link_starts_the_action_it_names_and_starts_nothing_without_a_required_answer` |
+| ACT-09 | An ``autorun`` link whose required answer is missing opens the prefilled form and starts no run. | web:nodeeplink | `tests/e2e/test_actions.py::test_act09_a_deep_link_that_cannot_start_leaves_the_form_open_and_the_port_untouched` |
+| ACT-10 | Stop asks first and then records cancelled; the ✕ retires the pane for one page, Close run for every page. | web:rw, web:rw2 | `tests/e2e/test_actions.py::test_act10_stopping_a_run_cancels_it_and_closing_it_takes_it_off_the_port_for_everyone` |
+| ACT-11 | A prompt its own timeout closes leaves no box on any open page, and none for a viewer arriving after it. | web:rw, web:rw2, web:late | `tests/e2e/test_actions.py::test_act11_an_operator_prompt_nobody_answers_closes_on_every_page` |
 | **AUTH** | | | |
 | AUTH-01 | The login form accepts a configured user and issues a session cookie with its attributes. | http | `tests/e2e/test_auth.py::test_auth01_the_login_form_hands_out_a_session_cookie` |
 | AUTH-02 | A bad password or an unknown account keeps the visitor signed out, with one shared refusal. | http | `tests/e2e/test_auth.py::test_auth02_a_wrong_password_is_answered_with_the_pages_own_sentence` |
