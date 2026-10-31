@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-119 scenarios across 10 suites.
+120 scenarios across 10 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -144,3 +144,4 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | TIM-03 | A split negotiation says it was truncated, because guessing would invent an option. | recorder | `tests/e2e/test_story.py::test_tim03_a_command_cut_short_by_the_chunk_end_is_marked_not_guessed` |
 | TIM-04 | A payload with embedded newlines still writes a single timeline record. | recorder | `tests/e2e/test_story.py::test_tim04_one_record_is_always_one_line` |
 | TIM-05 | A capped line points at the full payload, written next to ``timeline.log``. | recorder | `tests/e2e/test_story.py::test_tim05_a_long_payload_is_cut_on_the_line_and_kept_whole_beside_it` |
+| TIM-06 | One server, one shift: a PDU added in the browser, a seat taken, a feed lost, and both logs written. | web:admin, web:rw, cli:taker, http, server log | `tests/e2e/test_story.py::test_tim06_one_operators_shift_in_one_process` |

@@ -1,13 +1,12 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 8: 119 scenarios in ten suites, listed in
+**Status:** Implemented through Phase 9: 120 scenarios in ten suites, listed in
 [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the three `IDX` self-check
 scenarios, the browser proof, the ten `AUTH` scenarios driven over HTTP, the fourteen `CON` console scenarios driven
 in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the twenty `CFG` Config Editor
-scenarios, the eleven `ACT` Port Action scenarios, the five `TIM` story-recorder scenarios, and the six `ST` status page
-scenarios run green. Phase 9, the one story sequence in one process, is not written; see
-**Build status** near the end.
-**Date:** 2026-10-30
+scenarios, the eleven `ACT` Port Action scenarios, the six `TIM` story scenarios, and the six `ST` status page
+scenarios run green. See **Build status** near the end.
+**Date:** 2026-10-31
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
 and Telnet at the same time.
 
@@ -321,8 +320,8 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 119 scenarios in 10 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, `ACT` 11,
-`ST` 6, the index checks 3, and the timeline recorder 5. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
+The suite today runs 120 scenarios in 10 files: `LIFECYCLE` 11, `AUTH` 10, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, `ACT` 11,
+`ST` 6, the index checks 3, and the story recorder 6. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
 runs, and its count is checked by `IDX-02`. Two further groups below still hold planned ids: they have boundaries and
 assertions written down, and no test for each of them yet. Full wording for every built id lives in that
 index.
@@ -736,16 +735,30 @@ read-only operator's page, and that the port row labels it the same way. The tem
 never given: a client whose transport the server could not name reads `unknown`. Each half carries a unit guard in
 `tests/server/test_web_console_gather_clients.py` that fails without the fix.
 
-### Story and timeline recorder (`test_story.py`, 5 built, 1 planned)
+### Story and timeline recorder (`test_story.py`, 6 built)
 
-Built: the five recorder scenarios (`TIM-01` to `TIM-05`) prove what one timeline line looks like — caret notation for
-control bytes, `IAC WILL ECHO` named, a truncated command marked rather than guessed, one record per line, and a long
-payload kept whole beside the file. Planned: one sequence in one process, listed below. Its fixtures exist today, so it
-is the cheapest of the planned groups to write.
+Built: `TIM-01` to `TIM-05` prove what one timeline line looks like: caret notation for control bytes, `IAC WILL ECHO`
+named, a truncated command marked rather than guessed, one record per line, and a long payload kept whole beside the
+file. Those five read the recorder only, start no server, and open no browser. `TIM-06` is the sequence the recorder
+exists for, and the only scenario in this file that carries `e2e_browser`.
 
-One sequence in one process: configure a PDU through the browser, soft reload, web holds the write slot, CLI requests
-and is refused, CLI takes the slot, both terminals show the wording, switch the last feed off, both warn, restore, and
-the audit line present.
+| Id | Claim |
+| --- | --- |
+| `TIM-06` | One operator's shift in one process: a PDU added in the Config Editor, the reload that page runs by itself, an open console gaining the feed it waited for, a Write slot taken by a second console, the last feed lost and restored while both terminals watch, and the audit lines the shift leaves behind. |
+
+Measured boundaries of `TIM-06`:
+
+- The page's Save button is pressed only after the new row appears in the page's own table. Pressed in the same tick
+  as `Save item`, the page reports `Loaded current config` and writes nothing.
+- The PDU is switched through REST, because the same switch made from a console session adds `; client <id>` to the
+  audit line, and `PWR-19` covers that half.
+- A refusal to promote names its holder on the reply frame (`rw_holders`) and only its own sentence on the terminal, so
+  the scenario reads the holder from the frame and quotes the sentence from `access_decision`.
+- One switch writes two sentences in the web terminal: the server's notice, which every attached surface reads alike,
+  and the page's own all-power-lost line. The page re-writes that second line on every status frame while power stays
+  lost.
+- The holders are labelled `user@peer`, so two sessions of one account from one address cannot be told apart there.
+  `RW-17` reports that label.
 
 ---
 
@@ -792,7 +805,7 @@ Named now so release 1 fixtures stay sufficient.
 | 6a — uncovered-run notice | Done | A run that cannot start a browser skips every page scenario and, under the heading `E2E browser coverage`, prints how many scenarios asserted nothing, one line per reason, and the fix command. `IDX-03` drives the notice with a fake reason and a fake skip list; whether this machine has a browser is not what it checks. |
 | 7 — Port Actions | Done | Eleven scenarios (`ACT-01` to `ACT-11`) in `tests/e2e/test_actions.py`, with three fixture scripts under `tests/e2e/action_fixtures` and an `action` block on the page hook. Two page defects came out of them: see the ACT section above. |
 | 8 — Status pages | Done | Six scenarios (`ST-01` to `ST-06`) in `tests/e2e/test_status_pages.py`: the cards and the sort links against `/api/status`, a detail row that survives the swap that rebuilt it, one Clients table naming each transport across three surfaces, the federation empty state, one port's power dot following an outlet on two open pages, and the shape of `/api/status/fragments`. One product defect came out of them: the Clients table called every Telnet console a websocket. See the ST section above. The harness gained `ConsoleSession.is_visible()` and `ConsoleSession.live_badge()`; `set_offline()` is documented for what it really does. |
-| 9 — Story | Not started | The one sequence in one process listed under **Story and timeline recorder**. |
+| 9 — Story | Done | Six scenarios in `tests/e2e/test_story.py`: the five recorder scenarios and `TIM-06`, one operator's shift in one process. It adds no harness method: the editor steps run through `ConsoleSession` helpers other suites already added, and the file gained four local helpers of its own for the inline editor row. `TIM-06` is the tier's only scenario that marks `e2e_browser` inside a file whose other scenarios need no browser. |
 
 - `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
   `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`
