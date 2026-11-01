@@ -406,6 +406,22 @@ def test_federated_sc_ls():
     assert e["line_status"] is ls
 
 
+def test_federated_composite_id_names_the_origin_node():
+    """The composite id of a federated Port names the node that owns it (issue #111).
+
+    ``api/ports`` is how a client picks a federated Port, and the CLI menu labels the same
+    entry ``<origin_server_id>::<name>``. Measured in two linked ``openmux.server.main``
+    nodes (MXC-02) the api entry said ``<this node>::loop1`` while ``origin_server_id``
+    said the peer: ``_pinfo_composite`` ran before ``_pinfo_federated``, so the origin was
+    not known yet and the id fell back to the local server id — an id no node resolves.
+    """
+    origin = _Origin(server_id="node-leaf", to_dict=lambda: {"server_id": "node-leaf"})
+    meta = _Meta(origin_server=origin)
+    e = _by_name(_run({"loop1": _StatusPort({}, metadata=meta)}, mux="node-hub"), "loop1")
+    assert e["origin_server_id"] == "node-leaf"
+    assert e["id"] == "node-leaf::loop1"
+
+
 def test_federated_origin_to_dict():
     od = {"server_id": "o1", "full": True}
     origin = _Origin(to_dict=lambda: dict(od))

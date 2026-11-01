@@ -4553,10 +4553,13 @@ class WebConsoleAdapter(BaseGenericAdapter):
                         if "name" not in info:
                             info["name"] = name
                         self._pinfo_power(name, info, power_adapter)
+                        # Federated first: the composite id is built from origin_server_id,
+                        # so a peer Port would otherwise be labelled with this node's id —
+                        # an id no node resolves, and one the CLI menu does not print.
+                        self._pinfo_federated(port, info)
                         self._pinfo_composite(info)
                         self._pinfo_last_seen(port, info)
                         self._pinfo_loopback(name, info)
-                        self._pinfo_federated(port, info)
                         self._pinfo_clients(name, port, info)
                         ports.append(info)
                         self._pinfo_record_name(info, seen_names)

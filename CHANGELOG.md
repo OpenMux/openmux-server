@@ -46,6 +46,11 @@ Changes since v1.0.4 (2026-10-19).
   names the client that holds the write slot. The attach line for a taken slot also drops the word "seat": the approved term
   is write slot (`docs/GLOSSARY.md`), and a seat is the connection seat. The CLI client and the web console still print their
   own mode line, because the Client protocol carries the mode and no reason. No config change.
+- **A federated Port is listed under the node that owns it.** `api/ports` gives every Port an `id` of the form
+  `<node>::<port>`. For a Port that arrived over a MuxCon link, that id named **this** node, because the id was computed
+  before the payload recorded the Port's origin. The origin was still correct in the same entry, and the interactive menu
+  already labelled the Port `<origin>::<port>`, so the list and the menu disagreeed about one Port. The id now names the
+  origin node. Nothing in `server.yaml` changes.
 - **A console session that vanishes is quiet while the server writes to it.** The server learns that a viewer left when a
   write to it fails. Every such failure logged `ERROR: Failed to send data to client <id>` with a traceback, one line per
   write, while the session stayed listed on the Port. A connection reset, a broken pipe, or a write cut short now logs one
