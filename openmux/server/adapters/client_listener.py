@@ -1411,13 +1411,9 @@ class TcpServerAdapter(BaseGenericAdapter):
         client = self.clients[client_id]
         self.logger.debug("Sending %s bytes to client %s", len(data), client_id)
         self.logger.debug("Echo data content: %s...", data[:100])  # Log first 100 bytes
-        try:
-            # Send raw data directly (not as a line)
-            await client.send_raw_data(data)
-            return True
-        except Exception as e:
-            self.logger.error("Failed to send data to client %s: %s", client_id, e, exc_info=True)
-            return False
+        # No try/except here: ClientSession.send_raw_data reports a failed write itself (one INFO line
+        # for a peer that vanished, ERROR with a traceback for anything else) and returns False.
+        return await client.send_raw_data(data)
 
     async def send_control_frame_to_client(self, client_id: str, payload: Dict[str, Any]) -> bool:
         """Deliver an access-mode control frame to a locally connected TCP client.
@@ -1436,13 +1432,12 @@ class TcpServerAdapter(BaseGenericAdapter):
         client = self.clients.get(client_id)
         if client is None:
             return False
-        try:
-            await client.send_raw_data(CTRL_MARKER + json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
-            if payload.get("type") == "client_mode":
-                client.mode = payload.get("mode")
-            return True
-        except Exception:
-            return False
+        sent = await client.send_raw_data(CTRL_MARKER + json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
+        # Only remember a new mode once the frame reached the socket, so the server and the client
+        # cannot disagree about the access mode of a session that is already gone.
+        if sent and payload.get("type") == "client_mode":
+            client.mode = payload.get("mode")
+        return sent
 
     # Port management methods (required by BaseGenericAdapter)
     async def create_port(self, port_name: str, config: Dict[str, Any]) -> Optional[Any]:
@@ -1570,32 +1565,55 @@ class ClientSession:
             self.connected = False
             return None
 
-    async def send_line(self, line: str):
+    async def send_line(self, line: str) -> bool:
         """Send UTF-8 encoded line with newline terminator.
 
         Args:
             line: String content to send (without trailing newline).
+
+        Returns:
+            bool: True when the line reached the socket, False when it did not.
         """
         try:
             data = line.encode("utf-8") + b"\n"
             self.writer.write(data)
             await self.writer.drain()
+            return True
+        except _PEER_GONE_ERRORS as e:
+            # The client left without saying so, and this write is where that became visible. Same
+            # policy as receive_char: one INFO line and no traceback. The caller reports the failed
+            # send itself, so raising here would only repeat the same sentence at ERROR.
+            self.connected = False
+            self.logger.info("Send to client %s stopped: %s", self.client_id, e)
+            return False
         except Exception as e:
             self.logger.error("Failed to send line to client %s: %s", self.client_id, e, exc_info=True)
             self.connected = False
+            return False
 
-    async def send_raw_data(self, data: bytes):
+    async def send_raw_data(self, data: bytes) -> bool:
         """Send raw bytes (no framing).
 
         Args:
             data: Raw bytes to write to the client transport.
+
+        Returns:
+            bool: True when the bytes reached the socket, False when they did not.
         """
         try:
             self.writer.write(data)
             await self.writer.drain()
+            return True
+        except _PEER_GONE_ERRORS as e:
+            # A viewer that closed its tab or killed its client resets the socket mid-write, which is
+            # the normal end of a console session. One INFO line, no traceback: see send_line.
+            self.connected = False
+            self.logger.info("Send to client %s stopped: %s", self.client_id, e)
+            return False
         except Exception as e:
             self.logger.error("Failed to send raw data to client %s: %s", self.client_id, e, exc_info=True)
             self.connected = False
+            return False
 
     async def receive_bytes(self, n: int = 4096) -> Optional[bytes]:
         """Receive up to ``n`` bytes (unless disconnected).

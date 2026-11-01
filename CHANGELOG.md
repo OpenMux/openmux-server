@@ -36,6 +36,11 @@ Changes since v1.0.4 (2026-10-19).
   device that cannot take a hardware or in-band handshake.
 
 ### Behavior changes (no config change required)
+- **A console session that vanishes is quiet while the server writes to it.** The server learns that a viewer left when a
+  write to it fails. Every such failure logged `ERROR: Failed to send data to client <id>` with a traceback, one line per
+  write, while the session stayed listed on the Port. A connection reset, a broken pipe, or a write cut short now logs one
+  INFO line, `Send to client <id> stopped: <reason>`, and the send reports a plain failure to its caller, which ends that
+  session. A send that fails for another reason still reports ERROR with a traceback. No config change.
 - **One unusable port entry no longer costs every port of its section.** One entry in `serial_ports`,
   `command_ports`, `loopback_ports`, or `tcp_initiator_ports` in `server.yaml` that its own port rejects — a `parity`
   letter outside `N`, `E`, `O`, `M`, `S`, or an entry with no `command`, is one — used to cost every port of that
