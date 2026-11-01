@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-137 scenarios across 12 suites.
+143 scenarios across 13 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -139,6 +139,13 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | RW-18 | The page's Take control item is the same Takeover: it grants the page and displaces the holder. | cli:rw, web:rw | `tests/e2e/test_write_slot.py::test_rw18_a_web_page_can_take_the_seat_from_a_cli_holder` |
 | RW-19 | A page demoted by another client changes its mode, its pill, and its body class at once. | web:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw19_a_page_that_loses_the_seat_stops_claiming_it` |
 | RW-20 | Three viewers on one port, one stalled on purpose: a control frame still reaches the others. | cli:ro, cli:rw | `tests/e2e/test_write_slot.py::test_rw20_one_client_that_stops_reading_does_not_hold_up_the_others` |
+| **SER** | | | |
+| SER-01 | Typed bytes reach the device unchanged, with nothing echoed back to the console. | cli:admin, serial:device | `tests/e2e/test_serial_device.py::test_ser01_what_an_operator_types_is_what_the_device_reads` |
+| SER-02 | The device itself carries the configured speed, parity, and stop bits. | serial:device | `tests/e2e/test_serial_device.py::test_ser02_the_speed_and_framing_in_the_config_are_the_ones_on_the_device` |
+| SER-03 | A Port configured for a device no host has says why, and starts when the device arrives. | api:http, cli:admin, serial:device | `tests/e2e/test_serial_device.py::test_ser03_a_port_whose_device_is_missing_reports_it_and_recovers_on_its_own` |
+| SER-04 | Unplugging a live device is shown on the console, in the API, and in the log, and heals itself. | api:http, cli:admin, serial:device | `tests/e2e/test_serial_device.py::test_ser04_a_pulled_cable_is_reported_where_the_operator_looks` |
+| SER-05 | A block of every byte value crosses the server whole, in both directions. | cli:admin, serial:device | `tests/e2e/test_serial_device.py::test_ser05_no_byte_is_lost_or_reordered_in_either_direction` |
+| SER-06 | The kernel handshake a config asks for is the one the device carries. | cli:admin, serial:device | `tests/e2e/test_serial_device.py::test_ser06_flow_control_from_the_config_is_on_the_device` |
 | **SSH** | | | |
 | SSH-01 | The server generates its host key inside the state dir, offers that key, and reuses it after a restart. | ssh:viewer, state dir, server log | `tests/e2e/test_ssh_listener.py::test_ssh01_the_host_key_is_born_in_the_state_dir_and_outlives_the_process` |
 | SSH-02 | A password the config accepts opens a shell, and the account's permission decides what that shell may do. | ssh:rw, ssh:viewer, authentication.yaml | `tests/e2e/test_ssh_listener.py::test_ssh02_the_account_behind_the_password_decides_the_seat` |

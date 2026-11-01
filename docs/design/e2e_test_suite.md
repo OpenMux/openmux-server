@@ -1,12 +1,12 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 9, `AUTH-11`, the SSH listener, and the command-driver PDU: 137 scenarios in twelve
-suites, listed in [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the three
-`IDX` self-check scenarios, the browser proof, the eleven `AUTH` scenarios driven over HTTP, the fourteen `CON` console
-scenarios driven in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the six `CMD`
-command-driver scenarios, the twenty `CFG` Config Editor scenarios, the eleven `ACT` Port Action scenarios, the six `TIM`
-story scenarios, the six `ST` status page scenarios, and the ten `SSH` listener scenarios run green. See **Build status**
-near the end.
+**Status:** Implemented through Phase 9, `AUTH-11`, the SSH listener, the command-driver PDU, and the serial device
+tier: 143 scenarios in thirteen suites, listed in [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF`
+lifecycle scenarios, the three `IDX` self-check scenarios, the browser proof, the eleven `AUTH` scenarios driven over
+HTTP, the fourteen `CON` console scenarios driven in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR`
+power scenarios, the six `CMD` command-driver scenarios, the six `SER` serial-device scenarios, the twenty `CFG` Config
+Editor scenarios, the eleven `ACT` Port Action scenarios, the six `TIM` story scenarios, the six `ST` status page
+scenarios, and the ten `SSH` listener scenarios run green. See **Build status** near the end.
 **Date:** 2026-10-31
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
 Telnet, and SSH at the same time.
@@ -322,8 +322,8 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 137 scenarios in 12 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 20, `PWR` 19, `CMD` 6, `CFG` 20,
-`ACT` 11, `ST` 6, `SSH` 10, the index checks 3, and the story recorder 6. The generated
+The suite today runs 143 scenarios in 13 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 20, `PWR` 19, `CMD` 6,
+`SER` 6, `CFG` 20, `ACT` 11, `ST` 6, `SSH` 10, the index checks 3, and the story recorder 6. The generated
 [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what runs, and its count is checked by `IDX-02`. Two further groups
 below still hold planned ids: they have boundaries and assertions written down, and no test for each of them yet. Full
 wording for every built id lives in that index.
@@ -850,6 +850,51 @@ scenario reads the device through `world.power_box(name)`, `world.power_box_jour
 `world.power_box_flip(name, outlet)` and `world.power_box_fault(name, *modes)`. `box_args` bakes a fault into the argv at
 start-up; `power_box_fault` moves the device while the server runs, which is the case a poll or a backoff window is about.
 
+### SER — serial device over a pty pair (`test_serial_device.py`, 6)
+
+The Serial adapter reads and drives a character device. Its unit tests under `tests/server/` replace
+`serial_asyncio.open_serial_connection` or the port object, so no unit test opens a device and none can say what
+the device sees. Each scenario here opens one: `SerialStation` runs `socat` over a pty pair, the server opens one
+link as its `device`, and the test holds the other. The tier therefore proves the bytes on the wire, the termios on
+the device, and what an operator is told when the cable comes out. The tier needs `socat`; each scenario of the
+file states that reason and skips when the host has none.
+
+Six measured facts shape these bodies, and each is used where it applies:
+
+- Nothing is added and nothing is rewritten. A console that types `boot\x1b[A\x03 … end\r` is read by the device as
+  those same bytes, UTF-8 included, and the console is shown nothing of its own typing: a Serial Port forwards, it
+  does not echo.
+- The line settings land on the device. Before the server opens the link, the pty carries `socat`'s own line: 9600
+  baud, no parity, one stop bit, `ONLCR` set. After the server opens it with `baudrate: 57600`, `parity: "E"` and
+  `stopbits: 2`, the device carries that, with `CLOCAL` raised and `ONLCR` cleared.
+- An absent device never stops the server. The Port is listed with `state` still `active` and `connected` false, and
+  its `status_message` reads `Serial device <path> not found` beside the one logged warning `Serial device <path>
+  does not exist`. A console may still attach, and its typing is answered with `[Write blocked: port is disconnected
+  on server]`.
+- The Port recovers by itself. It retries every five seconds (`SerialPortWrapper.reconnect_delay`), so a device that
+  arrives, or a cable that goes back in, needs no reload. A seat granted while the device was down carries across
+  the connect, and the console is told `[Reconnected]`.
+- A device pulled mid-session says so on every surface: the console gets `[Port disconnected on server]`, the API
+  carries `Read error on <path>: device reports readiness to read but returned no data`, and the log adds `Port
+  <name> is not connected` plus `WRITE FAILED` for the next write.
+- Bytes are neither lost nor reordered. 4,096 bytes of every value arrive at the console whole and in order, and
+  2,000 bytes typed in one action arrive at the device whole, where the reads come up as three chunks.
+
+| Id | What it proves |
+| --- | --- |
+| `SER-01` | The device reads the control characters and the non-ASCII bytes exactly as typed, the console is shown none of its own typing, and what the device sends arrives unchanged. |
+| `SER-02` | The speed, parity, and stop bits of `server.yaml` are on the device's own termios, and opening the line clears output post-processing. |
+| `SER-03` | A Port whose device no host has states the reason in `/api/ports` and the log, lets a console attach and tells it where its typing went, then connects on its own when the device arrives. |
+| `SER-04` | Pulling a live device is reported to the attached console, in `status_message`, and in the log, the refused write is recorded, and the same console works again after the cable goes back in. |
+| `SER-05` | One block of every byte value crosses the server whole and in order in both directions, in either direction's own chunking. |
+| `SER-06` | `flow_control` reaches the device: the RTS flag or the in-band flags are set in its termios, the default sets neither, and a line under the hardware handshake still carries characters. |
+
+The world knob is `ConfigBuilder.with_serial_port(name, device, baudrate=…, parity=…, stopbits=…, flow_control=…)`,
+and `devices.serial(tag, plugged_in=True)` hands a scenario its device: `path` is what the config names, `send` and
+`received` are the wire, `line_settings` reads the device's own termios, and `unplug` plus `plug_back_in` are the
+cable. `SER-06` found the one product defect of this group and it is fixed on its own: the adapter used to leave
+`flow_control` out of the call that opened the device, so no handshake was ever applied.
+
 ### Story and timeline recorder (`test_story.py`, 6 built)
 
 Built: `TIM-01` to `TIM-05` prove what one timeline line looks like: caret notation for control bytes, `IAC WILL ECHO`
@@ -894,7 +939,10 @@ Named now so release 1 fixtures stay sufficient.
 3. Power `driver: command` driven by a checked-in fake device script: **built** as `CMD-01` to `CMD-06`. The device is
    `tests/e2e/power_fixtures/outlet_box.py`, which keeps its outlet positions in a file, so the tier proves the argv the
    driver builds and the exit code a user reads. The monkeypatched unit tests keep covering the parse and quoting rules.
-4. Serial adapter over a `socat` pty pair.
+4. Serial adapter over a `socat` pty pair: **built** as `SER-01` to `SER-06`. The device is a `socat` pty pair held by
+   `SerialStation`, so the tier reads the bytes the device reads, reads the termios the server applied, and pulls the
+   cable in the middle of a session. It found one product defect, and that defect is fixed: `flow_control` never
+   reached the opened device.
 5. Soak: many viewers, simultaneous requests, socket churn.
 
 ---
@@ -931,6 +979,7 @@ Named now so release 1 fixtures stay sufficient.
 | 9a — AUTH-11 | Done | `AUTH-11` in `tests/e2e/test_auth.py`: an `external_auth` helper decides who may sign in, and only `authentication.yaml` hands out the role. The harness gained `ConfigBuilder.with_external_auth`, and `tests/e2e/auth_fixtures/helper_stub.py` is the fixture — one script, four names, in the protocol `auth_manager.py` speaks. One product defect came out of building it: a helper that answers slowly stops the server for every other visitor, which issue #114 carries. The scenario asserts nothing about time, because a timing claim would read as flaky while that defect is open. |
 | 10 — SSH listener | Done | Ten scenarios (`SSH-01` to `SSH-10`) in `tests/e2e/test_ssh_listener.py`, each dialing a running server with `asyncssh`: the host key generated in the state dir and reused across a restart, the account behind a password, the `ssh` use of a registered key, the listener that offers the Port menu without a login, the `acl` fence beside a listener without one, the command request that never reaches a Port, one Takeover taken from an SSH holder, the Control menu's `p` key over SSH, a username that carries a Port name, and a Port that excludes the account. Two product defects came out of this group: issue #110 from `SSH-04`, and issue #115 from the restart in `SSH-01`, where a listener refused a bind is left stopped while the server goes on answering `/healthz` with 200. The harness gained the SSH half of itself: `with_ssh_listener`, `with_public_key`, `ssh_ed25519_keypair`, `E2EServer.restart` (which waits for the ports to be bindable again), the `ssh` knobs on `servers()`, and `clients.ssh()` over the new `SshSession`. See the SSH section above. |
 | 11 — Command-driver PDU | Done | Six scenarios (`CMD-01` to `CMD-06`) in `tests/e2e/test_power_command.py`, each driving the checked-in outlet box `tests/e2e/power_fixtures/outlet_box.py` through `driver: command`, so a real process answers every read and switch: the positions and missing wattages a real device reports, one CLI switch proven by the outlet id the box recorded, a position changed on the device found by the next poll, a refused switch quoting exit 3 and the box's own words on the CLI, in the log, and in a REST 409 that keeps its impact, a command past its timeout answered on two surfaces with the helper it started stopped, and a device that stops answering kept silent and stale while a switch still reaches it. No product defect came out of this group. The two surprises were documented behaviour, and each is now asserted where it applies: a switch that changes nothing sends no notice, and a device-wide read failure is silent by the contract in `power_drivers/readbackoff.py`. The harness gained `ConfigBuilder.with_command_pdu` plus `E2EServer.power_box`, `power_box_journal`, `power_box_child`, `power_box_flip`, `power_box_fault`, and `wait_until`; the builder owns the device's state path, so no scenario rebuilds it. See the CMD section above. |
+| 12 — Serial device | Done | Six scenarios (`SER-01` to `SER-06`) in `tests/e2e/test_serial_device.py`, each wiring a Serial Port to a `socat` pty pair whose far end `SerialStation` holds, so the tier reads what the device reads: the characters an operator typed arriving unchanged with nothing echoed back, the configured speed, parity and stop bits on the device's own termios, a device no host has stating its reason in `/api/ports` and the log while a console attached to that Port is told where its typing went, a cable pulled mid-session reported on the console, in `status_message` and in the log and healed by the Port's own five-second retry, one block of every byte value crossing whole in both directions, and the handshake a config asks for present on the line. One product defect came out of this group and is fixed on its own: `flow_control` was left out of the call that opened the device, so `rtscts` and `xonxoff` started no handshake at all. `tests/server/test_serial_flow_control.py` binds the mapping and `SER-06` proves the termios. The harness gained `SerialStation` (`send`, `received`, `line_settings`, `unplug`, `plug_back_in`), `devices.serial(...)`, the `stopbits` and `flow_control` knobs on `with_serial_port`, and `CliSession.byte_offset` with `reply_bytes_after` for a byte-exact read of a binary payload. See the SER section above. |
 
 - `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
   `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`
@@ -977,6 +1026,8 @@ carries a unit guard that fails without the fix, and `CHANGELOG.md` carries an e
 6. **Phase 10 — `test_ssh_listener.py`.** Release 2 item 1, built early: no browser, one more listener per world.
 7. **Phase 11 — `test_power_command.py`.** Release 2 item 3: no browser, one fixture script that plays the device, and
    one server per scenario.
+8. **Phase 12 — `test_serial_device.py`.** Release 2 item 4: no browser, one `socat` pty pair per device, and the test
+   itself holding the far end as the device.
 
 ---
 

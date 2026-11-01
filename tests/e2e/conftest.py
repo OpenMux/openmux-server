@@ -26,12 +26,15 @@ from .console import (
     note_browser_skip,
 )
 from .harness import (
+    SOCAT,
+    SOCAT_MISSING,
     TEST_PASSWORD,
     Api,
     ConfigBuilder,
     DeviceStation,
     E2EServer,
     HttpSession,
+    SerialStation,
     ServerAddress,
     free_ports,
 )
@@ -573,11 +576,12 @@ def clients(request: pytest.FixtureRequest, server: E2EServer, story: Story) -> 
 
 
 class _DeviceRegistry:
-    """Tracks the fake TCP devices one test started, which are the far end of a TCP-initiator port."""
+    """Tracks the fake devices one test started, which are the far end of a Port."""
 
     def __init__(self, story: Story):
         self.story = story
         self.stations: List[DeviceStation] = []
+        self.serial_stations: List[SerialStation] = []
 
     def tcp(self, name: str = "device", *, surface: Optional[str] = None, echo: bool = False) -> DeviceStation:
         """Start one listening device on a free port, so OpenMux has something to dial."""
@@ -588,10 +592,28 @@ class _DeviceRegistry:
         self.stations.append(station)
         return station
 
+    def serial(self, tag: str = "dev", *, surface: Optional[str] = None, plugged_in: bool = True) -> SerialStation:
+        """Create one fake serial device: a pty pair the server can open and the test can pull.
+
+        Pass ``plugged_in=False`` for a scenario that starts with the cable out: the device paths are
+        chosen and stable, they simply do not exist yet, and :meth:`SerialStation.plug_back_in` makes
+        the Port's own reconnect succeed later.
+        """
+        if SOCAT is None:
+            pytest.skip(SOCAT_MISSING)
+        station = SerialStation(tag)
+        if plugged_in:
+            station.start()
+        self.story.cast(
+            f"{(surface or 'serial:device'):<11} {station.tag} on {station.path.name}  fake pty device, unpluggable"
+        )
+        self.serial_stations.append(station)
+        return station
+
     def close_all(self) -> None:
         """Close every station, keeping the first failure so a real cause is not swallowed."""
         problem: Optional[BaseException] = None
-        for station in reversed(self.stations):
+        for station in reversed(self.stations + self.serial_stations):
             try:
                 station.close()
             except Exception as exc:  # justification: reported after the rest are closed

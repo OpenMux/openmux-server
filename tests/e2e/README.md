@@ -135,6 +135,19 @@ command, which is what a poll must catch. `world.power_box_fault(name, "state")`
 file the box reads on each call, so it needs no config change and no restart. `world.wait_until(fn, timeout=..., what=...)`
 polls a fact that is not a log line, such as one field of `/api/power`.
 
+`with_serial_port(name, device, baudrate=..., parity=..., stopbits=..., flow_control=...)` adds a Serial Port whose
+`device` is any path. The device a scenario wants comes from `devices.serial(tag)`: one `socat` pty pair whose near link
+is that path and whose far end the test holds raw, so the test itself is the device. `station.send(b"...")` is what the
+device transmits and `station.received()` is every byte it read, which is how a scenario shows a console's typing arrived
+unchanged. `station.line_settings()` reads the termios of the device path from a second handle, so the speed, parity,
+stop bits, and handshake a config named are checked on the device and not only in `serial_config`. `station.unplug()`
+stops the pair and leaves the path dangling; `station.plug_back_in()` brings it back under the same two names, which is
+what the Port's own five-second retry then finds. Pass `plugged_in=False` to a scenario that starts with no device at all.
+
+A binary payload cannot be compared as text, because `read_text()` replaces what is not valid UTF-8 and `offset()` counts
+the decoded characters. `cli.byte_offset()` and `cli.reply_bytes_after(mark)` are the raw pair, and a scenario that counts
+bytes uses those.
+
 The same hook registers an SSH key with `with_public_key(key_id, public_key, username, allowed_uses=("ssh",))`: the
 key material, the account it opens, and the use it is granted all land in `authentication.yaml`, which is what a key
 scenario reads back. `ssh_ed25519_keypair(comment)` builds such a pair and returns the OpenSSH public line with the

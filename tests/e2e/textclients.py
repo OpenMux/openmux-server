@@ -356,6 +356,24 @@ class CliSession:
         """Only the bytes that arrived after ``offset``, which isolates the answer to one command."""
         return self.read_text()[offset:]
 
+    def byte_offset(self) -> int:
+        """How many raw bytes have been received, for :meth:`reply_bytes_after`.
+
+        ``offset`` counts characters of the decoded text, which is a smaller number as soon as one
+        byte is not valid UTF-8. A scenario that compares a device's bytes counts these instead.
+        """
+        self.read_text()  # drain the queue first, so the count includes everything received so far
+        return len(self._seen)
+
+    def reply_bytes_after(self, offset: int) -> bytes:
+        """The raw bytes received after ``offset``, with nothing replaced.
+
+        :meth:`read_text` decodes with ``errors="replace"``, so a binary payload cannot be compared
+        as text. This is the byte-exact view a Serial or TCP Port scenario needs.
+        """
+        self.read_text()
+        return bytes(self._seen[offset:])
+
     def pause_reader(self) -> None:
         """Stop draining this session's socket, so the server's writes pile up against it.
 

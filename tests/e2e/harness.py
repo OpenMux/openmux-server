@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+import select
 import shlex
 import shutil
 import signal
@@ -19,8 +20,10 @@ import socket
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
+import tty
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -293,6 +296,8 @@ class ConfigBuilder:
         device: str,
         baudrate: int = 9600,
         parity: str = "N",
+        stopbits: float = 1,
+        flow_control: str = "none",
         write_slot_capacity: str = "one",
         feeds: Optional[Sequence[str]] = None,
     ) -> "ConfigBuilder":
@@ -303,6 +308,8 @@ class ConfigBuilder:
             device: Device path. A path that does not exist starts the port offline instead of failing the reload.
             baudrate: Line speed.
             parity: One of the letters the schema accepts: ``N``, ``E``, ``O``, ``M``, or ``S``.
+            stopbits: Stop bits: ``1``, ``1.5``, or ``2``.
+            flow_control: ``none`` (default), ``rtscts``, ``dsrdtr``, or ``xonxoff``.
             write_slot_capacity: ``one``, ``multiple``, or ``none`` (Write slot capacity).
             feeds: Outlet refs for the ``power:`` key.
         """
@@ -313,7 +320,8 @@ class ConfigBuilder:
             "baudrate": baudrate,
             "bytesize": 8,
             "parity": parity,
-            "stopbits": 1,
+            "stopbits": stopbits,
+            "flow_control": flow_control,
             "max_read_write_users": write_slot_capacity,
         }
         if feeds:
@@ -1702,6 +1710,184 @@ class DeviceStation:
         self.unplug()
         _close_quietly(self._listener)
         self._thread.join(timeout=5)
+
+
+#: Where ``socat`` lives, or ``None`` when the host has none. Homebrew puts it at
+#: ``/opt/homebrew/bin/socat`` on macOS.
+SOCAT = shutil.which("socat")
+
+#: The reason a Serial Port scenario states when it cannot run because the host has no ``socat``.
+SOCAT_MISSING = "these scenarios need socat (brew install socat, or apt install socat)"
+
+#: The termios bit that hands the RTS pin to the kernel handshake. Linux names it ``CRTSCTS``, macOS
+#: and the other BSDs name it ``CCTS_OFLOW``, and pyserial tries the two in the same order.
+_CRTSCTS = getattr(termios, "CRTSCTS", None) or getattr(termios, "CCTS_OFLOW", 0x00010000)
+
+
+class SerialStation:
+    """One fake serial device: a ``socat`` pty pair whose far end the test holds.
+
+    OpenMux opens :attr:`path`, the near link, exactly as it opens a real ``/dev/ttyUSB0``. The test
+    holds the far link, so it is the device on the other end of a null-modem cable: it reads the
+    exact bytes the server transmits and supplies the exact bytes the server reads, with nothing in
+    between to sanitise or echo.
+
+    ``unplug`` stops socat, which leaves :attr:`path` dangling -- the state an operator creates by
+    pulling the cable. ``plug_back_in`` starts a pair again under the same two link names, so the
+    Port finds its device again on its own reconnect with no config change and no reload.
+
+    The line settings the server applied are readable from a second fd on :attr:`path`
+    (:meth:`line_settings`), which is how a scenario proves a configured speed or parity reached the
+    device rather than only the config file.
+    """
+
+    def __init__(self, tag: str = "dev") -> None:
+        """Reserve the two link paths. Nothing exists on disk until :meth:`start`."""
+        if SOCAT is None:
+            raise RuntimeError(SOCAT_MISSING)
+        self.tag = tag
+        # The device path is quoted in the API status, the adapter log, and every failure message, so
+        # it gets its own short directory instead of pytest's ~90-character tmp_path.
+        self.workdir = Path(tempfile.mkdtemp(prefix=f"omxser-{os.getpid()}-"))
+        self.path = self.workdir / f"{tag}A"
+        self.far_path = self.workdir / f"{tag}B"
+        self.proc: Optional[subprocess.Popen] = None
+        self._fd: Optional[int] = None
+        self._rx: List[bytes] = []
+        self._rx_lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        self._closing = threading.Event()
+        self.plugged_in = False
+
+    # --- the cable -----------------------------------------------------------------------
+
+    def start(self) -> "SerialStation":
+        """Create the pair and open the far end, so OpenMux and the test each hold one side.
+
+        Raises:
+            AssertionError: when socat does not create both links, which is its own failure and not
+                something a scenario should have to interpret.
+        """
+        self._closing.clear()
+        self.proc = subprocess.Popen(
+            [SOCAT, "-d", "-d", f"pty,raw,echo=0,link={self.path}", f"pty,raw,echo=0,link={self.far_path}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if self.path.is_symlink() and self.far_path.is_symlink():
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"{self.tag}: socat never created both pty links at {self.path}; ran {SOCAT}")
+        self._fd = os.open(str(self.far_path), os.O_RDWR | os.O_NOCTTY)
+        # Raw, so the far end neither echoes what the server sent nor turns CR into LF on its own.
+        tty.setraw(self._fd)
+        self._thread = threading.Thread(target=self._pump, name=f"omxser-{self.tag}", daemon=True)
+        self._thread.start()
+        self.plugged_in = True
+        return self
+
+    def plug_back_in(self, timeout: float = 15.0) -> "SerialStation":
+        """Bring the device back on the same two paths, which is what a repaired cable looks like."""
+        return self.start()
+
+    def unplug(self) -> None:
+        """Stop the pair, leaving both link paths dangling. Idempotent."""
+        self._closing.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+        if self._fd is not None:
+            _close_quietly_fd(self._fd)
+            self._fd = None
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+        self.proc = None
+        self.plugged_in = False
+
+    # --- the far end -----------------------------------------------------------------------
+
+    def _pump(self) -> None:
+        """Read every byte the server writes, until the pair dies or the test is over."""
+        while not self._closing.is_set():
+            try:
+                ready, _, _ = select.select([self._fd], [], [], 0.05)
+            except (OSError, ValueError):
+                return
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self._fd, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            with self._rx_lock:
+                self._rx.append(chunk)
+
+    def received(self) -> bytes:
+        """Everything the device has read from the server since it was opened, in order."""
+        with self._rx_lock:
+            return b"".join(self._rx)
+
+    def clear(self) -> None:
+        """Forget what the device read, so a later assertion sees only the next exchange."""
+        with self._rx_lock:
+            self._rx.clear()
+
+    def send(self, data: bytes) -> None:
+        """Transmit from the device to the server. One call is one write, which may arrive in pieces."""
+        if self._fd is None:
+            raise AssertionError(f"{self.tag}: the device is unplugged; call plug_back_in() first")
+        os.write(self._fd, data)
+
+    def line_settings(self) -> Dict[str, Any]:
+        """The line settings the device itself carries.
+
+        Reads the termios of :attr:`path` from a fresh fd, which changes nothing. ``stopbits`` reports
+        ``2`` when the two-stop-bit flag is set and ``1`` otherwise, because that flag is also what a
+        1.5 stop-bit line uses; ``parity`` names ``N``, ``E``, or ``O`` and does not tell Mark from
+        Space, which share those two flags.
+        """
+        fd = os.open(str(self.path), os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            iflag, oflag, cflag, lflag, ispeed, _, _ = termios.tcgetattr(fd)
+        finally:
+            _close_quietly_fd(fd)
+        parity_bits = (bool(cflag & termios.PARENB), bool(cflag & termios.PARODD))
+        data_bits = {termios.CS5: 5, termios.CS6: 6, termios.CS7: 7, termios.CS8: 8}.get(cflag & termios.CSIZE)
+        return {
+            "speed": ispeed,
+            "bytesize": data_bits,
+            "parity": {(False, False): "N", (True, False): "E", (True, True): "O"}.get(parity_bits, "?"),
+            "stopbits": 2 if cflag & termios.CSTOPB else 1,
+            "rtscts": bool(cflag & _CRTSCTS),
+            "xonxoff": bool(iflag & termios.IXON) and bool(iflag & termios.IXOFF),
+            "clocal": bool(cflag & termios.CLOCAL),
+            "echo": bool(lflag & termios.ECHO),
+            "icanon": bool(lflag & termios.ICANON),
+            "onlcr": bool(oflag & termios.ONLCR),
+        }
+
+    def close(self) -> None:
+        """Stop the pair and remove its directory, so a pass leaves no process and no link behind."""
+        self.unplug()
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+
+def _close_quietly_fd(fd: int) -> None:
+    """Close one file descriptor and ignore a failure, which only says it was already closed."""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 def _close_quietly(sock: Optional[socket.socket]) -> None:
