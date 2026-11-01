@@ -585,6 +585,6 @@ def test_sok07_a_console_that_reads_nothing_holds_back_no_other_console(servers,
         f"a console that reads nothing held the viewer-set notice of a healthy console: {gap:.3f}s "
         f"against {before:.3f}s with nobody stalled"
     )
-    assert _port_entry(api, "swarm")["connected_clients"] == 3, (
-        f"a console that stopped reading, or one that caught up, is no longer on the Port: {_port_entry(api, 'swarm')}"
-    )
+    assert (
+        _port_entry(api, "swarm")["connected_clients"] == 3
+    ), f"a console that stopped reading, or one that caught up, is no longer on the Port: {_port_entry(api, 'swarm')}"
