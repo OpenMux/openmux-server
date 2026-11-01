@@ -792,6 +792,29 @@ class E2EServer:
         """The base URL of the web console, with no trailing slash."""
         return f"http://127.0.0.1:{self.port_of('web')}"
 
+    def descriptor_kinds(self) -> Dict[str, int]:
+        """Count the descriptors this server process holds, grouped by kind.
+
+        Uses ``lsof``, so no new dependency. A churn scenario compares the dict before and after a
+        burst, where only the return to baseline matters and the absolute numbers do not. A socket the
+        process still refers to keeps its entry after the peer left, and macOS adds one ``KQUEUE`` per
+        live transport, which is what a dropped session reference fails to release.
+        """
+        if self.proc is None:
+            raise RuntimeError("no process to inspect")
+        if LSOF is None:
+            raise RuntimeError(LSOF_MISSING)
+        out = subprocess.run(
+            [LSOF, "-n", "-P", "-p", str(self.proc.pid)], capture_output=True, text=True, timeout=60, check=False
+        )
+        kinds: Dict[str, int] = {}
+        for line in out.stdout.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) > 4:
+                kinds[fields[4]] = kinds.get(fields[4], 0) + 1
+        kinds["total"] = sum(kinds.values())
+        return kinds
+
     def power_box(self, pdu_name: str) -> Path:
         """The state file of one fake ``command`` device, which is the device's own state.
 
@@ -1718,6 +1741,9 @@ SOCAT = shutil.which("socat")
 
 #: The reason a Serial Port scenario states when it cannot run because the host has no ``socat``.
 SOCAT_MISSING = "these scenarios need socat (brew install socat, or apt install socat)"
+
+LSOF = shutil.which("lsof")
+LSOF_MISSING = "these scenarios need lsof to count the server's descriptors (brew install lsof, or apt install lsof)"
 
 #: The termios bit that hands the RTS pin to the kernel handshake. Linux names it ``CRTSCTS``, macOS
 #: and the other BSDs name it ``CCTS_OFLOW``, and pyserial tries the two in the same order.

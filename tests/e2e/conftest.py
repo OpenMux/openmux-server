@@ -39,7 +39,16 @@ from .harness import (
     free_ports,
 )
 from .story import Story, Timeline, artifact_dir_for, environment_flags
-from .textclients import CliSession, SshSession, TelnetSession, open_cli_client, open_ssh_client, open_telnet_client
+from .textclients import (
+    CliSession,
+    SilentSocket,
+    SshSession,
+    TelnetSession,
+    WebSocketViewer,
+    open_cli_client,
+    open_ssh_client,
+    open_telnet_client,
+)
 
 #: Where a failure bundle is written, relative to the repository root.
 ARTIFACTS_RELATIVE = Path("artifacts") / "e2e"
@@ -734,6 +743,52 @@ class _ClientRegistry:
         self.story.cast(f"{surface:<11} user {user!r}  SSH listener")
         self.sessions.append(session)
         return session
+
+    def silent(
+        self,
+        *,
+        surface: str = "raw:silent",
+        server: Optional[E2EServer] = None,
+        listener: str = "cli",
+    ) -> SilentSocket:
+        """Open a connection on one listener and send nothing at all.
+
+        This is the cheapest way to hold a socket open, and the state a server must survive: a laptop
+        that lost its network, or a scanner that connected and stopped.
+        """
+        world = server or self.server
+        session = SilentSocket("127.0.0.1", world.port_of(listener), surface=surface, timeline=self.timeline)
+        self.story.cast(f"{surface:<11} no user  connected, sends nothing")
+        self.sessions.append(session)
+        return session
+
+    def websocket(
+        self,
+        port_name: str,
+        *,
+        surface: str = "ws:viewer",
+        user: str = "admin",
+        password: str = TEST_PASSWORD,
+        server: Optional[E2EServer] = None,
+    ) -> WebSocketViewer:
+        """Open one port's websocket stream, which is the channel a browser console tab uses.
+
+        No browser is involved, so the scenario checks the delivery path the page relies on: many open
+        viewers must not stop the server pushing port bytes to any of them.
+        """
+        world = server or self.server
+        viewer = WebSocketViewer(
+            "127.0.0.1",
+            world.port_of("web"),
+            port_name,
+            user=user,
+            password=password,
+            surface=surface,
+            timeline=self.timeline,
+        )
+        self.story.cast(f"{surface:<11} user {user!r}  port {port_name!r} over the web console socket")
+        self.sessions.append(viewer)
+        return viewer
 
     def close_all(self) -> None:
         """Close every session, keeping the first failure so a real cause is not swallowed."""

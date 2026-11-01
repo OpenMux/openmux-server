@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-143 scenarios across 13 suites.
+149 scenarios across 14 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -146,6 +146,13 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | SER-04 | Unplugging a live device is shown on the console, in the API, and in the log, and heals itself. | api:http, cli:admin, serial:device | `tests/e2e/test_serial_device.py::test_ser04_a_pulled_cable_is_reported_where_the_operator_looks` |
 | SER-05 | A block of every byte value crosses the server whole, in both directions. | cli:admin, serial:device | `tests/e2e/test_serial_device.py::test_ser05_no_byte_is_lost_or_reordered_in_either_direction` |
 | SER-06 | The kernel handshake a config asks for is the one the device carries. | cli:admin, serial:device | `tests/e2e/test_serial_device.py::test_ser06_flow_control_from_the_config_is_on_the_device` |
+| **SOK** | | | |
+| SOK-01 | A dozen viewers watch one port while a writer sends two hundred lines. | telnet:viewer, cli:writer | `tests/e2e/test_soak.py::test_sok01_twelve_viewers_receive_one_stream` |
+| SOK-02 | One viewer stops reading while the others keep up. | telnet:viewer, telnet:stalled, cli:writer, api:http | `tests/e2e/test_soak.py::test_sok02_a_viewer_that_stops_reading_loses_only_its_own_bytes` |
+| SOK-03 | Four logged-in web sessions, a status poller, and two hundred requests from sixteen threads. | telnet:viewer, cli:writer, api:http, http:burst | `tests/e2e/test_soak.py::test_sok03_two_hundred_requests_answer_every_one_while_a_port_streams` |
+| SOK-04 | Twenty sessions log in and do nothing, and twelve connections send not one byte. | telnet:idle, raw:silent, telnet:keeper, cli:writer | `tests/e2e/test_soak.py::test_sok04_idle_and_silent_sessions_hold_the_listener_then_release_it` |
+| SOK-05 | Nine sessions in a row: one closes cleanly, one resets mid-stream, one never sends a byte. | telnet:passing, raw:silent, telnet:keeper, cli:writer, api:http | `tests/e2e/test_soak.py::test_sok05_abandoned_sockets_leave_the_seat_and_the_socket_behind` |
+| SOK-06 | Twenty seconds of marked output, with viewers arriving, leaving, and status asked between. | telnet:passing, ws:passing, cli:heartbeat, telnet:late, api:http | `tests/e2e/test_soak.py::test_sok06_a_sustained_stream_outlives_viewers_coming_and_going` |
 | **SSH** | | | |
 | SSH-01 | The server generates its host key inside the state dir, offers that key, and reuses it after a restart. | ssh:viewer, state dir, server log | `tests/e2e/test_ssh_listener.py::test_ssh01_the_host_key_is_born_in_the_state_dir_and_outlives_the_process` |
 | SSH-02 | A password the config accepts opens a shell, and the account's permission decides what that shell may do. | ssh:rw, ssh:viewer, authentication.yaml | `tests/e2e/test_ssh_listener.py::test_ssh02_the_account_behind_the_password_decides_the_seat` |

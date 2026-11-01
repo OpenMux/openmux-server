@@ -12,7 +12,10 @@ daemon thread, and the Telnet socket is read by a daemon thread. A test never se
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
+import os
 import queue
 import re
 import socket
@@ -845,6 +848,20 @@ class TelnetSession:
         """Stop reading on purpose, for the stalled-viewer test. The server keeps sending."""
         self.reader_paused = True
 
+    def abort(self) -> None:
+        """Drop the socket without a goodbye, so the server sees a reset instead of an end.
+
+        ``SO_LINGER`` with a zero timeout makes the kernel send RST rather than FIN, which is what a
+        killed client or a laptop that lost its network leaves behind. The next write to this session
+        is where the server finds out.
+        """
+        if not self.closed:
+            try:
+                self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            except OSError:
+                pass  # justification: an abandoned session only needs the socket gone
+        self.close()
+
     # --- internals -----------------------------------------------------------------------
 
     def _read_forever(self) -> None:
@@ -1318,3 +1335,227 @@ def open_ssh_client(
         surface=surface,
         timeline=timeline,
     )
+
+
+# --- raw clients, for the sessions the product client library cannot express -----------------
+
+
+def _recvuntil(sock: socket.socket, needle: bytes, timeout: float = 20.0, read_size: int = 4096) -> bytes:
+    """Read until one chunk holds ``needle`` and return everything read, or raise.
+
+    Used for the fixed bytes that open a session, where the delimiter is known in advance. A caller
+    that must accept any one of several replies uses :func:`_await_any` instead.
+    """
+    deadline = time.monotonic() + timeout
+    buffer = b""
+    while needle not in buffer:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"no {needle!r} within {timeout}s; read {buffer[:400]!r}")
+        sock.settimeout(remaining)
+        chunk = sock.recv(read_size)
+        if not chunk:
+            raise EOFError(f"peer closed while waiting for {needle!r} after {buffer[:400]!r}")
+        buffer += chunk
+    return buffer
+
+
+class _Abandonable:
+    """Shared close and abort for a socket the test owns outright."""
+
+    closed: bool = False
+    _socket: socket.socket
+    timeline: Optional[Timeline]
+    surface: str
+
+    def socket(self) -> socket.socket:
+        """The socket itself, for a scenario that must set an option before it goes away."""
+        return self._socket
+
+    def close(self) -> None:
+        """Close the way a user does: a normal end the server can report as a disconnect."""
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self._socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # justification: the peer may already have closed
+        try:
+            self._socket.close()
+        except OSError:
+            pass  # justification: closing an artifact is best effort
+        if self.timeline is not None:
+            self.timeline.record(self.surface, "log", "closed the socket")
+
+    def abort(self) -> None:
+        """Drop the connection the way a killed process does: a reset, and no goodbye.
+
+        ``SO_LINGER`` with a zero timeout makes the kernel send RST instead of FIN, so the server
+        discovers the peer at its next write rather than through an orderly end.
+        """
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        except OSError:
+            pass  # justification: an abandoned session only needs the socket gone
+        try:
+            self._socket.close()
+        except OSError:
+            pass  # justification: abandoning an artifact is best effort
+        if self.timeline is not None:
+            self.timeline.record(self.surface, "log", "abandoned the socket")
+
+
+class SilentSocket(_Abandonable):
+    """A connection that is opened and then never touched: no login, no byte, no read.
+
+    This is the cheapest way to hold a listener slot, and the one a server must survive: a laptop that
+    lost its network, or a scanner that connected and stopped. The scenario counts what the listener
+    does with it.
+    """
+
+    def __init__(self, host: str, port: int, *, surface: str = "raw:silent", timeline: Optional[Timeline] = None) -> None:
+        self.surface = surface
+        self.timeline = timeline
+        self.closed = False
+        self._socket = socket.create_connection((host, int(port)), timeout=10)
+        if timeline is not None:
+            timeline.record(surface, "log", f"dial 127.0.0.1:{port}  (no bytes sent)")
+
+
+class WebSocketViewer(_Abandonable):
+    """One port stream over a websocket, which is the path a browser console tab uses.
+
+    The web console shows a port's bytes in the page, so the server must keep delivering to every open
+    tab. This client speaks only what that needs: a GET upgrade with Basic credentials, client pings,
+    which is what a browser tab sends to keep an idle console alive, and frame reads. Port data
+    arrives as binary frames; each non-empty payload is one delivered chunk.
+    """
+
+    #: Magic suffix from RFC 6455 section 1.3, used to check the server accepted the upgrade.
+    ACCEPT_SALT = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        port_name: str,
+        *,
+        path: str = "/ws",
+        user: str = "admin",
+        password: str = TEST_PASSWORD,
+        surface: str = "ws:viewer",
+        timeline: Optional[Timeline] = None,
+    ) -> None:
+        self.surface = surface
+        self.timeline = timeline
+        self.closed = False
+        self.port_name = port_name
+        self._leftover = b""
+        self._send_lock = threading.Lock()
+        self._socket = socket.create_connection((host, int(port)), timeout=20)
+        self._socket.settimeout(20)
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        credentials = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+        request = (
+            f"GET {path}/{port_name} HTTP/1.1\r\n"
+            f"Host: {host}:{int(port)}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            f"Authorization: Basic {credentials}\r\n"
+            "\r\n"
+        )
+        self._socket.sendall(request.encode("ascii"))
+        handshake = _recvuntil(self._socket, b"\r\n\r\n")
+        head, _, self._leftover = handshake.partition(b"\r\n\r\n")
+        status_line = head.split(b"\r\n", 1)[0]
+        if b" 101 " not in status_line:
+            raise AssertionError(f"the web console refused the websocket upgrade: {head[:300]!r}")
+        digest = base64.b64encode(hashlib.sha1(key.encode("ascii") + self.ACCEPT_SALT.encode("ascii")).digest()).decode(
+            "ascii"
+        )
+        if digest.encode("ascii") not in head:
+            raise AssertionError(f"no valid Sec-WebSocket-Accept for {port_name!r}: {head[:300]!r}")
+        if timeline is not None:
+            timeline.record(surface, "log", f"opened the websocket for {port_name}")
+
+    def _read_exactly(self, count: int, timeout: float) -> bytes:
+        deadline = time.monotonic() + timeout
+        while len(self._leftover) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"only {len(self._leftover)} of {count} frame bytes within {timeout}s")
+            self._socket.settimeout(remaining)
+            chunk = self._socket.recv(65536)
+            if not chunk:
+                raise EOFError(f"a 127.0.0.1 websocket to {self.port_name} closed mid-frame")
+            self._leftover += chunk
+        taken, self._leftover = self._leftover[:count], self._leftover[count:]
+        return bytes(taken)
+
+    def read_frame(self, timeout: float = 20.0) -> Tuple[int, bytes]:
+        """Read one server frame and return its opcode and payload, unmasking a masked one."""
+        header = self._read_exactly(2, timeout)
+        opcode = header[0] & 0x0F
+        masked = bool(header[1] & 0x80)
+        length = header[1] & 0x7F
+        if length == 126:
+            length = int(struct.unpack(">H", self._read_exactly(2, timeout))[0])
+        elif length == 127:
+            length = int(struct.unpack(">Q", self._read_exactly(8, timeout))[0])
+        mask = self._read_exactly(4, timeout) if masked else b""
+        payload = self._read_exactly(length, timeout)
+        if masked:
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        return opcode, payload
+
+    def wait_for_text(self, needle: str, timeout: float = 20.0) -> str:
+        """Return the payload of the first data frame holding ``needle``.
+
+        Control frames are skipped, because ping, pong and close travel on the same socket as the
+        port bytes and carry no text. The wait is bounded so a stopped delivery reports itself.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"no websocket frame holding {needle!r} within {timeout}s")
+            opcode, payload = self.read_frame(timeout=remaining)
+            if opcode in (0x1, 0x2) and needle.encode("utf-8") in payload:
+                return payload.decode("utf-8", "replace")
+
+    def ping(self, payload: bytes = b"soak") -> None:
+        """Send a masked client ping, as a browser tab does on a timer."""
+        mask = os.urandom(4)
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        header = struct.pack("!BB", 0x89, 0x80 | len(payload))
+        with self._send_lock:
+            self._socket.sendall(header + mask + masked)
+
+    def wait_for_pong(self, timeout: float = 10.0) -> bytes:
+        """Return the payload of the next pong frame, skipping anything before it."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"no pong frame within {timeout}s")
+            opcode, payload = self.read_frame(timeout=remaining)
+            if opcode == 0xA:
+                return payload
+
+    def close(self) -> None:
+        """Send a close frame first, so the server ends the socket the way it ends a tab."""
+        if self.closed:
+            return
+        mask = os.urandom(4)
+        try:
+            with self._send_lock:
+                self._socket.sendall(struct.pack("!BB", 0x88, 0x80 | 0) + mask)
+        except OSError:
+            pass  # justification: a peer that already left makes the close frame undeliverable
+        super().close()
