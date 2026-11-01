@@ -36,6 +36,16 @@ Changes since v1.0.4 (2026-10-19).
   device that cannot take a hardware or in-band handshake.
 
 ### Behavior changes (no config change required)
+
+- **A console that may not write is told why.** A session that writes to a Port it does not drive reads
+  `[WARNING: console is in read-only mode]` (Telnet, SSH) or `[Write blocked: console is in read-only mode]` (Client
+  protocol). That line names its mode and no reason. It now reads the reason the Port gives:
+  `[Write blocked: the write slot is taken]`, `[Write blocked: this port has no write slot]`, or
+  `[Write blocked: you may not drive this port]`. A Telnet or SSH session that attaches read-only gets that same reason at
+  attach (`[Connected read-only: the write slot is taken]`), where a silent grant printed nothing before. None of these lines
+  names the client that holds the write slot. The attach line for a taken slot also drops the word "seat": the approved term
+  is write slot (`docs/GLOSSARY.md`), and a seat is the connection seat. The CLI client and the web console still print their
+  own mode line, because the Client protocol carries the mode and no reason. No config change.
 - **A console session that vanishes is quiet while the server writes to it.** The server learns that a viewer left when a
   write to it fails. Every such failure logged `ERROR: Failed to send data to client <id>` with a traceback, one line per
   write, while the session stayed listed on the Port. A connection reset, a broken pipe, or a write cut short now logs one

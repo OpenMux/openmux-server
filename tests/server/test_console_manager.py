@@ -1478,3 +1478,38 @@ class TestUnifiedPortWrapperGroupAttrsAreLive:
         status = wrapper.get_status()
         assert status["read_write_groups"] == ["oncall"]
         assert status["read_only_groups"] == []
+
+
+def test_the_reason_for_a_blocked_write_is_the_taken_write_slot(cm, port_manager):
+    port_manager.ports["p1"] = FakePort(
+        connected_clients=[{"client_id": "c1", "username": "alice", "mode": "read-write"}], mode="one"
+    )
+    assert cm.write_refusal_code("p1", "bob") is Code.CAPACITY_FULL
+
+
+def test_a_port_configured_without_a_write_slot_says_so(cm, port_manager):
+    port_manager.ports["p1"] = FakePort(mode="none")
+    assert cm.write_refusal_code("p1", "alice") is Code.NO_WRITE_SLOT
+
+
+def test_a_write_that_may_go_through_carries_no_reason(cm, port_manager):
+    port_manager.ports["p1"] = FakePort(mode="one")
+    assert cm.write_refusal_code("p1", "alice") is None
+
+
+def test_an_account_that_may_not_drive_is_told_that_rather_than_blamed_on_a_holder(cm, port_manager):
+    port_manager.ports["p1"] = FakePort(mode="one")
+    cm.auth_manager.permissions["bob"] = "read-only"
+    assert cm.write_refusal_code("p1", "bob") is Code.READ_ONLY_STANDING
+
+
+def test_a_port_that_lists_groups_and_omits_the_user_refuses_the_write(cm, port_manager):
+    port = FakePort(mode="one")
+    port.read_only_groups = ["viewers"]
+    port_manager.ports["p1"] = port
+    cm.auth_manager.groups["bob"] = {"others"}
+    assert cm.write_refusal_code("p1", "bob") is Code.DENIED_BY_GROUP_ACL
+
+
+def test_a_write_on_a_port_that_is_not_there_says_the_port_is_missing(cm):
+    assert cm.write_refusal_code("nope", "alice") is Code.PORT_MISSING

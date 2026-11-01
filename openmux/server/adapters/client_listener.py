@@ -21,7 +21,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from openmux.common.identity import get_server_id, get_server_label
-from openmux.server.access_decision import AccessDecision, Code, decide, mode_or_read_only
+from openmux.server.access_decision import AccessDecision, Code, decide, mode_or_read_only, write_blocked_notice
 from openmux.server.port_utils import resolve_port_connected_state, safe_get_port
 
 from .base_adapter import AdapterCapability, BaseGenericAdapter
@@ -745,7 +745,13 @@ class TcpServerAdapter(BaseGenericAdapter):
                         if is_up is False:
                             await client.send_raw_data(b"\r\n[Write blocked: port is disconnected on server]\r\n")
                         else:
-                            await client.send_raw_data(b"\r\n[Write blocked: console is in read-only mode]\r\n")
+                            # Name the reason this Console may not drive, read from the Port now: the
+                            # write slot is taken, this Port has none, or this account may not drive
+                            # it. Never the Client in front of it. A Console Manager that cannot
+                            # answer keeps the older line, which states only the mode.
+                            answer = getattr(self.console_manager, "write_refusal_code", None)
+                            code = answer(client.connected_port, client.username) if callable(answer) else None
+                            await client.send_raw_data(f"\r\n[{write_blocked_notice(code)}]\r\n".encode())
                     except Exception:
                         # justification: best-effort notice; the write block already happened
                         pass

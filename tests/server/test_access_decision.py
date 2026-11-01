@@ -25,6 +25,8 @@ from openmux.server.access_decision import (
     holders_frame,
     holders_of,
     notice,
+    read_only_grant_notice,
+    write_blocked_notice,
 )
 
 
@@ -341,3 +343,44 @@ class TestCapacityAwareWording:
         assert decide(Code.NOT_ATTACHED, mode=Mode.READ_ONLY, capacity=WIRE_MULTIPLE).lines == (
             "[You are not attached to this port]",
         )
+
+
+def test_a_blocked_write_names_its_reason_and_nothing_else():
+    assert write_blocked_notice(Code.CAPACITY_FULL) == "Write blocked: the write slot is taken"
+    assert write_blocked_notice(Code.NO_WRITE_SLOT) == "Write blocked: this port has no write slot"
+    assert write_blocked_notice(Code.CAPACITY_NONE) == "Write blocked: this port has no write slot"
+    assert write_blocked_notice(Code.READ_ONLY_STANDING) == "Write blocked: you may not drive this port"
+    assert write_blocked_notice(Code.DENIED_BY_GROUP_ACL) == "Write blocked: you may not drive this port"
+
+
+def test_no_write_blocked_notice_names_a_holder():
+    # A Console that may not drive has no right to learn who is in front of it.
+    assert [code for code in Code if "alice" in write_blocked_notice(code)] == []
+
+
+def test_a_stored_code_value_reads_as_the_code_it_came_from():
+    # A session keeps the wire value of a code, not the enum member.
+    assert write_blocked_notice("capacity_full") == "Write blocked: the write slot is taken"
+
+
+def test_a_refusal_no_code_explains_states_its_mode_as_before():
+    assert write_blocked_notice(None) == "Write blocked: console is in read-only mode"
+    assert write_blocked_notice(Code.ALREADY_RW) == "Write blocked: console is in read-only mode"
+
+
+def test_the_notice_at_attach_carries_the_reason_the_port_gave():
+    assert read_only_grant_notice(Code.CAPACITY_FULL) == "Connected read-only: the write slot is taken"
+    assert read_only_grant_notice(Code.CAPACITY_NONE) == "Connected read-only: this port has no write slot"
+    assert read_only_grant_notice("read_only_standing") == "Connected read-only: you may not drive this port"
+
+
+def test_an_attachment_that_recorded_no_reason_states_the_mode():
+    assert read_only_grant_notice(None) == "Console is in read-only mode"
+    assert read_only_grant_notice("not_a_code") == "Console is in read-only mode"
+
+
+def test_a_read_write_never_becomes_the_reason_a_read_only_console_reads():
+    # The grant sentences are shared, so a read-write code must not reach a watching Console.
+    assert read_only_grant_notice(Code.ATTACHED) == "Console is in read-only mode"
+    assert read_only_grant_notice(Code.GRANTED) == "Console is in read-only mode"
+    assert [code for code in Code if "read-write" in read_only_grant_notice(code)] == []

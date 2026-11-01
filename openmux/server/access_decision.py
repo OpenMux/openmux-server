@@ -198,7 +198,7 @@ _ROWS: Dict[Code, _Row] = {
     # Attach grants: silent, because the connect line and the mode already say it.
     Code.ATTACHED: _Row(_GRANT, True, "Connected with read-write access", ()),
     Code.READ_ONLY_STANDING: _Row(_GRANT, True, "Connected read-only: you may not drive this port", ()),
-    Code.CAPACITY_FULL: _Row(_GRANT, True, "Connected read-only: the read-write seat is taken", ()),
+    Code.CAPACITY_FULL: _Row(_GRANT, True, "Connected read-only: the write slot is taken", ()),
     Code.CAPACITY_NONE: _Row(_GRANT, True, "Connected read-only: this port has no write slot", ()),
     Code.GRANTED: _Row(
         _GRANT,
@@ -355,6 +355,67 @@ def mode_or_read_only(value: Any) -> Mode:
     except (ValueError, TypeError):
         # justification: an unrecognised stored mode is the safer seat, not a grant
         return Mode.READ_ONLY
+
+
+#: Why a Console that is attached may still be refused a write, in its own words.
+#: The notice names the reason and never the Client in front of it. A blocked Console
+#: has no right to learn who holds the Write slot, only why it may not drive.
+_WRITE_REFUSAL: Dict[Code, str] = {
+    Code.CAPACITY_FULL: "Write blocked: the write slot is taken",
+    Code.CAPACITY_NONE: "Write blocked: this port has no write slot",
+    Code.NO_WRITE_SLOT: "Write blocked: this port has no write slot",
+    Code.READ_ONLY_STANDING: "Write blocked: you may not drive this port",
+    Code.NO_PERMISSIONS: "Write blocked: this account has no permissions",
+    Code.DENIED_BY_GROUP_ACL: "Write blocked: you may not drive this port",
+    Code.DENIED_BY_ACCESS_DEFAULT: "Write blocked: you may not drive this port",
+    Code.NOT_ENTITLED: "Write blocked: you may not drive this port",
+    Code.FEDERATION_DENIED: "Write blocked: the server that owns this port refused the write",
+    Code.PORT_MISSING: "Write blocked: this port does not exist",
+    Code.PORT_UNAVAILABLE: "Write blocked: no console seat is free on this port",
+}
+
+#: States the Console's mode, for the cases no code explains.
+_WRITE_REFUSAL_FALLBACK = "Write blocked: console is in read-only mode"
+
+#: States a read-only Console's mode, when no code explains why it got that mode.
+_READ_ONLY_FALLBACK = "Console is in read-only mode"
+
+
+def write_blocked_notice(code: Optional[Any] = None) -> str:
+    """The line a Console reads when it writes to a Port it may not drive.
+
+    Pass the code that says why: the code the Port granted at attach, or the one
+    :meth:`ConsoleManager.write_refusal_code` reads now. ``None``, an unknown value, or
+    a code with no line here keeps the older wording, which states the Console's mode
+    without a reason. Callers add their own framing: Telnet and SSH wrap the line in
+    brackets, the Client protocol sends it as raw bytes.
+    """
+    if not isinstance(code, Code):
+        code = next((item for item in Code if item.value == code), None)
+    if code is None:
+        return _WRITE_REFUSAL_FALLBACK
+    return _WRITE_REFUSAL.get(code, _WRITE_REFUSAL_FALLBACK)
+
+
+#: The codes that grant read-only access, so the only codes that may explain a read-only
+#: Console. A read-write grant code (`ATTACHED`, `GRANTED`) has a read-write sentence, and a
+#: Console that watches must never read it.
+_READ_ONLY_GRANT: Tuple[Code, ...] = (Code.READ_ONLY_STANDING, Code.CAPACITY_FULL, Code.CAPACITY_NONE)
+
+
+def read_only_grant_notice(code: Optional[Any]) -> str:
+    """The line a Console reads when the Port grants it read-only access: the reason it got.
+
+    Telnet and SSH get no answer frame for a silent grant, so the listener prints this one
+    sentence from the code the Port chose. Any other code — a read-write grant, a code from
+    another path, or ``None`` — falls back to the plain statement of mode, because a sentence
+    about another outcome would be wrong here even when it exists.
+    """
+    if not isinstance(code, Code):
+        code = next((item for item in Code if item.value == code), None)
+    if code in _READ_ONLY_GRANT:
+        return _row(code).sentence or _READ_ONLY_FALLBACK
+    return _READ_ONLY_FALLBACK
 
 
 @dataclass(frozen=True)

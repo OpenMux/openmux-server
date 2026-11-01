@@ -313,6 +313,40 @@ class ConsoleManager:
             )
         return Mode.READ_ONLY, Code.CAPACITY_NONE if no_slots else Code.CAPACITY_FULL
 
+    def write_refusal_code(self, port_name: str, username: Optional[str]) -> Optional[Code]:
+        """Why ``username`` may not drive ``port_name`` right now, or ``None`` if it may.
+
+        A Console that watches read-only needs a reason the moment it tries to write, and
+        the reason can change while it watches: the slot it waited for may be free, or the
+        Port may have lost its write slot. So this re-reads the two questions attach asks —
+        is the identity write-entitled (`_taker_entitled`), and does the Port have a free
+        Write slot — instead of repeating a code recorded at attach time. Unlike
+        `_rw_mode_or_demote` it logs nothing: a Console can ask on every keystroke.
+
+        Render the answer with `access_decision.write_blocked_notice`, which holds the
+        wording and never names the Client that holds the slot.
+        """
+        permissions = self.auth_manager.get_user_permissions(username) if self.auth_manager and username else None
+        try:
+            port = self.port_manager.get_port(port_name)
+        except Exception:
+            # justification: a Port that cannot be read has no answer to give; the notice says so
+            port = None
+        if port is None:
+            return Code.PORT_MISSING
+        try:
+            entitlement = self._taker_entitled(port, port_name, permissions, username or "")
+            has_slot = self._has_write_slots(port)
+            no_slots = write_capacity(getattr(port, "max_read_write_users", 1)) == 0.0
+        except Exception:
+            # justification: an explaining notice must never break the write it explains
+            return None
+        if not entitlement.may_drive:
+            return entitlement.code or Code.READ_ONLY_STANDING
+        if has_slot:
+            return None
+        return Code.NO_WRITE_SLOT if no_slots else Code.CAPACITY_FULL
+
     def _taker_entitled(self, port: Optional[Any], port_name: str, permissions: Optional[str], username: str) -> Entitlement:
         """Decide whether this identity may drive this port (issue #59 Part 2).
 

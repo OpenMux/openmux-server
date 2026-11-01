@@ -34,7 +34,15 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 from openmux import __version__ as _OPENMUX_VERSION
 from openmux.common.access_wire import holders_text, render_terminal_text
 
-from .access_decision import FRAME_HOLDERS, AccessDecision, Code, decide, mode_or_read_only
+from .access_decision import (
+    FRAME_HOLDERS,
+    AccessDecision,
+    Code,
+    decide,
+    mode_or_read_only,
+    read_only_grant_notice,
+    write_blocked_notice,
+)
 from .adapters.listener_common import (
     AclEntry,
     _origin_entry_matches,
@@ -308,6 +316,8 @@ class ListenerSession:
     ``transport`` is the seam: the byte pipes, not a socket and not a process.
     ``port_mode`` is the mode the session shows and gates writes with; it always
     follows the Access decision or frame the session just rendered (issue #98).
+    ``grant_code`` is the code that decision chose, so a notice can say why the session
+    is read-only instead of only stating that it is.
     """
 
     client_id: str
@@ -318,6 +328,7 @@ class ListenerSession:
     remote_host: str
     username: str = ""
     port_mode: str = "read-only"
+    grant_code: Optional[Code] = None
     bytes_in: int = 0
     bytes_out: int = 0
     escape: EscapeState = field(default_factory=EscapeState)
@@ -409,6 +420,7 @@ class ListenerSessionManager:
             return None
         if attached.ok:
             session.port_mode = attached.mode.value
+            session.grant_code = attached.code
         else:
             self.logger.warning(
                 "Console manager rejected %s client %s for port %s (code=%s)",
@@ -429,7 +441,7 @@ class ListenerSessionManager:
         return attached
 
     async def serve(self, session: ListenerSession) -> None:
-        """Run the session body: connected log, read-only warning, pump, detach.
+        """Run the session body: connected log, read-only notice, pump, detach.
 
         Byte-specific by construction (the pump needs ``read``). A frame-based
         transport (the future web console) uses ``attach`` plus the named command
@@ -443,8 +455,14 @@ class ListenerSessionManager:
             session.port_name,
             session.read_only,
         )
-        if session.listener.read_only or session.port_mode != "read-write":
-            await self._write_session(session, "\r\n[WARNING: console is in read-only mode]\r\n")
+        if session.listener.read_only:
+            # A listener set read-only refuses every session on it, whatever the Port would grant.
+            await self._write_session(session, f"\r\n[{read_only_grant_notice(Code.READ_ONLY_STANDING)}]\r\n")
+        elif session.port_mode != "read-write":
+            # The Port's own reason: the write slot is taken, this Port has none, or this
+            # account may not drive it. A silent grant carries no frame, so this is the
+            # only place an operator on Telnet or SSH can learn it.
+            await self._write_session(session, f"\r\n[{read_only_grant_notice(session.grant_code)}]\r\n")
         try:
             await self.pump(session)
         finally:
@@ -496,16 +514,31 @@ class ListenerSessionManager:
             return True
         return False
 
+    def _write_blocked_reason(self, session: ListenerSession) -> str:
+        """Why this session may not write, in the server's own words.
+
+        Asked on every refused write, so it reads the Port now rather than the code the
+        session was granted: the write slot this session waited for may be free, and then
+        the Control menu is what it needs, not a stale reason. The line never names the
+        Client that holds the slot.
+        """
+        if session.listener.read_only:
+            return write_blocked_notice(Code.READ_ONLY_STANDING)
+        cm = self._get_console_manager()
+        answer = getattr(cm, "write_refusal_code", None)
+        code = answer(session.port_name, session.username) if callable(answer) else None
+        return write_blocked_notice(code)
+
     async def _forward_payload(self, session: ListenerSession, payload: bytes) -> bool:
         """Write `payload` to the attached port, respecting the read-only gate.
 
-        Returns False only on an actual write failure (session should close);
-        a read-only gate silently drops data and still returns True.
+        Returns False only on an actual write failure (session should close); a
+        read-only gate drops the data and says why, while still returning True.
         """
         if session.listener.read_only or session.port_mode != "read-write":
             if b"\r" in payload or b"\n" in payload:
-                # Re-announce on every Enter press; the one-time attach warning is easy to miss.
-                await self._write_session(session, "\r\n[WARNING: console is in read-only mode]\r\n")
+                # Re-announce on every Enter press; the one-time attach notice is easy to miss.
+                await self._write_session(session, f"\r\n[{self._write_blocked_reason(session)}]\r\n")
             return True
         try:
             cm = self._get_console_manager()

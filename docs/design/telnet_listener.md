@@ -26,8 +26,10 @@ literal `+` always wins over `:`; a doubled `::` is treated as part of the targe
 the embedded port is ignored, because the target is fixed. On a `target: '*'` listener, a valid embedded port skips the port
 menu and attaches directly.
 - **Read-Only Toggle**: Each listener may declare `read_only: true` to forward data from the OpenMux port to the Telnet client
-while ignoring client input. On attach, a read-only session (config-forced, or granted read-only because no read-write slot was
-free) gets a one-time in-band warning: `[WARNING: console is in read-only mode]`.
+  while ignoring client input. On attach, a session that is not read-write gets one in-band line naming the reason it got
+  that: `[Connected read-only: the write slot is taken]`, `[Connected read-only: this port has no write slot]`, or
+  `[Connected read-only: you may not drive this port]`. A write such a session attempts is refused with the matching
+  `[Write blocked: ...]` line, repeated on every Enter. Neither line names the client that holds the write slot.
 - **Control Menu (Ctrl+E,c)**: Any session can press Ctrl+E then `c` to open an in-band control menu, matching the CLI client's
 own escape sequence. Commands: `a` request read-write, `f` take the write slot (prompts for the holder's `client_id`, or take
 the most recently attached holder on Enter — target the demoted holder by the id shown by `w`), `s` release read-write (switch

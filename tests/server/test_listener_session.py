@@ -91,6 +91,7 @@ def make_session(
     read_only: bool = False,
     port_mode: str = "read-only",
     port_name: str = "loopback1",
+    grant_code: Optional[Code] = None,
 ) -> ListenerSession:
     listener = ListenerConfig(name="l1", bind_host="0.0.0.0", bind_port=1234, target=port_name, read_only=read_only)
     return ListenerSession(
@@ -102,6 +103,7 @@ def make_session(
         remote_host="127.0.0.1",
         username="bob",
         port_mode=port_mode,
+        grant_code=grant_code,
     )
 
 
@@ -112,13 +114,20 @@ class _FakeCm:
     ``(ok, reason)`` tuple would test a shape that no longer exists (issue #98).
     """
 
-    def __init__(self, decision=None, promote_decision=None, demote_decision=None):
+    def __init__(self, decision=None, promote_decision=None, demote_decision=None, refusal_code: Any = None):
         self.take_calls = []
         self.decision = decision if decision is not None else decide(Code.GRANTED, mode=Mode.READ_WRITE)
         self.promote_decision = promote_decision
         self.demote_decision = demote_decision
         self.promote_calls = []
         self.demote_calls = []
+        self.refusal_code = refusal_code
+        self.refusal_calls = []
+
+    def write_refusal_code(self, port_name, username):
+        # A real ConsoleManager re-reads the Port here, so the reason can change mid-session.
+        self.refusal_calls.append((port_name, username))
+        return self.refusal_code
 
     async def take_write_slot(self, client_id, port_name, target=None):
         self.take_calls.append((client_id, port_name, target))
@@ -410,7 +419,72 @@ async def test_forward_payload_readonly_reannounces_on_enter():
     ok = await mgr._forward_payload(session, b"hello\n")
 
     assert ok is True
-    assert b"[WARNING: console is in read-only mode]" in session.transport.buffer
+    assert b"[Write blocked: you may not drive this port]" in session.transport.buffer
+
+
+@pytest.mark.asyncio
+async def test_a_write_refused_for_a_taken_slot_names_the_slot_and_no_one():
+    # The operator needs the reason. Who holds the slot is not theirs to learn.
+    wiring = _Wiring(cm=_FakeCm(refusal_code=Code.CAPACITY_FULL))
+    mgr = make_manager(wiring)
+    session = make_session()
+
+    await mgr._forward_payload(session, b"ls\n")
+
+    out = session.transport.buffer.decode()
+    assert "[Write blocked: the write slot is taken]" in out
+    assert "alice" not in out and "c1" not in out
+    assert wiring.cm.refusal_calls == [("loopback1", "bob")]
+
+
+@pytest.mark.asyncio
+async def test_a_write_refused_while_a_slot_is_free_states_the_mode_only():
+    # The Port grants a slot now, so no reason line is true: a stale "slot is taken"
+    # would send the operator away instead of to the Control menu.
+    wiring = _Wiring(cm=_FakeCm(refusal_code=None))
+    mgr = make_manager(wiring)
+    session = make_session()
+
+    await mgr._forward_payload(session, b"ls\n")
+
+    assert b"[Write blocked: console is in read-only mode]" in session.transport.buffer
+
+
+@pytest.mark.asyncio
+async def test_a_write_refused_on_a_port_with_no_write_slot_says_so():
+    wiring = _Wiring(cm=_FakeCm(refusal_code=Code.NO_WRITE_SLOT))
+    mgr = make_manager(wiring)
+    session = make_session()
+
+    await mgr._forward_payload(session, b"ls\n")
+
+    assert b"[Write blocked: this port has no write slot]" in session.transport.buffer
+
+
+@pytest.mark.asyncio
+async def test_the_notice_at_attach_says_which_seat_the_port_gave():
+    # A silent grant carries no frame, so Telnet and SSH would otherwise learn only
+    # that they are read-only, never why.
+    mgr = make_manager()
+    session = make_session(grant_code=Code.CAPACITY_FULL)
+
+    await mgr.serve(session)
+
+    out = session.transport.buffer.decode()
+    assert "[Connected read-only: the write slot is taken]" in out
+    assert "WARNING" not in out
+
+
+@pytest.mark.asyncio
+async def test_the_notice_at_a_read_only_listener_says_the_listener():
+    mgr = make_manager()
+    session = make_session(read_only=True, grant_code=Code.CAPACITY_FULL)
+
+    await mgr.serve(session)
+
+    # The listener refuses every session on it, whatever the Port would have granted, and
+    # the session has written nothing yet, so the line states what it got, not a refusal.
+    assert b"[Connected read-only: you may not drive this port]" in session.transport.buffer
 
 
 @pytest.mark.asyncio

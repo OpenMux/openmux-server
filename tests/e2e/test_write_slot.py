@@ -16,6 +16,10 @@ Three measured facts shape these bodies, and each is stated where it is used:
   port says there is no single seat to take, and a `one` port whose promote failed blames the server.
 * A Telnet session's identity is the listener's own name (`telnet_<listener>`) unless the listener
   asks for a login, so write-slot scenarios start their Telnet listener with `require_auth`.
+* A session that may not drive is told **why**, in a line the server owns: `read_only_grant_notice`
+  renders the reason an attach granted read-only access, and `write_blocked_notice` the reason a write
+  was refused. A taken Write slot and a standing read-only account get different sentences, and
+  neither line names the client in front of it.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from openmux.server.access_decision import Code, Mode, decide, notice
+from openmux.server.access_decision import Code, Mode, decide, notice, read_only_grant_notice
 from openmux.server.adapters.listener_common import TAKE_TARGET_PROMPT
 
 from .conftest import DEFAULT_USERS
@@ -391,7 +395,7 @@ def test_rw11_a_telnet_takeover_displaces_the_holder_and_is_audited(servers, cli
     tel = clients.telnet(user="admin", surface="telnet:taker", server=server, require_auth=True)
     with step("the session attaches read-only, because the CLI client already holds the seat"):
         tel.choose_port("slot1")
-        tel.wait_for("read-only mode", timeout=10)
+        tel.wait_for(read_only_grant_notice(Code.CAPACITY_FULL), timeout=10)
     with step("the menu's Take key accepts the latest holder when the prompt is answered empty"):
         tel.open_control_menu()
         tel.press("f")
@@ -490,7 +494,7 @@ def test_rw15_a_read_only_listener_refuses_both_write_keys_and_blocks_keystrokes
     tel = clients.telnet(user="admin", surface="telnet:admin", server=server, require_auth=True)
     tel.choose_port("slot1")
     with step("the session is announced read-only before it asks for anything"):
-        tel.wait_for("read-only mode", timeout=10)
+        tel.wait_for(read_only_grant_notice(Code.READ_ONLY_STANDING), timeout=10)
     with step("the request key refuses, and names the listener as the reason"):
         tel.open_control_menu()
         tel.press("a")

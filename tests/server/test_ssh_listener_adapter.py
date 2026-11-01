@@ -93,6 +93,11 @@ class FakeConsoleManager:
         if self.adapter:
             await self.adapter.send_data_to_client(client_id, data)
 
+    def write_refusal_code(self, port_name: str, username: str):
+        # The real manager re-reads the Port to answer this. A single-adapter test has no Port
+        # to read, so it says nothing, and the session states its mode instead.
+        return None
+
     async def promote_client_to_read_write(self, client_id: str, port_name: str):
         if self.promote_result:
             self.client_modes[client_id] = "read-write"
@@ -472,14 +477,14 @@ async def test_read_only_listener_drops_client_input(tmp_path, monkeypatch):
             "127.0.0.1", port=port, username="alice", password="secret", known_hosts=None, client_keys=None
         ) as conn:
             process = await conn.create_process(encoding=None)
-            # Connecting to a read-only listener now sends a one-time
-            # in-band warning banner; drain it before asserting silence.
+            # A read-only listener now announces why the session may not drive; drain that
+            # line before asserting silence.
             await asyncio.wait_for(process.stdout.readuntil(b"]\r\n"), timeout=1.0)
             process.stdin.write(b"hello\n")
             await process.stdin.drain()
-            # Enter re-announces the read-only warning; the input itself is never echoed.
+            # Enter re-announces the reason; the input itself is never echoed.
             data = await asyncio.wait_for(process.stdout.readuntil(b"]\r\n"), timeout=1.0)
-            assert b"read-only" in data.lower()
+            assert b"you may not drive this port" in data.lower()
             assert b"hello" not in data
     finally:
         await adapter.stop()
