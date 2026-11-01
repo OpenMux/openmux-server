@@ -322,7 +322,7 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 150 scenarios in 14 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 20, `PWR` 19, `CMD` 6,
+The suite today runs 151 scenarios in 14 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 21, `PWR` 19, `CMD` 6,
 `SER` 6, `CFG` 20, `ACT` 11, `ST` 6, `SSH` 10, `SOK` 7, the index checks 3, and the story recorder 6. The generated
 [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what runs, and its count is checked by `IDX-02`. Every group below now
 maps to a file that runs. What is still unwritten sits in the **Release 2** list further down, where item 2, MuxCon with
@@ -376,7 +376,7 @@ the feed rather than to print a note, so `CON-09` reads it from the frame log. W
 half — a page that arrives mid-line still gets the bytes behind the mark — with a page that asks for no scrollback as
 the control, because that page must not replay.
 
-### RW — write slot capacity and Takeover (`test_write_slot.py`, built: 20)
+### RW — write slot capacity and Takeover (`test_write_slot.py`, built: 21)
 
 Ports at capacity `one`, `multiple`, and `none`, one port with `read_write_groups`, one `read_only: true` listener, and
 one viewer stalled on purpose. Every assertion that quotes a sentence takes it from the Access decision module
@@ -405,11 +405,14 @@ drift.
 | `RW-18` | The `Take control` item on the page is the same Takeover: the page goes read-write and the CLI holder is told who took the seat. |
 | `RW-19` | A demoted page changes its mode, its pill, and its `mode-readonly` class at once, prints the module sentence naming the taker, and stops sending keystrokes to the port. |
 | `RW-20` | One viewer stalled on purpose still leaves the presence frame reaching the two readers that keep up. See [Concurrency model](#concurrency-model). |
+| `RW-21` | A console that may not drive reads why, on Telnet and on the CLI protocol, and no notice names the holder. |
 
-Three facts from the Access decision module shaped these ids, and all three are measured, not assumed.
+Four facts from the Access decision module shaped these ids, and all four are measured, not assumed.
 
-- A plain attach grant and a `capacity_full` grant render **no** terminal line on any surface: `lines` is empty and the
-  reason lives in the frame `message`. `RW-01` and `RW-02` read the mode and the frame code instead of a sentence.
+- A plain attach grant and a `capacity_full` grant carry **no** `lines`: the reason lives in the frame `message`, which is
+  what the web console and the CLI protocol read. A Telnet or SSH session gets no frame at all, so its attach line now
+  carries the decision `sentence` instead, and a refused write carries `write_blocked_notice` (`RW-21`). `RW-01` and
+  `RW-02` read the mode and the frame code instead of a sentence.
 - The sentence in the design draft — that a `promote_failed` answer is worded by the port capacity — is wrong. One
   place, `ConsoleManager._seat_refusal`, picks the Outcome **code**: `no_write_slot` on a `none` port,
   `take_without_slot` on a `multiple` port, and `promote_failed` only on a one-seat port whose promote failed. Each code
@@ -417,6 +420,9 @@ Three facts from the Access decision module shaped these ids, and all three are 
 - The slot count is an invariant that `ConsoleManager._take_write_slot_local` restores on a half-completed transfer:
   when the promote of the taker fails after the demotion, the server promotes the victim again. No `RW` id drives that
   path at process level yet; it needs a port whose promote fails, which the harness cannot build from a config file.
+- A write the session may not make is answered in words the server owns: `write_blocked_notice(code)` for the refusal
+  and `read_only_grant_notice(code)` for the read-only grant (`RW-21`). The refusal reads the Port on every Enter,
+  because the write slot this session waited for may be free by then, and neither line names the Client in front of it.
 
 One measured behavior is recorded here because it surprises a reader: a listener with `read_only: true` gates its own
 write keys and its own data path, but not the mode the access ladder grants at Attach. Such a session can therefore hold
@@ -1040,7 +1046,7 @@ with two live nodes, is the one left.
 | 1 — lifecycle | Done | `LIF-01` to `LIF-11`, plus `IDX-01` and `IDX-02`. |
 | 2 — browser proof | Done | `login()`, `ConsoleSession`, the page hook under `?e2e=1`, with Chromium installed by `make e2e-install`. |
 | 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` came after Phase 9, once a helper fixture existed; see row 9a. |
-| 4 — write slot | Done | `RW-01` to `RW-20` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
+| 4 — write slot | Done | `RW-01` to `RW-21` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
 | 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
 | 6 — Config Editor | Done | `CFG-01` to `CFG-20` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at soft reload, one entry of any port section the adapter refuses at boot, and that entry again under a full reload. Five product defects came out of building this group, listed under `CFG` above; the third turned out to have a second half found after it was fixed, the fourth was found while measuring that half, and the fifth came from making a full reload answer carry the keys a soft reload answer already carried. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it; `CFG-18` then deletes that entry with `_drop_port_named()` and counts the block lines after `_wait_for_log_count()`, because a plain log wait is satisfied by an earlier reload; `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`, and `CFG-20` reuses the hand-edit helper `CFG-18` added. |
 | 6a — uncovered-run notice | Done | A run that cannot start a browser skips every page scenario and, under the heading `E2E browser coverage`, prints how many scenarios asserted nothing, one line per reason, and the fix command. `IDX-03` drives the notice with a fake reason and a fake skip list; whether this machine has a browser is not what it checks. |

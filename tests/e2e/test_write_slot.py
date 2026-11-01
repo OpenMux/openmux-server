@@ -1,4 +1,4 @@
-"""WRITE SLOT: who may drive a port, in what words, on every surface (RW-01 to RW-20).
+"""WRITE SLOT: who may drive a port, in what words, on every surface (RW-01 to RW-21).
 
 A port grants one thing in five places: attach, request, release, Takeover, and the notice that
 follows a Takeover. `access_decision.py` owns the Outcome code and the sentence for every one of
@@ -19,7 +19,7 @@ Three measured facts shape these bodies, and each is stated where it is used:
 * A session that may not drive is told **why**, in a line the server owns: `read_only_grant_notice`
   renders the reason an attach granted read-only access, and `write_blocked_notice` the reason a write
   was refused. A taken Write slot and a standing read-only account get different sentences, and
-  neither line names the client in front of it.
+  neither line names the client in front of it (`RW-21`).
 """
 
 from __future__ import annotations
@@ -30,7 +30,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from openmux.server.access_decision import Code, Mode, decide, notice, read_only_grant_notice
+from openmux.server.access_decision import (
+    Code,
+    Mode,
+    decide,
+    notice,
+    read_only_grant_notice,
+    write_blocked_notice,
+)
 from openmux.server.adapters.listener_common import TAKE_TARGET_PROMPT
 
 from .conftest import DEFAULT_USERS
@@ -671,3 +678,35 @@ def test_rw20_one_client_that_stops_reading_does_not_hold_up_the_others(servers,
                 f"presence counts={before!r} -> first={len(first.frames('presence'))}, "
                 f"third={len(third.frames('presence'))}"
             )
+
+
+@surfaces("cli:holder", "telnet:blocked", "cli:standing")
+def test_rw21_a_console_that_may_not_write_is_told_why_and_not_whom(servers, clients, story) -> None:
+    """A refused write names its reason on the two text surfaces, and no line names the client in front of it.
+
+    Both sentences come from the module that owns them, so this fails when a surface writes its
+    own wording rather than when the product rewords a line. The web console and the CLI client
+    print their own mode line, which this change leaves alone, so neither is a surface here.
+    """
+    server = _capacity_world(servers, "why", "one", telnet_kwargs={"require_auth": True})
+    holder = clients.cli(user="user2", surface="cli:holder", attach_to="slot1", server=server)
+    blocked = clients.telnet(user="rw", surface="telnet:blocked", server=server, require_auth=True)
+
+    holder.write_line("rw21-held")
+    label = [str(item) for item in holder.query_holders().get("holders") or []][0]
+    holder_id = _id_of(label)
+    with step("the session that arrives second is told at attach which seat the Port gave it"):
+        blocked.choose_port("slot1")
+        blocked.wait_for(read_only_grant_notice(Code.CAPACITY_FULL), timeout=20)
+    with step("and the same reason when it writes to the Port"):
+        blocked.send_line("")
+        blocked.wait_for(write_blocked_notice(Code.CAPACITY_FULL), timeout=20)
+    with step("no line of that transcript carries the holder's name or its short id"):
+        transcript = blocked.text()
+        assert "user2" not in transcript, f"the refusal named the holder: {transcript[-400:]}"
+        assert holder_id not in transcript, f"the refusal carried the holder id from {label!r}"
+    with step("an account that may never drive is told that, rather than blamed on a taken slot"):
+        standing = clients.cli(user="ro", surface="cli:standing", attach_to="slot1", server=server)
+        standing.write_line("ls")
+        standing.wait_for(write_blocked_notice(Code.READ_ONLY_STANDING), timeout=20)
+        assert write_blocked_notice(Code.CAPACITY_FULL) not in standing.wire_text()

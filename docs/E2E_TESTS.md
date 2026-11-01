@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-150 scenarios across 14 suites.
+151 scenarios across 14 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -139,6 +139,7 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | RW-18 | The page's Take control item is the same Takeover: it grants the page and displaces the holder. | cli:rw, web:rw | `tests/e2e/test_write_slot.py::test_rw18_a_web_page_can_take_the_seat_from_a_cli_holder` |
 | RW-19 | A page demoted by another client changes its mode, its pill, and its body class at once. | web:rw, cli:rw | `tests/e2e/test_write_slot.py::test_rw19_a_page_that_loses_the_seat_stops_claiming_it` |
 | RW-20 | Three viewers on one port, one stalled on purpose: a control frame still reaches the others. | cli:ro, cli:rw | `tests/e2e/test_write_slot.py::test_rw20_one_client_that_stops_reading_does_not_hold_up_the_others` |
+| RW-21 | A refused write names its reason on the two text surfaces, and no line names the client in front of it. | cli:holder, telnet:blocked, cli:standing | `tests/e2e/test_write_slot.py::test_rw21_a_console_that_may_not_write_is_told_why_and_not_whom` |
 | **SER** | | | |
 | SER-01 | Typed bytes reach the device unchanged, with nothing echoed back to the console. | cli:admin, serial:device | `tests/e2e/test_serial_device.py::test_ser01_what_an_operator_types_is_what_the_device_reads` |
 | SER-02 | The device itself carries the configured speed, parity, and stop bits. | serial:device | `tests/e2e/test_serial_device.py::test_ser02_the_speed_and_framing_in_the_config_are_the_ones_on_the_device` |
