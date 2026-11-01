@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -25,7 +26,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -39,6 +40,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARDED_CONFIG_DIRS = (REPO_ROOT / "config", REPO_ROOT / "config-local")
 
 _DEFAULT_USER_PERMISSIONS = ("admin", "read-write", "read-only")
+
+#: The checked-in fake PDU device for ``driver: command``. That driver spawns a command per read and per switch, so
+#: a scenario of it needs a device to run. This script is that device: outlet states live in one JSON file, so a
+#: scenario can read what the device holds and change it without going through the server.
+POWER_BOX_FIXTURE = Path(__file__).resolve().parent / "power_fixtures" / "outlet_box.py"
+
+#: The checked-in fake PDU device for ``driver: command``. That driver spawns a command per read and per switch, so
+#: a scenario of it needs a device to run. This script is that device: outlet states live in one JSON file, so a
+#: scenario can read what the device holds and change it without going through the server.
+POWER_BOX_FIXTURE = Path(__file__).resolve().parent / "power_fixtures" / "outlet_box.py"
 
 
 def free_ports(count: int) -> List[int]:
@@ -158,6 +169,9 @@ class ConfigBuilder:
         self._telnet: List[Dict[str, Any]] = []
         self._ssh: List[Dict[str, Any]] = []
         self._pdus: List[Dict[str, Any]] = []
+        # Where each ``driver: command`` PDU's fake device keeps its state, keyed by PDU name. The builder owns the
+        # path, because it writes the commands that name it; ``E2EServer.power_boxes`` carries it to the scenario.
+        self._power_boxes: Dict[str, Path] = {}
         self._web: Optional[Dict[str, Any]] = None
         self._client_listener: Optional[Dict[str, Any]] = None
         self._power_enabled = False
@@ -458,6 +472,69 @@ class ConfigBuilder:
         )
         return self
 
+    def with_command_pdu(
+        self,
+        name: str,
+        outlets: Sequence[str],
+        *,
+        poll_interval: float = 1,
+        enabled: bool = True,
+        box_args: Sequence[str] = (),
+        timeout: Optional[float] = None,
+        state_path: Optional[Path] = None,
+    ) -> "ConfigBuilder":
+        """Add one PDU whose driver spawns the checked-in outlet box (``driver: command``).
+
+        This driver runs a command per read and a command per switch, so a scenario needs a device to run. The
+        fixture behind it, `tests/e2e/power_fixtures/outlet_box.py`, keeps its outlet states in one JSON file, so a
+        scenario can read what the device holds and change it without going through the server. Three commands are
+        written for it: one batch ``state_cmd`` that prints every outlet, and the two switch templates behind the
+        ``{outlet_id}`` placeholder.
+
+        Args:
+            name: the PDU name; an outlet is addressed ``name.outlet``.
+            outlets: the outlet ids this PDU declares.
+            poll_interval: seconds between device reads; 0 reads on demand only. Unlike the ``dummy`` driver, this
+                device changes between two reads, so this value decides whether a device-side change is ever seen.
+            enabled: whether the ``power`` section is on.
+            box_args: extra words on every command, which is how a scenario builds in a device fault:
+                ``("--fail-state",)`` for a dead sense line, ``("--fail-switch",)`` for a relay that refuses to move,
+                ``("--slow", "6", "--child")`` for a command to time out.
+            timeout: the driver's per-command seconds, for a scenario that drives a command past its timeout.
+            state_path: where the device keeps its state. Default ``{workdir}/power_boxes/<name>.json``. The journal
+                and the recorded child pid are that path plus ``.journal`` and ``.child``.
+        """
+        self._power_enabled = self._power_enabled or enabled
+        box = Path(state_path) if state_path else self.path.parent / "power_boxes" / f"{name}.json"
+        self._power_boxes[name] = box
+        ids = [str(outlet) for outlet in outlets]
+        argv = [sys.executable, str(POWER_BOX_FIXTURE), "--state", str(box), "--ids", ",".join(ids)]
+        argv += [str(item) for item in box_args]
+        words = [shlex.quote(item) for item in argv]
+        options: Dict[str, Any] = {
+            "on_cmd": " ".join(words + ["on", "'{outlet_id}'"]),
+            "off_cmd": " ".join(words + ["off", "'{outlet_id}'"]),
+            "state_cmd": " ".join(words + ["state"]),
+        }
+        if timeout is not None:
+            options["timeout"] = float(timeout)
+        self._pdus.append(
+            {
+                "name": name,
+                "description": f"e2e command PDU {name}",
+                "driver": "command",
+                "poll_interval": poll_interval,
+                "outlets": [{"id": outlet} for outlet in ids],
+                "options": options,
+            }
+        )
+        return self
+
+    @property
+    def power_boxes(self) -> Dict[str, Path]:
+        """The state file of each fake device this config wires, by PDU name."""
+        return dict(self._power_boxes)
+
     def with_actions(self, grants: Dict[str, Any], actions_dir: Optional[str] = None) -> "ConfigBuilder":
         """Grant Port Action ids to ports. ``actions_dir`` defaults to the bundled examples."""
         self._actions = {
@@ -689,6 +766,9 @@ class E2EServer:
         self.recorder: Optional[Any] = None
         self.expected_exit: Optional[int] = None
         """Exit code a scenario expects, for a server meant to fail. ``stop_clean`` accepts it."""
+        #: Where each ``driver: command`` PDU's fake device keeps its state, by PDU name. ``ServerRegistry.make``
+        #: copies it off the builder, which is the object that chose the path. Empty for every other world.
+        self.power_boxes: Dict[str, Path] = {}
 
     # --- addresses -----------------------------------------------------------------------
 
@@ -703,6 +783,60 @@ class E2EServer:
     def web_url(self) -> str:
         """The base URL of the web console, with no trailing slash."""
         return f"http://127.0.0.1:{self.port_of('web')}"
+
+    def power_box(self, pdu_name: str) -> Path:
+        """The state file of one fake ``command`` device, which is the device's own state.
+
+        A scenario reads this to ask what the device holds rather than trusting what the server last reported, and
+        writes it through the fixture to move an outlet with no switch command.
+        """
+        if pdu_name not in self.power_boxes:
+            raise KeyError(f"{self.name} has no command PDU {pdu_name!r}: {sorted(self.power_boxes)}")
+        return self.power_boxes[pdu_name]
+
+    def power_box_journal(self, pdu_name: str) -> Path:
+        """The journal of one fake device: one line per switch it was told to run."""
+        return Path(f"{self.power_box(pdu_name)}.journal")
+
+    def power_box_child(self, pdu_name: str) -> Path:
+        """The file one fake device records a spawned helper's pid in, for a group-kill proof."""
+        return Path(f"{self.power_box(pdu_name)}.child")
+
+    def power_box_flip(self, pdu_name: str, outlet_id: str) -> str:
+        """Change one outlet on the fake device itself, with no switch command involved.
+
+        This is how a scenario produces what a poll must catch: a switch someone threw by hand, or a device
+        that changed on its own. The fixture reads, flips and rewrites its own state file, so no scenario has
+        to know that file's shape. Returns the state the fixture printed.
+        """
+        result = subprocess.run(
+            [sys.executable, str(POWER_BOX_FIXTURE), "--state", str(self.power_box(pdu_name)), "flip", outlet_id],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"{self.name}: flipping {pdu_name}.{outlet_id} on the device failed "
+                f"(exit {result.returncode}): {result.stderr.strip()[:300]}"
+            )
+        return result.stdout.strip()
+
+    def power_box_fault(self, pdu_name: str, *modes: str) -> None:
+        """Make the fake device broken for one kind of call, while the server keeps running.
+
+        Pass ``"state"`` to fail every read, ``"switch"`` to refuse every switch, both to model a dead device,
+        or no mode to heal it. The fault lives in a file the device reads on each call, so it needs no config
+        change and no restart: a scenario sets it after the server reached the device, which is what a device
+        that fails mid-shift does. See ``power_fixtures/outlet_box.py`` for the exit code and stderr each
+        fault produces.
+        """
+        path = Path(f"{self.power_box(pdu_name)}.faults")
+        if modes:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("\n".join(modes) + "\n", encoding="utf-8")
+        elif path.exists():
+            path.unlink()
 
     # --- lifecycle -----------------------------------------------------------------------
 
@@ -1026,6 +1160,24 @@ class E2EServer:
         if not path.exists():
             return []
         return path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    def wait_until(self, predicate: Callable[[], bool], timeout: float = 20.0, what: str = "") -> None:
+        """Wait for a condition about this server, and say what was waited for when it does not happen.
+
+        A log line is not the only thing that moves: a fake device's own state file, or one field of
+        ``/api/power``, changes on the server's own schedule. Poll the fact rather than sleeping a fixed
+        time, so a slow server stays slow and a wrong one still fails.
+        """
+        deadline = time.monotonic() + timeout
+        last: Optional[BaseException] = None
+        while time.monotonic() < deadline:
+            try:
+                if predicate():
+                    return
+            except AssertionError as exc:  # justification: a predicate reading a partial answer is a retry, not a failure
+                last = exc
+            time.sleep(0.05)
+        raise AssertionError(f"{self.name}: {what or 'condition'} never became true within {timeout:.0f}s") from last
 
     def wait_for_port_log(self, port_name: str, needle: str, timeout: float = 15.0) -> str:
         """Wait for one line containing ``needle`` in the port data log and return it."""

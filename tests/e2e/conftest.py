@@ -301,6 +301,9 @@ class ServerRegistry:
             (config_dir / "server.yaml").write_text(raw_server_yaml, encoding="utf-8")
 
         server = E2EServer(workdir=workdir, config_dir=config_dir, addresses=addresses, name=name)
+        # The builder chose where each fake ``command`` device lives, so hand those paths to the scenario. A PDU the
+        # driver refuses to build still has a path here: the device exists whether or not the server reached it.
+        server.power_boxes.update(builder.power_boxes)
         recorder = timeline if timeline is not None else self.story.timeline
         if self.options["live"]:
             # One live channel only: the timeline prints every line it stores, with the offset and the

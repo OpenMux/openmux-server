@@ -120,6 +120,21 @@ refusal that a browser would hide. `devices.tcp()` starts one fake device: it an
 and the reload starts that port with nothing behind it, which is the only adapter failure this tier can
 produce on demand.
 
+`with_command_pdu(name, outlets, poll_interval=..., box_args=..., timeout=...)` adds a PDU whose driver runs a program:
+`driver: command`. The program is the checked-in outlet box `power_fixtures/outlet_box.py`, which keeps its outlet
+positions in one JSON file, so a scenario proves the argv the driver built instead of trusting a patched spawn. Three
+commands go into the config: one batch `state_cmd` and the two switch templates behind `{outlet_id}`. `box_args` adds
+words to every command, which is how a scenario ships a device that answers late (`("--slow", "6", "--child")`), and
+`timeout` sets the driver's per-command seconds.
+
+A scenario reaches that box through the server rather than a path it builds itself: `world.power_box(name)` is the state
+file, `world.power_box_journal(name)` lists each switch the box was told to run, and `world.power_box_child(name)` holds
+the pid of a helper the box started. `world.power_box_flip(name, outlet)` changes one outlet on the box with no switch
+command, which is what a poll must catch. `world.power_box_fault(name, "state")` makes the box fail every read and
+`world.power_box_fault(name, "switch")` makes it refuse every switch; call it with no mode to heal it. A fault lives in a
+file the box reads on each call, so it needs no config change and no restart. `world.wait_until(fn, timeout=..., what=...)`
+polls a fact that is not a log line, such as one field of `/api/power`.
+
 The same hook registers an SSH key with `with_public_key(key_id, public_key, username, allowed_uses=("ssh",))`: the
 key material, the account it opens, and the use it is granted all land in `authentication.yaml`, which is what a key
 scenario reads back. `ssh_ed25519_keypair(comment)` builds such a pair and returns the OpenSSH public line with the

@@ -1,11 +1,12 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 9, `AUTH-11`, and the SSH listener: 131 scenarios in eleven suites, listed in
-[`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the three `IDX` self-check
-scenarios, the browser proof, the eleven `AUTH` scenarios driven over HTTP, the fourteen `CON` console scenarios driven
-in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the twenty `CFG` Config Editor
-scenarios, the eleven `ACT` Port Action scenarios, the six `TIM` story scenarios, the six `ST` status page scenarios,
-and the ten `SSH` listener scenarios run green. See **Build status** near the end.
+**Status:** Implemented through Phase 9, `AUTH-11`, the SSH listener, and the command-driver PDU: 137 scenarios in twelve
+suites, listed in [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF` lifecycle scenarios, the three
+`IDX` self-check scenarios, the browser proof, the eleven `AUTH` scenarios driven over HTTP, the fourteen `CON` console
+scenarios driven in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios, the six `CMD`
+command-driver scenarios, the twenty `CFG` Config Editor scenarios, the eleven `ACT` Port Action scenarios, the six `TIM`
+story scenarios, the six `ST` status page scenarios, and the ten `SSH` listener scenarios run green. See **Build status**
+near the end.
 **Date:** 2026-10-31
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
 Telnet, and SSH at the same time.
@@ -321,11 +322,11 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 121 scenarios in 10 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 20, `PWR` 19, `CFG` 20, `ACT` 11,
-`ST` 6, the index checks 3, and the story recorder 6. The generated [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what
-runs, and its count is checked by `IDX-02`. Two further groups below still hold planned ids: they have boundaries and
-assertions written down, and no test for each of them yet. Full wording for every built id lives in that
-index.
+The suite today runs 137 scenarios in 12 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 20, `PWR` 19, `CMD` 6, `CFG` 20,
+`ACT` 11, `ST` 6, `SSH` 10, the index checks 3, and the story recorder 6. The generated
+[docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what runs, and its count is checked by `IDX-02`. Two further groups
+below still hold planned ids: they have boundaries and assertions written down, and no test for each of them yet. Full
+wording for every built id lives in that index.
 
 ### LIFECYCLE — process and listeners (`tests/e2e/test_lifecycle.py`, 11)
 
@@ -809,6 +810,46 @@ closed SSH connection leaves a socket in TIME_WAIT, macOS then refuses the rebin
 logged dead and left stopped while the rest of the server keeps answering `/healthz` with 200 — issue
 [#115](https://github.com/OpenMux/openmux-server/issues/115) carries that, and no scenario asserts it yet.
 
+### CMD — command-driver PDU (`test_power_command.py`, 6)
+
+`driver: command` reads and switches a power device by running a program: one batch read per PDU and one command per
+switch. `tests/test_power_command_driver.py` covers that code with `asyncio.create_subprocess_exec` monkeypatched, so no
+unit test starts a process. Each scenario here starts one: the device is the checked-in outlet box
+`tests/e2e/power_fixtures/outlet_box.py`, a script that keeps its outlet positions in a JSON file. That file is what
+proves the argv the driver built, because the script writes what it was told to move.
+
+Six measured facts shape these bodies, and each is used where it applies:
+
+- The device decides what the server reports. A fresh box seeds every outlet off, so the first read reports `on: false`
+  and leaves `watts`, `amps`, `volts` and `total_watts` null. The `dummy` driver starts every outlet on and reports
+  120 W at 230 V, so `test_power.py` cannot show either half of that pair.
+- A listed feed carries no wattage when the device reports none: `POWER box.1 off  -> con1`, where the dummy row reads
+  `POWER rack1.1 on 120W 230V  -> solo, dual`.
+- A successful switch logs nothing of its own. The only server-side trace is the audit line `POWER CONTROL: user <name>
+  turned <ref> off; losing all power: <port>`, so a scenario waits for that line and never for a driver line.
+- A notice reaches a console only when its feed changes. Switching an outlet that already reports that state changes
+  nothing and says nothing, so a scenario sets the starting position first.
+- A refused switch reports the device's exit code and its own words on every surface: `power switch failed (exit 3)
+  (stderr: outlet box: relay refused to move)` in the CLI answer, the same text inside `set_state failed for <ref>` in
+  the log, and the same text in a REST 409 that still carries the impact.
+- A device-wide read failure is silent by contract (`power_drivers/readbackoff.py`): no further device IO, the last
+  readings kept, `online` still true, and no power log line. A switch is never backed off, so one switch still reaches
+  the device and the report follows it.
+
+| Id | What it proves |
+| --- | --- |
+| `CMD-01` | The config runs the checked-in device, the first read reports the device's own positions, no wattage is invented for it, and the device file agrees. |
+| `CMD-02` | One `POWER` line spawns the configured command with the substituted outlet id, the device records it, the console is told, and the audit line names the console that lost power. |
+| `CMD-03` | A change thrown on the device itself reaches the console and `/api/power` on the next poll, while the device records no switch because none was asked for. |
+| `CMD-04` | A relay that refuses to move answers with its exit code and stderr in the CLI, in the product log, and in a REST 409 that keeps the impact, and the device keeps its position. |
+| `CMD-05` | A command past its timeout answers `power switch timed out after 1s` on both surfaces, the helper it started is stopped, and the device wrote nothing. |
+| `CMD-06` | A device that stops answering leaves the last reading in place while the device holds another, says nothing in the log or on the console, and still accepts a switch. |
+
+The world knob is `ConfigBuilder.with_command_pdu(name, outlets, poll_interval=…, box_args=…, timeout=…)`, and the
+scenario reads the device through `world.power_box(name)`, `world.power_box_journal(name)`, `world.power_box_child(name)`,
+`world.power_box_flip(name, outlet)` and `world.power_box_fault(name, *modes)`. `box_args` bakes a fault into the argv at
+start-up; `power_box_fault` moves the device while the server runs, which is the case a poll or a backoff window is about.
+
 ### Story and timeline recorder (`test_story.py`, 6 built)
 
 Built: `TIM-01` to `TIM-05` prove what one timeline line looks like: caret notation for control bytes, `IAC WILL ECHO`
@@ -850,8 +891,9 @@ Named now so release 1 fixtures stay sufficient.
    fence, and the command request. The control menu is shared with Telnet and already covered by `RW-10`.
 2. MuxCon with two live nodes: first attach read-only, `FEDRW` Takeover, `CONNECT:{server}::{port}`,
    `POWER:SWITCH` relay, federation area, multipath panel. See [muxcon.md](muxcon.md) §4.5 and 4.6.
-3. Power `driver: command` driven by a checked-in fake device script. Only monkeypatched subprocesses are covered
-   today.
+3. Power `driver: command` driven by a checked-in fake device script: **built** as `CMD-01` to `CMD-06`. The device is
+   `tests/e2e/power_fixtures/outlet_box.py`, which keeps its outlet positions in a file, so the tier proves the argv the
+   driver builds and the exit code a user reads. The monkeypatched unit tests keep covering the parse and quoting rules.
 4. Serial adapter over a `socat` pty pair.
 5. Soak: many viewers, simultaneous requests, socket churn.
 
@@ -888,6 +930,7 @@ Named now so release 1 fixtures stay sufficient.
 | 9 — Story | Done | Six scenarios in `tests/e2e/test_story.py`: the five recorder scenarios and `TIM-06`, one operator's shift in one process. It adds no harness method: the editor steps run through `ConsoleSession` helpers other suites already added, and the file gained four local helpers of its own for the inline editor row. `TIM-06` marks `e2e_browser` inside a file whose other scenarios need no browser; `AUTH-11` is the other scenario that does. |
 | 9a — AUTH-11 | Done | `AUTH-11` in `tests/e2e/test_auth.py`: an `external_auth` helper decides who may sign in, and only `authentication.yaml` hands out the role. The harness gained `ConfigBuilder.with_external_auth`, and `tests/e2e/auth_fixtures/helper_stub.py` is the fixture — one script, four names, in the protocol `auth_manager.py` speaks. One product defect came out of building it: a helper that answers slowly stops the server for every other visitor, which issue #114 carries. The scenario asserts nothing about time, because a timing claim would read as flaky while that defect is open. |
 | 10 — SSH listener | Done | Ten scenarios (`SSH-01` to `SSH-10`) in `tests/e2e/test_ssh_listener.py`, each dialing a running server with `asyncssh`: the host key generated in the state dir and reused across a restart, the account behind a password, the `ssh` use of a registered key, the listener that offers the Port menu without a login, the `acl` fence beside a listener without one, the command request that never reaches a Port, one Takeover taken from an SSH holder, the Control menu's `p` key over SSH, a username that carries a Port name, and a Port that excludes the account. Two product defects came out of this group: issue #110 from `SSH-04`, and issue #115 from the restart in `SSH-01`, where a listener refused a bind is left stopped while the server goes on answering `/healthz` with 200. The harness gained the SSH half of itself: `with_ssh_listener`, `with_public_key`, `ssh_ed25519_keypair`, `E2EServer.restart` (which waits for the ports to be bindable again), the `ssh` knobs on `servers()`, and `clients.ssh()` over the new `SshSession`. See the SSH section above. |
+| 11 — Command-driver PDU | Done | Six scenarios (`CMD-01` to `CMD-06`) in `tests/e2e/test_power_command.py`, each driving the checked-in outlet box `tests/e2e/power_fixtures/outlet_box.py` through `driver: command`, so a real process answers every read and switch: the positions and missing wattages a real device reports, one CLI switch proven by the outlet id the box recorded, a position changed on the device found by the next poll, a refused switch quoting exit 3 and the box's own words on the CLI, in the log, and in a REST 409 that keeps its impact, a command past its timeout answered on two surfaces with the helper it started stopped, and a device that stops answering kept silent and stale while a switch still reaches it. No product defect came out of this group. The two surprises were documented behaviour, and each is now asserted where it applies: a switch that changes nothing sends no notice, and a device-wide read failure is silent by the contract in `power_drivers/readbackoff.py`. The harness gained `ConfigBuilder.with_command_pdu` plus `E2EServer.power_box`, `power_box_journal`, `power_box_child`, `power_box_flip`, `power_box_fault`, and `wait_until`; the builder owns the device's state path, so no scenario rebuilds it. See the CMD section above. |
 
 - `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
   `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`
@@ -932,6 +975,8 @@ carries a unit guard that fails without the fix, and `CHANGELOG.md` carries an e
 4. Phases 3-6 — AUTH and CON, then RW, then PWR, then CFG.
 5. Phases 7-9 — ACT, ST, story.
 6. **Phase 10 — `test_ssh_listener.py`.** Release 2 item 1, built early: no browser, one more listener per world.
+7. **Phase 11 — `test_power_command.py`.** Release 2 item 3: no browser, one fixture script that plays the device, and
+   one server per scenario.
 
 ---
 

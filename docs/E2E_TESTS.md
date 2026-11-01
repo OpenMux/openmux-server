@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-131 scenarios across 11 suites.
+137 scenarios across 12 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -60,6 +60,13 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | CFG-18 | One unusable Serial entry costs that one port, and the server says so out loud (issue #105). | http | `tests/e2e/test_config_editor.py::test_cfg18_a_port_the_server_cannot_build_is_named_in_the_log_and_never_reported_as_added` |
 | CFG-19 | A command entry its port refuses at startup costs that port alone, and boot names the reason (issue #105). | http | `tests/e2e/test_config_editor.py::test_cfg19_one_unusable_port_entry_at_boot_costs_one_port_and_names_it` |
 | CFG-20 | A full reload answers ok, keeps every port the file can build, and names the entry it refused (issue #105). | http, server log | `tests/e2e/test_config_editor.py::test_cfg20_a_full_reload_reports_the_port_it_could_not_build_and_keeps_the_others` |
+| **CMD** | | | |
+| CMD-01 | A command PDU reports what the device holds, and reports no power figure the device never gave. | http, cli:none | `tests/e2e/test_power_command.py::test_cmd01_the_device_answers_so_the_readings_are_its_own` |
+| CMD-02 | One ``POWER`` line becomes a real process whose argv carries the outlet it was told to move. | cli:admin | `tests/e2e/test_power_command.py::test_cmd02_a_switch_from_the_cli_runs_the_command_the_config_named` |
+| CMD-03 | Someone throws the switch by hand: the poll finds it, and no switch command was ever run. | cli:none, http | `tests/e2e/test_power_command.py::test_cmd03_a_change_made_on_the_device_is_picked_up_by_the_next_poll` |
+| CMD-04 | A relay that refuses to move reports its exit code and its own words, and keeps its position. | cli:none, http | `tests/e2e/test_power_command.py::test_cmd04_a_device_that_refuses_the_switch_says_so_on_every_surface` |
+| CMD-05 | A device that answers too late is stopped inside its timeout, including the helper it started. | cli:none, http | `tests/e2e/test_power_command.py::test_cmd05_a_command_that_never_answers_times_out_without_an_orphan` |
+| CMD-06 | A dead sense line makes the server quiet and stale on purpose, while a switch still gets through. | http, cli:none | `tests/e2e/test_power_command.py::test_cmd06_a_device_that_stops_answering_keeps_its_last_readings` |
 | **CON** | | | |
 | CON-01 | A read-write user opens the console on a Loopback port and sees their own text come back. | web:rw | `tests/e2e/test_console.py::test_con01_a_signed_in_user_opens_the_console_and_gets_their_text_back` |
 | CON-02 | The page exports its test hook only when the URL carries ``?e2e=1``. | web:admin | `tests/e2e/test_console.py::test_con02_the_test_hook_stays_off_unless_the_url_asks_for_it` |
