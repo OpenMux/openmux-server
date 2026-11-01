@@ -815,6 +815,33 @@ class E2EServer:
         kinds["total"] = sum(kinds.values())
         return kinds
 
+    def tcp_queue(self, address: str, peer_port: int) -> Dict[str, int]:
+        """The bytes queued on the server's side of one live connection, in bytes.
+
+        ``send_q`` above zero says the server handed bytes to the kernel and the peer has not taken them,
+        so a scenario can tell a viewer that stopped reading from a viewer whose bytes the server still
+        holds. Only the first can delay a write the two of them share. Reads ``netstat``, which is the
+        ``-p proto`` spelling macOS and the BSDs use; Linux gives ``-p`` to the owning program, so this
+        raises rather than returning another host's columns.
+
+        Raises:
+            RuntimeError: when ``netstat`` is missing, or the host is not one this column layout fits.
+            LookupError: when no connection matches the two ends.
+        """
+        if NETSTAT is None:
+            raise RuntimeError(NETSTAT_MISSING)
+        if not sys.platform.startswith("darwin"):
+            raise RuntimeError(f"tcp_queue reads macOS netstat columns, not {sys.platform}")
+        local_port = self.port_of(address)
+        out = subprocess.run([NETSTAT, "-an", "-p", "tcp"], capture_output=True, text=True, timeout=60, check=False)
+        for line in out.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 5 or not fields[0].startswith("tcp"):
+                continue
+            if fields[3].rsplit(".", 1)[-1] == str(local_port) and fields[4].rsplit(".", 1)[-1] == str(peer_port):
+                return {"recv_q": int(fields[1]), "send_q": int(fields[2])}
+        raise LookupError(f"no TCP connection on {address} port {local_port} to peer port {peer_port}")
+
     def power_box(self, pdu_name: str) -> Path:
         """The state file of one fake ``command`` device, which is the device's own state.
 
@@ -1744,6 +1771,9 @@ SOCAT_MISSING = "these scenarios need socat (brew install socat, or apt install 
 
 LSOF = shutil.which("lsof")
 LSOF_MISSING = "these scenarios need lsof to count the server's descriptors (brew install lsof, or apt install lsof)"
+
+NETSTAT = shutil.which("netstat")
+NETSTAT_MISSING = "these scenarios need netstat to read a connection queue (it ships with macOS and Linux)"
 
 #: The termios bit that hands the RTS pin to the kernel handshake. Linux names it ``CRTSCTS``, macOS
 #: and the other BSDs name it ``CCTS_OFLOW``, and pyserial tries the two in the same order.

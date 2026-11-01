@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-149 scenarios across 14 suites.
+150 scenarios across 14 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -153,6 +153,7 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | SOK-04 | Twenty sessions log in and do nothing, and twelve connections send not one byte. | telnet:idle, raw:silent, telnet:keeper, cli:writer | `tests/e2e/test_soak.py::test_sok04_idle_and_silent_sessions_hold_the_listener_then_release_it` |
 | SOK-05 | Nine sessions in a row: one closes cleanly, one resets mid-stream, one never sends a byte. | telnet:passing, raw:silent, telnet:keeper, cli:writer, api:http | `tests/e2e/test_soak.py::test_sok05_abandoned_sockets_leave_the_seat_and_the_socket_behind` |
 | SOK-06 | Twenty seconds of marked output, with viewers arriving, leaving, and status asked between. | telnet:passing, ws:passing, cli:heartbeat, telnet:late, api:http | `tests/e2e/test_soak.py::test_sok06_a_sustained_stream_outlives_viewers_coming_and_going` |
+| SOK-07 | A viewer set changes while one console reads nothing, and the healthy console must not wait for it. | ws:stalled, ws:observer, cli:writer, telnet:arriving | `tests/e2e/test_soak.py::test_sok07_a_console_that_reads_nothing_holds_back_no_other_console` |
 | **SSH** | | | |
 | SSH-01 | The server generates its host key inside the state dir, offers that key, and reuses it after a restart. | ssh:viewer, state dir, server log | `tests/e2e/test_ssh_listener.py::test_ssh01_the_host_key_is_born_in_the_state_dir_and_outlives_the_process` |
 | SSH-02 | A password the config accepts opens a shell, and the account's permission decides what that shell may do. | ssh:rw, ssh:viewer, authentication.yaml | `tests/e2e/test_ssh_listener.py::test_ssh02_the_account_behind_the_password_decides_the_seat` |

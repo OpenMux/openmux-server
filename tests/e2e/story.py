@@ -372,6 +372,15 @@ class Story:
             self.timeline.failure(text, f"{type(exc).__name__}: {_one_line(exc)}")
             raise
 
+    def note(self, text: str) -> None:
+        """Record one measured line the scenario read, such as a port counter or an elapsed wait.
+
+        A step wraps the code that proves something. This is for the number a scenario reports without
+        asserting on it, which a reader still wants when a later step fails. It is a plain call, because a
+        measurement has no block of its own.
+        """
+        self.timeline.note(_one_line(text))
+
     def expect(self, expected: str, actual: str) -> None:
         """Record an unmet expectation from inside a helper, without raising here."""
         self.timeline.failure(expected, actual)

@@ -38,6 +38,16 @@ _SOCKET_KINDS = ("total", "IPv4", "IPv6", "unix", "KQUEUE", "NPOLLED")
 #: only once its own socket buffer is full, which takes more than the few kilobytes one line each is.
 _STALL_PADDING = "x" * 200
 
+#: One big line in the stalled-console flood. A loopback connection absorbs only a few MiB
+#: (``net.inet.tcp.autorcvbufmax`` and its send-side twin are 4 MiB each here), so the scenario pushes more
+#: than that to find out where the surplus goes.
+_FLOOD_LINE = "x" * 65000
+_FLOOD_COUNT = 240
+
+#: Seconds a healthy console may wait for a viewer-set notice while another console reads nothing. The
+#: same attach with nobody stalled costs the same measurement, so the bound is the gap and not the wait.
+_PRESENCE_LIMIT = 5.0
+
 
 def _swarm_world(
     servers,
@@ -202,9 +212,9 @@ def test_sok01_twelve_viewers_receive_one_stream(servers, clients, story) -> Non
     sizes = [len(viewer.text()) for viewer in viewers]
     # The writer sees the port too, so its own echo says whether a missing line ever reached the port.
     writer_gap = _missing(markers, writer.read_text())
-    story.step(
+    story.note(
         f"12 viewers received the stream: missing counts {[len(gap) for gap in gaps]}, sizes {sizes}, "
-        f"writer missing {len(writer_gap)}"
+        f"writer missing {len(writer_gap)}",
     )
 
     assert [len(gap) for gap in gaps] == [0] * VIEWERS, (
@@ -230,7 +240,7 @@ def test_sok02_a_viewer_that_stops_reading_loses_only_its_own_bytes(servers, cli
     first = _markers(writer, "paced", 20)
     stalled.wait_for(first[-1], timeout=30.0)
     stalled.kill_reader()
-    story.step("one viewer stopped reading, as a wedged tab or a laptop with no network does")
+    story.note("one viewer stopped reading, as a wedged tab or a laptop with no network does")
 
     beyond = _markers(writer, "beyond", 1200, pad=_STALL_PADDING)
     sizes_before = [len(viewer.text()) for viewer in viewers]
@@ -238,10 +248,10 @@ def test_sok02_a_viewer_that_stops_reading_loses_only_its_own_bytes(servers, cli
         viewer.wait_for(beyond[-1], timeout=60.0)
     lost = [marker for marker in beyond if any(marker not in viewer.text() for viewer in viewers)]
     entry = _port_entry(api, "swarm")
-    story.step(
+    story.note(
         f"{len(beyond)} padded lines written after the stall: {len(lost)} missing for a viewer that read, "
         f"port counters {sorted((key, value) for key, value in entry.items() if not isinstance(value, (list, dict)))}, "
-        f"viewer sizes {sizes_before} then {[len(viewer.text()) for viewer in viewers]}"
+        f"viewer sizes {sizes_before} then {[len(viewer.text()) for viewer in viewers]}",
     )
 
     assert lost == [], f"a stalled viewer cost another viewer its bytes: {lost[:5]}"
@@ -249,7 +259,7 @@ def test_sok02_a_viewer_that_stops_reading_loses_only_its_own_bytes(servers, cli
 
     writer.write_line("port-still-delivers")
     viewers[0].wait_for("port-still-delivers", timeout=30.0)
-    story.step("the port still delivers to a viewer that kept up")
+    story.note("the port still delivers to a viewer that kept up")
 
 
 # --- SOK-03 ---------------------------------------------------------------------------------------
@@ -296,7 +306,7 @@ def test_sok03_two_hundred_requests_answer_every_one_while_a_port_streams(server
         elapsed = time.monotonic() - started
     stop_polling.set()
     poller.join(timeout=15.0)
-    story.step(f"{len(urls)} unanswered requests and 20 signed ones from 16 threads in {elapsed:.2f} s")
+    story.note(f"{len(urls)} unanswered requests and 20 signed ones from 16 threads in {elapsed:.2f} s")
 
     wrong = [
         (url, status, size, expected[url][0], len(expected[url][1]))
@@ -311,7 +321,7 @@ def test_sok03_two_hundred_requests_answer_every_one_while_a_port_streams(server
     writer.write_line("still-streaming")
     for viewer in viewers:
         viewer.wait_for("still-streaming", timeout=30.0)
-    story.step("the four logged-in sessions answered, four viewers read the line, and the poller survived")
+    story.note("the four logged-in sessions answered, four viewers read the line, and the poller survived")
 
 
 # --- SOK-04 ---------------------------------------------------------------------------------------
@@ -330,24 +340,24 @@ def test_sok04_idle_and_silent_sessions_hold_the_listener_then_release_it(server
     writer = clients.cli(server=world, attach_to="swarm", surface="cli:writer")
     baseline = _descriptors(world)
     if LSOF is None:
-        story.step(f"descriptor counts skipped: {LSOF_MISSING}")
+        story.note(f"descriptor counts skipped: {LSOF_MISSING}")
 
     holders = [
         clients.telnet(user="ro", require_auth=True, server=world, surface=f"telnet:idle{index + 1}")
         for index in range(IDLE_SESSIONS)
     ]
     silent = [clients.silent(surface=f"raw:silent{index + 1}", server=world) for index in range(12)]
-    story.step(f"{IDLE_SESSIONS} logged-in sessions and 12 silent connections are open and idle")
+    story.note(f"{IDLE_SESSIONS} logged-in sessions and 12 silent connections are open and idle")
 
     writer.write_line("idle-check-1")
     keeper.wait_for("idle-check-1", timeout=30.0)
-    story.step("a fresh session still gets a seat and the stream while thirty others wait")
+    story.note("a fresh session still gets a seat and the stream while thirty others wait")
 
     for holder in holders:
         holder.close()
     for socket_holder in silent:
         socket_holder.abort()
-    story.step("the idle sessions closed and the silent ones were abandoned")
+    story.note("the idle sessions closed and the silent ones were abandoned")
 
     writer.write_line("idle-check-2")
     keeper.wait_for("idle-check-2", timeout=30.0)
@@ -370,7 +380,7 @@ def test_sok05_abandoned_sockets_leave_the_seat_and_the_socket_behind(servers, c
     # Counted after the two sessions that outlive every round, so their sockets are not read as a leak.
     baseline = _descriptors(world)
     if LSOF is None:
-        story.step(f"descriptor counts skipped: {LSOF_MISSING}")
+        story.note(f"descriptor counts skipped: {LSOF_MISSING}")
 
     outcomes: List[str] = []
     for round_index in range(9):
@@ -398,10 +408,10 @@ def test_sok05_abandoned_sockets_leave_the_seat_and_the_socket_behind(servers, c
     final = _markers(writer, "last", 10)
     keeper.wait_for(final[-1], timeout=30.0)
     entry = _port_entry(api, "swarm")
-    story.step("churn outcomes: " + ", ".join(outcomes))
-    story.step(
+    story.note("churn outcomes: " + ", ".join(outcomes))
+    story.note(
         "port after churn: "
-        + ", ".join(f"{key}={entry.get(key)}" for key in ("connected_clients", "dropped_chunks", "client_count"))
+        + ", ".join(f"{key}={entry.get(key)}" for key in ("connected_clients", "dropped_chunks", "client_count")),
     )
 
     assert _missing(final, keeper.text()) == [], "the stream must survive nine sessions arriving and leaving"
@@ -458,21 +468,123 @@ def test_sok06_a_sustained_stream_outlives_viewers_coming_and_going(servers, cli
         thread.join(timeout=15.0)
     with sent_lock:
         markers = list(sent)
-    story.step(f"{'; '.join(seen) or 'no passing viewer completed'}; {len(markers)} marked lines written")
+    story.note(f"{'; '.join(seen) or 'no passing viewer completed'}; {len(markers)} marked lines written")
 
     assert len(markers) >= 40, f"the sustained writer produced only {len(markers)} lines in 20 s"
 
     entry = _port_entry(api, "swarm")
     scalars = sorted((key, value) for key, value in entry.items() if not isinstance(value, (list, dict)))
-    story.step(f"the port after the run: {scalars}")
+    story.note(f"the port after the run: {scalars}")
     assert entry["connected_clients"] == 1, f"a viewer that left still holds its seat: {entry}"
 
     watched = [f"watch-{index}" for index in range(3)]
     assert _missing(watched, writer.read_text()) == [], "the stream stopped for the writer at some round"
-    story.step("the writer's own transcript holds every round marker beside the beats")
+    story.note("the writer's own transcript holds every round marker beside the beats")
 
     late = clients.telnet(user="ro", require_auth=True, server=world, surface="telnet:late")
     late.choose_port("swarm")
     writer.write_line("late-check")
     late.wait_for("late-check", timeout=30.0)
-    story.step("a viewer that arrives after the run still gets a seat and the stream")
+    story.note("a viewer that arrives after the run still gets a seat and the stream")
+
+
+def _drain_console(viewer: Any, seconds: float) -> None:
+    """Read every frame one console hands over within ``seconds``.
+
+    A viewer set changes on every attach and detach, so a scenario that times the next notice must first
+    clear the notices the setup already caused.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            viewer.read_frame(timeout=0.05)
+        except (TimeoutError, OSError):
+            return
+
+
+def _presence_gap(clients, world: E2EServer, observer: Any, port_name: str) -> Tuple[float, float]:
+    """Attach one console, close it again, and time what the observing console waits for the notice.
+
+    Returns the attach round trip and the wait for the viewer-set frame, in seconds. The login happens
+    outside the timed window, so the second number is the notice and not the handshake.
+    """
+    _drain_console(observer, 0.4)
+    arriving = clients.telnet(user="ro", require_auth=True, server=world, surface="telnet:arriving")
+    started = time.monotonic()
+    arriving.choose_port(port_name)
+    attached = time.monotonic()
+    deadline = attached + 30.0
+    while time.monotonic() < deadline:
+        try:
+            opcode, payload = observer.read_frame(timeout=0.5)
+        except (TimeoutError, OSError):
+            continue
+        if opcode == 0x1 and b'"presence"' in payload:
+            gap = time.monotonic() - started
+            arriving.close()
+            return attached - started, gap
+    raise AssertionError(f"no viewer-set notice reached the observing console within 30s of choosing {port_name}")
+
+
+@pytest.mark.e2e
+@surfaces("ws:stalled", "ws:observer", "cli:writer", "telnet:arriving")
+def test_sok07_a_console_that_reads_nothing_holds_back_no_other_console(servers, clients, story, api_for_server) -> None:
+    """A viewer set changes while one console reads nothing, and the healthy console must not wait for it.
+
+    ``ConsoleManager.broadcast_control_frame_to_port`` delivers to one viewer at a time, so a viewer whose
+    socket is full could make every viewer behind it wait. This measures what that costs. The stalled
+    console is attached first, because fan-out order is attach order.
+    """
+
+    world = _swarm_world(servers, port="swarm")
+    api = api_for_server(world)
+    stalled = clients.websocket("swarm", user="ro", surface="ws:stalled", server=world)
+    stalled_port = stalled.socket().getsockname()[1]
+    observer = clients.websocket("swarm", user="ro", surface="ws:observer", server=world)
+    writer = clients.cli(server=world, attach_to="swarm", surface="cli:writer")
+
+    writer.write_line("sok07-prime")
+    stalled.wait_for_text("sok07-prime", timeout=30.0)
+    observer.wait_for_text("sok07-prime", timeout=30.0)
+
+    _, before = _presence_gap(clients, world, observer, "swarm")
+    story.note(f"a viewer-set notice reached the watching console in {before:.3f}s with nobody stalled")
+
+    drops_before = _port_entry(api, "swarm").get("dropped_chunks")
+    stalled.socket().settimeout(0.01)
+    for index in range(_FLOOD_COUNT):
+        writer.write_line(f"sok07-flood-{index:04d} {_FLOOD_LINE}", timeout=30.0)
+    try:
+        queued = world.tcp_queue("web", stalled_port)
+    except RuntimeError as exc:  # justification: the queue is evidence, and the assertion does not need it
+        queued = {"send_q": -1, "recv_q": -1, "note": str(exc)}
+    _, gap = _presence_gap(clients, world, observer, "swarm")
+    entry = _port_entry(api, "swarm")
+    story.note(
+        f"{_FLOOD_COUNT * len(_FLOOD_LINE) / 1e6:.1f} MB pushed at one console that read nothing: "
+        f"the kernel held send_q={queued.get('send_q')} for it, dropped_chunks moved {drops_before} -> "
+        f"{entry.get('dropped_chunks')}, and a viewer-set notice reached the watching console in {gap:.3f}s",
+    )
+
+    writer.write_line("sok07-after-flood")
+    observer.wait_for_text("sok07-after-flood", timeout=30.0)
+    buffered = 0
+    stalled.socket().settimeout(20)
+    while True:
+        try:
+            _, payload = stalled.read_frame(timeout=1.0)
+            buffered += len(payload)
+        except (TimeoutError, OSError):
+            break
+    story.note(
+        f"the stalled console was still attached and caught up on {buffered / 1e6:.1f} MB when it read again, "
+        f"of the {_FLOOD_COUNT * len(_FLOOD_LINE) / 1e6:.1f} MB written while it read nothing",
+    )
+
+    assert gap < _PRESENCE_LIMIT, (
+        f"a console that reads nothing held the viewer-set notice of a healthy console: {gap:.3f}s "
+        f"against {before:.3f}s with nobody stalled"
+    )
+    assert _port_entry(api, "swarm")["connected_clients"] == 3, (
+        f"a console that stopped reading, or one that caught up, is no longer on the Port: {_port_entry(api, 'swarm')}"
+    )

@@ -1,7 +1,7 @@
 # End-to-End Test Suite
 
 **Status:** Implemented through Phase 9, `AUTH-11`, the SSH listener, the command-driver PDU, the serial device tier, and the
-soak tier: 149 scenarios in fourteen suites, listed in [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF`
+soak tier: 150 scenarios in fourteen suites, listed in [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF`
 lifecycle scenarios, the three `IDX` self-check scenarios, the browser proof, the eleven `AUTH` scenarios driven over HTTP, the
 fourteen `CON` console scenarios driven in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios,
 the six `CMD` command-driver scenarios, the six `SER` serial-device scenarios, the twenty `CFG` Config Editor scenarios, the
@@ -322,8 +322,8 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 149 scenarios in 14 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 20, `PWR` 19, `CMD` 6,
-`SER` 6, `CFG` 20, `ACT` 11, `ST` 6, `SSH` 10, `SOK` 6, the index checks 3, and the story recorder 6. The generated
+The suite today runs 150 scenarios in 14 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 20, `PWR` 19, `CMD` 6,
+`SER` 6, `CFG` 20, `ACT` 11, `ST` 6, `SSH` 10, `SOK` 7, the index checks 3, and the story recorder 6. The generated
 [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what runs, and its count is checked by `IDX-02`. Every group below now
 maps to a file that runs. What is still unwritten sits in the **Release 2** list further down, where item 2, MuxCon with
 two live nodes, is the one left. Full wording for every built id lives in that index.
@@ -925,7 +925,7 @@ Measured boundaries of `TIM-06`:
 - The holders are labelled `user@peer`, so two sessions of one account from one address cannot be told apart there.
   `RW-17` reports that label.
 
-### SOK — soak: many viewers, simultaneous requests, and socket churn (`test_soak.py`, 6)
+### SOK — soak: many viewers, simultaneous requests, and socket churn (`test_soak.py`, 7)
 
 One Port, many sessions, and the server measured from outside. The unit tests under `tests/server/` hand the fan-out a
 client that never blocks, so they cannot say what a slow reader, an abandoned socket, or two hundred parallel requests do
@@ -940,8 +940,9 @@ to a running process. Each scenario here opens real sessions, then reads numbers
 | `SOK-04` | Twenty sessions log in on Telnet and do nothing, and twelve bare connections send not one byte. A fresh session still gets a seat and the stream beside them. After the closes and the resets, the process holds what it held before. |
 | `SOK-05` | Nine sessions arrive and leave in a row: one closes cleanly, one resets mid-stream, one never sends a byte. The stream loses no marker, and the Port lists only the two sessions that outlive the rounds. |
 | `SOK-06` | A heartbeat writes a marked line every 0.2 s while three viewers arrive and go, on Telnet and on the console websocket, abandoned on the odd round and closed on the even one. The writer's own transcript holds every round marker, no left session keeps a seat, and a viewer that arrives after the run is served. |
+| `SOK-07` | One console websocket attaches and then reads nothing while a writer pushes 15.6 MB through its Port. The kernel holds 143 KiB of that against the server, the Port drops the rest for that one console, and a viewer-set notice for a console arriving during the flood still reaches a watching console in 0.110 s against 0.107 s with nobody stalled. The stalled console keeps its seat and catches up on the 1.0 MB that survived when it reads again. |
 
-Six measured boundaries shape these bodies:
+Seven measured boundaries shape these bodies:
 
 - The Write slot is one seat, not a viewer limit. A console websocket that asks for read-write takes it: with such a
   viewer attached, the writer's line never reached the Port, and no data frame arrived within two seconds. The same viewer
@@ -962,13 +963,24 @@ Six measured boundaries shape these bodies:
 - A stalled reader was seen not to starve the others. With one viewer stalled and three reading, 1 200 marked lines and
   1 200 markers each, none of the three missed a marker and the stalled one missed them all. That is the Loopback Port
   with a small line rate; a slow real device is not tested here, and the product still has no per-viewer pacing.
+- A console that reads nothing does not hold back a *control* delivery either, because the Port sheds its bytes before its
+  socket can fill. `broadcast_control_frame_to_port` (`console_manager.py:1111`) delivers to one viewer at a time in attach
+  order, so `SOK-07` stalls the console it attaches first and then floods that Port with 65 000-byte lines. One run measured
+  15.6 MB written, `send_q=146988` on the server's side of the stalled socket (`netstat -an -p tcp`), `dropped_chunks`
+  0 to 14745, and a viewer-set notice reaching a healthy console in 0.110 s against 0.107 s with nobody stalled. The queue
+  stopped near 143 KiB, far under the 4 MiB the system allows, because `_process_data_queue` (`port.py:584`) discards that
+  console's chunks once its queue is full. [Issue #106](https://github.com/OpenMux/openmux-server/issues/106) keeps the two
+  questions this shape cannot answer: a peer that closes its socket mid-burst leaves no queue to shed into, and a stream
+  slow enough to stay under the queue limit needs a device that really reads slowly, which no fixture provides yet — the
+  Serial fixture is a `socat` pty pair that never throttles.
 - Awaiting sessions hold no seat, and the descriptor check must count them fairly. The first baseline was taken before the
   scenario's own two surviving sessions opened, so those two sockets were read as a leak (measured 3 before, 5 after). The
   baseline now includes them, and the check allows one IPv4 and five KQUEUE entries of slack.
 
 No product defect in this group is proven. Two measurements stayed unexplained, and both are on
 [Issue #116](https://github.com/OpenMux/openmux-server/issues/116): the batch loss above, and a `dropped_chunks` count that
-moves on a busy Port whose only reader received every line.
+moves on a busy Port whose only reader received every line. The third open question, answered as far as this machine lets
+it and kept open for the two shapes above, is [issue #106](https://github.com/OpenMux/openmux-server/issues/106).
 
 ---
 
@@ -989,7 +1001,7 @@ with two live nodes, is the one left.
    `SerialStation`, so the tier reads the bytes the device reads, reads the termios the server applied, and pulls the
    cable in the middle of a session. It found one product defect, and that defect is fixed: `flow_control` never
    reached the opened device.
-5. Soak: many viewers, simultaneous requests, socket churn: **built** as `SOK-01` to `SOK-06` in `tests/e2e/test_soak.py`. The
+5. Soak: many viewers, simultaneous requests, socket churn: **built** as `SOK-01` to `SOK-07` in `tests/e2e/test_soak.py`. The
    viewers are real sessions on the Telnet listener and the client listener, because a mock holds no socket and reads no
    stream. A churn scenario counts what the server process still holds with `lsof -n -P`, so the tier gains no dependency.
    Two facts the tier had to learn now stand where they bite: a Loopback Port limits only the Write seat, so a viewer that
@@ -997,7 +1009,12 @@ with two live nodes, is the one left.
    after it attaches, so a scenario waits for a marker it sent after the attach, never for one the Port wrote before. A
    third fact is an open question rather than a lesson: an un-paced bulk write lost the same markers for every reader in
    one run and not in another, so each scenario confirms its writes against the Port echo and
-   [issue #116](https://github.com/OpenMux/openmux-server/issues/116) carries the rest.
+   [issue #116](https://github.com/OpenMux/openmux-server/issues/116) carries the rest. `SOK-07` adds the console that keeps
+   its socket and reads nothing: one run measured a viewer-set notice reaching a healthy console in 0.110 s while 15.6 MB
+   piled up behind the stalled one, and [issue #106](https://github.com/OpenMux/openmux-server/issues/106) keeps the two
+   shapes a machine like this cannot produce — a peer that closes its socket mid-burst, and a device that reads slowly on
+   purpose. A console that disappears mid-write, without holding a socket open, is still untested on purpose: the server
+   fails silently there, so nothing can observe it.
 
 ---
 
@@ -1034,7 +1051,7 @@ with two live nodes, is the one left.
 | 10 — SSH listener | Done | Ten scenarios (`SSH-01` to `SSH-10`) in `tests/e2e/test_ssh_listener.py`, each dialing a running server with `asyncssh`: the host key generated in the state dir and reused across a restart, the account behind a password, the `ssh` use of a registered key, the listener that offers the Port menu without a login, the `acl` fence beside a listener without one, the command request that never reaches a Port, one Takeover taken from an SSH holder, the Control menu's `p` key over SSH, a username that carries a Port name, and a Port that excludes the account. Two product defects came out of this group: issue #110 from `SSH-04`, and issue #115 from the restart in `SSH-01`, where a listener refused a bind is left stopped while the server goes on answering `/healthz` with 200. The harness gained the SSH half of itself: `with_ssh_listener`, `with_public_key`, `ssh_ed25519_keypair`, `E2EServer.restart` (which waits for the ports to be bindable again), the `ssh` knobs on `servers()`, and `clients.ssh()` over the new `SshSession`. See the SSH section above. |
 | 11 — Command-driver PDU | Done | Six scenarios (`CMD-01` to `CMD-06`) in `tests/e2e/test_power_command.py`, each driving the checked-in outlet box `tests/e2e/power_fixtures/outlet_box.py` through `driver: command`, so a real process answers every read and switch: the positions and missing wattages a real device reports, one CLI switch proven by the outlet id the box recorded, a position changed on the device found by the next poll, a refused switch quoting exit 3 and the box's own words on the CLI, in the log, and in a REST 409 that keeps its impact, a command past its timeout answered on two surfaces with the helper it started stopped, and a device that stops answering kept silent and stale while a switch still reaches it. No product defect came out of this group. The two surprises were documented behaviour, and each is now asserted where it applies: a switch that changes nothing sends no notice, and a device-wide read failure is silent by the contract in `power_drivers/readbackoff.py`. The harness gained `ConfigBuilder.with_command_pdu` plus `E2EServer.power_box`, `power_box_journal`, `power_box_child`, `power_box_flip`, `power_box_fault`, and `wait_until`; the builder owns the device's state path, so no scenario rebuilds it. See the CMD section above. |
 | 12 — Serial device | Done | Six scenarios (`SER-01` to `SER-06`) in `tests/e2e/test_serial_device.py`, each wiring a Serial Port to a `socat` pty pair whose far end `SerialStation` holds, so the tier reads what the device reads: the characters an operator typed arriving unchanged with nothing echoed back, the configured speed, parity and stop bits on the device's own termios, a device no host has stating its reason in `/api/ports` and the log while a console attached to that Port is told where its typing went, a cable pulled mid-session reported on the console, in `status_message` and in the log and healed by the Port's own five-second retry, one block of every byte value crossing whole in both directions, and the handshake a config asks for present on the line. One product defect came out of this group and is fixed on its own: `flow_control` was left out of the call that opened the device, so `rtscts` and `xonxoff` started no handshake at all. `tests/server/test_serial_flow_control.py` binds the mapping and `SER-06` proves the termios. The harness gained `SerialStation` (`send`, `received`, `line_settings`, `unplug`, `plug_back_in`), `devices.serial(...)`, the `stopbits` and `flow_control` knobs on `with_serial_port`, and `CliSession.byte_offset` with `reply_bytes_after` for a byte-exact read of a binary payload. See the SER section above. |
-| 13 — Soak | Done | Six scenarios (`SOK-01` to `SOK-06`) in `tests/e2e/test_soak.py`, each with real sessions on one Port: twelve Telnet viewers over one two-hundred-line stream, one viewer that stops reading while twelve hundred padded lines follow, two hundred unanswered requests from sixteen threads beside twenty signed ones and a live poller, twenty idle logins plus twelve abandoned sockets, nine sessions that close cleanly or reset mid-stream or never speak, and a 0.2 s heartbeat that outlives viewers arriving on Telnet and on the console websocket. `lsof -n -P` gives the descriptor counts, so the tier adds no dependency. Two measurements stayed unexplained and are on issue #116. The harness gained `clients.silent(...)`, `clients.websocket(...)`, `SilentSocket`, `WebSocketViewer` (`read_frame`, `wait_for_text`, `ping`, `wait_for_pong`, `abort`), and `E2EServer.descriptor_kinds()`. See the SOK section above. |
+| 13 — Soak | Done | Seven scenarios (`SOK-01` to `SOK-07`) in `tests/e2e/test_soak.py`, each with real sessions on one Port: twelve Telnet viewers over one two-hundred-line stream, one viewer that stops reading while twelve hundred padded lines follow, two hundred unanswered requests from sixteen threads beside twenty signed ones and a live poller, twenty idle logins plus twelve abandoned sockets, nine sessions that close cleanly or reset mid-stream or never speak, and a 0.2 s heartbeat that outlives viewers arriving on Telnet and on the console websocket. `lsof -n -P` gives the descriptor counts and `netstat -an -p tcp` the bytes the kernel holds for one stalled console, so the tier adds no dependency. Two measurements stayed unexplained and are on issue #116. The harness gained `clients.silent(...)`, `clients.websocket(...)`, `SilentSocket`, `WebSocketViewer` (`read_frame`, `wait_for_text`, `ping`, `wait_for_pong`, `abort`), and `E2EServer.descriptor_kinds()`. See the SOK section above. |
 
 - `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
   `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`
