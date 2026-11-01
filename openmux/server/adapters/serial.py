@@ -503,6 +503,24 @@ class SerialPortWrapper:
             self.logger.debug("Serial device %s still not found", self.device)
         self._set_status_message(f"Serial device {self.device} not found", connected=False)
 
+    def _flow_control_kwargs(self) -> Dict[str, bool]:
+        """Translate ``flow_control`` into the keyword arguments pyserial applies to the device.
+
+        Only the two modes with a kernel termios flag are applied. ``rtscts`` sets CRTSCTS, which hands
+        the RTS pin to the kernel handshake (the Config Manager rejects that mode together with a
+        managed ``rts`` value for exactly that reason); ``xonxoff`` sets IXON and IXOFF for the in-band
+        handshake.
+
+        ``dsrdtr`` is deliberately not passed through. On POSIX pyserial sets no flow flag for it: its
+        only effect is to skip raising DTR when the port opens, and the ``dtr`` line policy owns that
+        pin here. Passing it would silently drop DTR on a line whose owner is a config key.
+
+        Returns:
+            Dict[str, bool]: The ``rtscts`` and ``xonxoff`` flags for the mode in effect.
+        """
+        mode = str(self.flow_control or "none").strip().lower()
+        return {"rtscts": mode == "rtscts", "xonxoff": mode == "xonxoff"}
+
     async def _connect(self) -> bool:
         """Establish a new connection to the configured device.
 
@@ -548,6 +566,7 @@ class SerialPortWrapper:
                 parity=self.parity,
                 stopbits=self.stopbits,
                 timeout=self.timeout,
+                **self._flow_control_kwargs(),
             )
 
             self.is_connected = True

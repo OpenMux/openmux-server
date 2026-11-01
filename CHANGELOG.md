@@ -24,6 +24,16 @@ Changes since v1.0.4 (2026-10-19).
   `ssh_listener` already used. To keep the old anonymous access (ACL and network trust only), add `require_auth: false`
   to that entry. Menu mode (`target: '*'`) with `require_auth: false` warns at startup, because every client inside the
   ACL can then browse and attach to any port (issue #100).
+- **`flow_control` on a Serial port now reaches the device.** An entry in `serial_ports` in `server.yaml` with
+  `flow_control: rtscts` or `flow_control: xonxoff` used to open the device with no flow-control flag at all: the port
+  stored the setting and listed it in `/api/ports`, then dropped it when it opened the device, so the handshake never
+  started. The port now sets the flag when it opens the device, which changes what those two settings do on the wire.
+  `rtscts` drives and reads the RTS and CTS pins, so a device that holds CTS low now stops the stream sent to it until it
+  releases the pin. `xonxoff` turns on the in-band handshake, so a Ctrl+S that reaches the device from a console now
+  pauses the character stream until a Ctrl+Q arrives. `flow_control: dsrdtr` stays accepted and still sets no flag: on
+  POSIX, pyserial uses that mode only to decide whether to raise DTR when the port opens, and OpenMux leaves DTR to the
+  `dtr` policy, so a port that names `dsrdtr` behaves as `none`. No config edit is needed; check the two modes above on a
+  device that cannot take a hardware or in-band handshake.
 
 ### Behavior changes (no config change required)
 - **One unusable port entry no longer costs every port of its section.** One entry in `serial_ports`,

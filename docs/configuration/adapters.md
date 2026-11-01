@@ -292,7 +292,8 @@ Supported options per port:
 - `parity`: N, E, O, M, S (default: N)
 - `stopbits`: 1, 1.5, 2 (default: 1)
 - `timeout`: Read timeout seconds (default: 1.0)
-- `flow_control`: Flow control mode: `none` (default), `rtscts`, `dsrdtr`, `xonxoff`
+- `flow_control`: Flow control mode applied to the device at open: `none` (default), `rtscts`, or `xonxoff`. `dsrdtr`
+  is accepted and changes nothing on the device (see Constraints below)
 - `dtr`: DTR signal-line policy (default: `none`, see Signal lines below)
 - `rts`: RTS signal-line policy (default: `none`, see Signal lines below)
 - `max_read_write_users`: Write-slot capacity — `one` (default), `multiple`, or `none` (see Port Access Control above); legacy
@@ -349,10 +350,16 @@ serial_ports:
 ```
 
 Constraints:
-- `flow_control: rtscts` hands the RTS pin to the kernel handshake (termios CRTSCTS). A configured `rts` value conflicts with
-  it, and the Config Manager rejects the combination at load, save, and reload. DTR is not affected by any flow-control mode.
-- `dsrdtr` and `xonxoff` do not own either pin: pyserial has no kernel flag for DSR/DTR flow control (DSR is polled by
-  applications), and XON/XOFF runs in-band. Either mode works with any `dtr` / `rts` policy.
+- The port applies `flow_control` to the device when it opens it, so the setting is visible on the line and not only in
+  `/api/ports`.
+- `flow_control: rtscts` sets the kernel hardware handshake (termios CRTSCTS) and hands the RTS pin to it. A configured
+  `rts` value conflicts with it, and the Config Manager rejects the combination at load, save, and reload. DTR is not
+  affected by any flow-control mode. With this mode a device that holds CTS low stops the data flowing to it.
+- `flow_control: xonxoff` sets the in-band handshake (termios IXON and IXOFF) and owns neither pin. Because IXON is
+  then on, a Ctrl+S that reaches the device from a console pauses its output until a Ctrl+Q arrives.
+- `flow_control: dsrdtr` sets no flag on the device and is accepted for compatibility. On POSIX, pyserial uses that
+  mode only to decide whether to raise DTR when the port opens, and this port leaves DTR to the `dtr` policy above, so
+  no second writer takes the pin. A port that names `dsrdtr` behaves as `none`: use `rtscts` for a hardware handshake.
 - Note: YAML 1.1 parses unquoted `on` / `off` as booleans. Quote policy strings in config files to be safe; the boolean result
   is the same `on` / `off` shorthand.
 
