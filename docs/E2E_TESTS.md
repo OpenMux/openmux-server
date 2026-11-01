@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-151 scenarios across 14 suites.
+155 scenarios across 15 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -98,6 +98,11 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | LIF-09 | The local control socket answers a status request, and only its owner may use it. | control socket | `tests/e2e/test_lifecycle.py::test_lif09_the_control_socket_answers_status_locally` |
 | LIF-10 | A client that leaves, by exit or by force, must not leave an ERROR or a traceback behind. | CLI, loopback port, server log | `tests/e2e/test_lifecycle.py::test_lif10_a_session_that_ends_is_closed_without_an_error_in_the_log` |
 | LIF-11 | Every line one write carries takes effect: the login, the Port choice, and the Port's own data. | Telnet, loopback port | `tests/e2e/test_lifecycle.py::test_lif11_input_that_arrives_with_the_login_still_reaches_the_port` |
+| **MXC** | | | |
+| MXC-01 | Two nodes finish the handshake, and the answering node names the peer in its status. | server:hub, server:leaf, api:status | `tests/e2e/test_muxcon.py::test_mxc01_two_nodes_link_and_report_each_other` |
+| MXC-02 | The leaf's Port appears on the hub under its own name, with the leaf's identity on it. | server:hub, cli:rw, cli:ro, server:leaf | `tests/e2e/test_muxcon.py::test_mxc02_a_peer_port_keeps_the_origin_identity_and_drives_for_an_entitled_console` |
+| MXC-03 | Two consoles on the hub, one Port on the leaf: only one of them drives, and the leaf decides. | cli:rw, cli:blocked, server:leaf | `tests/e2e/test_muxcon.py::test_mxc03_the_origin_holds_one_write_slot_for_every_node` |
+| MXC-04 | The refusal a federated console reads names the reason, and no line names a node or a client. | cli:holder, telnet:blocked, server:leaf | `tests/e2e/test_muxcon.py::test_mxc04_a_console_blocked_across_the_link_is_told_why_and_not_by_whom` |
 | **PWR** | | | |
 | PWR-01 | ``/api/power`` reports the configured PDU, and one switch moves only the fields it should. | http | `tests/e2e/test_power.py::test_pwr01_the_power_api_mirrors_the_pdu_and_moves_with_one_switch` |
 | PWR-02 | A console that declares a feed no PDU outlet provides is reported everywhere it appears. | http, web:rw | `tests/e2e/test_power.py::test_pwr02_a_feed_no_outlet_provides_is_named_by_the_api_the_page_and_the_badge` |

@@ -171,6 +171,7 @@ class ConfigBuilder:
         self._serial: List[Dict[str, Any]] = []
         self._telnet: List[Dict[str, Any]] = []
         self._ssh: List[Dict[str, Any]] = []
+        self._muxcon: Dict[str, Any] = {}
         self._pdus: List[Dict[str, Any]] = []
         # Where each ``driver: command`` PDU's fake device keeps its state, keyed by PDU name. The builder owns the
         # path, because it writes the commands that name it; ``E2EServer.power_boxes`` carries it to the scenario.
@@ -428,6 +429,63 @@ class ConfigBuilder:
         self._ssh.append(entry)
         return self
 
+    def with_muxcon(
+        self,
+        *,
+        listen_port: Optional[int] = None,
+        dial: Sequence[Tuple[str, int]] = (),
+        advertise: Sequence[str] = (),
+        accept: Sequence[str] = (),
+        auth_required: bool = False,
+        auth: Optional[Dict[str, Any]] = None,
+        public_keys: Optional[Sequence[Dict[str, str]]] = None,
+        use_tls: bool = False,
+        cache: bool = False,
+    ) -> "ConfigBuilder":
+        """Add the federation link, as the answering side, the dialling side, or both.
+
+        One ``muxcon`` section carries both roles in the product, so one method does too. Four defaults
+        differ from the adapter on purpose, because two nodes on one host must be deterministic:
+
+        * ``use_tls`` is false on both sides. A TLS link needs a certificate on the answering side and a
+          trust-on-first-use fingerprint on the other, and a fingerprint stored for a ``127.0.0.1`` port
+          outlives the server that produced it: the next test's node then fails the fingerprint check.
+        * ``auth_required`` is false, so the link carries no identity claim. The Ed25519 challenge is a
+          scenario of its own, and a link that only has to carry a Port needs no key.
+        * The filters are stated, never omitted. Both directions default to deny-all (issue #77), so a
+          list left out drops every Port, and the reason is logged at ``DEBUG``, which a test cannot read.
+        * ``federated_cache_enabled`` is false. That cache re-registers a peer's Ports as disconnected
+          after a restart, so a scenario that counts Ports would inherit state from an earlier one.
+
+        ``advertise`` holds the patterns for this node's own Ports the peer may see, and ``accept`` the
+        Port names this node takes from the peer; both match the Port name with ``fnmatch``. ``dial``
+        holds ``(host, port)`` pairs to dial. ``auth`` is the dialling node's own ``{private_key,
+        key_id}``, whose path the server resolves against its working directory, and ``public_keys`` the
+        keys the answering side accepts, each ``{key_id, public_key}`` in OpenSSH text form.
+        """
+        if listen_port is None and not dial:
+            raise ValueError("with_muxcon needs listen_port, a dial target, or both: an empty link proves nothing")
+        section: Dict[str, Any] = {
+            "auth_required": auth_required,
+            "federated_cache_enabled": cache,
+            "listeners": [],
+            "initiators": [],
+        }
+        if listen_port is not None:
+            section["listeners"].append({"enabled": True, "host": "127.0.0.1", "port": int(listen_port), "use_tls": use_tls})
+        for host, port in dial:
+            section["initiators"].append({"host": str(host), "port": int(port), "use_tls": use_tls})
+        if auth:
+            section["auth"] = dict(auth)
+        if public_keys:
+            section["public_keys"] = [dict(entry) for entry in public_keys]
+        if advertise:
+            section["advertise_filters"] = {"include": list(advertise)}
+        if accept:
+            section["accept_filters"] = {"include": list(accept)}
+        self._muxcon = section
+        return self
+
     # --- listeners and adapters ----------------------------------------------------------
 
     def with_client_listener(self, port: int) -> "ConfigBuilder":
@@ -663,6 +721,8 @@ class ConfigBuilder:
             config["telnet_listener"] = self._telnet
         if self._ssh:
             config["ssh_listener"] = self._ssh
+        if self._muxcon:
+            config["muxcon"] = self._muxcon
         if self._web:
             config["web_console"] = self._web
         if self._pdus:
@@ -756,6 +816,10 @@ class E2EServer:
         self.workdir = Path(workdir)
         self.config_dir = Path(config_dir)
         self.addresses = list(addresses)
+        # ``server.id``, set by the factory from its builder. Federation names a peer by this id (it is the
+        # identity in ``HELLO``, and the ``node:<id>`` key of a multipath group), so a two-node scenario
+        # asserts against it instead of re-deriving the factory's naming rule.
+        self.server_id: str = ""
         self.state_dir = self.workdir / "state"
         self.log_dir = self.workdir / "logs"
         # The run dir holds the pid file and the control socket, and a Unix socket path is capped

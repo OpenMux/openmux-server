@@ -253,6 +253,8 @@ class ServerRegistry:
         telnet_kwargs: Optional[Dict[str, Any]] = None,
         ssh: bool = False,
         ssh_kwargs: Optional[Dict[str, Any]] = None,
+        muxcon: bool = False,
+        muxcon_kwargs: Optional[Dict[str, Any]] = None,
         web: bool = True,
         timeline: Optional[Timeline] = None,
         timeout: float = 45.0,
@@ -275,14 +277,19 @@ class ServerRegistry:
                 scenario can sign in as a named user, or ``{"read_only": True}`` for a listener that
                 never grants a Write slot. The allocated port stays the factory's to choose.
             ssh: Bind an SSH listener (port menu, and auth required, which is that adapter's own default).
-            ssh_kwargs: Same shape as ``telnet_kwargs``, for example ``{"require_auth": False}`` for a
-                listener that accepts any client, or ``{"acl": ["192.0.2.0/24"]}``.
+            ssh_kwargs: Same shape as ``telnet_kwargs``, for example ``{"acl": ["192.0.2.0/24"]}``.
+            muxcon: Bind the federation listener, so this node answers a peer that dials it. The port is
+                allocated here and readiness waits for it, which is also what surfaces a listener that
+                failed to bind: the adapter only logs that failure, and the servers run with
+                ``fail_fast_adapters: false``.
+            muxcon_kwargs: Extra arguments for ``ConfigBuilder.with_muxcon`` besides the allocated
+                ``listen_port``, for example ``{"accept": ["loop1"]}`` on the node that takes a peer's Port.
             web: Bind the web console.
             timeline: Attach the timeline so server output lands on it.
             timeout: Seconds to wait for the server to be ready.
         """
-        want = {"cli": True, "web": web, "telnet": telnet, "ssh": ssh}
-        names = [key for key in ("web", "cli", "telnet", "ssh") if want.get(key)]
+        want = {"cli": True, "web": web, "telnet": telnet, "ssh": ssh, "muxcon": muxcon}
+        names = [key for key in ("web", "cli", "telnet", "ssh", "muxcon") if want.get(key)]
         allocated: Dict[str, int] = {key: int(value) for key, value in (ports or {}).items()}
         missing = [key for key in names if key not in allocated]
         for key, port in zip(missing, free_ports(len(missing))):
@@ -305,6 +312,8 @@ class ServerRegistry:
             builder.with_telnet_listener(int(allocated["telnet"]), **(telnet_kwargs or {}))
         if want["ssh"]:
             builder.with_ssh_listener(int(allocated["ssh"]), **(ssh_kwargs or {}))
+        if want["muxcon"]:
+            builder.with_muxcon(listen_port=int(allocated["muxcon"]), **(muxcon_kwargs or {}))
         if configure is not None:
             builder = configure(builder) or builder
         builder.with_log_dir(workdir / "logs")
@@ -313,6 +322,7 @@ class ServerRegistry:
             (config_dir / "server.yaml").write_text(raw_server_yaml, encoding="utf-8")
 
         server = E2EServer(workdir=workdir, config_dir=config_dir, addresses=addresses, name=name)
+        server.server_id = builder.server_id
         # The builder chose where each fake ``command`` device lives, so hand those paths to the scenario. A PDU the
         # driver refuses to build still has a path here: the device exists whether or not the server reached it.
         server.power_boxes.update(builder.power_boxes)

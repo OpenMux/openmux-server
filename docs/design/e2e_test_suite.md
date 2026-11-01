@@ -1,13 +1,10 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 9, `AUTH-11`, the SSH listener, the command-driver PDU, the serial device tier, and the
-soak tier: 150 scenarios in fourteen suites, listed in [`docs/E2E_TESTS.md`](../E2E_TESTS.md). The harness, the eleven `LIF`
-lifecycle scenarios, the three `IDX` self-check scenarios, the browser proof, the eleven `AUTH` scenarios driven over HTTP, the
-fourteen `CON` console scenarios driven in Chromium, the twenty `RW` write-slot scenarios, the nineteen `PWR` power scenarios,
-the six `CMD` command-driver scenarios, the six `SER` serial-device scenarios, the twenty `CFG` Config Editor scenarios, the
-eleven `ACT` Port Action scenarios, the six `TIM` story scenarios, the six `ST` status page scenarios, the six `SOK`
-soak scenarios, and the ten `SSH` listener scenarios run green. See **Build status** near the end.
-**Date:** 2026-10-31
+**Status:** Implemented through Phase 9, and through Release 2 except federation TLS, key-based peer authentication, the
+` CONNECT:<node>::<port> ` menu syntax, the relay path across a link, and the Config Editor's `muxcon` writes: 155 scenarios in
+fifteen suites run green. [`docs/E2E_TESTS.md`](../E2E_TESTS.md) lists them and is the only place a group's count is written
+down, because restating those numbers here let two of them go stale. See **Build status** near the end.
+**Date:** 2026-11-01
 **Scope:** A test tier that runs the real server as a process and drives it through a browser, the CLI protocol,
 Telnet, and SSH at the same time.
 
@@ -289,9 +286,8 @@ Write down what the scenario claims, then give each part the strongest proof tha
    selected menu-item elements only, so the read was wrong and the page was right. A scenario that asserted on the read
    alone would have reported a product defect that never existed.
 4. **Anything the suite cannot prove**: an honest skip or a named outstanding id. A skip names what it proves and what
-   it does not. Release 1 has no outstanding id left. What stays planned in Release 2 stays planned because the builder
-   has no knob for it: `ConfigBuilder` writes no muxcon section, which is why `ST-04` proves only the federation empty
-   state.
+   it does not. Release 1 has no outstanding id left. `ConfigBuilder.with_muxcon` now writes a `muxcon:` section, so a
+   scenario can link two real nodes; the federation surfaces still unproven are named in **Release 2** item 2.
 
 Three traps in this tier cost a debugging session each, so they are rules now.
 
@@ -322,11 +318,12 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 151 scenarios in 14 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 21, `PWR` 19, `CMD` 6,
-`SER` 6, `CFG` 20, `ACT` 11, `ST` 6, `SSH` 10, `SOK` 7, the index checks 3, and the story recorder 6. The generated
+The suite today runs 155 scenarios in 15 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 21, `PWR` 19, `CMD` 6,
+`SER` 6, `CFG` 20, `ACT` 11, `ST` 6, `SSH` 10, `SOK` 7, `MXC` 4, the index checks 3, and the story recorder 6. The generated
 [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what runs, and its count is checked by `IDX-02`. Every group below now
 maps to a file that runs. What is still unwritten sits in the **Release 2** list further down, where item 2, MuxCon with
-two live nodes, is the one left. Full wording for every built id lives in that index.
+two live nodes, now has its base suite (`MXC`) and names the surfaces that stay unproven. Full wording for every built id
+lives in that index.
 
 ### LIFECYCLE — process and listeners (`tests/e2e/test_lifecycle.py`, 11)
 
@@ -742,8 +739,8 @@ together. Where two pages watch one change, both are read, and what belongs to o
 | `ST-05` | Both pages start with a green **Live-data badge** carrying its exact sentence. The fed port's **Power dot** reads healthy and its tooltip names the feed; the unfed port shows `—`. One outlet switched through REST tints that dot on both pages to `0/1 - ALL POWER LOST` while both sockets stay live, and switching back restores it. |
 | `ST-06` | The endpoint answers with exactly the four regions under one `fragments` key. No fragment carries its own container id, and the `ports` fragment carries no sort header. The sort query is honoured in both directions. A signed-in cookie answers for the fetch the page itself makes, while an anonymous caller gets `401` with a challenge and no port name. After a swap the open page shows the rows and the clients the endpoint serves for the same query. |
 
-Three boundaries keep this group from wider claims. `ConfigBuilder` has no muxcon knob, so federation is proven only as
-the empty state, which is a builder gap rather than a product answer. `ConsoleSession.set_offline()` blocks
+Three boundaries keep this group from wider claims. Federation proves itself here only as the empty state, because this
+suite runs one node; the two-node behaviour lives in the `MXC` suite. `ConsoleSession.set_offline()` blocks
 fetches but leaves an open WebSocket running, so the stale red badge is out of reach for a page scenario and stays with
 `tests/test_web_console_live_badge.py`; `ST-05` proves the green half instead, and a full reload cannot catch the red
 either because the one-second debounce races the first reconnect. And `AUTH-01` owns the anonymous refusal of
@@ -988,18 +985,39 @@ No product defect in this group is proven. Two measurements stayed unexplained, 
 moves on a busy Port whose only reader received every line. The third open question, answered as far as this machine lets
 it and kept open for the two shapes above, is [issue #106](https://github.com/OpenMux/openmux-server/issues/106).
 
+### MXC — two linked nodes (`test_muxcon.py`, built: 4)
+
+The only suite in the tier that starts two servers. One answers on a federation port the harness allocated and owns no Port;
+the other owns `loop1` and dials it. Both state their filters, because both directions of a MuxCon link default to deny-all
+(issue #77) and a Port a filter drops is reported only at `DEBUG`. The link runs in plaintext, which each side declares in its
+config; TLS, the key-authenticated handshake, and the relayed Power path stay in Release 2 item 2.
+
+`MXC-02` is the first scenario in the tier to read a peer Port from `api/ports`, and it found a defect on the way: the
+composite id of a federated Port carried this node's id rather than its origin's, because the id was computed before the
+origin was filled in. No node resolves such an id, and the interactive menu already printed the other label.
+
+| Id | What one scenario proves |
+| --- | --- |
+| `MXC-01` | Two nodes complete a handshake and each names the other in its own status API, on the federation and multipath pages. |
+| `MXC-02` | A peer Port keeps its origin's name and identity, drives for a console the origin entitles, and stays a view for one it does not. |
+| `MXC-03` | Every console on every node shares the ONE Write slot the origin arbitrates, and the next in line gets it when the holder leaves. |
+| `MXC-04` | A console refused across the link is told the reason in words on a listener surface, on a line that names no node and no holder. |
+
 ---
 
 ## Release 2
 
-Named now so release 1 fixtures stay sufficient. Four of these five are built, with their ids in the entry. Item 2, MuxCon
-with two live nodes, is the one left.
+Named now so release 1 fixtures stay sufficient. All five have a suite. Item 2 is built as far as one link and one Port
+carry, and its remaining surfaces are named in its entry.
 
 1. SSH listener: **built** as `SSH-01` to `SSH-10`, ahead of the rest of this list. The host key inside
    `OPENMUX_STATE_DIR`, one Takeover, and one `p` menu run are each proven there, beside the login forms, the `acl`
    fence, and the command request. The control menu is shared with Telnet and already covered by `RW-10`.
-2. MuxCon with two live nodes: first attach read-only, `FEDRW` Takeover, `CONNECT:{server}::{port}`,
-   `POWER:SWITCH` relay, federation area, multipath panel. See [muxcon.md](muxcon.md) §4.5 and 4.6.
+2. MuxCon with two live nodes: **built as far as one link and one Port carry** as `MXC-01` to `MXC-04` — the link and what
+   each side reports about it, the origin's identity on a peer Port, the ONE Write slot the origin arbitrates for every node,
+   and the refusal a blocked console reads. Still unproven there: TLS and trust-on-first-use (`MXC-01` runs the plaintext link
+   both ends declare), the `PKID` key-authenticated handshake, `CONNECT:{server}::{port}` from the menu, the `POWER:SWITCH`
+   relay, and the Config Editor's `muxcon` writes. See [muxcon.md](muxcon.md) §4.5 and 4.6.
 3. Power `driver: command` driven by a checked-in fake device script: **built** as `CMD-01` to `CMD-06`. The device is
    `tests/e2e/power_fixtures/outlet_box.py`, which keeps its outlet positions in a file, so the tier proves the argv the
    driver builds and the exit code a user reads. The monkeypatched unit tests keep covering the parse and quoting rules.
@@ -1058,6 +1076,7 @@ with two live nodes, is the one left.
 | 11 — Command-driver PDU | Done | Six scenarios (`CMD-01` to `CMD-06`) in `tests/e2e/test_power_command.py`, each driving the checked-in outlet box `tests/e2e/power_fixtures/outlet_box.py` through `driver: command`, so a real process answers every read and switch: the positions and missing wattages a real device reports, one CLI switch proven by the outlet id the box recorded, a position changed on the device found by the next poll, a refused switch quoting exit 3 and the box's own words on the CLI, in the log, and in a REST 409 that keeps its impact, a command past its timeout answered on two surfaces with the helper it started stopped, and a device that stops answering kept silent and stale while a switch still reaches it. No product defect came out of this group. The two surprises were documented behaviour, and each is now asserted where it applies: a switch that changes nothing sends no notice, and a device-wide read failure is silent by the contract in `power_drivers/readbackoff.py`. The harness gained `ConfigBuilder.with_command_pdu` plus `E2EServer.power_box`, `power_box_journal`, `power_box_child`, `power_box_flip`, `power_box_fault`, and `wait_until`; the builder owns the device's state path, so no scenario rebuilds it. See the CMD section above. |
 | 12 — Serial device | Done | Six scenarios (`SER-01` to `SER-06`) in `tests/e2e/test_serial_device.py`, each wiring a Serial Port to a `socat` pty pair whose far end `SerialStation` holds, so the tier reads what the device reads: the characters an operator typed arriving unchanged with nothing echoed back, the configured speed, parity and stop bits on the device's own termios, a device no host has stating its reason in `/api/ports` and the log while a console attached to that Port is told where its typing went, a cable pulled mid-session reported on the console, in `status_message` and in the log and healed by the Port's own five-second retry, one block of every byte value crossing whole in both directions, and the handshake a config asks for present on the line. One product defect came out of this group and is fixed on its own: `flow_control` was left out of the call that opened the device, so `rtscts` and `xonxoff` started no handshake at all. `tests/server/test_serial_flow_control.py` binds the mapping and `SER-06` proves the termios. The harness gained `SerialStation` (`send`, `received`, `line_settings`, `unplug`, `plug_back_in`), `devices.serial(...)`, the `stopbits` and `flow_control` knobs on `with_serial_port`, and `CliSession.byte_offset` with `reply_bytes_after` for a byte-exact read of a binary payload. See the SER section above. |
 | 13 — Soak | Done | Seven scenarios (`SOK-01` to `SOK-07`) in `tests/e2e/test_soak.py`, each with real sessions on one Port: twelve Telnet viewers over one two-hundred-line stream, one viewer that stops reading while twelve hundred padded lines follow, two hundred unanswered requests from sixteen threads beside twenty signed ones and a live poller, twenty idle logins plus twelve abandoned sockets, nine sessions that close cleanly or reset mid-stream or never speak, and a 0.2 s heartbeat that outlives viewers arriving on Telnet and on the console websocket. `lsof -n -P` gives the descriptor counts and `netstat -an -p tcp` the bytes the kernel holds for one stalled console, so the tier adds no dependency. Two measurements stayed unexplained and are on issue #116. The harness gained `clients.silent(...)`, `clients.websocket(...)`, `SilentSocket`, `WebSocketViewer` (`read_frame`, `wait_for_text`, `ping`, `wait_for_pong`, `abort`), and `E2EServer.descriptor_kinds()`. See the SOK section above. |
+| 14 — MuxCon federation | Done (base) | Four scenarios (`MXC-01` to `MXC-04`) in `tests/e2e/test_muxcon.py`, each starting two `openmux.server.main` processes in one test: the handshake and what each node reports about the other, a peer Port carrying its origin's identity, the ONE Write slot the origin arbitrates for every console on every node, and the refusal a blocked console reads across the link. `ConfigBuilder.with_muxcon` writes the section (listener, initiator, filters, authentication), `servers()` gained the `muxcon` and `muxcon_kwargs` knobs, and `E2EServer.server_id` names a peer. It found one product defect: `api/ports` labelled a peer Port with this node's own id, because the composite id was computed before the origin was known. TLS, key-authenticated peering, `CONNECT:<server>::<port>`, and the Power relay across a link stay in Release 2 item 2. See the MXC section above. |
 
 - `IDX-03` closes a gap the phase-1 index checks left: a machine without Chromium reported
   `60 passed, 41 skipped, 3106 deselected in 143.92s`, and the skip reason stayed hidden because `make test-e2e`
