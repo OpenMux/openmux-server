@@ -17,7 +17,8 @@ Four measured facts shape these bodies, and each is stated where it is used:
 * The **origin** decides the mode, and it decides it from its own Port. Asked at attach, it hands the
   Write slot to the first write-entitled console across the link and refuses the next: a federated Port
   carries the ONE slot of the Port it stands for, shared by every console on every peer node. The asking
-  node decides nothing — it asks, and obeys the answer.
+  node decides nothing — it asks, and obeys the answer. A released slot goes to **nobody**: the origin
+  keeps no queue of waiting consoles, so the next holder is whoever asks next.
 * A console reads that answer differently per surface. The CLI protocol carries the mode and nothing else
   (`CONNECTED:loop1:READ_ONLY`), so an id is what these ids assert there; only a listener surface prints the
   sentence that names the reason, which is why `MXC-04` dials Telnet on the hub.
@@ -25,7 +26,6 @@ Four measured facts shape these bodies, and each is stated where it is used:
 
 from __future__ import annotations
 
-import time
 from typing import Any, List, Optional, Tuple
 
 import pytest
@@ -93,6 +93,21 @@ def _origin_gave_the_slot(leaf: Any, hub: Any) -> None:
     """
     leaf.wait_for_log("to port loop1 in read-only mode", timeout=20)
     leaf.wait_for_log(f"Promoted client fed:node:{hub.server_id}", timeout=20)
+
+
+def _holders(session: Any) -> List[str]:
+    """The holder labels the node OWNING the Port reports for it, asked over that console's own link.
+
+    A federated Port's Write slot lives on the origin, so this is the only holder list that counts for
+    it: it names a console that reached the Port from the other node exactly as it names a local one.
+    An empty list means the slot is free — the product keeps no queue of waiting consoles.
+    """
+    return [str(label) for label in (session.query_holders().get("holders") or [])]
+
+
+def _promotions(leaf: Any) -> int:
+    """How many times the origin has handed the Write slot of ``loop1`` to anyone, ever."""
+    return len([line for line in leaf.log_lines() if " to read-write mode on port loop1" in line])
 
 
 def _ports(api: Any) -> List[dict]:
@@ -173,35 +188,49 @@ def test_mxc02_a_peer_port_keeps_the_origin_identity_and_drives_for_an_entitled_
         assert len(promoted) == 1, f"the viewer was promoted too: {promoted}"
 
 
-@surfaces("cli:rw", "cli:blocked", "server:leaf")
-def test_mxc03_the_origin_holds_one_write_slot_for_every_node(servers, clients, story) -> None:
-    """Two consoles on the hub, one Port on the leaf: only one of them drives, and the leaf decides."""
+@surfaces("cli:rw", "cli:blocked", "cli:local", "server:leaf")
+def test_mxc03_a_released_write_slot_belongs_to_nobody_until_a_console_asks(servers, clients, story) -> None:
+    """Two consoles on the hub, one Port on the leaf: one drives, and a freed slot waits for a request.
+
+    The slot the origin hands out is the slot of its own Port, so a console on the owner node competes
+    for it with a console across the link, and the owner's holders list is where both are visible.
+    Nothing hands a freed slot to the next viewer: the origin keeps no queue — only `REQUEST` promotes,
+    from a peer or from a local console alike — so after the holder leaves the owner reports no holder
+    at all, the viewer stays a viewer, and the slot goes to whoever asks.
+    """
     hub, leaf = _linked_pair(servers)
     hub.wait_for_log(f"{PORT_REGISTERED} loop1", timeout=30)
 
-    with step("the first console across the link gets the Write slot of the leaf's Port"):
+    with step("the first console across the link holds the Write slot of the leaf's Port"):
         first = clients.cli(user="rw", surface="cli:rw", attach_to="loop1", server=hub)
         assert "CONNECTED:loop1:READ_WRITE" in first.wire_text(), first.wire_text()[-400:]
         _origin_gave_the_slot(leaf, hub)
 
-    with step("the second gets the same Port as a viewer, with the slot as the reason"):
+    with step("the owner node counts that peer console as its only holder"):
+        owner = clients.cli(user="ro", surface="cli:local", attach_to="loop1", server=leaf)
+        assert len(_holders(owner)) == 1, f"the owner does not see the peer's holder: {_holders(owner)}"
+
+    with step("the second console across the link gets the same Port as a viewer"):
         second = clients.cli(user="rw", surface="cli:blocked", attach_to="loop1", server=hub)
         assert "CONNECTED:loop1:READ_ONLY" in second.wire_text(), second.wire_text()[-400:]
-        assert second.mode() == "read-only", second.wire_text()[-400:]
+        assert len(_holders(owner)) == 1, "the viewer was let drive as well"
 
-    with step("when the first console leaves, the origin gives the slot to the one still waiting"):
+    with step("when the holder leaves, the slot belongs to nobody — it is not handed to the viewer"):
         first.close()
-        # The origin frees the slot when the stream closes, which travels the link after this
-        # call returns. The retries wait for that close to arrive; the count is capped, so a
-        # slot that never frees stays a failure.
-        reply = {}
-        for _ in range(10):
-            reply = second.request_read_write()
-            if reply.get("ok") is True:
-                break
-            time.sleep(0.5)
-        assert reply.get("ok") is True, f"the slot stayed held after its holder left: {reply!r}"
+        # `CLOSE stream` is the origin learning that the peer's stream ended. The poll then waits for
+        # that close to free the slot, so the checks below say "nobody holds it" rather than "the close
+        # has not arrived yet".
+        leaf.wait_for_log("CLOSE stream 1", timeout=20)
+        leaf.wait_until(lambda: not _holders(owner), timeout=15, what="the released slot to belong to nobody")
+        assert second.mode() == "read-only", "the link drove the console that only ever watched"
+        assert _promotions(leaf) == 1, "a released slot promoted a console that never asked"
+
+    with step("and it goes to the console that asks, the same way it went to the first"):
+        reply = second.request_read_write()
+        assert reply.get("ok") is True, f"a free slot was refused to an entitled console: {reply!r}"
         assert second.mode() == "read-write", second.wire_text()[-400:]
+        assert _promotions(leaf) == 2, [line for line in leaf.log_lines() if " to read-write mode on port loop1" in line]
+        assert len(_holders(owner)) == 1, f"the owner does not count the new holder: {_holders(owner)}"
 
 
 @surfaces("cli:holder", "telnet:blocked", "server:leaf")

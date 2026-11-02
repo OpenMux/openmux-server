@@ -101,7 +101,7 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | **MXC** | | | |
 | MXC-01 | Two nodes finish the handshake, and the answering node names the peer in its status. | server:hub, server:leaf, api:status | `tests/e2e/test_muxcon.py::test_mxc01_two_nodes_link_and_report_each_other` |
 | MXC-02 | The leaf's Port appears on the hub under its own name, with the leaf's identity on it. | server:hub, cli:rw, cli:ro, server:leaf | `tests/e2e/test_muxcon.py::test_mxc02_a_peer_port_keeps_the_origin_identity_and_drives_for_an_entitled_console` |
-| MXC-03 | Two consoles on the hub, one Port on the leaf: only one of them drives, and the leaf decides. | cli:rw, cli:blocked, server:leaf | `tests/e2e/test_muxcon.py::test_mxc03_the_origin_holds_one_write_slot_for_every_node` |
+| MXC-03 | Two consoles on the hub, one Port on the leaf: one drives, and a freed slot waits for a request. | cli:rw, cli:blocked, cli:local, server:leaf | `tests/e2e/test_muxcon.py::test_mxc03_a_released_write_slot_belongs_to_nobody_until_a_console_asks` |
 | MXC-04 | The refusal a federated console reads names the reason, and no line names a node or a client. | cli:holder, telnet:blocked, server:leaf | `tests/e2e/test_muxcon.py::test_mxc04_a_console_blocked_across_the_link_is_told_why_and_not_by_whom` |
 | **PWR** | | | |
 | PWR-01 | ``/api/power`` reports the configured PDU, and one switch moves only the fields it should. | http | `tests/e2e/test_power.py::test_pwr01_the_power_api_mirrors_the_pdu_and_moves_with_one_switch` |

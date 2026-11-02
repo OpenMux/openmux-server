@@ -438,6 +438,40 @@ async def test_add_client_to_port_dedupes_by_client_id():
     assert sum(1 for c in port.connected_clients if c.get("client_id") == "ro1") == 1
 
 
+@pytest.mark.asyncio
+async def test_releasing_a_write_slot_promotes_nobody():
+    # A freed Write slot is free, not reassigned. The manager keeps no list of waiting clients, so the
+    # next writer is whoever asks — never the viewer that happened to be attached (measured across a
+    # federation link in MXC-03, guarded here at the module that owns the slot).
+    class Port:
+        def __init__(self):
+            self.connected_clients: List[Dict[str, Any]] = []
+            self.client_queues: Dict[str, Any] = {}
+            self.max_read_write_users = 1
+
+    def modes(port):
+        return {str(c.get("client_id")): str(c.get("mode")) for c in port.connected_clients}
+
+    pm = PortManager([])
+    pm.ports["pr"] = Port()
+    port = pm.ports["pr"]
+    assert await pm.add_client_to_port("pr", "rw1", "u1", "read-write") is True
+    assert await pm.add_client_to_port("pr", "ro1", "u2", "read-only") is True
+    assert await pm.add_client_to_port("pr", "rw2", "u3", "read-write") is False
+
+    assert await pm.demote_client("pr", "rw1") is True
+    assert modes(port) == {"rw1": "read-only", "ro1": "read-only"}
+    # The viewer stayed a viewer, so the slot went to nobody — and it is genuinely free for the next ask.
+    assert await pm.add_client_to_port("pr", "rw3", "u4", "read-write") is True
+    assert modes(port)["ro1"] == "read-only"
+
+    # Leaving frees the slot the same way: the remaining viewer is not driven by someone else leaving,
+    # and a demoted holder stays attached as a viewer — demote is not a disconnect.
+    assert await pm.remove_client_from_port("pr", "rw3") is True
+    assert modes(port) == {"rw1": "read-only", "ro1": "read-only"}
+    assert "rw3" not in modes(port)
+
+
 def test_wrapper_connected_reads_live_state():
     # Regression: a unified port without an ``is_connected`` attribute (e.g.
     # an on-demand command port registered before its first spawn) must
