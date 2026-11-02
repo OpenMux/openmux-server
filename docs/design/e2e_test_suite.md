@@ -9,6 +9,7 @@ Telnet, and SSH at the same time.
 
 Related: [ADR-0001 Access wording belongs to the server](../adr/0001-access-wording-belongs-to-the-server.md),
 [ADR-0002 Listener session module sits above a byte transport seam](../adr/0002-listener-session-module-sits-above-a-byte-transport-seam.md),
+[ADR-0003 Certificate label carries an id digest](../adr/0003-autogen-certificate-label-ends-with-a-digest-of-the-id.md),
 [Port Actions](port_actions.md), [MuxCon](muxcon.md), [Telnet listener](telnet_listener.md),
 [SSH listener](ssh_listener.md), [tests/README.md](../../tests/README.md).
 
@@ -1017,7 +1018,8 @@ composite id of a federated Port carried this node's id rather than its origin's
 origin was filled in. No node resolves such an id, and the interactive menu already printed the other label.
 `MXC-05` found the second: the autogen certificate puts `server.id` in its X.509 CommonName, which RFC 5280 caps at 64
 characters, so a node with a longer id logged `TLS autogen failed`, refused to start a plaintext listener, and simply had no
-federation listener at all. The CommonName now ends at that ceiling.
+federation listener at all. The CommonName now ends at that ceiling, and a shortened one ends with a digest of the whole id so
+two nodes sharing a long prefix are not labelled alike (issue #118).
 
 | Id | What one scenario proves |
 | --- | --- |

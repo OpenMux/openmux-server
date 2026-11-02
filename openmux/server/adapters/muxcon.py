@@ -2925,8 +2925,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         key = ec.generate_private_key(ec.SECP256R1(), backend=default_backend())
         subject = issuer = x509.Name(
             [
-                # Use server_id as the certificate CN to align identity semantics, capped at the
-                # X.509 CommonName ceiling so a long server.id still gets a listener (issue #118).
+                # Use server_id as the certificate CN to align identity semantics, shortened past the
+                # X.509 CommonName ceiling so a long server.id still gets a listener (issue #118,
+                # ADR-0003).
                 x509.NameAttribute(NameOID.COMMON_NAME, certificate_cn(self.server_id, socket.gethostname())),
                 x509.NameAttribute(NameOID.ORGANIZATION_NAME, "OpenMux"),
             ]

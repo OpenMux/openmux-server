@@ -64,7 +64,8 @@ testing; not recommended over an untrusted network).
 
 TLS is independent of this handshake: `use_tls: true` (the default for listeners) wraps the TCP connection before HELLO.
 `tls_autogen: true` generates a self-signed cert/key under `<state dir>/muxcon/` on first start; the cert CN is the node's
-`server.id` and it has no SAN. TLS failure is fail-closed on both sides: a listener that cannot build its TLS context refuses
+`server.id`, shortened to a head plus a digest of the whole id when the id passes the X.509 64-character ceiling (ADR-0003),
+and it has no SAN. TLS failure is fail-closed on both sides: a listener that cannot build its TLS context refuses
 to start a plaintext listener, and an initiator that cannot build its TLS context retries after backoff instead of dialing in
 plaintext. `tls_tofu: true` on an initiator (Trust-On-First-Use) pins the listener's certificate fingerprint into `<state
 dir>/muxcon/known_peers.yaml` on first connect and rejects a different certificate later; `tls_pin_fingerprint` pins an exact
@@ -518,6 +519,8 @@ Documented here so nobody re-discovers these by reading 5000 lines of `muxcon.py
 - [configuration/adapters.md](../configuration/adapters.md#muxcon-federation-muxcon) — full config option reference with
 defaults.
 - [DEFAULTS.md](../DEFAULTS.md) — every muxcon runtime default in one place.
+- [ADR-0003 Certificate label carries an id digest](../adr/0003-autogen-certificate-label-ends-with-a-digest-of-the-id.md)
+  — why the certificate CN is display text and how a long `server.id` is shortened.
 - [QUICKSTART.md](../QUICKSTART.md) — step-by-step two-node setup walkthrough.
 - [config/loopback_test.yaml](../../config/loopback_test.yaml) and
   [config/remote_leaf_server.yaml](../../config/remote_leaf_server.yaml) — a

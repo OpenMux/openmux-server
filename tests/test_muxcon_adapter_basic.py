@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openmux.common.identity import CERT_CN_MAX_LEN
 from openmux.server.adapters.muxcon import FederationPeer, UnifiedMuxConAdapter
 
 LOG = "openmux.adapter.muxcon.mx"
@@ -89,7 +90,14 @@ async def test_autogen_cert_shortens_a_server_id_past_the_common_name_ceiling(tm
 
     cert = x509.load_pem_x509_certificate(open(cert_path, "rb").read())
     names = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
-    assert [str(a.value) for a in names] == [long_id[:64]]
+    cn = [str(a.value) for a in names]
+    # The certificate builds, so the listener starts. The label is still this node's own: it fits the
+    # ceiling and it is not the bare 64-character prefix, which another node with the same prefix
+    # would also claim (issue #118).
+    assert len(cn) == 1
+    assert len(cn[0]) <= CERT_CN_MAX_LEN
+    assert cn[0].startswith(long_id[:20])
+    assert cn[0] != long_id[:CERT_CN_MAX_LEN]
 
 
 # --- Default-deny federation filter warning (ticket #77) ---

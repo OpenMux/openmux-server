@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from ..common.fsutil import ensure_directory
+from ..common.identity import warn_long_server_id
 from .auth_manager import AuthManager
 from .config_gaps import ConfigGap, log_gap_warning, unique_gaps, violations_from_summary
 from .config_manager import ConfigManager
@@ -224,6 +225,11 @@ class OpenMuxServer:
 
     def _reload_config_from_disk(self) -> Dict[str, Any]:
         cfg = self.config_manager.load_config()
+        # Report an identity that cannot fit a certificate CommonName on every load. The length is a
+        # property of server.id and not of a certificate, so a node with TLS off must hear it too;
+        # a load always follows a deliberate act (start, SIGHUP, SIGUSR1, or a Config Editor reload),
+        # so there is no automatic repetition to suppress (issue #118, ADR-0003).
+        warn_long_server_id(self.logger, cfg.get("server") if isinstance(cfg, dict) else None)
         self._refresh_security_policy()
         return cfg
 
