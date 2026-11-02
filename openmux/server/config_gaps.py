@@ -61,17 +61,22 @@ class ConfigGap:
 def _extract_adapter_gaps(section: str, result: Any, gaps: List[ConfigGap]) -> None:
     """Collect gaps from one adapter's reconcile result, as a soft reload stores it.
 
-    Soft reload stores the result a reconcile call returned, keyed by adapter kind. Full reload
-    reports what failed under ``"errors"`` of its own summary, which
+    Soft reload stores the result a reconcile call returned, keyed by adapter kind. The only keys a
+    reconcile WRITES for a refusal are ``failed``, ``failed_detail`` and ``kept_previous``
+    (``BaseGenericAdapter.reconcile_summary``); a report naming no port arrives under ``error``
+    (``OpenMuxServer._ras_apply_reconcile``). Nothing writes a per-adapter ``violations`` or
+    ``refused`` key — a schema line is reported once for the whole reload under
+    ``config_violations`` — so this reads those and no others, and a gap is never invented from a key
+    no producer writes.
+
+    Full reload reports what failed under ``"errors"`` of its own summary, which
     :func:`violations_from_summary` reads through :func:`_gap_from_reload_error`.
     """
     if not isinstance(result, dict):
         return
-    for violation in _as_list(result.get("violations")):
-        gaps.append(ConfigGap(section=section, error=_text(violation)))
     detail = result.get("failed_detail")
     detail = detail if isinstance(detail, dict) else {}
-    for port_name in _as_list(result.get("failed")) + _as_list(result.get("refused")):
+    for port_name in _as_list(result.get("failed")):
         name = _text(port_name)
         entry = detail.get(name)
         entry = entry if isinstance(entry, dict) else {}
@@ -129,7 +134,9 @@ def violations_from_summary(summary: Any) -> List[ConfigGap]:
     if not isinstance(summary, dict):
         return []
     gaps: List[ConfigGap] = []
-    for violation in _as_list(summary.get("config_violations")) + _as_list(summary.get("violations")):
+    # ``config_violations`` is the one key a reload writes its schema lines into
+    # (``OpenMuxServer.add_gap_keys_to_summary``).
+    for violation in _as_list(summary.get("config_violations")):
         gaps.append(ConfigGap(section="schema", error=_text(violation)))
     # A full reload summary records one entry per adapter or phase that failed.
     for problem in _as_list(summary.get("errors")):

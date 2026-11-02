@@ -124,12 +124,29 @@ def test_an_error_the_reporter_does_not_recognise_is_still_reported():
     ]
 
 
-def test_per_port_schema_lines_are_reported_as_gaps():
-    summary = {"adapters": {"serial": {"updated": [], "violations": ["baudrate: 99 is not one of [9600]"]}}}
+def test_a_key_no_reload_writes_is_not_read_as_a_gap():
+    """Issue #109: the reporter read ``violations`` and ``refused``, which no producer writes.
 
-    gaps = violations_from_summary(summary)
+    A schema line reaches the summary once, under ``config_violations``, and a refusal once, under
+    ``failed`` plus ``failed_detail``. Reading a per-adapter alias as well meant a gap could be
+    counted from a key nothing maintains, so the aliases now report nothing — and this pins that.
+    """
+    summary = {
+        "adapters": {"serial": {"updated": [], "violations": ["baudrate: 99 is not one of [9600]"], "refused": ["ser7"]}}
+    }
 
-    assert [(g.section, g.error) for g in gaps] == [("serial", "baudrate: 99 is not one of [9600]")]
+    assert violations_from_summary(summary) == []
+
+    # The same two faults, reported the way a reload reports them, are both gaps.
+    reported = {
+        "config_violations": ["serial_ports.ser9.baudrate: 99 is not one of [9600, 19200]"],
+        "adapters": {"serial": {"failed": ["ser7"], "failed_detail": {"ser7": {"error": "Device not specified"}}}},
+    }
+
+    assert [(g.section, g.port, g.error) for g in violations_from_summary(reported)] == [
+        ("schema", None, "serial_ports.ser9.baudrate: 99 is not one of [9600, 19200]"),
+        ("serial", "ser7", "Device not specified"),
+    ]
 
 
 def test_a_summary_that_names_no_adapter_yields_only_the_schema_gaps():
