@@ -1,4 +1,4 @@
-"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-04).
+"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-06).
 
 Federation was proven only as an empty state before these ids: `ST-04` shows the status page saying
 `No federation connections`, and the unit suites drive `UnifiedMuxConAdapter` with fakes. No test started a
@@ -6,7 +6,7 @@ second `openmux.server.main` process and let it dial the first over a socket. Th
 in one test - which the harness already did for `CFG-07` and `PWR-03` - and add the one capability it
 lacked: a `muxcon:` section, which `ConfigBuilder.with_muxcon` now writes (issue #111).
 
-Four measured facts shape these bodies, and each is stated where it is used:
+Five measured facts shape these bodies, and each is stated where it is used:
 
 * Both directions of the link default to **deny-all** (issue #77), and a Port a filter drops is reported
   only at `DEBUG`. So each end states its filters, and a scenario never reads a missing Port as a transfer
@@ -22,6 +22,11 @@ Four measured facts shape these bodies, and each is stated where it is used:
 * A console reads that answer differently per surface. The CLI protocol carries the mode and nothing else
   (`CONNECTED:loop1:READ_ONLY`), so an id is what these ids assert there; only a listener surface prints the
   sentence that names the reason, which is why `MXC-04` dials Telnet on the hub.
+* A TLS link needs no shared CA. The answering side autogenerates a self-signed certificate under its own
+  state dir, and the dialling side's default check relaxes the TLS-level verification and gates the link on
+  a SHA-256 fingerprint stored against `host:port` — trust-on-first-use. The first connect is unverified and
+  is recorded as such; a peer that returns with a different certificate is refused, and a refusal never
+  rewrites the stored fingerprint. `MXC-05` records, `MXC-06` refuses.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Tuple
 
 import pytest
+import yaml
 
 from openmux.server.access_decision import Code, read_only_grant_notice, write_blocked_notice
 
@@ -52,6 +58,7 @@ def _linked_pair(
     hub_accept: Optional[List[str]] = None,
     leaf_advertise: Optional[List[str]] = None,
     hub_telnet: bool = False,
+    use_tls: bool = False,
 ) -> Tuple[Any, Any]:
     """Start two servers, the second dialling the first, and return ``(hub, leaf)``.
 
@@ -59,6 +66,11 @@ def _linked_pair(
     a listener that fails to bind only logs an error, and these servers run with ``fail_fast_adapters:
     false``. The leaf owns ``port`` and the hub owns nothing, so a Port of that name on the hub can only
     have come from the peer.
+
+    ``use_tls`` turns the link over to TLS on both sides at once; the default is the plaintext link every
+    other id in this file runs. A TLS world carries its own material: the hub autogenerates a certificate
+    in its state dir, and the leaf pins the hub's fingerprint there. Both files belong to this world alone,
+    because its state dir is created with it.
     """
     hub = servers(
         name="hub",
@@ -66,7 +78,7 @@ def _linked_pair(
         telnet=hub_telnet,
         telnet_kwargs={"require_auth": True} if hub_telnet else None,
         muxcon=True,
-        muxcon_kwargs={"accept": hub_accept if hub_accept is not None else ["*"]},
+        muxcon_kwargs={"accept": hub_accept if hub_accept is not None else ["*"], "use_tls": use_tls},
         start=True,
     )
     dial_to = hub.port_of("muxcon")
@@ -77,6 +89,7 @@ def _linked_pair(
         configure=lambda builder: builder.with_muxcon(
             dial=[("127.0.0.1", dial_to)],
             advertise=leaf_advertise if leaf_advertise is not None else [port],
+            use_tls=use_tls,
         ),
         start=True,
     )
@@ -108,6 +121,21 @@ def _holders(session: Any) -> List[str]:
 def _promotions(leaf: Any) -> int:
     """How many times the origin has handed the Write slot of ``loop1`` to anyone, ever."""
     return len([line for line in leaf.log_lines() if " to read-write mode on port loop1" in line])
+
+
+def _tofu_fingerprint(leaf: Any, dial_key: str) -> str:
+    """The one fingerprint the dialling node trusts for the answering node, read from its store.
+
+    The store is ``known_peers.yaml`` under the node's own state dir — a ``host:port`` to ``sha256:`` map
+    the product wrote after the first TLS connect. A refusal must never rewrite it, so a scenario reads
+    the file itself rather than trusting a log line.
+    """
+    path = leaf.state_dir / "muxcon" / "known_peers.yaml"
+    assert path.exists(), f"the dialling node stored no trust material at {path}"
+    stored = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    fingerprint = str(stored.get(dial_key) or "")
+    assert fingerprint.startswith("sha256:"), f"{dial_key!r} is absent from the TOFU store: {stored!r}"
+    return fingerprint
 
 
 def _ports(api: Any) -> List[dict]:
@@ -260,3 +288,60 @@ def test_mxc04_a_console_blocked_across_the_link_is_told_why_and_not_by_whom(ser
             assert lines, f"{notice!r} never arrived as its own line: {transcript[-400:]}"
             for named in (hub.server_id, leaf.server_id, "rw:"):
                 assert named.lower() not in lines[0].lower(), lines[0]
+
+
+@surfaces("server:hub", "server:leaf", "api:ports")
+def test_mxc05_a_tls_link_needs_no_shared_ca_because_the_dialler_pins_what_it_first_saw(
+    servers, story, api_for_server
+) -> None:
+    """The answering node serves an autogenerated certificate, and the dialling node records its fingerprint."""
+    hub, leaf = _linked_pair(servers, use_tls=True)
+
+    with step("the dialling side names the mode that let a self-signed peer in, before it dials"):
+        # `_create_client_ssl_context` relaxes the TLS-level check for the trust-on-first-use gate, and
+        # says so once per peer: without that line a green link could just mean verification was off.
+        leaf.wait_for_log("trust-on-first-use gates the link", timeout=30)
+
+    with step("the answering side served a certificate it generated on its own first start"):
+        cert = hub.state_dir / "muxcon" / "server.crt"
+        key = hub.state_dir / "muxcon" / "server.key"
+        assert cert.exists() and key.exists(), f"no autogen certificate pair under {cert.parent}"
+
+    with step("the dialling side recorded the peer's fingerprint, warning that this first sight is unverified"):
+        dial_key = f"127.0.0.1:{hub.port_of('muxcon')}"
+        leaf.wait_for_log(f"TOFU stored fingerprint for {dial_key}", timeout=30)
+        assert _tofu_fingerprint(leaf, dial_key).startswith("sha256:")
+
+    with step("and the encrypted link carries the leaf's Port like the plaintext one does"):
+        hub.wait_for_log(f"{PORT_REGISTERED} loop1", timeout=30)
+        entry = _port_named(api_for_server(hub), "loop1")
+        assert str(entry.get("origin_server_id")) == leaf.server_id, entry
+
+
+@surfaces("server:hub", "server:leaf")
+def test_mxc06_a_peer_that_returns_with_a_different_certificate_is_refused(servers, story) -> None:
+    """The answering node comes back without its certificate, and the stored fingerprint closes the gate."""
+    hub, leaf = _linked_pair(servers, use_tls=True)
+    hub.wait_for_log(f"{PORT_REGISTERED} loop1", timeout=30)
+    dial_key = f"127.0.0.1:{hub.port_of('muxcon')}"
+
+    with step("the first link left exactly one trusted fingerprint on the dialling side"):
+        leaf.wait_for_log(f"TOFU stored fingerprint for {dial_key}", timeout=30)
+        stored = _tofu_fingerprint(leaf, dial_key)
+
+    with step("the answering node restarts without its certificate, so its next one is different"):
+        handshakes = len([line for line in hub.log_lines() if "Handshake OK" in line])
+        hub.stop()
+        (hub.state_dir / "muxcon" / "server.crt").unlink()
+        (hub.state_dir / "muxcon" / "server.key").unlink()
+        hub.restart()
+
+    with step("the dialling side reaches it again, recognises a stranger, and refuses the link"):
+        # This warning proves the dialler redialled AFTER the restart and saw the new certificate over a
+        # live socket, so the absence checked next is bounded: the thing the peer dialed is this one.
+        leaf.wait_for_log("TOFU fingerprint changed", timeout=60)
+
+    with step("the stranger completed no handshake, and what the node trusted is unchanged"):
+        found = len([line for line in hub.log_lines() if "Handshake OK" in line])
+        assert found == handshakes, "a peer with a changed certificate finished a handshake"
+        assert _tofu_fingerprint(leaf, dial_key) == stored, "the refusal overwrote the trusted fingerprint"

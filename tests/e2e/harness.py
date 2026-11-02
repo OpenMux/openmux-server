@@ -447,9 +447,11 @@ class ConfigBuilder:
         One ``muxcon`` section carries both roles in the product, so one method does too. Four defaults
         differ from the adapter on purpose, because two nodes on one host must be deterministic:
 
-        * ``use_tls`` is false on both sides. A TLS link needs a certificate on the answering side and a
-          trust-on-first-use fingerprint on the other, and a fingerprint stored for a ``127.0.0.1`` port
-          outlives the server that produced it: the next test's node then fails the fingerprint check.
+        * ``use_tls`` is false on both sides, because that is the link every scenario but ``MXC-05`` and
+          ``MXC-06`` wants. A TLS link needs a certificate on the answering side and pins a
+          trust-on-first-use fingerprint on the other; both files live under this world's own
+          ``OPENMUX_STATE_DIR``, so they belong to the test that created them and a TLS scenario cannot
+          inherit a fingerprint from an earlier one.
         * ``auth_required`` is false, so the link carries no identity claim. The Ed25519 challenge is a
           scenario of its own, and a link that only has to carry a Port needs no key.
         * The filters are stated, never omitted. Both directions default to deny-all (issue #77), so a
