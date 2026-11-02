@@ -156,6 +156,15 @@ Changes since v1.0.4 (2026-10-19).
   typed with the Port choice was lost, and the session waited in silence for an answer it had already thrown away. That
   reader now keeps what it was not asked for and hands it to the next reader, and after the last prompt it hands it to
   the Port. No config key changed.
+- **A healthy MuxCon link no longer reports an ordering fault, and the check survives the link.** The receive ordering
+  diagnostic compared one watermark across the two numbers the frame header carries: a `DATA` frame's `seq` counts per
+  multipath peer and every other frame's `seq` counts per connection. Both start at 1, so the first control frame after
+  Port data read as a reorder and logged `Out-of-order frame seq=1 last=7` on a link that lost nothing. That warning
+  fired once per connection, and the same flag gated the gap check, so a link stopped reporting real loss after its
+  first false alarm. The diagnostic now watches the control sequence space only (`DATA` order is already enforced per
+  peer), skips a frame that carries no sequence number, never moves its watermark backwards, and reports the two faults
+  on separate flags. The messages read `Out-of-order control frame seq=N last=M` and `Control sequence gap seq=N last=M`.
+  No config key changed.
 
 ### Web console and observability
 - **A deep link keeps the parameters it carried.** Opening the actions overlay starts a catalog read, and that read rebuilt the

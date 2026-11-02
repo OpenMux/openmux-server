@@ -287,36 +287,42 @@ async def test_fault_frozen_thaws_and_reads(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# RX diagnostics
+# RX diagnostics — the CONTROL sequence space only (issue #117)
+#
+# The header `seq` carries two independent numbers: DATA uses the peer-scoped counter
+# (`_next_peer_seq`) and every other frame type uses the per-connection counter
+# (`_next_frame_seq`). These tests drive CONTROL frames, because comparing one watermark
+# across both spaces is what made every healthy link look reordered.
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_rx_diag_reorder_warns_once(monkeypatch, caplog):
     caplog.set_level(logging.WARNING)
-    # rseq (3) < last (5), no warn yet -> "Out-of-order" warn, flag set
-    script = [_frame("D", stream_id=1, payload=b"x", seq=5), _frame("D", stream_id=1, payload=b"x", seq=3)]
+    # Control 5 then 3: the per-connection counter never goes backwards, so this is a
+    # real reorder -> one warning, and the watermark stays at the highest seq seen.
+    script = [_frame("C", payload=b"REQ:5", seq=5), _frame("C", payload=b"REQ:3", seq=3)]
     ad, rec = await _run(monkeypatch, script)
-    assert "Out-of-order frame" in caplog.text
-    assert "Sequence gap" not in caplog.text
-    assert ad._rx_last_seq[CID] == 3
-    assert ad._rx_order_warned[CID] is True
+    assert "Out-of-order control frame seq=3 last=5" in caplog.text
+    assert "Control sequence gap" not in caplog.text
+    assert ad._rx_last_seq[CID] == 5
+    assert ad._rx_reorder_warned[CID] is True
 
 
 @pytest.mark.asyncio
 async def test_rx_diag_gap_warns_once(monkeypatch, caplog):
     caplog.set_level(logging.WARNING)
-    # rseq (3) > last (1) + 1, no warn yet -> "Sequence gap" warn, flag set
-    script = [_frame("D", stream_id=1, payload=b"x", seq=1), _frame("D", stream_id=1, payload=b"x", seq=3)]
+    # Control 1 then 9: six control numbers went missing between them.
+    script = [_frame("C", payload=b"REQ:1", seq=1), _frame("C", payload=b"REQ:9", seq=9)]
     ad, rec = await _run(monkeypatch, script)
-    assert "Sequence gap detected" in caplog.text
+    assert "Control sequence gap seq=9 last=1" in caplog.text
     assert "Out-of-order" not in caplog.text
-    assert ad._rx_last_seq[CID] == 3
-    assert ad._rx_order_warned[CID] is True
+    assert ad._rx_last_seq[CID] == 9
+    assert ad._rx_gap_warned[CID] is True
 
 
 @pytest.mark.asyncio
 async def test_rx_diag_inorder_no_warn(monkeypatch, caplog):
     caplog.set_level(logging.WARNING)
-    script = [_frame("D", stream_id=1, payload=b"x", seq=1), _frame("D", stream_id=1, payload=b"x", seq=2)]
+    script = [_frame("C", payload=b"REQ:1", seq=1), _frame("C", payload=b"REQ:2", seq=2)]
     ad, rec = await _run(monkeypatch, script)
     assert "Sequence gap" not in caplog.text
     assert "Out-of-order" not in caplog.text
@@ -326,11 +332,67 @@ async def test_rx_diag_inorder_no_warn(monkeypatch, caplog):
 @pytest.mark.asyncio
 async def test_rx_diag_equal_seq_warns_once(monkeypatch, caplog):
     caplog.set_level(logging.WARNING)
-    # rseq == last (<=) and no prior warn -> out-of-order warn, then flag set
-    script = [_frame("D", stream_id=1, payload=b"x", seq=2), _frame("D", stream_id=1, payload=b"x", seq=2)]
+    # Two control frames never share a number on one connection, so seq == last is a fault.
+    script = [_frame("C", payload=b"REQ:2", seq=2), _frame("C", payload=b"REQ:2", seq=2)]
     ad, rec = await _run(monkeypatch, script)
-    assert "Out-of-order" in caplog.text
+    assert "Out-of-order control frame seq=2 last=2" in caplog.text
     assert ad._rx_last_seq[CID] == 2
+
+
+@pytest.mark.asyncio
+async def test_rx_diag_ignores_the_data_sequence_space(monkeypatch, caplog):
+    """Issue #117 regression: DATA seq is peer-scoped, so it must never meet the control watermark."""
+    caplog.set_level(logging.WARNING)
+    script = [
+        _frame("C", payload=b"REQ:1", seq=1),
+        _frame("D", stream_id=1, payload=b"x", seq=7),
+        _frame("D", stream_id=1, payload=b"x", seq=7),  # a retransmission reuses its DATA seq
+        _frame("D", stream_id=1, payload=b"x", seq=3),  # below the DATA high-water: another peer's business
+        _frame("C", payload=b"REQ:2", seq=2),
+    ]
+    ad, rec = await _run(monkeypatch, script)
+    assert "Out-of-order" not in caplog.text
+    assert "Control sequence gap" not in caplog.text
+    assert ad._rx_last_seq[CID] == 2, "DATA frames must not move the control watermark"
+    assert not ad._rx_reorder_warned.get(CID)
+    assert not ad._rx_gap_warned.get(CID)
+
+
+@pytest.mark.asyncio
+async def test_rx_diag_reorder_does_not_silence_the_gap_check(monkeypatch, caplog):
+    """Issue #117: warn-once is per fault class, so one report cannot kill the other."""
+    caplog.set_level(logging.WARNING)
+    script = [
+        _frame("C", payload=b"REQ:5", seq=5),
+        _frame("C", payload=b"REQ:3", seq=3),  # reorder -> warning one
+        _frame("C", payload=b"REQ:9", seq=9),  # gap over 6..8 -> warning two must still fire
+    ]
+    ad, rec = await _run(monkeypatch, script)
+    assert "Out-of-order control frame" in caplog.text
+    assert "Control sequence gap seq=9 last=5" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rx_diag_frame_without_seq_is_ignored(monkeypatch, caplog):
+    caplog.set_level(logging.WARNING)
+    # A frame carrying no seq (the counter starts at 1, so 0 means absent) is not out of order.
+    script = [_frame("C", payload=b"REQ:1", seq=1), _frame("C", payload=b"REQ:0"), _frame("C", payload=b"REQ:2", seq=2)]
+    ad, rec = await _run(monkeypatch, script)
+    assert "Out-of-order" not in caplog.text
+    assert "Control sequence gap" not in caplog.text
+    assert ad._rx_last_seq[CID] == 2
+
+
+def test_cc_pop_state_clears_rx_diag_state():
+    """A long-lived server must not grow one entry per connection ever opened."""
+    ad = _adapter()
+    ad._rx_last_seq[CID] = 4
+    ad._rx_reorder_warned[CID] = True
+    ad._rx_gap_warned[CID] = True
+    ad._cc_pop_state(CID)
+    assert CID not in ad._rx_last_seq
+    assert CID not in ad._rx_reorder_warned
+    assert CID not in ad._rx_gap_warned
 
 
 @pytest.mark.asyncio
@@ -388,8 +450,8 @@ async def test_data_unauthenticated_auth_notice(monkeypatch):
     ad, rec = await _run(monkeypatch, [_frame("D", stream_id=1, payload=b"zz", seq=7)], auth=False)
     assert rec.calls["auth_notice"]
     assert rec.calls["data"] == []
-    # RX diagnostics run before dispatch, so the seq IS recorded
-    assert ad._rx_last_seq[CID] == 7
+    # A DATA frame is the peer space: the control diagnostic records nothing for it.
+    assert CID not in ad._rx_last_seq
     assert any(c[0] == "control" and c[3] == "AUTH:REQUIRED" for c in rec.proto_calls)
 
 
@@ -413,7 +475,7 @@ async def test_data_delivered_and_acked(monkeypatch):
     ad, rec = await _run(monkeypatch, [_frame("D", stream_id=2, payload=b"body", seq=9)])
     assert rec.calls["data"] == [(CID, 2, b"body", 9)]
     assert any(c[0] == "ack" and c[1] == 9 for c in rec.proto_calls)
-    assert ad._rx_last_seq[CID] == 9
+    assert CID not in ad._rx_last_seq  # DATA seq belongs to the peer space, not this watermark
 
 
 async def _raising_ack_send(writer, frame):
@@ -427,7 +489,7 @@ async def test_data_ack_send_raises(monkeypatch):
     )
     # delivered, then the ack send failed silently
     assert rec.calls["data"] == [(CID, 1, b"zz", 1)]
-    assert ad._rx_last_seq[CID] == 1
+    assert CID not in ad._rx_last_seq  # DATA never touches the control watermark
 
 
 @pytest.mark.asyncio

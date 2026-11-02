@@ -447,6 +447,23 @@ outage (`_regrant_proxy_read_write`, a plain `FEDRW ... REQUEST`): the reopened 
 nothing else re-sends the grant. A denied grant (the slot is held by another user) demotes the client locally so its mode
 matches the origin; a human can still force-take.
 
+### 6.6 Ordering diagnostics read the control sequence space only
+
+The frame header carries two numbers that mean different things (section 6): a `DATA` frame's `seq` comes from
+`_next_peer_seq(peer_key)` and every other frame's `seq` from `_next_frame_seq(conn_id)`. Both start at 1 and never
+coordinate, so one watermark across both calls the first control frame after bulk data a reorder — the receiver logged
+`Out-of-order frame seq=1 last=7` on a link that lost nothing (`MXC-11` holds that line absent on a real two-node link).
+`_rl_rx_diagnostics` therefore skips `DATA` frames: their ordering is already enforced per peer by
+`_handle_inbound_data`, which buffers a gap, flushes a stuck one with an ERROR (section 6.3), and warns on a stale
+duplicate (section 6.4). What is left covers the control space, where the counter is strictly increasing per connection
+and nothing else checks it, and where a lost `PORTS:FEDERATED` or `POWER:STATE` would otherwise pass unnoticed.
+
+Three rules keep the diagnostic usable: a frame with no sequence number (`seq` 0) is skipped, because 0 means absent and
+not "before everything"; the watermark only moves forward, so a reported reorder cannot drag it down and invent a gap;
+and reorder and gap report on separate flags (`_rx_reorder_warned`, `_rx_gap_warned`), because one shared warn-once flag
+let whichever fault fired first silence the other for the rest of the connection. Per-connection state is dropped with
+the connection in `_cc_pop_rx_diag`.
+
 ## 7. Viewer presence relay
 
 A `VIEWERS:<port_name>` control frame (JSON lines, `END:VIEWERS` terminated) carries the list of local viewers

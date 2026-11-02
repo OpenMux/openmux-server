@@ -297,15 +297,19 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         # this adapter as a meta listener the moment a PortManager is attached, so
         # local viewer-presence changes (issue #48) can be relayed to peers.
         self._main_port_manager: Optional[Any] = None
-        # Receive ordering diagnostics keyed per connection.
-        # Root cause of earlier noisy gap warnings: a single global transmit
-        # sequence space was shared across all connections while diagnostics
-        # compared consecutive numbers per connection, so gaps appeared when
-        # frames for other connections advanced the global counter. We now use
-        # per-connection sequence allocation; diagnostics can safely remain
-        # per-connection without false gap noise.
+        # Receive ordering diagnostics, keyed per connection, for the CONTROL
+        # sequence space only. The frame header carries two independent numbers
+        # by design (docs/design/muxcon.md §6): a DATA frame's seq is peer-scoped
+        # (`_peer_tx_seq`, so a multipath failover does not restart numbering) and
+        # every other frame type stamps `_next_frame_seq(conn_id)`, a per-connection
+        # counter. Comparing one watermark across both made every link look
+        # reordered (issue #117). DATA ordering is enforced per peer by
+        # `_handle_inbound_data`; this map watches the control space, where no other
+        # check exists. The two warnings keep separate flags so one class of fault
+        # cannot silence the other for the rest of the connection.
         self._rx_last_seq: Dict[str, int] = {}
-        self._rx_order_warned: Dict[str, bool] = {}
+        self._rx_reorder_warned: Dict[str, bool] = {}
+        self._rx_gap_warned: Dict[str, bool] = {}
         # Active remote stream mapping keyed by peer_key -> stream_id -> proxy
         self._session_map: Dict[str, Dict[int, Any]] = {}
         # Local server-initiated stream mapping keyed by peer_key -> stream_id -> local_port_name
@@ -3899,18 +3903,36 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         return await self._read_frame(reader, conn_id)
 
     def _rl_rx_diagnostics(self, conn_id: str, frame: Dict[str, Any]) -> None:
-        """Ordering diagnostics (lightweight): warn once if gap or reorder detected."""
+        """Ordering diagnostics for the per-connection control sequence space.
+
+        The header `seq` carries two unrelated numbers: a DATA frame's seq comes from
+        the peer-scoped counter (`_next_peer_seq`, docs/design/muxcon.md §6) and every
+        other frame's seq comes from the per-connection counter (`_next_frame_seq`).
+        DATA is skipped here on purpose: its ordering is enforced per peer by
+        `_handle_inbound_data`, which buffers a gap, flushes a stuck one with an ERROR,
+        and warns on a stale duplicate. This method therefore covers the control space,
+        where the counter is strictly increasing per connection and nothing else checks it.
+
+        A frame with no sequence number (`seq` 0) is skipped: there is nothing to order.
+        Each fault class warns once per connection, on its own flag, and the watermark
+        only moves forward, so one report never hides the other.
+        """
         try:
+            if frame.get("frame_type") == "D":
+                return
             rseq = int(frame.get("seq") or 0)
+            if rseq <= 0:
+                return
             last = self._rx_last_seq.get(conn_id)
             if last is not None:
-                if rseq <= last and not self._rx_order_warned.get(conn_id):
-                    self.logger.warning("[%s] Out-of-order frame seq=%s last=%s", conn_id, rseq, last)
-                    self._rx_order_warned[conn_id] = True
-                elif rseq > last + 1 and not self._rx_order_warned.get(conn_id):
-                    self.logger.warning("[%s] Sequence gap detected seq=%s last=%s", conn_id, rseq, last)
-                    self._rx_order_warned[conn_id] = True
-            self._rx_last_seq[conn_id] = rseq
+                if rseq <= last and not self._rx_reorder_warned.get(conn_id):
+                    self.logger.warning("[%s] Out-of-order control frame seq=%s last=%s", conn_id, rseq, last)
+                    self._rx_reorder_warned[conn_id] = True
+                elif rseq > last + 1 and not self._rx_gap_warned.get(conn_id):
+                    self.logger.warning("[%s] Control sequence gap seq=%s last=%s", conn_id, rseq, last)
+                    self._rx_gap_warned[conn_id] = True
+            if last is None or rseq > last:
+                self._rx_last_seq[conn_id] = rseq
         except Exception:  # justification: RX diagnostics best-effort; do not disrupt processing
             pass
 
@@ -4529,6 +4551,15 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         except Exception:
             # justification: idempotent state cleanup
             pass
+        self._cc_pop_rx_diag(conn_id)
+
+    def _cc_pop_rx_diag(self, conn_id: str) -> None:
+        """Drop the per-connection RX ordering state so a long-lived server does not grow with links."""
+        for state in (self._rx_last_seq, self._rx_reorder_warned, self._rx_gap_warned):
+            try:
+                state.pop(conn_id, None)
+            except Exception:  # justification: idempotent state cleanup
+                pass
 
     async def _cc_maybe_cleanup(self, stable_peer_key: Optional[str]) -> None:
         """Drop a peer's origin-side session state (pumps, fed clients, streams)."""
@@ -4543,6 +4574,7 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
             self._wire_state.pop(conn_id, None)
         except Exception:  # justification: best-effort wire-state cleanup
             pass
+        self._cc_pop_rx_diag(conn_id)
         if writer:
             try:
                 await _await_writer_closed(writer, self.logger)
