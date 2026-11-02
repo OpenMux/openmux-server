@@ -967,15 +967,15 @@ Seven measured boundaries shape these bodies:
   1 200 markers each, none of the three missed a marker and the stalled one missed them all. That is the Loopback Port
   with a small line rate; a slow real device is not tested here, and the product still has no per-viewer pacing.
 - A console that reads nothing does not hold back a *control* delivery either, because the Port sheds its bytes before its
-  socket can fill. `broadcast_control_frame_to_port` (`console_manager.py:1111`) delivers to one viewer at a time in attach
+  socket can fill. `broadcast_control_frame_to_port` (`console_manager.py:1145`) delivers to one viewer at a time in attach
   order, so `SOK-07` stalls the console it attaches first and then floods that Port with 65 000-byte lines. One run measured
   15.6 MB written, `send_q=146988` on the server's side of the stalled socket (`netstat -an -p tcp`), `dropped_chunks`
   0 to 14745, and a viewer-set notice reaching a healthy console in 0.110 s against 0.107 s with nobody stalled. The queue
-  stopped near 143 KiB, far under the 4 MiB the system allows, because `_process_data_queue` (`port.py:584`) discards that
-  console's chunks once its queue is full. [Issue #106](https://github.com/OpenMux/openmux-server/issues/106) keeps the two
-  questions this shape cannot answer: a peer that closes its socket mid-burst leaves no queue to shed into, and a stream
-  slow enough to stay under the queue limit needs a device that really reads slowly, which no fixture provides yet — the
-  Serial fixture is a `socat` pty pair that never throttles.
+  stopped near 143 KiB, far under the 4 MiB the system allows, because `_fan_out_to_client_queues` (`port_manager.py:1316`)
+  discards that console's chunks once its queue is full. [Issue #106](https://github.com/OpenMux/openmux-server/issues/106)
+  keeps the two questions this shape cannot answer: a peer that closes its socket mid-burst leaves no queue to shed into,
+  and a stream slow enough to stay under the queue limit needs a device that really reads slowly, which no fixture provides
+  yet — the Serial fixture is a `socat` pty pair that never throttles.
 - Awaiting sessions hold no seat, and the descriptor check must count them fairly. The first baseline was taken before the
   scenario's own two surviving sessions opened, so those two sockets were read as a leak (measured 3 before, 5 after). The
   baseline now includes them, and the check allows one IPv4 and five KQUEUE entries of slack.
