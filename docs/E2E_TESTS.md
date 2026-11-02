@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-159 scenarios across 15 suites.
+160 scenarios across 15 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -107,6 +107,7 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | MXC-06 | The answering node comes back without its certificate, and the stored fingerprint closes the gate. | server:hub, server:leaf | `tests/e2e/test_muxcon.py::test_mxc06_a_peer_that_returns_with_a_different_certificate_is_refused` |
 | MXC-07 | One hub checks one key: its true holder links, a wrong key under its name is refused, nothing links without a key. | server:hub, server:leaf, server:forged, server:nokey, api:ports | `tests/e2e/test_muxcon.py::test_mxc07_a_peered_key_opens_the_link_and_a_stolen_name_does_not` |
 | MXC-08 | `<node>::<port>` reaches the Port at the node it names — on the menu and on the wire, and nowhere else. | server:hub, server:leaf, cli:unknown-node, cli:wrong-origin, cli:local, cli:driver, telnet:menu, telnet:chooser | `tests/e2e/test_muxcon.py::test_mxc08_the_qualified_port_name_reaches_the_node_it_names_and_only_that_node` |
+| MXC-09 | A federated outlet moves only by request, and only from a console that drives a Port that outlet powers. | server:hub, server:leaf, cli:guest, telnet:menu, api:power | `tests/e2e/test_muxcon.py::test_mxc09_a_switch_typed_on_one_node_moves_the_outlet_on_the_other` |
 | **PWR** | | | |
 | PWR-01 | ``/api/power`` reports the configured PDU, and one switch moves only the fields it should. | http | `tests/e2e/test_power.py::test_pwr01_the_power_api_mirrors_the_pdu_and_moves_with_one_switch` |
 | PWR-02 | A console that declares a feed no PDU outlet provides is reported everywhere it appears. | http, web:rw | `tests/e2e/test_power.py::test_pwr02_a_feed_no_outlet_provides_is_named_by_the_api_the_page_and_the_badge` |

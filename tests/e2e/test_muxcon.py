@@ -1,4 +1,4 @@
-"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-08).
+"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-09).
 
 Federation was proven only as an empty state before these ids: `ST-04` shows the status page saying
 `No federation connections`, and the unit suites drive `UnifiedMuxConAdapter` with fakes. No test started a
@@ -6,7 +6,7 @@ second `openmux.server.main` process and let it dial the first over a socket. Th
 in one test - which the harness already did for `CFG-07` and `PWR-03` - and add the one capability it
 lacked: a `muxcon:` section, which `ConfigBuilder.with_muxcon` now writes (issue #111).
 
-Seven measured facts shape these bodies, and each is stated where it is used:
+Eight measured facts shape these bodies, and each is stated where it is used:
 
 * Both directions of the link default to **deny-all** (issue #77), and a Port a filter drops is reported
   only at `DEBUG`. So each end states its filters, and a scenario never reads a missing Port as a transfer
@@ -38,6 +38,12 @@ Seven measured facts shape these bodies, and each is stated where it is used:
   and the bare name; each is checked against the Port's **origin**, so a qualifier naming a node that does
   not own the Port is refused even when the bare name would have matched one. `MXC-08` refuses both wrong
   shapes and reaches the Port with both right ones, through the menu and on the wire.
+* An outlet on the peer node is switched by request, never directly. The qualified ref
+  `<node>::<pdu>.<outlet>` relays to the origin, but only when the acting console ITSELF drives, read-write, a
+  port that ref powers — the request is anchored on that console's own session and the origin re-verifies the
+  mirror of it before running its own local switch. The origin's audit names its own local ref; the state update
+  flowing back is what powers off the typing console's own notices on this side of the link. `MXC-09` runs the
+  round trip.
 """
 
 from __future__ import annotations
@@ -63,6 +69,12 @@ PORT_REGISTERED = "Registered federated port:"
 
 #: What the dialling side logs after it sends the list of Ports it offers.
 PORTS_SENT = "local ports in PORTS:FEDERATED response"
+
+#: The leaf's dummy PDU. Its one outlet feeds `loop1` alone, so one relayed switch off takes a console's
+#: LAST feed away — a fall to half-power would warn nothing and prove less. The dummy driver starts with
+#: every outlet ON, so a scenario reads "still on" as the untouched state, never as a prior switch.
+PDU = "rack1"
+PDU_FEED = f"{PDU}.1"
 
 
 def _linked_pair(
@@ -494,3 +506,98 @@ def test_mxc08_the_qualified_port_name_reaches_the_node_it_names_and_only_that_n
         # The console that arrived over the wire holds the origin's one Write slot, so the console that
         # arrived through the menu joins it as a viewer: both paths compete in the same single queue.
         chooser.wait_for(read_only_grant_notice(Code.CAPACITY_FULL), timeout=20)
+
+
+def _power_pair(servers: Any) -> Tuple[Any, Any]:
+    """Two linked nodes: the leaf's ``loop1`` hangs off its dummy PDU, and each node owns a PDU of its own.
+
+    The relayed switch is refused by ``PduAdapter.set_outlet`` on the asking node BEFORE anything reaches
+    the link when that node has no power section at all — its own words are `power management is not
+    configured` — so the hub needs one, and it holds an outlet (`rack9.9`) the leaf has never heard of:
+    a ref can then only be relayed because its qualifier names the leaf, not because the hub lacks PDUs.
+    ``loop1`` feeds off the leaf's one outlet, so a single off-switch powers a console on the OTHER node.
+    """
+    hub = servers(
+        name="hub",
+        loopback=(),
+        telnet=True,
+        telnet_kwargs={"require_auth": True},
+        muxcon=True,
+        muxcon_kwargs={"accept": ["*"]},
+        configure=lambda builder: builder.with_dummy_pdu("rack9", ["9"], poll_interval=0),
+        start=True,
+    )
+    dial_to = hub.port_of("muxcon")
+
+    def _leaf_config(builder: Any) -> Any:
+        builder.with_dummy_pdu(PDU, ["1"], poll_interval=0)
+        builder.with_loopback("loop1", feeds=[PDU_FEED])
+        return builder.with_muxcon(dial=[("127.0.0.1", dial_to)], advertise=["loop1"])
+
+    leaf = servers(name="leaf", loopback=(), telnet=False, configure=_leaf_config, start=True)
+    hub.wait_for_log("Handshake OK (server-side)", timeout=30)
+    hub.wait_for_log(f"{PORT_REGISTERED} loop1", timeout=30)
+    return hub, leaf
+
+
+def _outlet_on(api: Any, ref: str) -> Optional[bool]:
+    """What the node owning this power snapshot reports for one LOCAL outlet ref: True, False, or None."""
+    for pdu in (api.power() or {}).get("pdus") or []:
+        for entry in pdu.get("outlets") or []:
+            if entry.get("ref") == ref:
+                return bool(entry.get("on"))
+    return None
+
+
+@surfaces("server:hub", "server:leaf", "cli:guest", "telnet:menu", "api:power")
+def test_mxc09_a_switch_typed_on_one_node_moves_the_outlet_on_the_other(servers, clients, story, api_for_server) -> None:
+    """A federated outlet moves only by request, and only from a console that drives a Port that outlet powers.
+
+    The qualified ref names an outlet on ANOTHER node, so this node cannot honour it: what crosses the link
+    is a switch request anchored on the acting console's own session, and the origin re-verifies the mirror
+    of that session before running its own local switch. A console that drives nothing has nothing to
+    anchor on — and the anchored switch runs as the origin's OWN relayed pseudo-client, never as the typing
+    user's name. The refusal keeps a viewer node from switching a peer's power by name alone.
+    """
+    hub, leaf = _power_pair(servers)
+    qualified = f"{leaf.server_id}::{PDU_FEED}"
+
+    with step("a console driving no Port cannot move the peer's outlet, and the outlet stays where it was"):
+        guest = clients.cli(user="rw", surface="cli:guest", server=hub)
+        guest.command(f"POWER {qualified} off")
+        guest.wait_for(f"ERROR:POWER: {qualified} is owned by federated node {leaf.server_id}", timeout=20)
+        guest.wait_for("switch it from a session attached to a port it powers", timeout=20)
+        assert _outlet_on(api_for_server(leaf), PDU_FEED) is True, "the refused switch moved the outlet anyway"
+
+    with step("the console driving the Port this outlet powers sees the peer's outlet among its own feeds"):
+        menu = clients.telnet(user="rw", surface="telnet:menu", server=hub, require_auth=True)
+        menu.choose_port("loop1")
+        menu.press("p")
+        menu.wait_for("POWER: feeds for loop1  (a number = toggle, a = all, Enter = exit)", timeout=20)
+        # The row carries the QUALIFIED ref: the hub caches the feed under the global name, which is what
+        # makes it switchable here at all and distinguishable from a same-named local outlet.
+        menu.wait_for(f" 1  [on]   {qualified}", timeout=20)
+
+    with step("toggling that row crosses the link, and the origin audits the switch as its own relayed session"):
+        menu.answer("1")
+        menu.wait_for(f"POWER {qualified} -> off", timeout=20)
+        line = leaf.wait_for_log("POWER CONTROL:", timeout=15)
+        # The audit reads like any local switch on the origin — local ref, and the origin's own fed
+        # pseudo-client as the user, because that mirror session is what the request was anchored on.
+        assert f"turned {PDU_FEED} off" in line, line
+        assert "fed:node:" in line, f"the relayed switch was audited under the wrong identity: {line}"
+        assert _outlet_on(api_for_server(leaf), PDU_FEED) is False
+
+    with step("the state update flowing back powers off the typing console's own notice, qualified ref and all"):
+        # The hub never owned rack1.1 — this warning can only come from the POWER:STATE update applied to
+        # the proxy Port and re-emitted under the global ref. It is the flip side of the audit line above.
+        menu.wait_for(f"[POWER WARNING] all power feeds are now OFF for this console ({qualified})", timeout=20)
+        menu.wait_for(f" 1  [off]  {qualified}", timeout=20)
+
+    with step("and switching it back on the same menu returns the owner's outlet, then the menu exits on Enter"):
+        menu.answer("1")
+        menu.wait_for(f"POWER {qualified} -> on", timeout=20)
+        menu.wait_for(f"[POWER] feed {qualified} is now on", timeout=20)
+        assert _outlet_on(api_for_server(leaf), PDU_FEED) is True
+        menu.answer("")
+        menu.wait_for("[EXITING POWER]", timeout=20)
