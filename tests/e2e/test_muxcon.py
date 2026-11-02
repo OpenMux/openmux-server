@@ -1,4 +1,4 @@
-"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-07).
+"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-08).
 
 Federation was proven only as an empty state before these ids: `ST-04` shows the status page saying
 `No federation connections`, and the unit suites drive `UnifiedMuxConAdapter` with fakes. No test started a
@@ -6,7 +6,7 @@ second `openmux.server.main` process and let it dial the first over a socket. Th
 in one test - which the harness already did for `CFG-07` and `PWR-03` - and add the one capability it
 lacked: a `muxcon:` section, which `ConfigBuilder.with_muxcon` now writes (issue #111).
 
-Six measured facts shape these bodies, and each is stated where it is used:
+Seven measured facts shape these bodies, and each is stated where it is used:
 
 * Both directions of the link default to **deny-all** (issue #77), and a Port a filter drops is reported
   only at `DEBUG`. So each end states its filters, and a scenario never reads a missing Port as a transfer
@@ -33,6 +33,11 @@ Six measured facts shape these bodies, and each is stated where it is used:
   with the wrong private key, closes the connection before any Port moves — and the acceptor also drops a
   `PORTS:FEDERATED` from a connection it has not authenticated, so a peer that advertises anyway injects
   nothing. `MXC-07` proves all three outcomes on one hub.
+* A Port can be addressed through the node that owns it. The menu lists a federated Port as
+  `<origin>::<name>` and both menu surfaces and the CLI wire accept that qualified form, `local::<name>`,
+  and the bare name; each is checked against the Port's **origin**, so a qualifier naming a node that does
+  not own the Port is refused even when the bare name would have matched one. `MXC-08` refuses both wrong
+  shapes and reaches the Port with both right ones, through the menu and on the wire.
 """
 
 from __future__ import annotations
@@ -68,13 +73,15 @@ def _linked_pair(
     leaf_advertise: Optional[List[str]] = None,
     hub_telnet: bool = False,
     use_tls: bool = False,
+    hub_loopback: Tuple[str, ...] = (),
 ) -> Tuple[Any, Any]:
     """Start two servers, the second dialling the first, and return ``(hub, leaf)``.
 
     The hub answers on a federation port the factory allocated, so ``wait_ready`` proves the listener bound:
     a listener that fails to bind only logs an error, and these servers run with ``fail_fast_adapters:
-    false``. The leaf owns ``port`` and the hub owns nothing, so a Port of that name on the hub can only
-    have come from the peer.
+    false``. The leaf owns ``port`` and the hub owns nothing — unless ``hub_loopback`` names Ports the hub
+    owns too — so a Port of that name on the hub can only have come from the peer. ``hub_loopback`` is for
+    a scenario that aims an origin-qualified name at a Port this node owns but the peer does not.
 
     ``use_tls`` turns the link over to TLS on both sides at once; the default is the plaintext link every
     other id in this file runs. A TLS world carries its own material: the hub autogenerates a certificate
@@ -83,7 +90,7 @@ def _linked_pair(
     """
     hub = servers(
         name="hub",
-        loopback=(),
+        loopback=hub_loopback,
         telnet=hub_telnet,
         telnet_kwargs={"require_auth": True} if hub_telnet else None,
         muxcon=True,
@@ -422,3 +429,68 @@ def test_mxc07_a_peered_key_opens_the_link_and_a_stolen_name_does_not(servers, s
         names = {str(entry.get("name")) for entry in _ports(api_for_server(hub))}
         assert "loop1" in names, names
         assert not names & {"loop8", "loop9"}, f"an unauthenticated peer registered a Port: {sorted(names)}"
+
+
+@surfaces(
+    "server:hub",
+    "server:leaf",
+    "cli:unknown-node",
+    "cli:wrong-origin",
+    "cli:local",
+    "cli:driver",
+    "telnet:menu",
+    "telnet:chooser",
+)
+def test_mxc08_the_qualified_port_name_reaches_the_node_it_names_and_only_that_node(servers, clients, story) -> None:
+    """`<node>::<port>` reaches the Port at the node it names — on the menu and on the wire, and nowhere else.
+
+    The menu prints a federated Port qualified, so the qualification has to carry weight: a resolver that
+    matched the name and ignored the origin would make the menu's own label a lie. The sharpest shape is a
+    name that stands on THIS node (`loop9`) while the named node does not own it — the qualifier must
+    refuse it even though the bare name is a Port right here.
+    """
+    hub, leaf = _linked_pair(servers, hub_telnet=True, hub_loopback=("loop9",))
+    hub.wait_for_log(f"{PORT_REGISTERED} loop1", timeout=30)
+
+    with step("a qualifier naming a node that does not exist is refused, though the bare name would attach"):
+        unknown = clients.cli(user="rw", surface="cli:unknown-node", server=hub)
+        unknown.command("CONNECT:not-a-node::loop1")
+        unknown.wait_for("ERROR:CONNECT:Port not found for given server_id", timeout=20)
+
+    with step("and so is a real node that does not own that Port, though the Port stands on this one"):
+        wrong = clients.cli(user="rw", surface="cli:wrong-origin", server=hub)
+        wrong.command(f"CONNECT:{leaf.server_id}::loop9")
+        wrong.wait_for("ERROR:CONNECT:Port not found for given server_id", timeout=20)
+        wrong.expect_no_text("CONNECTED:", for_seconds=2.0)
+
+    with step("local:: names this node's own Port, and attaches it"):
+        local = clients.cli(user="rw", surface="cli:local", server=hub, attach_to="local::loop9")
+        assert "CONNECTED:loop9:READ_WRITE" in local.wire_text(), local.wire_text()[-400:]
+
+    with step("the qualifier that names the true owner reaches the peer's Port, and drives it"):
+        driver = clients.cli(user="rw", surface="cli:driver", server=hub, attach_to=f"{leaf.server_id}::loop1")
+        # The CONNECTED line carries the RESOLVED Port name, not the typed string: the qualifier is
+        # consumed by resolution. The mode itself is the origin's answer — its semantics are `MXC-02`/`03`.
+        assert "CONNECTED:loop1:READ_WRITE" in driver.wire_text(), driver.wire_text()[-400:]
+        _origin_gave_the_slot(leaf, hub)
+        driver.echo_of("mxc08", timeout=20)
+
+    with step("the menu prints that qualifier, and refuses both wrong claims about the listed Port"):
+        menu = clients.telnet(user="rw", surface="telnet:menu", server=hub, require_auth=True)
+        menu.wait_for_prompt("Port:")
+        assert f"{leaf.server_id}::loop1" in menu.text(), menu.text()[-400:]
+        # `loop1` stands listed here, but `local::` claims a Port this node owns — the origin gate says no.
+        menu.answer("local::loop1")
+        menu.wait_for("Unknown port: local::loop1", timeout=20)
+        menu.answer("nobody::loop1")
+        menu.wait_for("Unknown port: nobody::loop1", timeout=20)
+
+    with step("answering the prompt with the printed label attaches the console to the leaf's Port"):
+        chooser = clients.telnet(user="rw", surface="telnet:chooser", server=hub, require_auth=True)
+        chooser.wait_for_prompt("Port:")
+        chooser.answer(f"{leaf.server_id}::loop1")
+        # `i` prints `Port: <name>` only for an attached session — here the resolved short name.
+        chooser.press_until("i", "Port: loop1")
+        # The console that arrived over the wire holds the origin's one Write slot, so the console that
+        # arrived through the menu joins it as a viewer: both paths compete in the same single queue.
+        chooser.wait_for(read_only_grant_notice(Code.CAPACITY_FULL), timeout=20)
