@@ -96,31 +96,43 @@ def validate_listener_entries(entries: List[Any], seen_names: Set[str]) -> bool:
     ``seen_names`` is mutated to reject duplicate port names.
     """
     for entry in entries:
-        if not _valid_listener_entry(entry, seen_names):
+        if listener_entry_problem(entry, seen_names) is not None:
             return False
     return True
 
 
-def _valid_listener_entry(entry: Any, seen_names: Set[str]) -> bool:
-    """True when one SSH/Telnet listener dict entry is well-formed."""
+def listener_entry_problem(entry: Any, seen_names: Optional[Set[str]] = None) -> Optional[str]:
+    """Return why one SSH/Telnet listener entry cannot be used, or None when it can.
+
+    This is the one place that knows the rules both transports apply. The whole-section check
+    ``validate_listener_entries()`` turns the answer into a bool, and ``build_listener()`` raises it as
+    the reason an entry was refused, so the verdict a config file gets and the verdict a reload
+    reports cannot drift apart (issue #107). Wording names the key an operator has to edit.
+
+    Args:
+        entry: The raw entry from the config file.
+        seen_names: Names already accepted, used to reject a duplicate. None skips that check, for a
+            caller that judges one entry by itself.
+    """
     if not isinstance(entry, dict):
-        return False
+        return "the entry is not a mapping of listener options"
     if not _valid_listener_str_field(entry, "name"):
-        return False
-    if entry["name"] in seen_names:
-        return False
-    seen_names.add(entry["name"])
+        return "'name' is required and must be a non-empty string"
+    name = entry["name"]
+    if seen_names is not None:
+        if name in seen_names:
+            return f"another listener already uses the name '{name}'"
+        seen_names.add(name)
     if not _valid_listener_str_field(entry, "target"):
-        return False
+        return "'target' is required and must be a non-empty string"
     if not _valid_listener_port(entry.get("bind_port")):
-        return False
+        return "'bind_port' is required and must be a port number between 1 and 65535"
     if not _valid_listener_bind_host(entry.get("bind_host")):
-        return False
-    if not _valid_listener_bool_flags(entry):
-        return False
-    if not _valid_listener_acl_optional(entry):
-        return False
-    return True
+        return "'bind_host' must be a non-empty string, or absent"
+    for bool_key in ("read_only", "enabled", "require_auth"):
+        if bool_key in entry and not isinstance(entry[bool_key], bool):
+            return f"'{bool_key}' must be true or false"
+    return _listener_acl_problem(entry)
 
 
 def _valid_listener_str_field(entry: Dict[str, Any], key: str) -> bool:
@@ -145,34 +157,26 @@ def _valid_listener_port(bind_port: Any) -> bool:
     return 1 <= port <= 65535
 
 
-def _valid_listener_bool_flags(entry: Dict[str, Any]) -> bool:
-    """True when read_only/enabled/require_auth, if present, are all bools."""
-    for bool_key in ("read_only", "enabled", "require_auth"):
-        if bool_key in entry and not isinstance(entry[bool_key], bool):
-            return False
-    return True
-
-
-def _valid_listener_acl_optional(entry: Dict[str, Any]) -> bool:
-    """True when ``acl`` is absent or a list of valid IP / CIDR strings."""
+def _listener_acl_problem(entry: Dict[str, Any]) -> Optional[str]:
+    """Return why ``entry['acl']`` cannot be used, or None when it is absent or well-formed."""
     if "acl" not in entry:
-        return True
+        return None
     acl = entry["acl"]
     if acl is None:
-        return True
+        return None
     if not isinstance(acl, list):
-        return False
+        return "'acl' must be a list of IP or CIDR strings"
     for rule in acl:
         if not isinstance(rule, str) or not rule.strip():
-            return False
+            return "'acl' must hold non-empty IP or CIDR strings"
         try:
             if "/" in rule:
                 ipaddress.ip_network(rule, strict=False)
             else:
                 ipaddress.ip_address(rule)
         except ValueError:
-            return False
-    return True
+            return f"'acl' holds the invalid rule '{rule}'"
+    return None
 
 
 def render_port_list(entries: List[Dict[str, Any]], header: Optional[str] = None) -> bytes:
@@ -338,6 +342,7 @@ __all__ = [
     "compile_acl",
     "ip_allowed",
     "validate_listener_entries",
+    "listener_entry_problem",
     "render_port_list",
     "resolve_server_label",
     "TAKE_TARGET_PROMPT",

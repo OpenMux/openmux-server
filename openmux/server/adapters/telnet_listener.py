@@ -17,6 +17,7 @@ from ..access_decision import Code, Mode, decide
 from ..listener_session import MENU_TARGET, ListenerConfig, ListenerSessionManager, build_listener
 from .base_adapter import AdapterCapability, BaseGenericAdapter
 from .listener_common import ip_allowed, parse_login, validate_listener_entries
+from .listener_reconcile import ListenerReconcileMixin
 from .protocols.plain import TelnetIacStripper
 
 # Sentinel 'target' value that puts a listener into interactive port-menu mode.
@@ -118,8 +119,17 @@ class _StreamSessionTransport:
         await self._writer.wait_closed()
 
 
-class TelnetListenerAdapter(BaseGenericAdapter):
-    """Adapter exposing OpenMux ports via raw TCP/Telnet sockets."""
+class TelnetListenerAdapter(ListenerReconcileMixin, BaseGenericAdapter):
+    """Adapter exposing OpenMux ports via raw TCP/Telnet sockets.
+
+    Config reconciliation, boot binding, and the config gaps both transports report live in
+    ``ListenerReconcileMixin`` (issue #107); this class owns the Telnet transport only.
+    """
+
+    #: Config key holding this adapter's listener entries.
+    listener_section = "telnet_listener"
+    #: Word used in this transport's log lines.
+    listener_display = "Telnet"
 
     def get_adapter_type(self) -> str:
         """Return adapter type for security policy and factory lookup."""
@@ -129,12 +139,8 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         super().__init__(name, config)
         self.logger = logging.getLogger(f"openmux.adapter.telnet_listener.{name}")
         raw_entries = config.get("telnet_listener") if isinstance(config, dict) else []
-        self.listeners: List[ListenerConfig] = []
-        if isinstance(raw_entries, list):
-            for entry in raw_entries:
-                spec = self._build_listener(entry)
-                if spec:
-                    self.listeners.append(spec)
+        # A refused entry is recorded as a config gap and costs only itself (issue #107).
+        self.listeners: List[ListenerConfig] = self.build_listener_entries(raw_entries)
         self.servers: Dict[str, asyncio.AbstractServer] = {}
         self.console_manager = None
         self.auth_manager = None
@@ -175,22 +181,6 @@ class TelnetListenerAdapter(BaseGenericAdapter):
         if not isinstance(entries, list):
             return False
         return validate_listener_entries(entries, set())
-
-    async def _do_start(self) -> bool:
-        if not self.listeners:
-            self.logger.info("Telnet listener adapter has no entries; nothing to bind")
-            return True
-        if not self.console_manager:
-            self.logger.error("Telnet listener adapter requires a console manager reference")
-            return False
-        success = True
-        for spec in self.listeners:
-            if not spec.enabled:
-                self.logger.info("Telnet listener '%s' disabled via configuration", spec.name)
-                continue
-            if not await self._start_single_listener(spec):
-                success = False
-        return success
 
     async def _start_single_listener(self, spec: ListenerConfig) -> bool:
         """Bind a single listener's server socket. Returns True on success."""
@@ -238,95 +228,6 @@ class TelnetListenerAdapter(BaseGenericAdapter):
                 self.logger.info("Telnet listener '%s' stopped", name)
             except Exception:
                 self.logger.warning("Error stopping telnet listener '%s'", name, exc_info=True)
-
-    async def reconcile_ports(self, new_config: Any) -> Dict[str, Any]:
-        """Incrementally reconcile telnet listeners without disturbing unrelated sessions.
-
-        Args:
-            new_config: Dict with key 'telnet_listener' as list, or direct list.
-
-        Returns:
-            Summary dict: {added, removed, updated, unchanged}.
-        """
-        if isinstance(new_config, dict) and isinstance(new_config.get("telnet_listener"), list):
-            items = list(new_config["telnet_listener"])
-        elif isinstance(new_config, list):
-            items = list(new_config)
-        else:
-            items = []
-
-        new_by_name: Dict[str, Dict[str, Any]] = {}
-        for entry in items:
-            if isinstance(entry, dict) and entry.get("name"):
-                new_by_name[str(entry["name"])] = entry
-
-        old_by_name = {spec.name: spec for spec in self.listeners}
-        old_names = set(old_by_name.keys())
-        new_names = set(new_by_name.keys())
-        removed = sorted(old_names - new_names)
-        added = sorted(new_names - old_names)
-        common = sorted(old_names & new_names)
-
-        def _material_cfg(spec: ListenerConfig) -> Dict[str, Any]:
-            return {
-                "bind_host": spec.bind_host,
-                "bind_port": spec.bind_port,
-                "target": spec.target,
-                "read_only": spec.read_only,
-                "acl_raw": list(spec.acl_raw),
-                "enabled": spec.enabled,
-                "require_auth": spec.require_auth,
-            }
-
-        updated: List[str] = []
-        unchanged: List[str] = []
-        for name in common:
-            new_spec = self._build_listener(new_by_name[name])
-            if new_spec is None:
-                continue
-            if _material_cfg(old_by_name[name]) == _material_cfg(new_spec):
-                unchanged.append(name)
-            else:
-                updated.append(name)
-
-        await self._rebuild_listeners(removed, updated, added, new_by_name)
-
-        summary = {"added": added, "removed": removed, "updated": updated, "unchanged": unchanged}
-        self.logger.info(
-            "Telnet listener adapter %s reconcile: +%s ~%s -%s unchanged=%s",
-            self.name,
-            len(added),
-            len(updated),
-            len(removed),
-            len(unchanged),
-        )
-        return summary
-
-    async def _rebuild_listeners(
-        self, removed: List[str], updated: List[str], added: List[str], new_by_name: Dict[str, Dict[str, Any]]
-    ) -> None:
-        """Stop removed/updated listeners, start added/updated, refresh state.
-
-        Stale listeners (removed + updated) stop first; the kept, added and
-        updated specs then rebuild ``self.listeners``. A spec that fails to
-        build on re-apply is skipped (the old listener already stopped).
-        """
-        for name in removed + updated:
-            await self._stop_single_listener(name)
-
-        specs_by_name = {spec.name: spec for spec in self.listeners if spec.name not in (removed + updated)}
-        for name in added + updated:
-            spec = self._build_listener(new_by_name[name])
-            if spec is None:
-                continue
-            specs_by_name[name] = spec
-            if spec.enabled:
-                await self._start_single_listener(spec)
-            else:
-                self.logger.info("Telnet listener '%s' disabled via configuration", spec.name)
-
-        self.listeners = [specs_by_name[n] for n in sorted(specs_by_name.keys())]
-        self._set_running(True)
 
     async def stop(self) -> None:
         self.is_running = False
@@ -648,8 +549,11 @@ class TelnetListenerAdapter(BaseGenericAdapter):
     # ------------------------------------------------------------------
     # Helpers
 
-    def _build_listener(self, entry: Dict[str, Any]) -> Optional[ListenerConfig]:
-        """Shared builder; both transports require auth unless the entry disables it (issue #100)."""
+    def _build_listener(self, entry: Dict[str, Any]) -> ListenerConfig:
+        """Build one spec, or raise the reason this entry cannot become a listener (issue #107).
+
+        Both transports require auth unless the entry disables it (issue #100).
+        """
         return build_listener(entry, display_name="Telnet", require_auth_default=True, logger=self.logger)
 
     def _client_allowed(self, listener: ListenerConfig, peer_ip: str) -> bool:

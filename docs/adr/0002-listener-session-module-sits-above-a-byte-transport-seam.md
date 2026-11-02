@@ -57,9 +57,11 @@ adapter object (the module registers it as `channel_owner`), and the adapter's p
   byte-only by construction; a frame-based transport uses `attach` plus the command handlers.
 - Login policy (attempt caps, lockouts, the HMAC probe) stays per transport. It is the Auth Manager's ground
   (issue #92) and a later candidate; folding it in here would have mixed two refactors.
-- `reconcile_ports` stays two implementations on purpose (candidate 3, not yet built): Telnet reconciles through
+- `reconcile_ports` stayed two implementations here (candidate 3, then not built): Telnet reconciled through
   a material-config closure, SSH through `_listener_material_diff` and `_material_cfg`. The session module takes
-  no part in it beyond `drop_listener_sessions`.
+  no part in it beyond `drop_listener_sessions`. Candidate 3 is now built: issue #107 moved both plans into
+  `openmux/server/adapters/listener_reconcile.py`, and that module also owns the config gap a refused listener
+  gets (`docs/adr/0004-one-reconcile-module-plans-both-listener-sections.md`).
 - `listener_common.py` shrinks to a pure leaf: login-line parsing, ACL compile/match, entry validation, port-list
   rendering, and the echoing prompt primitives. `read_prompt_line` must stay there and not move into the session
   module, because `power_command.run_power_menu` imports it and the session module imports `power_command`.

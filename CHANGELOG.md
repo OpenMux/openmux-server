@@ -37,6 +37,15 @@ Changes since v1.0.4 (2026-10-19).
 
 ### Behavior changes (no config change required)
 
+- **A listener the server cannot build is named, and no longer reported as applied.** A `telnet_listener` or `ssh_listener`
+  entry in `server.yaml` that the server could not build — a missing `bind_port`, a `name` two entries share, a bad `acl`
+  rule, or a `bind_port` another process holds — was reported under `added` by a reload while nothing listened, and the
+  `CONFIG_GAP` block named nothing. At boot it was worse: one unusable entry made the server skip the whole section, so
+  every listener of that transport stayed closed and no log line named any entry. Each unusable entry now gets one config
+  gap naming itself and the reason, the other entries of the section still come up, and a reload reports the entry under
+  `failed` and `failed_detail` instead of `added`. A change to a running listener that is refused keeps that listener
+  running and is listed under `kept_previous`. No config edit is needed. A config that silently started no listener may
+  now start the listeners its usable entries name (issue #107).
 - **A console that may not write is told why.** A session that writes to a Port it does not drive reads
   `[WARNING: console is in read-only mode]` (Telnet, SSH) or `[Write blocked: console is in read-only mode]` (Client
   protocol). That line names its mode and no reason. It now reads the reason the Port gives:

@@ -64,7 +64,10 @@ apply, with the reason the code that refused it gave (issue #105). Both reload a
 caller that reads the answer and not the log sees the same list: `adapters.<kind>.failed` names the refused ports,
 `adapters.<kind>.failed_detail` gives each reason and whether the running port was kept, and `config_violations` holds
 the schema violations the loader tolerated. The server adds those keys only when something stayed unapplied. A gap ends
-when the entry that caused it ends: an entry the new file no longer lists is not reported again.
+when the entry that caused it ends: an entry the new file no longer lists is not reported again. A listener section
+reports the same facts. `openmux/server/adapters/listener_reconcile.py` plans both listener transports, records a
+refused entry or a socket that will not bind as a gap naming its reason, and never reports such an entry as added
+(issue #107, `docs/adr/0004-one-reconcile-module-plans-both-listener-sections.md`).
 | `PortManager` | Aggregation of active ports | `set_unified_adapters()`, client lookup helpers, wrapper exposure |
 | `ConsoleManager` | Interactive / mgmt console | Injected into connection adapters & adapters when supported |
 | `GenericAdapterFactory` | Creates modern adapters from config | `create_adapters_from_config()` |

@@ -47,6 +47,7 @@ from .adapters.listener_common import (
     AclEntry,
     _origin_entry_matches,
     compile_acl,
+    listener_entry_problem,
     read_take_target,
     render_port_list,
     resolve_server_label,
@@ -259,35 +260,37 @@ def build_listener(
     display_name: str,
     require_auth_default: bool,
     logger: logging.Logger,
-) -> Optional[ListenerConfig]:
-    """Build one listener spec from a config entry, or None when the entry is unusable.
+) -> ListenerConfig:
+    """Build one listener spec from a config entry. Shared by both transports (issue #100).
 
-    Shared by both transports (issue #100). Only two facts differ per transport and the
-    caller passes both: the log display name ("Telnet"/"SSH") and the `require_auth`
-    default applied to entries without the key. Warning strings keep their exact
-    per-transport wording through ``display_name``.
+    Only two facts differ per transport and the caller passes both: the log display name ("Telnet"/
+    "SSH") and the `require_auth` default applied to entries without the key. Warning strings keep
+    their exact per-transport wording through ``display_name``.
+
+    Raises:
+        ValueError: The entry cannot become a listener, with the reason an operator can act on. The
+            caller records it as that listener's config gap (issue #107), so an unusable entry is
+            reported by name instead of only logged and dropped. ``listener_entry_problem()`` owns the
+            rules, and ``validate_listener_entries()`` judges the same ones as a bool, so the check a
+            config file passes and the build a reload performs cannot disagree.
     """
-    if not isinstance(entry, dict):
-        return None
+    problem = listener_entry_problem(entry)
+    if problem:
+        raise ValueError(problem)
     try:
         bind_host = entry.get("bind_host", "0.0.0.0")
         if not isinstance(bind_host, str) or not bind_host.strip():
             bind_host = "0.0.0.0"
-        bind_port = int(entry.get("bind_port"))
         spec = ListenerConfig(
-            name=str(entry.get("name")),
+            name=str(entry["name"]),
             bind_host=bind_host,
-            bind_port=bind_port,
-            target=str(entry.get("target")),
+            bind_port=int(entry["bind_port"]),
+            target=str(entry["target"]),
             read_only=bool(entry.get("read_only", False)),
             acl_raw=[str(a).strip() for a in entry.get("acl", []) if str(a).strip()],
             enabled=bool(entry.get("enabled", True)),
             require_auth=bool(entry.get("require_auth", require_auth_default)),
         )
-        if not spec.name:
-            return None
-        if not spec.target:
-            return None
         if spec.target == MENU_TARGET and not spec.require_auth:
             logger.warning(
                 "%s listener '%s' uses menu mode (target: '*') without require_auth; "
@@ -300,9 +303,10 @@ def build_listener(
             on_invalid=lambda rule: logger.warning("Ignoring invalid ACL '%s' for listener %s", rule, spec.name),
         )
         return spec
-    except Exception:
-        logger.error("Invalid %s listener entry: %s", display_name.lower(), entry, exc_info=True)
-        return None
+    except Exception as exc:
+        # justification: a rule the entry validator does not cover must cost one listener and not the
+        # reload that met it; the text still reaches the operator, as this listener's config gap.
+        raise ValueError(f"the entry could not be read: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

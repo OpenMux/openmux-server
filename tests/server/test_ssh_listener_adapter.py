@@ -1,6 +1,8 @@
 """Tests for the SSH listener's auth/menu-mode/login-shortcut/session features."""
 
 import asyncio
+import contextlib
+import socket
 from typing import Any, Dict, List, Optional
 
 import asyncssh
@@ -162,10 +164,19 @@ async def make_running_adapter(
 
 
 def make_entry(**overrides) -> Dict[str, Any]:
+    """One usable listener entry, on a port nothing else holds.
+
+    ``bind_port`` must be 1-65535: the schema says so, and ``build_listener()`` enforces for a reload
+    what ``validate_config()`` always checked at boot (issue #107). A test can no longer pass 0 to be
+    handed an ephemeral port, so it names a port it just saw free.
+    """
+    with contextlib.closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = int(probe.getsockname()[1])
     entry = {
         "name": "s1",
         "bind_host": "127.0.0.1",
-        "bind_port": 0,
+        "bind_port": free,
         "target": "loopback1",
         "require_auth": True,
     }

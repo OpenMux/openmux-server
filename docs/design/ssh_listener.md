@@ -82,6 +82,10 @@ A client picks a port either interactively (`ssh alice@host -p 2023`, then
 - `openmux/server/adapters/ssh_listener.py` — `SshListenerAdapter`, built on
   `asyncssh.create_server`. Shares `listener_common.py` (parse_login,
   compile_acl, ip_allowed, render_port_list) with `telnet_listener.py`.
+- `openmux/server/adapters/listener_reconcile.py` — the plan both listener transports share: build every
+  entry first, report one the adapter refuses as a config gap naming its reason, keep the running listener
+  when a changed entry is refused, and report the reload summary. The adapter keeps the bind, the stop, and
+  the host key (issue #107, `docs/adr/0004-one-reconcile-module-plans-both-listener-sections.md`).
 - `openmux/server/auth_manager.py` — adds
   `get_ed25519_pubkeys_for_user_and_use(username, use)` for username-scoped
   public-key lookups (SSH-specific; `telnet_listener` doesn't need this

@@ -4,7 +4,9 @@ These tests pin the behaviour that both transports (telnet_listener, ssh_listene
 share through `openmux/server/listener_session.py`: the session registry, the
 Control menu, the read-write gate, the Escape sequence scanner, the access-frame
 rendering, and the power menu call. Per-transport files keep only what the seam
-does not cover (auth/menu phase, wire protocol, reconcile).
+does not cover (auth/menu phase and wire protocol). The listener lifecycle is shared
+through `listener_reconcile.py` (issue #107) and guarded in
+tests/server/test_listener_config_gaps.py.
 """
 
 import asyncio
