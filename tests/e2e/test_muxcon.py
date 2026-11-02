@@ -1,4 +1,4 @@
-"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-10).
+"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-11).
 
 Federation was proven only as an empty state before these ids: `ST-04` shows the status page saying
 `No federation connections`, and the unit suites drive `UnifiedMuxConAdapter` with fakes. No test started a
@@ -6,7 +6,7 @@ second `openmux.server.main` process and let it dial the first over a socket. Th
 in one test - which the harness already did for `CFG-07` and `PWR-03` - and add the one capability it
 lacked: a `muxcon:` section, which `ConfigBuilder.with_muxcon` now writes (issue #111).
 
-Nine measured facts shape these bodies, and each is stated where it is used:
+Ten measured facts shape these bodies, and each is stated where it is used:
 
 * Both directions of the link default to **deny-all** (issue #77), and a Port a filter drops is reported
   only at `DEBUG`. So each end states its filters, and a scenario never reads a missing Port as a transfer
@@ -49,6 +49,11 @@ Nine measured facts shape these bodies, and each is stated where it is used:
   itself starts nothing — a SOFT reload bootstraps the muxcon adapter onto a running node that started without
   one and starts initiators added since. `MXC-10` writes an initiator into a live node and watches the Port
   arrive on the peer.
+* The frame header carries TWO sequence spaces by design: a DATA frame's `seq` is peer-scoped, so a path
+  failover does not restart numbering, and every other frame's `seq` is per connection. A receiver that
+  compares one watermark across both sees a reorder on every link that carries bulk data (issue #117) — and
+  since that warning fires once per connection, it also kills the loss check with it. `MXC-11` drives traffic
+  through both spaces and holds the link's log free of the alarm.
 """
 
 from __future__ import annotations
@@ -666,3 +671,35 @@ def test_mxc10_the_config_editor_writes_a_live_link_into_a_node_that_had_none(se
         hub.wait_for_log(f"{PORT_REGISTERED} loop1", timeout=20)
         saved = _config(api)["muxcon"]
         assert [entry["port"] for entry in saved["initiators"]] == [hub_fed_port], saved
+
+
+@surfaces("server:hub", "server:leaf", "cli:driver")
+def test_mxc11_a_link_carrying_both_sequence_spaces_raises_no_ordering_alarm(servers, clients, story) -> None:
+    """DATA is numbered per peer and every other frame per connection; a healthy link must prove it is healthy.
+
+    One console driving a peer Port puts DATA on the wire in both directions while heartbeats, PORTS and the
+    closing CLOSE take numbers from a different counter on the same connection. A receiver that compares one
+    watermark across both spaces calls that a reorder — and because the alarm is once per connection, the link
+    loses its ordering and loss check for the rest of its life (issue #117). So the claim here is about a log
+    line NOT appearing, and it is held up by two lines that DO: the DATA reached the far side, and the control
+    frame that used to trip the alarm arrived after it.
+    """
+    hub, leaf = _linked_pair(servers)
+
+    with step("one console drives the peer's Port, so DATA crosses the link in both directions"):
+        driver = clients.cli(user="rw", surface="cli:driver", server=hub, attach_to="loop1")
+        assert "CONNECTED:loop1:READ_WRITE" in driver.wire_text(), driver.wire_text()[-400:]
+        driver.echo_of("mxc11", timeout=20)
+
+    with step("the far side then takes a number from its own counter, which is where the false reorder fired"):
+        # Closing the console makes the ORIGIN emit a control frame after the DATA it just counted, which is
+        # the exact ordering the warning used to misread on this node.
+        driver.close()
+        leaf.wait_for_log("CLOSE stream", timeout=20)
+
+    with step("and neither node calls the link out of order or claims a gap in it"):
+        # Both needles are the whole message, so nothing else can satisfy them: the DATA space reports a loss
+        # as `DATA gap at seq N not filled` and a stale frame as `dropped DATA seq=N`, and neither is this.
+        needles = ("Out-of-order", "Control sequence gap")
+        noisy = [line for line in hub.log_lines() + leaf.log_lines() if any(word in line for word in needles)]
+        assert not noisy, f"a healthy link raised an ordering alarm: {noisy}"
