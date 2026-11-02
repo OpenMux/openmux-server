@@ -285,8 +285,8 @@ Write down what the scenario claims, then give each part the strongest proof tha
    selected menu-item elements only, so the read was wrong and the page was right. A scenario that asserted on the read
    alone would have reported a product defect that never existed.
 4. **Anything the suite cannot prove**: an honest skip or a named outstanding id. A skip names what it proves and what
-   it does not. Release 1 has no outstanding id left. `ConfigBuilder.with_muxcon` now writes a `muxcon:` section, so a
-   scenario can link two real nodes; the federation surfaces still unproven are named in **Release 2** item 2.
+   it does not. Release 1 has no outstanding id left. `ConfigBuilder.with_muxcon` writes a `muxcon:` section, so a
+   scenario links two real nodes; **Release 2** item 2 names what those scenarios prove.
 
 Three traps in this tier cost a debugging session each, so they are rules now.
 
@@ -1033,8 +1033,7 @@ federation listener at all. The CommonName now ends at that ceiling.
 
 ## Release 2
 
-Named now so release 1 fixtures stay sufficient. All five have a suite. Item 2 is built as far as one link and one Port
-carry, and its remaining surfaces are named in its entry.
+Named now so release 1 fixtures stay sufficient. All five have a suite, and every item is built.
 
 1. SSH listener: **built** as `SSH-01` to `SSH-10`, ahead of the rest of this list. The host key inside
    `OPENMUX_STATE_DIR`, one Takeover, and one `p` menu run are each proven there, beside the login forms, the `acl`
