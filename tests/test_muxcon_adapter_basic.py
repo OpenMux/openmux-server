@@ -75,6 +75,23 @@ async def test_start_stop_without_listeners():
     assert ad.is_running is False
 
 
+@pytest.mark.asyncio
+async def test_autogen_cert_shortens_a_server_id_past_the_common_name_ceiling(tmp_path):
+    # An e2e scenario first met this as a silent startup failure: X.509 caps a CommonName at 64
+    # characters (RFC 5280 ub-common-name), the adapter used to put the whole server.id there, and a
+    # node with a long id then logged "TLS autogen failed" and never started its federation listener.
+    long_id = "e2e-test_a_tls_link_needs_no_shared_ca_because_the_dialler_pins-hub"
+    assert len(long_id) > 64
+    ad = UnifiedMuxConAdapter("mx", {"muxcon": {}})
+    ad.server_id = long_id
+    cert_path, _key_path = await ad._ensure_autogen_cert({"tls_dir": str(tmp_path)})
+    from cryptography import x509
+
+    cert = x509.load_pem_x509_certificate(open(cert_path, "rb").read())
+    names = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+    assert [str(a.value) for a in names] == [long_id[:64]]
+
+
 # --- Default-deny federation filter warning (ticket #77) ---
 
 

@@ -40,7 +40,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from aiohttp import web
 
-from openmux.common.identity import basic_authenticate_header, get_server_id, get_server_label
+from openmux.common.identity import basic_authenticate_header, certificate_cn, get_server_id, get_server_label
 from openmux.server.access_control import capacity_display_label
 from openmux.server.access_decision import (
     CLOSE_ATTACH_DENIED,
@@ -5185,7 +5185,7 @@ class WebConsoleAdapter(BaseGenericAdapter):
 
         subject = issuer = x509.Name(
             [
-                x509.NameAttribute(NameOID.COMMON_NAME, cn),
+                x509.NameAttribute(NameOID.COMMON_NAME, certificate_cn(cn)),
                 x509.NameAttribute(NameOID.ORGANIZATION_NAME, "OpenMux"),
             ]
         )

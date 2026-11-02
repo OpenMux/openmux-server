@@ -106,7 +106,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from cryptography.x509.oid import NameOID
 
-from openmux.common.identity import get_server_id, get_server_label
+from openmux.common.identity import certificate_cn, get_server_id, get_server_label
 from openmux.server.access_control import capacity_from_wire, capacity_to_wire, wire_to_mode
 from openmux.server.access_decision import Code, notice
 from openmux.server.locations import muxcon_known_peers_path, muxcon_tls_dir
@@ -2921,8 +2921,9 @@ class UnifiedMuxConAdapter(BaseGenericAdapter):  # noqa: Vulture
         key = ec.generate_private_key(ec.SECP256R1(), backend=default_backend())
         subject = issuer = x509.Name(
             [
-                # Use server_id as the certificate CN to align identity semantics
-                x509.NameAttribute(NameOID.COMMON_NAME, (self.server_id or socket.gethostname())),
+                # Use server_id as the certificate CN to align identity semantics, capped at the
+                # X.509 CommonName ceiling so a long server.id still gets a listener (issue #118).
+                x509.NameAttribute(NameOID.COMMON_NAME, certificate_cn(self.server_id, socket.gethostname())),
                 x509.NameAttribute(NameOID.ORGANIZATION_NAME, "OpenMux"),
             ]
         )
