@@ -1,4 +1,4 @@
-"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-09).
+"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-10).
 
 Federation was proven only as an empty state before these ids: `ST-04` shows the status page saying
 `No federation connections`, and the unit suites drive `UnifiedMuxConAdapter` with fakes. No test started a
@@ -6,7 +6,7 @@ second `openmux.server.main` process and let it dial the first over a socket. Th
 in one test - which the harness already did for `CFG-07` and `PWR-03` - and add the one capability it
 lacked: a `muxcon:` section, which `ConfigBuilder.with_muxcon` now writes (issue #111).
 
-Eight measured facts shape these bodies, and each is stated where it is used:
+Nine measured facts shape these bodies, and each is stated where it is used:
 
 * Both directions of the link default to **deny-all** (issue #77), and a Port a filter drops is reported
   only at `DEBUG`. So each end states its filters, and a scenario never reads a missing Port as a transfer
@@ -44,6 +44,11 @@ Eight measured facts shape these bodies, and each is stated where it is used:
   mirror of it before running its own local switch. The origin's audit names its own local ref; the state update
   flowing back is what powers off the typing console's own notices on this side of the link. `MXC-09` runs the
   round trip.
+* The link itself is editable at runtime. `POST /config-editor/apply` replaces the WHOLE config (a section left
+  out reads as removed), the JSON schema refuses a `muxcon` section carrying an unmodelled key, and the write
+  itself starts nothing — a SOFT reload bootstraps the muxcon adapter onto a running node that started without
+  one and starts initiators added since. `MXC-10` writes an initiator into a live node and watches the Port
+  arrive on the peer.
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ import pytest
 import yaml
 
 from .harness import ssh_ed25519_keypair
+from .test_config_editor import _apply, _config, _data, _payload, _reconciled, _reload, _summary
 
 from openmux.server.access_decision import Code, read_only_grant_notice, write_blocked_notice
 
@@ -601,3 +607,62 @@ def test_mxc09_a_switch_typed_on_one_node_moves_the_outlet_on_the_other(servers,
         assert _outlet_on(api_for_server(leaf), PDU_FEED) is True
         menu.answer("")
         menu.wait_for("[EXITING POWER]", timeout=20)
+
+
+@surfaces("server:hub", "server:leaf", "web:editor", "api:ports")
+def test_mxc10_the_config_editor_writes_a_live_link_into_a_node_that_had_none(servers, story, api_for_server) -> None:
+    """The federation link is a config section like any other: the editor saves it, and a SOFT reload runs it.
+
+    The leaf starts with no `muxcon` section at all — no adapter exists to reconcile — and the answering hub
+    therefore knows nothing of its Port either. What turns that into a live link is exactly the two shipped
+    editor steps: `/config-editor/apply` replaces the WHOLE config (the payload is what `/data` served, with
+    the section added), and the save itself starts nothing. Only the soft reload bootstraps the adapter the
+    node never had and starts the initiator the section names, and the reload summary is where it admits
+    doing so.
+    """
+    hub = servers(
+        name="hub",
+        loopback=(),
+        telnet=False,
+        muxcon=True,
+        muxcon_kwargs={"accept": ["loop1"], "use_tls": False},
+        start=True,
+    )
+    leaf = servers(name="leaf", loopback=("loop1",), telnet=False, start=True)
+    hub_fed_port = hub.port_of("muxcon")
+    api = api_for_server(leaf)
+
+    with step(
+        "the leaf holds no link to break, its policy calls the federated section writable, and the hub owns no peer Port"
+    ):
+        data = _data(api)
+        assert (
+            "muxcon" in data["writable_sections"]
+        ), f"policy will not let this node save its own link: {data['writable_sections']}"
+        assert "muxcon" not in data["config"], "the leaf was built with a muxcon section; the write would prove nothing"
+        assert "loop1" not in [str(port.get("name")) for port in _ports(api_for_server(hub))]
+
+    with step("a section carrying a key the schema does not model is refused whole, and the leaf still holds no link"):
+        malformed = {"auth_required": False, "initiators": [], "not_a_link_key": True}
+        refused = _apply(api, dict(_payload(api), muxcon=malformed), expect=400)
+        assert "muxcon" in str(refused), f"the refusal did not name the section it refused: {refused}"
+        assert "muxcon" not in _config(api), "the refused save reached the running config anyway"
+
+    with step("the real section saves clean, and it is the SOFT reload that bootstrap-starts the initiator"):
+        link = {
+            "auth_required": False,
+            "federated_cache_enabled": False,
+            "listeners": [],
+            "initiators": [{"host": "127.0.0.1", "port": hub_fed_port, "use_tls": False}],
+            "advertise_filters": {"include": ["loop1"]},
+        }
+        assert _apply(api, dict(_payload(api), muxcon=link)) == {"ok": True}
+        # The write started nothing on its own — the link exists only once the reload summary admits it.
+        muxcon_now = _reconciled(_summary(_reload(api, "soft")), "muxcon")
+        assert muxcon_now["initiators"]["added"] == [f"127.0.0.1:{hub_fed_port}"], muxcon_now
+
+    with step("and the saved section is a live link: the hub answers, registers the Port, and the editor reads it back"):
+        hub.wait_for_log("Handshake OK (server-side)", timeout=30)
+        hub.wait_for_log(f"{PORT_REGISTERED} loop1", timeout=20)
+        saved = _config(api)["muxcon"]
+        assert [entry["port"] for entry in saved["initiators"]] == [hub_fed_port], saved
