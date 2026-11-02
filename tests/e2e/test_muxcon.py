@@ -1,4 +1,4 @@
-"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-06).
+"""MUXCON: two real nodes, one link, and what each side may see and do (MXC-01 to MXC-07).
 
 Federation was proven only as an empty state before these ids: `ST-04` shows the status page saying
 `No federation connections`, and the unit suites drive `UnifiedMuxConAdapter` with fakes. No test started a
@@ -6,7 +6,7 @@ second `openmux.server.main` process and let it dial the first over a socket. Th
 in one test - which the harness already did for `CFG-07` and `PWR-03` - and add the one capability it
 lacked: a `muxcon:` section, which `ConfigBuilder.with_muxcon` now writes (issue #111).
 
-Five measured facts shape these bodies, and each is stated where it is used:
+Six measured facts shape these bodies, and each is stated where it is used:
 
 * Both directions of the link default to **deny-all** (issue #77), and a Port a filter drops is reported
   only at `DEBUG`. So each end states its filters, and a scenario never reads a missing Port as a transfer
@@ -27,14 +27,23 @@ Five measured facts shape these bodies, and each is stated where it is used:
   a SHA-256 fingerprint stored against `host:port` — trust-on-first-use. The first connect is unverified and
   is recorded as such; a peer that returns with a different certificate is refused, and a refusal never
   rewrites the stored fingerprint. `MXC-05` records, `MXC-06` refuses.
+* Key-authenticated peering proves a signature, not a name. The dialler puts its `key_id` in `HELLO` as
+  `PKID=<id>`; the acceptor issues `AUTH:PK:CHALLENGE` with a 32-byte nonce and verifies the Ed25519
+  signature on it against the public key stored under that id. A `key_id` nobody knows, or a matching name
+  with the wrong private key, closes the connection before any Port moves — and the acceptor also drops a
+  `PORTS:FEDERATED` from a connection it has not authenticated, so a peer that advertises anyway injects
+  nothing. `MXC-07` proves all three outcomes on one hub.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any, List, Optional, Tuple
 
 import pytest
 import yaml
+
+from .harness import ssh_ed25519_keypair
 
 from openmux.server.access_decision import Code, read_only_grant_notice, write_blocked_notice
 
@@ -345,3 +354,71 @@ def test_mxc06_a_peer_that_returns_with_a_different_certificate_is_refused(serve
         found = len([line for line in hub.log_lines() if "Handshake OK" in line])
         assert found == handshakes, "a peer with a changed certificate finished a handshake"
         assert _tofu_fingerprint(leaf, dial_key) == stored, "the refusal overwrote the trusted fingerprint"
+
+
+@surfaces("server:hub", "server:leaf", "server:forged", "server:nokey", "api:ports")
+def test_mxc07_a_peered_key_opens_the_link_and_a_stolen_name_does_not(servers, story, api_for_server, tmp_path) -> None:
+    """One hub checks one key: its true holder links, a wrong key under its name is refused, nothing links without a key.
+
+    The proof is a signature, never a name: the acceptor challenges the claimed ``key_id`` with a 32-byte
+    nonce and verifies the Ed25519 signature on it. So the interesting dialler is the one whose ``key_id``
+    MATCHES a configured entry while its private key does not — it passes the name gate and dies at the
+    crypto gate, which is what no name-matching scheme could catch.
+    """
+    real_pub, real_key = ssh_ed25519_keypair("mxc07-real")
+    _forged_pub, forged_key = ssh_ed25519_keypair("mxc07-forged")
+
+    def _private_file(name: str, key) -> str:
+        path = tmp_path / name
+        path.write_text(key.export_private_key("openssh").decode("ascii"))
+        os.chmod(path, 0o600)
+        return str(path)
+
+    hub = servers(
+        name="hub",
+        loopback=(),
+        muxcon=True,
+        muxcon_kwargs={
+            "accept": ["*"],
+            "auth_required": True,
+            "public_keys": [{"key_id": "op-1", "public_key": real_pub}],
+        },
+        start=True,
+    )
+    dial_to = hub.port_of("muxcon")
+
+    def _dialer(name: str, port: str, auth: Optional[dict]) -> Any:
+        return servers(
+            name=name,
+            loopback=(port,),
+            telnet=False,
+            configure=lambda builder: builder.with_muxcon(dial=[("127.0.0.1", dial_to)], advertise=[port], auth=auth),
+            start=True,
+        )
+
+    real_id = _private_file("real_id", real_key)
+    forged_id = _private_file("forged_id", forged_key)
+
+    with step("the hub answers only the peer that presents the configured key_id"):
+        # The initiator advertises its Ports only after AUTH:OK, so this registration line IS the proof
+        # that the challenge round trip completed — no earlier frame can cause it.
+        _dialer("leaf", "loop1", {"private_key": real_id, "key_id": "op-1"})
+        hub.wait_for_log(f"{PORT_REGISTERED} loop1", timeout=30)
+
+    with step("the same key_id with a different private key is refused at the signature, not the name"):
+        forged = _dialer("forged", "loop9", {"private_key": forged_id, "key_id": "op-1"})
+        forged.wait_for_log("MuxCon auth failed: bad signature", timeout=30)
+
+    with step("and a dialler with no key never reaches the challenge at all"):
+        nokey = _dialer("nokey", "loop8", None)
+        nokey.wait_for_log("server requires a known PKID", timeout=30)
+
+    with step("neither refused peer put a Port on the hub, because the acceptor drops Port lists it cannot authenticate"):
+        # The keyless dialler treats itself as discoverable and really does send its Port list on the
+        # unauthenticated link; `_ctl_ports` checks `_is_conn_authenticated` before registering anything,
+        # so the list is discarded without a log and without a Port. The send line bounds the absence
+        # below: the offer reached the node, and only the auth gate kept `loop8` off the list.
+        nokey.wait_for_log(PORTS_SENT, timeout=30)
+        names = {str(entry.get("name")) for entry in _ports(api_for_server(hub))}
+        assert "loop1" in names, names
+        assert not names & {"loop8", "loop9"}, f"an unauthenticated peer registered a Port: {sorted(names)}"
