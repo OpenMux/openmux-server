@@ -1,4 +1,4 @@
-"""CFG: what the Config Editor changes, when it changes it, and who may ask (CFG-01 to CFG-20).
+"""CFG: what the Config Editor changes, when it changes it, and who may ask (CFG-01 to CFG-21).
 
 The editor is one page over four owners, and each layer can be right while the page is wrong, so every scenario here
 states the pair a person would otherwise reconcile by hand:
@@ -16,7 +16,9 @@ device, so a PDU that appears in the file always starts. And the two adapter fai
 are a Serial port whose device path no host has, which the server starts offline rather than refusing, and a port
 entry holding a value its own port rejects, which the server reports instead of starting: for one Serial entry at
 soft reload (CFG-18), for one entry of any port section at boot (CFG-19), and for that same entry when a full reload
-rebuilds every adapter from the file (CFG-20).
+rebuilds every adapter from the file (CFG-20). A listener the server cannot bring up needs a third device, because
+its entry holds nothing the server rejects: this tier occupies a TCP port itself, so the bind fails for the one
+listener that was written to it (CFG-21).
 
 Unlike the plan for this suite, no scenario depends on another: each builds its server, makes its edit, and proves
 its own save-then-reload-then-see order in one run. That order is a product rule, so it belongs inside the scenario
@@ -28,7 +30,7 @@ from __future__ import annotations
 import json
 import socket
 import time
-from typing import Any, Dict, List, Sequence, Set
+from typing import Any, Dict, List, Sequence, Set, Tuple
 
 import pytest
 import yaml
@@ -65,6 +67,8 @@ GAP_ITEM = f"{GAP_MARKER}   "
 BAD_PARITY_REASON = "Parity must be N, E, O, M, or S"
 #: The reason a port of any section gives for a write-slot capacity it does not accept.
 BAD_CAPACITY_REASON = "Invalid max_read_write_users"
+#: The reason a listener gives when its own build is fine but its socket would not bind (``LISTENER_UNBOUND``).
+UNBOUND_REASON = "could not be bound"
 #: The last line one reload logs, so counting it proves every line of that reload reached the log.
 RELOAD_DONE = "Completed with summary"
 
@@ -390,6 +394,67 @@ def _drop_port_named(ports: List[Dict[str, Any]], name: str) -> None:
         name: Entry name to delete.
     """
     ports[:] = [p for p in ports if p.get("name") != name]
+
+
+def _edit_telnet_listeners_in_file(world: Any, edit: Any) -> None:
+    """Rewrite the ``telnet_listener`` section of server.yaml, by hand as a person would.
+
+    The Config Editor cannot be the way in here either: it saves what the operator typed, and an entry
+    whose port another process holds is a valid entry right up to the bind. ``edit`` receives the
+    current list of listener entries and changes it in place; the server reads the file on the next
+    reload.
+
+    Args:
+        world: The running world whose ``server.yaml`` is rewritten.
+        edit: Callable handed the list of Telnet listener entries.
+    """
+    path = world.config_dir / "server.yaml"
+    config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    listeners = config.get("telnet_listener")
+    listeners = list(listeners) if isinstance(listeners, list) else [listeners] if listeners else []
+    edit(listeners)
+    config["telnet_listener"] = listeners
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+
+def _drop_listener_named(listeners: List[Dict[str, Any]], name: str) -> None:
+    """Delete every listener entry with this name from the list, in place.
+
+    Args:
+        listeners: The ``telnet_listener`` list a caller handed over.
+        name: Entry name to delete.
+    """
+    listeners[:] = [entry for entry in listeners if entry.get("name") != name]
+
+
+def _listener_entry(name: str, port: int) -> Dict[str, Any]:
+    """One Telnet listener entry in the shape the harness writes, for a hand edit.
+
+    Args:
+        name: Listener name the reload answer and the gap report will show.
+        port: Port it asks to listen on.
+    """
+    return {
+        "name": name,
+        "bind_host": "127.0.0.1",
+        "bind_port": int(port),
+        "target": "*",
+        "require_auth": True,
+        "read_only": False,
+    }
+
+
+def _occupied_port() -> Tuple[int, socket.socket]:
+    """One port this process holds so the server cannot bind it, and the socket holding it.
+
+    The socket stays bound and listening instead of being closed: a closed port returns to the pool and
+    the kernel may hand that number to the very listener under test, which would then bind and let the
+    scenario pass without proving anything.
+    """
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    return int(held.getsockname()[1]), held
 
 
 def _log_count(world: Any, needle: str) -> int:
@@ -1160,3 +1225,72 @@ def test_cfg20_a_full_reload_reports_the_port_it_could_not_build_and_keeps_the_o
     assert GAP_MARKER in header, header
     gap_line = world.wait_for_log(f"{GAP_ITEM}serial/typo1:", since=mark, timeout=20.0)
     assert BAD_PARITY_REASON in gap_line, gap_line
+
+
+# ===============================================================================
+# A listener the server cannot bring up, which must never be reported as listening
+# ===============================================================================
+
+
+@surfaces("http", "server log")
+def test_cfg21_a_listener_that_cannot_bind_is_named_and_never_reported_as_added(servers, api_for_server):
+    """One listener whose port is taken costs that listener alone, in the answer and in the log (issue #107).
+
+    A person hand-edits server.yaml to add a listener on a port another process already holds. Nothing rejects that
+    entry: it names a port, a target and a host, and only the bind says no. Both listener adapters answered
+    ``added: [take1]`` for it and kept the reason to themselves, and the reload after that read the dead entry as
+    ``unchanged`` and never bound it again -- so the node served no listener its own file asked for, while its reload
+    answer claimed it did. The pair this proves is the refusal in the answer and one log line naming the listener.
+    """
+    world = servers(name="listengap", loopback=("keep",), telnet_kwargs={"require_auth": True}, start=True)
+    api = api_for_server(world)
+    taken_port, held = _occupied_port()
+    try:
+        step("the hand edit lands in the file beside the listener that works")
+        _edit_telnet_listeners_in_file(world, lambda items: items.append(_listener_entry("take1", taken_port)))
+        assert "take1" in world.config_text(), "the edit never reached the file"
+        step("the soft reload refuses that listener and never reports it as added")
+        mark = len(world.log_lines())
+        summary = _summary(_reload(api, "soft"))
+        listeners = _reconciled(summary, "telnet_listener")
+        assert listeners["failed"] == ["take1"], listeners
+        assert UNBOUND_REASON in listeners["failed_detail"]["take1"]["error"], listeners
+        assert listeners["failed_detail"]["take1"]["kept_previous"] is False, listeners
+        assert "take1" not in listeners.get("added", []), f"an unbound listener was reported as added: {listeners}"
+        assert "telnet1" in listeners["unchanged"], listeners
+        step("the log names the section, the listener, and the reason it is not listening")
+        # The gap block is one log call and the thread filling log_lines() runs behind the reply, so wait for the line
+        # under test instead of reading the lines back straight away.
+        gap_line = world.wait_for_log(f"{GAP_ITEM}telnet_listener/take1:", since=mark)
+        assert UNBOUND_REASON in gap_line, gap_line
+        step("the listener the file can still serve answers as before")
+        assert _listener_answers(world.port_of("telnet")), f"the good listener went with the refused one: {world.tail(40)}"
+        step("the port stays held, so the next reload names it again: a gap does not heal by waiting")
+        again = _reconciled(_summary(_reload(api, "soft")), "telnet_listener")
+        assert again["failed"] == ["take1"], again
+        assert "take1" not in again.get("added", []), again
+        # Each reload logs its summary line last, after any gap block, so counting those lines proves the blocks above
+        # reached the log. From here the count measures what the server logged, not how far the reader caught up.
+        _wait_for_log_count(world, RELOAD_DONE, 2)
+        gaps_logged = _log_count(world, GAP_MARKER)
+        step("freeing the port is enough: the entry was never dropped, so a later reload binds it")
+        held.close()
+        freed = _reconciled(_summary(_reload(api, "soft")), "telnet_listener")
+        assert "take1" in freed["added"], f"the reload never retried the listener once its port was free: {freed}"
+        assert "failed" not in freed, freed
+        assert _listener_answers(taken_port), f"the retried listener never opened on {taken_port}"
+        _wait_for_log_count(world, RELOAD_DONE, 3)
+        assert _log_count(world, GAP_MARKER) == gaps_logged, "\n".join(_marked_lines(world))
+        step("and the reload after that knows it is running, because it reports no change")
+        later = _reconciled(_summary(_reload(api, "soft")), "telnet_listener")
+        assert "failed" not in later and "take1" in later["unchanged"], later
+        step("deleting a listener that works takes away its port and leaves no gap behind")
+        _edit_telnet_listeners_in_file(world, lambda items: _drop_listener_named(items, "take1"))
+        deleted = _reconciled(_summary(_reload(api, "soft")), "telnet_listener")
+        assert "take1" in deleted.get("removed", []), deleted
+        assert "failed" not in deleted, deleted
+        assert not _listener_answers(taken_port), f"the removed listener still holds {taken_port}"
+        _wait_for_log_count(world, RELOAD_DONE, 5)
+        assert _log_count(world, GAP_MARKER) == gaps_logged, "\n".join(_marked_lines(world))
+    finally:
+        held.close()

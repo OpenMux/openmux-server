@@ -1,6 +1,6 @@
 # End-to-End Test Suite
 
-**Status:** Implemented through Phase 9 and through Release 2: 162 scenarios in fifteen suites run green.
+**Status:** Implemented through Phase 9 and through Release 2: 163 scenarios in fifteen suites run green.
 [`docs/E2E_TESTS.md`](../E2E_TESTS.md) lists them and is the only place a group's
 count is written down, because restating those numbers here let two of them go stale. See **Build status** near the end.
 **Date:** 2026-11-01
@@ -318,8 +318,8 @@ the failure usually looks like a product bug in a *different* suite. Do not fix 
 
 ## Test inventory
 
-The suite today runs 162 scenarios in 15 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 21, `PWR` 19, `CMD` 6,
-`SER` 6, `CFG` 20, `ACT` 11, `ST` 6, `SSH` 10, `SOK` 7, `MXC` 11, the index checks 3, and the story recorder 6. The generated
+The suite today runs 163 scenarios in 15 files: `LIFECYCLE` 11, `AUTH` 11, `CON` 14, `RW` 21, `PWR` 19, `CMD` 6,
+`SER` 6, `CFG` 21, `ACT` 11, `ST` 6, `SSH` 10, `SOK` 7, `MXC` 11, the index checks 3, and the story recorder 6. The generated
 [docs/E2E_TESTS.md](../E2E_TESTS.md) is the list of what runs, and its count is checked by `IDX-02`. Every group below now
 maps to a file that runs. What is still unwritten sits in the **Release 2** list further down, where item 2, MuxCon with
 two live nodes, is now built in full (`MXC`). Full wording for every built id
@@ -509,7 +509,7 @@ run a second console joining wrote two more copies, a grant one more, and a leav
 stayed at one copy. [Issue #112](https://github.com/OpenMux/openmux-server/issues/112) carries it.
 
 
-### CFG — configure, then reload (`test_config_editor.py`, 20 scenarios)
+### CFG — configure, then reload (`test_config_editor.py`, 21 scenarios)
 
 Each scenario builds its own server, edits its own config, and proves its own save-then-reload-then-see order. Four
 owners sit behind one page, so each scenario names the pair a person would otherwise reconcile by hand: access and
@@ -523,7 +523,9 @@ appears in the file always starts. The two adapter failures this tier can produc
 device path no host has, which the reload starts offline and the port reports itself down, and one port entry holding a
 value its own port refuses, which the server reports instead of starting: for one Serial entry at soft reload
 (`CFG-18`), for one entry of any port section at boot (`CFG-19`), and for that entry again when a full reload rebuilds
-every adapter from the file (`CFG-20`).
+every adapter from the file (`CFG-20`). A listener the server cannot bring up needs a third device, because its entry
+holds nothing the server refuses: the tier occupies a TCP port itself, so the bind fails for the one listener written to
+it (`CFG-21`).
 
 | Id | What one scenario proves |
 | --- | --- |
@@ -547,6 +549,7 @@ every adapter from the file (`CFG-20`).
 | `CFG-18` | A Serial entry the server cannot build is named in the log block, reported as `failed`, never as `added`, and forgotten once the file drops it. |
 | `CFG-19` | One unusable port entry at boot costs that port alone: the port beside it runs and the block names both. |
 | `CFG-20` | A full reload answers ok, keeps every port the file can build, and names the entry it refused in its answer and its log. |
+| `CFG-21` | A listener whose port is taken is refused by name in the answer and the log, never listed as added, and binds on the reload after the port frees. |
 
 Unlike the plan for this suite, **no scenario depends on another**. Each builds its server and makes its own edit, so
 a failure names the rule it broke instead of the scenario that ran before it. The save-then-reload order is a product
@@ -592,7 +595,7 @@ page doing anything wrong: `POST /config-editor/apply` runs the same schema and 
 (`CFG-06`). While the file keeps that entry listed, the verdict repeats on every reload. Once the file drops that entry,
 the next reload reports nothing, because nothing in the file is then unapplied.
 
-Five defects in the product came out of measuring, and each is fixed with the scenario that proves it.
+Six defects in the product came out of measuring, and each is fixed with the scenario that proves it.
 
 - A full reload while any browser page was connected left the web console down for good. `WebConsoleAdapter.stop()`
   asked each runner to `cleanup()`, which waits for the handlers that runner started, and the console and `/ws/events`
@@ -684,10 +687,29 @@ Five defects in the product came out of measuring, and each is fixed with the sc
   per port under `{"status": "failed"}`, and an `errors` list of sentences — which is why this stayed visible only in
   green tests: a search over the tree for a producer of the per-port shape found the test that fed it and nothing else.
   Both now read the payloads that method builds, and `tests/server/test_main_config_gaps.py` drives the real method, so
-  the reporter is checked against a summary the product made. No world in this tier can force an adapter start failure,
-  which needs a second process holding the listener port, so that half stays a unit test: it asserts the summary as the
-  producer writes it and the block line as the operator reads it. All three tests fail against the previous reporter —
+  the reporter is checked against a summary the product made. No world in this tier forces an *adapter* start failure:
+  the held listener port below refuses one listener at reconcile while the adapter itself starts. That half therefore
+  stays a unit test: it asserts the summary as the producer writes it and the block line as the operator reads it. All
+  three tests fail against the previous reporter —
   `('adapter', "{'adapter': 'serial_ports', 'start_timeout': 10.0}") != ('serial_ports', 'start timed out after 10.0s')`.
+- A listener the server could not bind was reported as started, and the reload after that stopped trying to bind it. The
+  two listener transports applied their section with two copies of the same naming rule, and neither kept a refused name
+  out of `added`. A refused listener is not a value its entry can hold: nothing in the file is wrong, so only the bind
+  says no, and no other world in this tier can force that. `_occupied_port()` binds and holds one TCP port, so the bind
+  fails for the one listener written to it. `CFG-21` writes a second Telnet listener onto that port by hand and reloads.
+  Measured against the shape before the rule — `reconcile_summary()` no longer strips a refused name — the scenario fails
+  on `an unbound listener was reported as added`, with that answer listing `take1` under both `added` and `failed`: it
+  claimed the listener and refused it in the same object, for a listener that never bound. The same reload logged
+  `Telnet adapter telnet_listener rejects listener take1: the listener socket could not be bound (is the port already
+  in use?)` and one `CONFIG_GAP   telnet_listener/take1:` line beside that claim.
+  The refused spec is dropped from `listeners`, and that is what keeps a later retry possible: measured with the
+  `ready.append(spec)` line restored, the next reload logged `Telnet listener adapter telnet_listener reconcile: +0 ~0 -0
+  unchanged=2 failed=0` while the port stayed held, and the scenario fails with `KeyError: 'failed'` because the dead
+  entry now reads as running. Measured with both rules in place, from a live server: `+0 ~0 -0 unchanged=1 failed=1` on
+  the first reload and again on the second while the port stays held, then `+1 ~0 -0 unchanged=1 failed=0` on the reload
+  after the port frees, `+0 ~0 -0 unchanged=2 failed=0` after that, and `+0 ~0 -1 unchanged=1 failed=0` with no
+  `CONFIG_GAP` line once the file drops the listener. `tests/server/test_listener_config_gaps.py` holds the unit half,
+  26 tests over both transports. [Issue #107](https://github.com/OpenMux/openmux-server/issues/107).
 
 ### ACT — Port Actions (`test_actions.py`, built: 11)
 
@@ -1100,7 +1122,7 @@ Named now so release 1 fixtures stay sufficient. All five have a suite, and ever
 | 3 — AUTH and CON | Done | `AUTH-01` to `AUTH-10` over HTTP with a real cookie jar, and `CON-01` to `CON-14` in a real Chromium page. `AUTH-11` came after Phase 9, once a helper fixture existed; see row 9a. |
 | 4 — write slot | Done | `RW-01` to `RW-21` in `test_write_slot.py` over the three surfaces. The harness gained a per-port listener knob, a `groups` list per user, the two group lists per port, and `expect_no_text` on both text sessions. |
 | 5 — power | Done | `PWR-01` to `PWR-19` in `test_power.py`: the REST shape, both PDU pages, the badge and its menu, the terminal notices on three surfaces, the `POWER` command, the Telnet `p` menu, the permission and group matrix, and the audit lines. Three product defects came out of it, listed under `PWR` above. The harness gained the page, dialog, and text-session helpers each one needed; see [`tests/e2e/README.md`](../../tests/e2e/README.md). |
-| 6 — Config Editor | Done | `CFG-01` to `CFG-20` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at soft reload, one entry of any port section the adapter refuses at boot, and that entry again under a full reload. Five product defects came out of building this group, listed under `CFG` above; the third turned out to have a second half found after it was fixed, the fourth was found while measuring that half, and the fifth came from making a full reload answer carry the keys a soft reload answer already carried. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it; `CFG-18` then deletes that entry with `_drop_port_named()` and counts the block lines after `_wait_for_log_count()`, because a plain log wait is satisfied by an earlier reload; `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`, and `CFG-20` reuses the hand-edit helper `CFG-18` added. |
+| 6 — Config Editor | Done | `CFG-01` to `CFG-21` in `test_config_editor.py`: the gating and CSRF pair, what a save writes and refuses, the soft reconcile and the full reload seen from an open page, a Serial port with no device behind it, a Serial entry the adapter refuses to build at soft reload, one entry of any port section the adapter refuses at boot, that entry again under a full reload, and a listener whose port another process holds. Six product defects came out of building this group, listed under `CFG` above; the third turned out to have a second half found after it was fixed, the fourth was found while measuring that half, the fifth came from making a full reload answer carry the keys a soft reload answer already carried, and the sixth is the listener half of the gap contract, which needed this tier to hold a TCP port. The harness gained `ConfigBuilder.with_serial_port`, a Telnet `port` knob, `TelnetSession.wait_for_close`, and `ConsoleSession.wait_for_selector`; `CFG-18` edits `server.yaml` through `world.config_dir`, because a hand edit is the state under test and the Editor refuses it; `CFG-18` then deletes that entry with `_drop_port_named()` and counts the block lines after `_wait_for_log_count()`, because a plain log wait is satisfied by an earlier reload; `CFG-19` needs no harness change at all, because an unusable entry is written by `ConfigBuilder.with_command_port` with `write_slot_capacity="two"`; `CFG-20` reuses the hand-edit helper `CFG-18` added; and `CFG-21` keeps the port bound and listening in its own socket, because a closed port returns to the pool and the kernel can hand that number to the listener under test. |
 | 6a — uncovered-run notice | Done | A run that cannot start a browser skips every page scenario and, under the heading `E2E browser coverage`, prints how many scenarios asserted nothing, one line per reason, and the fix command. `IDX-03` drives the notice with a fake reason and a fake skip list; whether this machine has a browser is not what it checks. |
 | 7 — Port Actions | Done | Eleven scenarios (`ACT-01` to `ACT-11`) in `tests/e2e/test_actions.py`, with three fixture scripts under `tests/e2e/action_fixtures` and an `action` block on the page hook. Two page defects came out of them: see the ACT section above. |
 | 8 — Status pages | Done | Six scenarios (`ST-01` to `ST-06`) in `tests/e2e/test_status_pages.py`: the cards and the sort links against `/api/status`, a detail row that survives the swap that rebuilt it, one Clients table naming each transport across three surfaces, the federation empty state, one port's power dot following an outlet on two open pages, and the shape of `/api/status/fragments`. One product defect came out of them: the Clients table called every Telnet console a websocket. See the ST section above. The harness gained `ConsoleSession.is_visible()` and `ConsoleSession.live_badge()`; `set_offline()` is documented for what it really does. |

@@ -11,7 +11,7 @@ What each group proves is in the test inventory of
 scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 
 
-162 scenarios across 15 suites.
+163 scenarios across 15 suites.
 
 | ID | Scenario | Surfaces | Test |
 | --- | --- | --- | --- |
@@ -60,6 +60,7 @@ scenario is in [`tests/e2e/README.md`](../tests/e2e/README.md).
 | CFG-18 | One unusable Serial entry costs that one port, and the server says so out loud (issue #105). | http | `tests/e2e/test_config_editor.py::test_cfg18_a_port_the_server_cannot_build_is_named_in_the_log_and_never_reported_as_added` |
 | CFG-19 | A command entry its port refuses at startup costs that port alone, and boot names the reason (issue #105). | http | `tests/e2e/test_config_editor.py::test_cfg19_one_unusable_port_entry_at_boot_costs_one_port_and_names_it` |
 | CFG-20 | A full reload answers ok, keeps every port the file can build, and names the entry it refused (issue #105). | http, server log | `tests/e2e/test_config_editor.py::test_cfg20_a_full_reload_reports_the_port_it_could_not_build_and_keeps_the_others` |
+| CFG-21 | One listener whose port is taken costs that listener alone, in the answer and in the log (issue #107). | http, server log | `tests/e2e/test_config_editor.py::test_cfg21_a_listener_that_cannot_bind_is_named_and_never_reported_as_added` |
 | **CMD** | | | |
 | CMD-01 | A command PDU reports what the device holds, and reports no power figure the device never gave. | http, cli:none | `tests/e2e/test_power_command.py::test_cmd01_the_device_answers_so_the_readings_are_its_own` |
 | CMD-02 | One ``POWER`` line becomes a real process whose argv carries the outlet it was told to move. | cli:admin | `tests/e2e/test_power_command.py::test_cmd02_a_switch_from_the_cli_runs_the_command_the_config_named` |
