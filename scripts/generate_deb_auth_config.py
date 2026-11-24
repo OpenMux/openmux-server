@@ -6,7 +6,7 @@ sentinel password hash ``CHANGE_ME_ON_FIRST_BOOT``. On a fresh install the
 postinst calls this script to replace that sentinel with the hash of a
 randomly generated admin password:
 
-    python3 generate-auth-config.py \
+    python3 /usr/share/openmux/generate_deb_auth_config.py \
         --template /usr/share/openmux/default-config/authentication.yaml \
         --output /etc/openmux/authentication.yaml \
         --credentials-out /etc/openmux/.initial_credentials

@@ -177,6 +177,12 @@ Changes since v1.0.4 (2026-10-19).
   peer), skips a frame that carries no sequence number, never moves its watermark backwards, and reports the two faults
   on separate flags. The messages read `Out-of-order control frame seq=N last=M` and `Control sequence gap seq=N last=M`.
   No config key changed.
+- **A packaged install generates its admin password again.** OpenMux 1.0.4-1 `openmux.postinst` ran
+  `/usr/share/openmux/generate-auth-config.py`, a script the package never installed. A fresh install stopped there with
+  `dpkg: error processing package openmux (--configure)` and left the package unconfigured. It wrote no config file at all:
+  the failure ends the loop that copies `server.yaml`, `security.yaml`, and `client.yaml`. The postinst now runs the script
+  the package ships. On an affected host, follow the repair steps in [docs/INSTALL.md](docs/INSTALL.md). No config key
+  changed.
 
 ### Web console and observability
 - **A deep link keeps the parameters it carried.** Opening the actions overlay starts a catalog read, and that read rebuilt the

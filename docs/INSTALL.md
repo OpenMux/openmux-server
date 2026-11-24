@@ -270,6 +270,25 @@ A fresh install generates a random admin password for the web console. The insta
 The server also logs a warning at startup while any known default credential is still configured; resolve each warning the same
 way.
 
+A 1.0.4-1 install stops with `can't open file '/usr/share/openmux/generate-auth-config.py'`: that release named a script the
+package never installed. The package ends up unpacked but unconfigured, and no config file exists, because the failed step
+ends the config step before it copies `server.yaml`, `security.yaml`, and `client.yaml`. Repair it as root, then finish the
+install:
+
+```sh
+python3 /usr/share/openmux/generate_deb_auth_config.py \
+    --template /usr/share/openmux/default-config/authentication.yaml \
+    --output /etc/openmux/authentication.yaml \
+    --credentials-out /etc/openmux/.initial_credentials
+chown root:openmux /etc/openmux/.initial_credentials
+chmod 0600 /etc/openmux/.initial_credentials
+dpkg --configure openmux   # writes the three config files the failed step skipped
+```
+
+The command prints the admin password on the terminal. Read it there, or read `/etc/openmux/.initial_credentials`. A package
+of 1.0.5 or later already carries the fix; run the steps above first, because `apt` waits for the pending `openmux`
+configuration before it installs anything.
+
 The web console binds `127.0.0.1` by default, so it is reachable from the local host only. To open it to other hosts, set
 `web_console.host: 0.0.0.0` in `/etc/openmux/server.yaml` (or via the web console Config Editor > Server view), then do a full
 reload - see [QUICKSTART.md](QUICKSTART.md#1b-reach-the-web-console-from-other-machines).

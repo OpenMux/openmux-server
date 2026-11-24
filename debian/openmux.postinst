@@ -48,7 +48,9 @@ for cfg in authentication.yaml client.yaml security.yaml server.yaml; do
 			# Fresh install: replace the CHANGE_ME_ON_FIRST_BOOT sentinel with a
 			# per-install random admin password. The plaintext is stored once in
 			# /etc/openmux/.initial_credentials (0600) and printed on the console.
-			genpw=$(python3 /usr/share/openmux/generate-auth-config.py \
+			# The name must match the file debian/openmux.install ships.
+			gen_script=/usr/share/openmux/generate_deb_auth_config.py
+			genpw=$(python3 "$gen_script" \
 			--template "$default_cfg" \
 			--output "$target_cfg" \
 			--credentials-out /etc/openmux/.initial_credentials) || {
@@ -56,7 +58,7 @@ for cfg in authentication.yaml client.yaml security.yaml server.yaml; do
 				echo "postinst: The install is left in a failed state. Repair it as root:" >&2
 				echo "postinst:   dpkg --configure openmux" >&2
 				echo "postinst: or re-run manually:" >&2
-				echo "postinst:   python3 /usr/share/openmux/generate-auth-config.py --template $default_cfg --output $target_cfg --credentials-out /etc/openmux/.initial_credentials" >&2
+				echo "postinst:   python3 $gen_script --template $default_cfg --output $target_cfg --credentials-out /etc/openmux/.initial_credentials" >&2
 				exit 1
 			}
 			chown root:openmux /etc/openmux/.initial_credentials || true
