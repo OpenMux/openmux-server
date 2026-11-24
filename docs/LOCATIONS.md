@@ -17,7 +17,7 @@ locations:
 |---|---|---|---|
 | logs (aggregate + `ports/`) | `OPENMUX_LOG_DIR` | `/var/log/openmux` | `logs/` |
 | runtime (pidfile, control socket) | `OPENMUX_RUN_DIR` | `/run/openmux` | `logs/` |
-| state (muxcon TLS, ssh host keys, web TLS) | `OPENMUX_STATE_DIR` | `/var/lib/openmux` | `~/.openmux` |
+| state (muxcon TLS, ssh host keys, web TLS, config backups) | `OPENMUX_STATE_DIR` | `/var/lib/openmux` | `~/.openmux` |
 
 - Tier 1 beats the defaults file, the unit, and every launch mode.
 - Tier 2 is the single relocation point that works in every launch mode.
@@ -70,7 +70,13 @@ variables nor systemd's. Its control-socket resolution:
   `openmux.sock`.
 - State: `OPENMUX_STATE_DIR` (packaged `/var/lib/openmux`):
   `muxcon/` (certs, keys, known peers, federated cache), `ssh_listener/`
-  (host keys), `web_console/` (web TLS).
+  (host keys), `web_console/` (web TLS), `config-backups/` (0700).
+- Config backups: `config-backups/` inside the state dir, written on
+  each Config Editor save. One file per saved config, named after it
+  with a `.bak` suffix (0600, because the authentication copy holds
+  password hashes). It is not beside the config file: the packaged
+  `/etc/openmux` belongs to root, and the service cannot create a
+  file there.
 - Port-action scripts: `port_actions.actions_dir` in config (packaged
   default `/etc/openmux/actions`, created by the package at 0750).
 - Bundled example action scripts: inside the python package
@@ -95,3 +101,12 @@ variables nor systemd's. Its control-socket resolution:
   that directory, so the action grants in the default config resolve.
   It never overwrites an existing file, so an admin edit survives a
   reinstall or upgrade.
+- The postinst script also sets the owner of each config file on every
+  configure, so an upgrade repairs an older layout. `server.yaml` and
+  `authentication.yaml` are 0640 `openmux:openmux`: the Config Editor
+  runs as the service user and rewrites those two in place through
+  `ConfigManager.save_config`. `security.yaml` and `client.yaml` stay
+  0640 `root:openmux`, because the server only reads them and root
+  ownership keeps a running server from widening its own policy.
+  `/etc/openmux` itself stays 0750 `root:openmux`: the service reads
+  the directory but cannot add or replace a file in it.

@@ -69,12 +69,33 @@ for cfg in authentication.yaml client.yaml security.yaml server.yaml; do
 			cp "$default_cfg" "$target_cfg"
 		fi
 	fi
+	# Ownership the service needs, applied on every configure so an upgrade also
+	# repairs a host that installed a package with the old root-owned layout.
+	# The Config Editor runs as the service user, and its Save writes
+	# server.yaml and authentication.yaml through ConfigManager.save_config, so
+	# those two belong to openmux. security.yaml and client.yaml stay root owned:
+	# the server only reads them, and root ownership keeps a running server from
+	# widening its own security policy. 0640 both ways: owner writes, group reads,
+	# others nothing. /etc/openmux itself stays 0750 root:openmux below, so the
+	# service can read the directory but cannot add or replace a file in it; the
+	# pre-save copies of the two writable files go to the state dir
+	# (/var/lib/openmux/config-backups).
 	if [ -e "$target_cfg" ]; then
-		chown root:openmux "$target_cfg" || true
+		case "$cfg" in
+		server.yaml | authentication.yaml)
+			chown openmux:openmux "$target_cfg" || true
+			;;
+		*)
+			chown root:openmux "$target_cfg" || true
+			;;
+		esac
 		chmod 0640 "$target_cfg" || true
 	fi
 done
 
+# The service must not create files here (see the ownership note above): it
+# rewrites the two files it owns in place, and its config backups live under
+# $STATE_DIRECTORY.
 chmod 0750 /etc/openmux || true
 
 #DEBHELPER#

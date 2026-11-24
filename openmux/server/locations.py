@@ -63,6 +63,8 @@ _DEV_CTL_SOCK = os.path.join(_DEV_LOG_DIR, "openmux.sock")
 _STATE_MUXCON = "muxcon"
 _STATE_SSH = "ssh_listener"
 _STATE_WEB = "web_console"
+# Pre-save copies of the config files the server writes (see config_backup_dir).
+_STATE_CONFIG_BACKUPS = "config-backups"
 
 # Read-only assets ship with the package under ``webui`` (ticket T2).
 _WEBUI_PKG = "webui"
@@ -224,6 +226,17 @@ def ssh_host_key_dir() -> str:
 def web_tls_dir() -> str:
     """Web console auto-generated TLS directory."""
     return os.path.join(state_dir(), _STATE_WEB)
+
+
+def config_backup_dir() -> str:
+    """Directory for the pre-save copy of each config file the server writes.
+
+    It sits under ``state_dir()`` instead of beside the config file, because the
+    packaged ``/etc/openmux`` belongs to root: the service user rewrites
+    ``server.yaml`` and ``authentication.yaml`` in place and cannot create a file
+    in that directory. The server creates it on the first save.
+    """
+    return os.path.join(state_dir(), _STATE_CONFIG_BACKUPS)
 
 
 def _module_dir() -> Path:

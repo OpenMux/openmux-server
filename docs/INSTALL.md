@@ -289,6 +289,20 @@ The command prints the admin password on the terminal. Read it there, or read `/
 of 1.0.5 or later already carries the fix; run the steps above first, because `apt` waits for the pending `openmux`
 configuration before it installs anything.
 
+A save from the Config Editor that answers `Config save failed (no changes written)` usually means the service cannot write
+`/etc/openmux`. The server runs as `openmux`, and a package before 1.0.5 owned `server.yaml` and `authentication.yaml` as
+`root:openmux`, so the service could read them and nothing else; the server log names the first blocked write, for example
+`Permission denied: '/etc/openmux/server.yaml.bak'`. Give the service the two files it writes:
+
+```sh
+chown openmux:openmux /etc/openmux/server.yaml /etc/openmux/authentication.yaml
+chmod 0640 /etc/openmux/server.yaml /etc/openmux/authentication.yaml
+```
+
+A package of 1.0.5 or later sets that ownership on every install and upgrade. `security.yaml` and `client.yaml` stay
+`root:openmux`: the server reads them and never writes them. Note that editing a config file with `sudo` hands it back to
+root and stops the editor from writing it again; run the `chown` above afterwards, or make the edit in the Config Editor.
+
 The web console binds `127.0.0.1` by default, so it is reachable from the local host only. To open it to other hosts, set
 `web_console.host: 0.0.0.0` in `/etc/openmux/server.yaml` (or via the web console Config Editor > Server view), then do a full
 reload - see [QUICKSTART.md](QUICKSTART.md#1b-reach-the-web-console-from-other-machines).

@@ -183,6 +183,17 @@ Changes since v1.0.4 (2026-10-19).
   the failure ends the loop that copies `server.yaml`, `security.yaml`, and `client.yaml`. The postinst now runs the script
   the package ships. On an affected host, follow the repair steps in [docs/INSTALL.md](docs/INSTALL.md). No config key
   changed.
+- **A packaged Config Editor can save again.** The server runs as `openmux`, but the package owned `/etc/openmux/server.yaml`
+  and `authentication.yaml` as `root:openmux` 0640, so the service could read them and nothing else. A save failed at its first
+  step, the copy of the file it is about to replace: `PermissionError: [Errno 13] Permission denied:`
+  `'/etc/openmux/server.yaml.bak'`, the editor answered `Config save failed (no changes written)`, and no file changed. Those
+  two files are now `openmux:openmux` 0640, because the editor rewrites them in place. `security.yaml` and `client.yaml` stay
+  `root:openmux`, and `/etc/openmux` stays `0750 root:openmux`, so the service still cannot add or replace a file there. The
+  copy of the previous file moves to `/var/lib/openmux/config-backups` (0700; each copy 0600, since the authentication copy
+  holds password hashes). On a host that already has the root-owned files, run the `chown` and `chmod` in
+  [docs/INSTALL.md](docs/INSTALL.md), or upgrade: the package sets this ownership on every configure. One consequence to know:
+  editing a config file with `sudo` hands it back to root, and the editor cannot write it until you `chown` it again. No config
+  key changed.
 
 ### Web console and observability
 - **A deep link keeps the parameters it carried.** Opening the actions overlay starts a catalog read, and that read rebuilt the

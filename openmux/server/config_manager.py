@@ -14,7 +14,8 @@ Key responsibilities
             is sourced from authentication.yaml.
     * Serial ports: a list of port dicts (array-only, like every other *_ports section); validate required fields.
 - Provide getters that lazily load configuration on first access.
-- Persist configuration changes atomically with a simple .bak backup of the previous file.
+- Persist configuration changes in place, after copying the previous file to
+  the config backup dir (see `locations.config_backup_dir`).
 
 Inputs/Outputs
 - Input: path to a YAML file on disk provided at construction.
@@ -44,7 +45,11 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from .config_validation import AUTH_SCHEMA, SECURITY_SCHEMA, SERVER_SCHEMA, check_mapping
+from .locations import config_backup_dir
 from .security_policy import SecurityPolicy
+
+# Suffix of the pre-save copy written to config_backup_dir().
+_BACKUP_SUFFIX = ".bak"
 
 
 class ConfigManager:
@@ -443,8 +448,8 @@ class ConfigManager:
     def save_config(self, config: Dict[str, Any], authentication: Optional[Dict[str, Any]] = None) -> bool:
         """Persist a configuration mapping back to disk.
 
-        Creates a ``.bak`` backup of the existing file (if present) before
-        writing the new configuration.
+        Copies each existing file to ``config_backup_dir()`` first (see
+        :meth:`_write_yaml_with_backup`).
 
         Args:
             config: The configuration mapping to serialize and save.
@@ -478,13 +483,43 @@ class ConfigManager:
             return False
 
     def _write_yaml_with_backup(self, path: str, data: Dict[str, Any]) -> None:
+        """Write ``data`` to ``path``, keeping the previous content in ``config_backup_dir()``.
+
+        The copy goes to the state dir rather than beside ``path``: the packaged
+        ``/etc/openmux`` belongs to root, so the service user cannot create a file
+        in it and a sibling ``.bak`` failed every Config Editor save with EACCES.
+        ``path`` itself is still rewritten in place, which the package allows for
+        the two files the service owns.
+        """
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        if os.path.exists(path):
-            backup_path = f"{path}.bak"
-            with open(path, "r", encoding="utf-8") as src, open(backup_path, "w", encoding="utf-8") as dst:
-                dst.write(src.read())
+        self._backup_existing(path)
         with open(path, "w", encoding="utf-8") as handle:
             yaml.dump(data, handle, default_flow_style=False)
+
+    def _backup_existing(self, path: str) -> None:
+        """Copy the current contents of ``path`` to ``<config_backup_dir>/<name>.bak``.
+
+        Created 0600 inside a 0700 directory: this file is new on every first save,
+        and a plain ``open()`` would create it 0644 under the service umask, which
+        would expose the previous ``authentication.yaml`` (password hashes) to every
+        local user. A failed backup warns and returns; the payload was validated
+        already, so an unwritable backup dir must not block an admin's save.
+        """
+        if not os.path.exists(path):
+            return
+        backup_dir = config_backup_dir()
+        backup_path = os.path.join(backup_dir, os.path.basename(path) + _BACKUP_SUFFIX)
+        try:
+            created = not os.path.isdir(backup_dir)
+            os.makedirs(backup_dir, mode=0o700, exist_ok=True)
+            if created:
+                os.chmod(backup_dir, 0o700)  # makedirs() masks the mode with the umask
+            fd = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as dst, open(path, "r", encoding="utf-8") as src:
+                dst.write(src.read())
+            os.chmod(backup_path, 0o600)  # explicit, even if the umask weakened O_CREAT
+        except OSError as exc:
+            self.logger.warning("Could not back up %s to %s (%s); writing the file without a backup", path, backup_path, exc)
 
     def _load_authentication_file(self) -> Dict[str, Any]:
         path = self.auth_config_path
